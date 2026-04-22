@@ -20,6 +20,11 @@ from taste.llm import LLM, MODEL_MONITOR, MODEL_PLANNER, MODEL_WORKER, cached
 from taste.memory import Memory
 from taste.tools import ToolRegistry
 
+
+class PlannerError(RuntimeError):
+    """Raised when the Planner returns a malformed or missing plan."""
+
+
 # ============================================================== Plan schema
 
 
@@ -43,6 +48,7 @@ class Step:
     id: str
     description: str
     verification: Verification
+    depends_on: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -53,12 +59,51 @@ class Plan:
     def to_summary(self) -> str:
         lines = [f"Task: {self.task}", "", "Plan:"]
         for s in self.steps:
-            lines.append(f"  {s.id}: {s.description}")
+            deps = f"  (depends on: {', '.join(s.depends_on)})" if s.depends_on else ""
+            lines.append(f"  {s.id}: {s.description}{deps}")
             if s.verification.kind == "shell":
                 lines.append(f"    check: `{s.verification.command}`")
             else:
                 lines.append(f"    check (llm): {s.verification.criteria}")
         return "\n".join(lines)
+
+    def waves(self) -> list[list[Step]]:
+        """Group steps into parallel waves by ``depends_on`` (topological).
+
+        Steps in the same wave have all of their dependencies satisfied by
+        earlier waves and no dependencies on each other — so they can run
+        concurrently, each on its own worktree, and be merged back at the
+        end of the wave.
+
+        If no step declares a dependency, the plan is treated as a linear
+        chain (sequential, one per wave). This keeps plans without explicit
+        parallelism hints safe by default: a Planner that ignores the
+        ``depends_on`` field ends up with the old single-threaded behavior
+        rather than surprise parallelism across steps that may conflict.
+        """
+        if not any(s.depends_on for s in self.steps):
+            return [[s] for s in self.steps]
+
+        by_id = {s.id: s for s in self.steps}
+        remaining = dict(by_id)
+        done: set[str] = set()
+        waves: list[list[Step]] = []
+
+        while remaining:
+            ready = [
+                s for s in remaining.values() if set(s.depends_on).issubset(done)
+            ]
+            if not ready:
+                unresolved = list(remaining)
+                raise ValueError(
+                    f"unresolvable dependency cycle or dangling ref among: {unresolved}"
+                )
+            ready.sort(key=lambda s: [t.id for t in self.steps].index(s.id))
+            waves.append(ready)
+            for s in ready:
+                done.add(s.id)
+                del remaining[s.id]
+        return waves
 
 
 # ============================================================== Planner
@@ -66,11 +111,23 @@ class Plan:
 
 PLANNER_SYSTEM = """You are the Planner in an Agent OS — the first core of a multi-core agent harness.
 
-Your single job: decompose the user's task into the smallest viable sequence of steps such that each step can be verified mechanically (by running a shell command) before the next one starts.
+Your single job: decompose the user's task into the smallest viable sequence of steps such that each step can be verified by running a command that actually exercises behavior — not by checking that a string appears in a file.
+
+Verification taste (this is the part models get wrong):
+  * STRONG verifications actually execute the code: `pytest`, `pytest -k <pattern>`, `python -c '<assertion>'`, `ruff check`, `mypy`.
+  * WEAK verifications only confirm text presence: `grep`, `find`, `ls`, `cat | grep`. These are BANNED — if you catch yourself reaching for grep as a verification, the step is not actually verifiable and you should merge it into the next real check.
+  * If a step cannot be verified by executing something, either (a) merge it into the next step that CAN be verified, or (b) add an assertion to the existing test suite.
+  * For a workspace with a pytest suite, default every verification to `pytest -q` unless you have a concrete reason to use something narrower.
+
+Dependencies and parallelism:
+  * Every step has a `depends_on` list (step IDs it strictly requires before it can run).
+  * Steps with the same `depends_on` set (or both empty) will be executed **in parallel**, each on its own git worktree, and merged back into the session branch when both succeed.
+  * Use parallelism when subtasks touch **disjoint files** — e.g. "add type hints to module_a" and "add type hints to module_b". Do NOT parallelize steps that edit the same file; git will conflict and the run will halt.
+  * When unsure, prefer sequential (`depends_on: [<previous-step-id>]`). Safety beats speedup.
 
 Principles:
-  1. Each step is the smallest unit of progress that can be independently committed and reverted. If a step cannot be verified, split it.
-  2. Prefer `shell` verifications (pytest, ruff, type-check, grep) over `llm` verifications. Deterministic checks are cheap and cannot flatter mediocre work.
+  1. Each step is the smallest unit of progress that can be independently committed and reverted. If a step cannot be verified, split or merge it.
+  2. Prefer `shell` verifications over `llm` verifications. Deterministic checks cannot flatter mediocre work.
   3. Only use `llm` verification when the outcome is genuinely subjective (e.g. "docstrings are clear"). Keep LLM checks rare.
   4. Keep plans tight — 3 to 8 steps. If you catch yourself planning step 15, you are over-decomposing.
   5. Step IDs must be zero-padded: step-01, step-02, ... so they sort lexicographically.
@@ -100,6 +157,15 @@ PLAN_TOOL = {
                                 "criteria": {"type": "string"},
                             },
                             "required": ["kind"],
+                        },
+                        "depends_on": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Step IDs that must complete before this step. "
+                                "Steps with no shared dependencies run in parallel on separate worktrees. "
+                                "Leave empty ([]) for steps that can run first or concurrently."
+                            ),
                         },
                     },
                     "required": ["id", "description", "verification"],
@@ -134,15 +200,26 @@ def plan(llm: LLM, task: str, spec: AgentSpec, workspace_summary: str) -> Plan:
         tools=[PLAN_TOOL],
         max_tokens=4096,
     )
-    payload = _extract_tool_input(response, "submit_plan")
-    steps = [
-        Step(
-            id=s["id"],
-            description=s["description"],
-            verification=Verification(**s["verification"]),
-        )
-        for s in payload["steps"]
-    ]
+    try:
+        payload = _extract_tool_input(response, "submit_plan")
+    except RuntimeError as exc:
+        raise PlannerError(str(exc)) from exc
+
+    try:
+        steps = [
+            Step(
+                id=s["id"],
+                description=s["description"],
+                verification=Verification(**s["verification"]),
+                depends_on=list(s.get("depends_on") or []),
+            )
+            for s in payload["steps"]
+        ]
+    except (KeyError, TypeError) as exc:
+        raise PlannerError(f"malformed plan payload: {exc}") from exc
+
+    if not steps:
+        raise PlannerError("planner returned an empty step list")
     return Plan(task=task, steps=steps)
 
 

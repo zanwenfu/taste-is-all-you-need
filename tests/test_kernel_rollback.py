@@ -194,3 +194,103 @@ def test_rich_event_stream_is_complete(refactor_workspace: Path) -> None:
     assert kinds.count("step.begin") == 3
     assert kinds.count("monitor.verdict") == 3
     assert all(e.payload for e in events), "every event carries a payload"
+
+
+def test_events_persisted_to_jsonl(refactor_workspace: Path) -> None:
+    """The dashboard reads .taste/events.jsonl; make sure we actually write it."""
+    ws = refactor_workspace
+
+    def noop_worker(step: Step, plan: Plan) -> WorkerResult:
+        (ws / LEGACY_MATH).write_text((ws / LEGACY_MATH).read_text() + "\n")
+        return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
+
+    Kernel(workspace=ws).run(
+        task="jsonl",
+        spec=_spec(),
+        plan_override=_plan(),
+        worker_override=noop_worker,
+    )
+
+    log = ws / ".git" / "taste" / "events.jsonl"
+    assert log.exists()
+    lines = [json.loads(line) for line in log.read_text().splitlines() if line]
+    assert lines[0]["kind"] == "run.start"
+    assert lines[-1]["kind"] == "run.done"
+    assert all({"ts", "kind", "payload"} <= set(line) for line in lines)
+
+
+def test_event_log_survives_rollback(refactor_workspace: Path) -> None:
+    """The dashboard relies on events.jsonl retaining the FAIL verdict + rollback.
+
+    Because checkpoints run ``git add --all`` and rollbacks run ``git reset --hard``,
+    any file inside the tracked tree gets clobbered on rollback. The event log
+    lives outside the tree (in .git/taste/) so it captures the full story.
+    """
+    ws = refactor_workspace
+    math = ws / LEGACY_MATH
+    attempts: dict[str, int] = {}
+
+    def worker(step: Step, plan: Plan) -> WorkerResult:
+        attempts[step.id] = attempts.get(step.id, 0) + 1
+        n = attempts[step.id]
+        if step.id == "step-01":
+            math.write_text(math.read_text() + "\n# ok\n")
+        elif step.id == "step-02":
+            math.write_text(BROKEN_STEP2 if n == 1 else CORRECT_STEP2)
+        elif step.id == "step-03":
+            math.write_text(math.read_text().rstrip() + "\n")
+        return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
+
+    Kernel(workspace=ws, max_retries=2).run(
+        task="rollback trace",
+        spec=_spec(),
+        plan_override=_plan(),
+        worker_override=worker,
+    )
+
+    log = ws / ".git" / "taste" / "events.jsonl"
+    lines = [json.loads(line) for line in log.read_text().splitlines() if line]
+
+    # Every step must have a monitor.verdict, including step-01 (which runs
+    # before any rollback) — that's the event that was getting wiped out when
+    # the log lived inside the tracked tree.
+    verdicts_by_step: dict[str, list[bool]] = {}
+    for e in lines:
+        if e["kind"] == "monitor.verdict":
+            verdicts_by_step.setdefault(e["payload"]["id"], []).append(e["payload"]["passed"])
+
+    assert set(verdicts_by_step) == {"step-01", "step-02", "step-03"}
+    assert verdicts_by_step["step-01"] == [True]
+    # step-02: FAIL (attempt 1) → rollback → PASS (attempt 2).
+    assert verdicts_by_step["step-02"] == [False, True]
+    assert verdicts_by_step["step-03"] == [True]
+
+    # Exactly one rollback event, for step-02.
+    rollbacks = [e for e in lines if e["kind"] == "step.rollback"]
+    assert len(rollbacks) == 1
+    assert rollbacks[0]["payload"]["id"] == "step-02"
+
+
+def test_planner_error_halts_cleanly(refactor_workspace: Path) -> None:
+    """A bad planner response must not crash the kernel — it should halt with status=failed."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from taste.cores import PlannerError
+    from taste.llm import RunStats
+
+    ws = refactor_workspace
+
+    def boom(*args, **kwargs):
+        raise PlannerError("model refused to call submit_plan")
+
+    events: list[Event] = []
+    with patch("taste.kernel.cores.plan", side_effect=boom):
+        kernel = Kernel(workspace=ws, on_event=events.append)
+        kernel.llm = SimpleNamespace(stats=RunStats())  # type: ignore[assignment]
+        result = kernel.run(task="bad plan", spec=_spec())
+
+    assert result.status == "failed"
+    assert result.failure_reason is not None
+    assert "refused" in result.failure_reason
+    assert any(e.kind == "plan.error" for e in events)

@@ -4,10 +4,18 @@ The thesis in one file: branches are execution contexts, commits are
 checkpoints, `git show` is demand paging, `git reset` is rollback. Nothing
 about the agent loop lives in here — this file only knows how to persist,
 retrieve, and revert state.
+
+For parallel execution (Milestone B), this module also exposes ``add_worktree``
+/ ``remove_worktree`` / ``merge_branch`` primitives. Each worktree is a
+real physical working tree at a sibling path — the blog's *processes have
+their own address spaces* analogy made literal in git.
 """
 
 from __future__ import annotations
 
+import contextlib
+import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,8 +68,14 @@ class Memory:
 
         The branch name is ``taste/session-{session_id}``. If the branch
         already exists we resume on it; otherwise we fork it from ``base_ref``.
+
+        Also installs a handful of local-only git excludes so that generated
+        artifacts (Python bytecode, pytest caches) don't end up in the
+        per-step checkpoints — they'd otherwise conflict at merge time when
+        parallel workers each produce their own copies.
         """
-        repo = Repo(Path(repo_path).resolve())
+        repo_path = Path(repo_path).resolve()
+        repo = Repo(repo_path)
         branch = f"taste/session-{session_id}"
 
         if branch in [h.name for h in repo.heads]:
@@ -69,7 +83,8 @@ class Memory:
         else:
             repo.git.checkout("-b", branch, base_ref)
 
-        return cls(Path(repo_path), branch)
+        _install_local_excludes(repo_path)
+        return cls(repo_path, branch)
 
     # ------------------------------------------------------------------ writes
 
@@ -169,6 +184,79 @@ class Memory:
     def working_tree_dirty(self) -> bool:
         return self.repo.is_dirty(untracked_files=True)
 
+    # ------------------------------------------------------------------ worktrees
+
+    def add_worktree(
+        self,
+        branch: str,
+        *,
+        base: str | Checkpoint | None = None,
+    ) -> Memory:
+        """Spawn a new worktree on a fresh branch, return a Memory bound to it.
+
+        Workers in a parallel wave each get their own worktree so filesystem
+        writes cannot collide. The worktree's physical path lives under
+        ``<parent>/.taste-worktrees/<slug>`` — outside the main working tree
+        so it's invisible to the primary session.
+        """
+        base_ref: str
+        if isinstance(base, Checkpoint):
+            base_ref = base.sha
+        elif base is None:
+            base_ref = self.branch
+        else:
+            base_ref = base
+
+        if branch in [h.name for h in self.repo.heads]:
+            raise ValueError(f"branch already exists: {branch}")
+
+        wt_root = self.repo_path.parent / ".taste-worktrees" / _slug(self.branch)
+        wt_root.mkdir(parents=True, exist_ok=True)
+        wt_path = wt_root / _slug(branch)
+        if wt_path.exists():
+            raise FileExistsError(f"worktree path already exists: {wt_path}")
+
+        self.repo.git.worktree("add", "-b", branch, str(wt_path), base_ref)
+        return Memory(wt_path, branch)
+
+    def remove_worktree(self, other: Memory, *, force: bool = True) -> None:
+        """Prune the worktree that ``other`` is bound to. Safe to call twice."""
+        args = ["remove"]
+        if force:
+            args.append("--force")
+        args.append(str(other.repo_path))
+        try:
+            self.repo.git.worktree(*args)
+        except GitCommandError:
+            # Already gone, or git refused — fall back to manual cleanup.
+            if other.repo_path.exists():
+                shutil.rmtree(other.repo_path, ignore_errors=True)
+            self.repo.git.worktree("prune")
+
+    def merge_branch(
+        self,
+        source: str,
+        *,
+        message: str | None = None,
+    ) -> Checkpoint:
+        """Merge ``source`` into the current (session) branch. --no-ff to keep
+        the topology visible in ``git log --graph``.
+
+        Raises :class:`MergeConflict` if git reports conflicts — the blog's
+        *merge conflict = coordination signal* made explicit as a typed
+        exception the Orchestrator can catch.
+        """
+        self._ensure_on_branch()
+        msg = message or f"merge: {source} into {self.branch}"
+        try:
+            self.repo.git.merge("--no-ff", "-m", msg, source)
+        except GitCommandError as exc:
+            # Leave the working tree in its conflicted state; abort and raise.
+            with contextlib.suppress(GitCommandError):
+                self.repo.git.merge("--abort")
+            raise MergeConflict(source=source, target=self.branch, detail=str(exc)) from exc
+        return self.head()
+
     # ------------------------------------------------------------------ helpers
 
     def _ensure_on_branch(self) -> None:
@@ -201,3 +289,55 @@ def _parse_commit_message(raw: str) -> tuple[str, str | None]:
             subject_lines.append(line)
     subject = "\n".join(subject_lines).strip()
     return subject, step_id
+
+
+def _slug(s: str) -> str:
+    """Branch name → filesystem-safe slug."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", s).strip("-")
+
+
+_LOCAL_EXCLUDE_MARKER = "# taste-os: local excludes (never committed)"
+_LOCAL_EXCLUDES = [
+    _LOCAL_EXCLUDE_MARKER,
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".mypy_cache/",
+    ".taste/dashboard.html",
+]
+
+
+def _install_local_excludes(repo_path: Path) -> None:
+    """Write common Python generated-artifact patterns to .git/info/exclude.
+
+    Uses git's per-repo local exclude file so we don't touch a tracked
+    .gitignore. This keeps workers from committing bytecode/pytest caches
+    that would otherwise conflict at merge time in parallel waves.
+    """
+    exclude = repo_path / ".git" / "info" / "exclude"
+    if not exclude.parent.is_dir():
+        return
+    current = exclude.read_text() if exclude.exists() else ""
+    if _LOCAL_EXCLUDE_MARKER in current:
+        return
+    with exclude.open("a") as f:
+        if current and not current.endswith("\n"):
+            f.write("\n")
+        f.write("\n".join(_LOCAL_EXCLUDES) + "\n")
+
+
+class MergeConflict(RuntimeError):
+    """The Orchestrator-visible form of a git merge conflict.
+
+    Raised by :meth:`Memory.merge_branch` when ``git merge`` reports conflicts.
+    The merge is aborted before the exception surfaces, so the session branch
+    remains clean — the Orchestrator can route the conflict or escalate.
+    """
+
+    def __init__(self, *, source: str, target: str, detail: str) -> None:
+        super().__init__(f"conflict merging {source} into {target}: {detail}")
+        self.source = source
+        self.target = target
+        self.detail = detail

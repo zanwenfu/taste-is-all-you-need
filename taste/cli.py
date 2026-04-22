@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from taste import dashboard as dashboard_mod
 from taste.agent import AgentSpec
 from taste.kernel import Event, Kernel, RunResult
 from taste.llm import LLM
@@ -99,6 +100,33 @@ def log_cmd(workspace: Path, session: str) -> None:
     console.print(table)
 
 
+@main.command("dashboard")
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path.cwd(),
+    help="Workspace containing a .taste/ directory (default: cwd).",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Where to write the HTML. Defaults to <workspace>/.taste/dashboard.html.",
+)
+@click.option("--branch", default=None, help="Session branch name override.")
+def dashboard_cmd(workspace: Path, output: Path | None, branch: str | None) -> None:
+    """Render a self-contained HTML dashboard from a run's .taste/ artifacts."""
+    path = dashboard_mod.write(workspace, output=output, branch=branch)
+    console.print(
+        Panel.fit(
+            f"Dashboard:  [cyan]{path}[/]\n"
+            f"Open with:  [dim]open {path}[/]  (macOS)  |  [dim]xdg-open {path}[/]  (Linux)",
+            title="taste dashboard",
+            border_style="cyan",
+        )
+    )
+
+
 # -------------------------------------------------------------- rendering
 
 _EVENT_STYLE = {
@@ -143,11 +171,44 @@ def _print_result(result: RunResult) -> None:
             o.checkpoint.short_sha,
         )
     console.print(table)
+
+    if result.stats and result.stats.per_model:
+        usage_table = Table(title="Model usage", show_edge=False)
+        usage_table.add_column("model", style="magenta")
+        usage_table.add_column("calls", justify="right")
+        usage_table.add_column("input", justify="right")
+        usage_table.add_column("output", justify="right")
+        usage_table.add_column("cache read", justify="right")
+        usage_table.add_column("cost (USD)", justify="right")
+        for model, u in sorted(result.stats.per_model.items()):
+            usage_table.add_row(
+                model,
+                str(u.calls),
+                f"{u.input_tokens:,}",
+                f"{u.output_tokens:,}",
+                f"{u.cache_read_tokens:,}",
+                f"${u.cost_usd(model):.4f}",
+            )
+        totals = result.stats.totals
+        usage_table.add_row(
+            "[bold]total[/]",
+            f"[bold]{totals.calls}[/]",
+            f"[bold]{totals.input_tokens:,}[/]",
+            f"[bold]{totals.output_tokens:,}[/]",
+            f"[bold]{totals.cache_read_tokens:,}[/]",
+            f"[bold]${result.stats.total_cost_usd:.4f}[/]",
+        )
+        console.print(usage_table)
+        console.print(
+            f"[dim]cache hit rate: {result.stats.cache_hit_rate:.1%}[/]"
+        )
+
     console.print(
         Panel.fit(
-            f"Branch: [cyan]{result.branch}[/]\n"
-            f"Inspect: [dim]git -C <workspace> log {result.branch} --oneline[/]\n"
-            f"Replay:  [dim]taste log {result.session_id}[/]",
+            f"Branch:   [cyan]{result.branch}[/]\n"
+            f"Inspect:  [dim]git -C <workspace> log {result.branch} --oneline[/]\n"
+            f"Replay:   [dim]taste log {result.session_id}[/]\n"
+            f"Events:   [dim]<workspace>/.git/taste/events.jsonl[/]",
             border_style="dim",
         )
     )

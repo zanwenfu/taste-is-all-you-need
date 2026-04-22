@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>taste dashboard — session rollback-demo</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  background: #0d1117; color: #e6edf3; margin: 0; padding: 24px 32px;
+  line-height: 1.5;
+}
+a { color: #58a6ff; }
+code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em;
+        background: #1f242d; padding: 2px 6px; border-radius: 4px; color: #d2a8ff; }
+h1 { font-size: 26px; margin: 0 0 4px; }
+h2 { font-size: 16px; text-transform: uppercase; letter-spacing: 0.08em;
+      color: #8b949e; margin: 32px 0 12px; border-bottom: 1px solid #21262d;
+      padding-bottom: 6px; }
+section { margin-bottom: 24px; }
+.meta { color: #8b949e; font-size: 13px; margin-bottom: 16px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+          gap: 12px; margin: 16px 0 0; }
+.card { background: #161b22; border: 1px solid #21262d; border-radius: 8px;
+         padding: 14px 16px; }
+.card .label { color: #8b949e; font-size: 11px; text-transform: uppercase;
+                letter-spacing: 0.08em; }
+.card .value { font-size: 22px; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.card.pass .value { color: #3fb950; }
+.card.fail .value { color: #f85149; }
+.card.info .value { color: #58a6ff; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #21262d;
+         vertical-align: top; }
+th { color: #8b949e; font-weight: 500; text-transform: uppercase;
+      letter-spacing: 0.06em; font-size: 11px; }
+.center { text-align: center; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px;
+          border-radius: 4px; }
+.badge-pass { background: #1b3c21; color: #3fb950; }
+.badge-fail { background: #4d1d1d; color: #f85149; }
+.reason { color: #8b949e; font-size: 12px; }
+.rollback-cell { color: #d29922; font-weight: 600; }
+.step-tag { font-size: 11px; color: #d2a8ff; background: #1f242d; padding: 1px 6px;
+             border-radius: 4px; letter-spacing: 0.02em; }
+ol.timeline { list-style: none; padding-left: 0; margin: 0; border-left: 2px solid #21262d; }
+.evt { padding: 6px 0 6px 16px; margin-left: -2px; border-left: 2px solid transparent;
+         display: grid; grid-template-columns: 80px 150px 1fr; gap: 12px; font-size: 13px; }
+.evt .ts { color: #8b949e; font-family: "SF Mono", Menlo, monospace;
+            font-variant-numeric: tabular-nums; }
+.evt .kind { font-weight: 600; }
+.evt .payload { color: #c9d1d9; }
+.evt-lifecycle { border-left-color: #58a6ff; }
+.evt-lifecycle .kind { color: #58a6ff; }
+.evt-plan { border-left-color: #a371f7; }
+.evt-plan .kind { color: #a371f7; }
+.evt-worker { border-left-color: #79c0ff; }
+.evt-worker .kind { color: #79c0ff; }
+.evt-monitor { border-left-color: #3fb950; }
+.evt-monitor .kind { color: #3fb950; }
+.evt-rollback { border-left-color: #f85149; }
+.evt-rollback .kind { color: #f85149; }
+.evt b { color: #e6edf3; font-weight: 600; }
+.footer { text-align: center; color: #6e7681; font-size: 12px; margin-top: 40px;
+           padding-top: 16px; border-top: 1px solid #21262d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>session <code>rollback-demo</code></h1>
+  <div class="meta">
+    agent <code>scripted_refactor</code> &middot;
+    branch <code>taste/session-rollback-demo</code> &middot;
+    task <em>refactor legacy_math preserving behavior</em>
+  </div>
+  <div class="cards">
+    <div class="card pass"><div class="label">status</div><div class="value">completed</div></div>
+    <div class="card info"><div class="label">steps passed</div><div class="value">3/3</div></div>
+    <div class="card info"><div class="label">rollbacks</div><div class="value">1</div></div>
+    <div class="card info"><div class="label">elapsed (s)</div><div class="value">0.70</div></div>
+    <div class="card info"><div class="label">cost (USD)</div><div class="value">$0.0000</div></div>
+    <div class="card info"><div class="label">cache hit rate</div><div class="value">0.0%</div></div>
+    <div class="card info"><div class="label">events</div><div class="value">16</div></div>
+  </div>
+</header>
+
+<section>
+  <h2>Plan &amp; outcomes</h2>
+  <table>
+    <thead>
+      <tr><th>step</th><th>description</th><th>verification</th><th>attempts</th>
+          <th>rollback</th><th>verdict</th><th>sha</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>step-01</code></td><td>annotate module header</td><td><code>pytest -q</code></td><td class='center'>1</td><td class='center rollback-cell'></td><td><span class='badge badge-pass'>PASS</span> <span class='reason'>`pytest -q` exited 0</span></td><td><code>f248c82</code></td></tr>
+<tr><td><code>step-02</code></td><td>add type hints to run/fmt/main</td><td><code>pytest -q</code></td><td class='center'>2</td><td class='center rollback-cell'>yes</td><td><span class='badge badge-pass'>PASS</span> <span class='reason'>`pytest -q` exited 0</span></td><td><code>423ccdf</code></td></tr>
+<tr><td><code>step-03</code></td><td>normalize trailing whitespace</td><td><code>pytest -q</code></td><td class='center'>1</td><td class='center rollback-cell'></td><td><span class='badge badge-pass'>PASS</span> <span class='reason'>`pytest -q` exited 0</span></td><td><code>8917fab</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Timeline</h2>
+  <ol class="timeline">
+    <li class='evt evt-lifecycle'><span class='ts'>+0.00s</span><span class='kind'>run.start</span><span class='payload'>session=<b>rollback-demo</b> branch=<b>taste/session-rollback-demo</b> agent=<b>scripted_refactor</b></span></li>
+<li class='evt evt-plan'><span class='ts'>+0.04s</span><span class='kind'>plan.ready</span><span class='payload'>steps=<b>3</b></span></li>
+<li class='evt evt-other'><span class='ts'>+0.04s</span><span class='kind'>step.begin</span><span class='payload'>id=<b>step-01</b> attempt=<b>1</b></span></li>
+<li class='evt evt-worker'><span class='ts'>+0.04s</span><span class='kind'>worker.done</span><span class='payload'>tools=<b>0</b> stop=<b>end_turn</b></span></li>
+<li class='evt evt-monitor'><span class='ts'>+0.22s</span><span class='kind'>monitor.verdict</span><span class='payload'>id=<b>step-01</b> passed=<b>True</b> reason=<b>`pytest -q` exited 0</b> sha=<b>f248c82</b></span></li>
+<li class='evt evt-other'><span class='ts'>+0.22s</span><span class='kind'>step.begin</span><span class='payload'>id=<b>step-02</b> attempt=<b>1</b></span></li>
+<li class='evt evt-worker'><span class='ts'>+0.22s</span><span class='kind'>worker.done</span><span class='payload'>tools=<b>0</b> stop=<b>end_turn</b></span></li>
+<li class='evt evt-monitor'><span class='ts'>+0.38s</span><span class='kind'>monitor.verdict</span><span class='payload'>id=<b>step-02</b> passed=<b>False</b> reason=<b>`pytest -q` exited 1</b> sha=<b>fc21405</b></span></li>
+<li class='evt evt-rollback'><span class='ts'>+0.39s</span><span class='kind'>step.rollback</span><span class='payload'>id=<b>step-02</b> to=<b>f248c82</b> remaining_retries=<b>2</b></span></li>
+<li class='evt evt-other'><span class='ts'>+0.39s</span><span class='kind'>step.begin</span><span class='payload'>id=<b>step-02</b> attempt=<b>2</b></span></li>
+<li class='evt evt-worker'><span class='ts'>+0.39s</span><span class='kind'>worker.done</span><span class='payload'>tools=<b>0</b> stop=<b>end_turn</b></span></li>
+<li class='evt evt-monitor'><span class='ts'>+0.54s</span><span class='kind'>monitor.verdict</span><span class='payload'>id=<b>step-02</b> passed=<b>True</b> reason=<b>`pytest -q` exited 0</b> sha=<b>423ccdf</b></span></li>
+<li class='evt evt-other'><span class='ts'>+0.54s</span><span class='kind'>step.begin</span><span class='payload'>id=<b>step-03</b> attempt=<b>1</b></span></li>
+<li class='evt evt-worker'><span class='ts'>+0.54s</span><span class='kind'>worker.done</span><span class='payload'>tools=<b>0</b> stop=<b>end_turn</b></span></li>
+<li class='evt evt-monitor'><span class='ts'>+0.69s</span><span class='kind'>monitor.verdict</span><span class='payload'>id=<b>step-03</b> passed=<b>True</b> reason=<b>`pytest -q` exited 0</b> sha=<b>8917fab</b></span></li>
+<li class='evt evt-lifecycle'><span class='ts'>+0.69s</span><span class='kind'>run.done</span><span class='payload'>status=<b>completed</b> elapsed=<b>0.7</b> cost_usd=<b>0.0</b> cache_hit_rate=<b>0.0</b></span></li>
+  </ol>
+</section>
+
+<section>
+  <h2>Git topology (session branch)</h2>
+  <table>
+    <thead>
+      <tr><th>sha</th><th>step</th><th>subject</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>8917fab</code></td><td><span class='step-tag'>step-03</span></td><td>step-03: normalize trailing whitespace [Monitor: PASS]</td></tr>
+<tr><td><code>423ccdf</code></td><td><span class='step-tag'>step-02</span></td><td>step-02: add type hints to run/fmt/main [Monitor: PASS]</td></tr>
+<tr><td><code>f248c82</code></td><td><span class='step-tag'>step-01</span></td><td>step-01: annotate module header [Monitor: PASS]</td></tr>
+<tr><td><code>f7a2821</code></td><td></td><td>plan: commit decomposition</td></tr>
+<tr><td><code>6951c18</code></td><td></td><td>initial: legacy_math.py + tests</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<div class="footer">
+  generated 2026-04-22 02:07 UTC by
+  <a href="https://github.com/zanwenfu/taste-is-all-you-need">taste</a>
+</div>
+</body>
+</html>

@@ -137,3 +137,67 @@ def test_parse_commit_message_without_trailer() -> None:
     subject, step_id = _parse_commit_message("initial")
     assert subject == "initial"
     assert step_id is None
+
+
+# ------------------------------------------------------------------ worktrees
+
+
+def test_add_worktree_isolates_filesystem(tiny_repo: Path) -> None:
+    main = Memory.open_session(tiny_repo, "main")
+    wt = main.add_worktree("taste/worker-a")
+    try:
+        assert wt.branch == "taste/worker-a"
+        assert wt.repo_path != main.repo_path
+        # Writes in the worktree are invisible in the main tree until merged.
+        (wt.repo_path / "a.txt").write_text("alpha")
+        wt.checkpoint("step-01", "wt writes alpha")
+        assert not (tiny_repo / "a.txt").exists()
+    finally:
+        main.remove_worktree(wt)
+
+
+def test_add_worktree_rejects_existing_branch(tiny_repo: Path) -> None:
+    main = Memory.open_session(tiny_repo, "x")
+    wt = main.add_worktree("taste/worker-a")
+    try:
+        with pytest.raises(ValueError):
+            main.add_worktree("taste/worker-a")
+    finally:
+        main.remove_worktree(wt)
+
+
+def test_merge_branch_into_session_brings_changes_across(tiny_repo: Path) -> None:
+    main = Memory.open_session(tiny_repo, "merge")
+    wt = main.add_worktree("taste/worker-b")
+    try:
+        (wt.repo_path / "b.txt").write_text("beta")
+        wt.checkpoint("step-01", "add b.txt")
+        merged = main.merge_branch("taste/worker-b")
+        assert merged.sha == main.head().sha
+        assert (tiny_repo / "b.txt").read_text() == "beta"
+    finally:
+        main.remove_worktree(wt)
+
+
+def test_merge_conflict_raises_typed_exception(tiny_repo: Path) -> None:
+    from taste.memory import MergeConflict
+
+    main = Memory.open_session(tiny_repo, "conflict")
+    wt = main.add_worktree("taste/worker-c")
+    try:
+        # Main and worktree both touch hello.txt with different content.
+        (tiny_repo / "hello.txt").write_text("hello main\n")
+        main.checkpoint("step-01", "main edits hello")
+        (wt.repo_path / "hello.txt").write_text("hello worker\n")
+        wt.checkpoint("step-01", "worker edits hello")
+
+        with pytest.raises(MergeConflict) as excinfo:
+            main.merge_branch("taste/worker-c")
+        assert excinfo.value.source == "taste/worker-c"
+        assert excinfo.value.target == "taste/session-conflict"
+
+        # After conflict the main tree is aborted back to a clean state.
+        assert (tiny_repo / "hello.txt").read_text() == "hello main\n"
+        assert not main.working_tree_dirty()
+    finally:
+        main.remove_worktree(wt)
