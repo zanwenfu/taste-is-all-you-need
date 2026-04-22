@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taste"
+version = "0.1.0"
+description = "Agent OS: a git-native harness for long-running agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Zanwen Fu" }]
+keywords = ["agents", "llm", "orchestration", "harness", "agent-os"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "anthropic>=0.40.0",
+    "click>=8.1",
+    "rich>=13.7",
+    "gitpython>=3.1.43",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+taste = "taste.cli:main"
+
+[project.urls]
+Blog = "https://zanwenfu.com/blog/agent_harness_blog"
+Repository = "https://github.com/zanwenfu/taste-is-all-you-need"
+
+[tool.setuptools.packages.find]
+include = ["taste*"]
+exclude = ["tests*", "examples*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# simulate.py is a runnable script that adjusts sys.path so it works both
+# via `python examples/refactor_demo/simulate.py` and `python -m ...`.
+"examples/refactor_demo/simulate.py" = ["E402", "I001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
