@@ -24,7 +24,7 @@ from taste.llm import (
     cached,
     static_system,
 )
-from taste.memory import Memory
+from taste.memory import Checkpoint, Memory
 from taste.tools import ToolRegistry
 
 
@@ -405,14 +405,20 @@ def evaluate(
     workspace: Path,
     llm: LLM | None = None,
     monitor_model: str = MODEL_MONITOR,
+    before: Checkpoint | None = None,
 ) -> MonitorResult:
     """Evaluate the current step's verification.
 
     Shell verifications are executed in ``workspace`` and pass iff exit 0. LLM
-    verifications delegate to the Monitor model, which sees the diff produced
-    by the latest checkpoint and is asked to judge against natural-language
-    criteria. Deterministic checks are preferred because they are cheap,
-    reproducible, and immune to the self-praise failure mode.
+    verifications delegate to the Monitor model, which judges the worker's
+    *uncommitted* changes against natural-language criteria. Deterministic
+    checks are preferred because they are cheap, reproducible, and immune to
+    the self-praise failure mode.
+
+    ``before`` is the pre-step checkpoint the kernel anchored on. It defines
+    what "the worker's changes" means: everything between that commit and the
+    current working tree. Without it we fall back to HEAD, which is correct
+    but attributes any pre-existing uncommitted state to this step.
     """
     v = step.verification
     if v.kind == "shell":
@@ -420,7 +426,7 @@ def evaluate(
     if v.kind == "llm":
         if llm is None:
             raise ValueError("LLM verification requested but no LLM provided.")
-        return _run_llm_check(v.criteria or "", step, memory, llm, monitor_model)
+        return _run_llm_check(v.criteria or "", step, memory, llm, monitor_model, before=before)
     raise ValueError(f"unknown verification kind: {v.kind}")
 
 
@@ -452,9 +458,14 @@ def _run_llm_check(
     memory: Memory,
     llm: LLM,
     model: str,
+    *,
+    before: Checkpoint | None = None,
 ) -> MonitorResult:
-    head = memory.head()
-    diff = memory.diff(head.parent_sha or head.sha, head.sha) if head.parent_sha else ""
+    # The judge must see what the worker JUST did. Verification runs before
+    # the kernel commits, so the changes are still uncommitted — diffing the
+    # last commit against its parent would grade the *previous* step's work.
+    anchor = before.sha if before is not None else memory.head().sha
+    diff = memory.diff_pending(anchor)
     # Single consolidated block for consistency with the other cores. Note the
     # monitor prompt alone sits below the cache minimum on Haiku-class models,
     # so this block may not cache — shell monitors (the default) dominate runs.
@@ -465,7 +476,7 @@ def _run_llm_check(
             "content": (
                 f"Step: {step.id} — {step.description}\n\n"
                 f"Criteria:\n{criteria}\n\n"
-                f"Diff of the Worker's checkpoint ({head.short_sha}):\n"
+                f"The Worker's changes (uncommitted, since {anchor[:7]}):\n"
                 f"```diff\n{_tail(diff, 400)}\n```"
             ),
         }
@@ -483,7 +494,7 @@ def _run_llm_check(
     return MonitorResult(
         passed=bool(verdict["passed"]),
         reason=str(verdict["reason"]),
-        evidence=f"judged on diff {head.short_sha}",
+        evidence=f"judged on pending changes since {anchor[:7]}",
     )
 
 

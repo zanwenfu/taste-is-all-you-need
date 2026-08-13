@@ -172,6 +172,24 @@ class Memory:
             args += ["--", path]
         return self.repo.git.diff(*args)
 
+    def diff_pending(self, from_ref: str) -> str:
+        """Diff the *uncommitted* working tree against ``from_ref``.
+
+        The Monitor runs before the kernel checkpoints, so at verification
+        time the worker's changes exist only in the working tree. Staging
+        first (``git add --all``) is what makes untracked files visible to
+        ``git diff``; it commits nothing, and the kernel's own checkpoint
+        stages identically a moment later.
+        """
+        self.repo.git.add("--all", ".")
+        return self.repo.git.diff("--cached", from_ref)
+
+    def changed_files(self, from_ref: str) -> list[str]:
+        """Paths that differ between ``from_ref`` and the working tree."""
+        self.repo.git.add("--all", ".")
+        out = self.repo.git.diff("--cached", "--name-only", from_ref)
+        return [line for line in out.splitlines() if line.strip()]
+
     def log(self, *, limit: int | None = None, branch: str | None = None) -> list[Checkpoint]:
         """Return checkpoints (most-recent first) for the session branch."""
         target = branch or self.branch

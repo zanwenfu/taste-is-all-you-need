@@ -26,7 +26,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -513,6 +513,7 @@ class Kernel:
                 memory=memory,
                 workspace=workspace,
                 llm=self.llm,
+                before=before,
             )
             self._write_verdict(workspace, step, verdict)
             message = f"{step.id}: {step.description} [Monitor: {'PASS' if verdict.passed else 'FAIL'}]"
@@ -608,6 +609,9 @@ class Kernel:
                                 "command": s.verification.command,
                                 "criteria": s.verification.criteria,
                             },
+                            # Without this the committed plan cannot reproduce
+                            # its own wave structure — the DAG would be lost.
+                            "depends_on": list(s.depends_on),
                         }
                         for s in plan.steps
                     ],
@@ -618,10 +622,21 @@ class Kernel:
         memory.checkpoint("plan", "plan: commit decomposition", allow_empty=True)
 
     def _write_verdict(self, workspace: Path, step: Step, verdict: MonitorResult) -> None:
+        # Explicit field list, never **asdict: this file is COMMITTED, so a new
+        # MonitorResult field would silently change the content of every
+        # checkpoint — and with it the diff the Monitor itself grades.
         path = Path(workspace) / ".taste" / "monitor" / f"{step.id}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"step_id": step.id, **asdict(verdict)}, indent=2)
+            json.dumps(
+                {
+                    "step_id": step.id,
+                    "passed": verdict.passed,
+                    "reason": verdict.reason,
+                    "evidence": verdict.evidence,
+                },
+                indent=2,
+            )
         )
 
     def _halted_result(

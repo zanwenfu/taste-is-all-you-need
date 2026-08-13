@@ -108,14 +108,24 @@ def make_builtin_tools(workspace: Path) -> list[Tool]:
     """Return the three tools every worker needs, scoped to a workspace.
 
     Scoping is enforced by resolving every path under ``workspace`` — a worker
-    cannot read or write outside its assigned branch's working tree.
+    cannot read or write outside its assigned branch's working tree, and
+    cannot reach into git's own metadata.
     """
     workspace = Path(workspace).resolve()
 
     def _resolve(rel: str) -> Path:
         target = (workspace / rel).resolve()
-        if not str(target).startswith(str(workspace)):
+        # is_relative_to, not str.startswith: a sibling directory whose name
+        # merely shares the prefix ("/tmp/ws" vs "/tmp/wsevil") passes a string
+        # comparison and escapes the workspace entirely.
+        if not target.is_relative_to(workspace):
             raise PermissionError(f"path escapes workspace: {rel}")
+        # .git resolves *inside* the workspace, so the path check alone lets a
+        # worker write .git/hooks/pre-commit — which the kernel then executes
+        # on its very next checkpoint — or corrupt the event log and manifests
+        # under .git/taste/. The memory substrate belongs to the kernel.
+        if ".git" in target.relative_to(workspace).parts:
+            raise PermissionError(f"path touches git metadata: {rel}")
         return target
 
     def read_file(path: str) -> str:
