@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from taste.agent import AgentSpec
-from taste.llm import LLM, MODEL_MONITOR, MODEL_PLANNER, MODEL_WORKER, cached
+from taste.llm import (
+    LLM,
+    MODEL_MONITOR,
+    MODEL_PLANNER,
+    MODEL_WORKER,
+    cached,
+    static_system,
+)
 from taste.memory import Memory
 from taste.tools import ToolRegistry
 
@@ -177,11 +184,26 @@ PLAN_TOOL = {
 }
 
 
-def plan(llm: LLM, task: str, spec: AgentSpec, workspace_summary: str) -> Plan:
-    """Ask the Planner model to decompose ``task`` into steps with verifications."""
+def plan(
+    llm: LLM,
+    task: str,
+    spec: AgentSpec,
+    workspace_summary: str,
+    *,
+    model: str | None = None,
+) -> Plan:
+    """Ask the Planner model to decompose ``task`` into steps with verifications.
+
+    ``spec.model`` deliberately does NOT reach the Planner: the agent spec's
+    model field configures the Worker only. Letting it override every role
+    (the pre-Wave-0 behavior) made the model-size role split inexpressible —
+    an audited validity threat. Pass ``model=`` explicitly to override.
+    """
     system = [
-        cached(PLANNER_SYSTEM),
-        cached(f"Agent capability:\n{spec.description}\n\nAgent instructions:\n{spec.system_prompt}"),
+        static_system(
+            PLANNER_SYSTEM,
+            f"Agent capability:\n{spec.description}\n\nAgent instructions:\n{spec.system_prompt}",
+        ),
     ]
     messages = [
         {
@@ -194,11 +216,12 @@ def plan(llm: LLM, task: str, spec: AgentSpec, workspace_summary: str) -> Plan:
         }
     ]
     response = llm.call(
-        model=spec.model or MODEL_PLANNER,
+        model=model or MODEL_PLANNER,
         system=system,
         messages=messages,
         tools=[PLAN_TOOL],
         max_tokens=4096,
+        role="planner",
     )
     try:
         payload = _extract_tool_input(response, "submit_plan")
@@ -258,9 +281,14 @@ def execute(
     Returns a :class:`WorkerResult` describing what happened. The kernel is
     responsible for turning the filesystem changes into a commit.
     """
+    # One consolidated static block (crosses the cache minimum) + the plan
+    # context on its own breakpoint (stable across the turns of a step, so the
+    # tool-loop turns hit cache; varies across steps/retries).
     system = [
-        cached(WORKER_SYSTEM),
-        cached(f"Agent capability:\n{spec.description}\n\nAgent instructions:\n{spec.system_prompt}"),
+        static_system(
+            WORKER_SYSTEM,
+            f"Agent capability:\n{spec.description}\n\nAgent instructions:\n{spec.system_prompt}",
+        ),
         cached(f"Plan so far:\n{plan_context}"),
     ]
     messages: list[dict[str, Any]] = [
@@ -284,6 +312,7 @@ def execute(
             messages=messages,
             tools=tools.to_anthropic(),
             max_tokens=4096,
+            role="worker",
         )
         stop_reason = response.stop_reason or "unknown"
         assistant_blocks = [_block_to_dict(b) for b in response.content]
@@ -333,6 +362,11 @@ class MonitorResult:
         status = "PASS" if self.passed else "FAIL"
         return f"[{status}] {self.reason}"
 
+
+# The Monitor judges deterministically on purpose — its verdicts gate commits.
+# Recorded in the run manifest; keep manifest and call site in sync via this
+# constant, never an inline literal.
+MONITOR_TEMPERATURE = 0.0
 
 MONITOR_SYSTEM = """You are the Monitor core in an Agent OS.
 
@@ -421,7 +455,10 @@ def _run_llm_check(
 ) -> MonitorResult:
     head = memory.head()
     diff = memory.diff(head.parent_sha or head.sha, head.sha) if head.parent_sha else ""
-    system = [cached(MONITOR_SYSTEM)]
+    # Single consolidated block for consistency with the other cores. Note the
+    # monitor prompt alone sits below the cache minimum on Haiku-class models,
+    # so this block may not cache — shell monitors (the default) dominate runs.
+    system = [static_system(MONITOR_SYSTEM)]
     messages = [
         {
             "role": "user",
@@ -439,7 +476,8 @@ def _run_llm_check(
         messages=messages,
         tools=[VERDICT_TOOL],
         max_tokens=1024,
-        temperature=0.0,
+        temperature=MONITOR_TEMPERATURE,
+        role="monitor",
     )
     verdict = _extract_tool_input(response, "report_verdict")
     return MonitorResult(

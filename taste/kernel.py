@@ -19,6 +19,7 @@ swap the cores' implementations and the orchestration is unchanged.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import threading
 import time
@@ -32,9 +33,33 @@ from typing import Any, Literal
 from taste import cores
 from taste.agent import AgentSpec
 from taste.cores import MonitorResult, Plan, PlannerError, Step, WorkerResult
-from taste.llm import LLM, RunStats
+from taste.llm import (
+    DEFAULT_TEMPERATURE,
+    LLM,
+    MODEL_MONITOR,
+    MODEL_PLANNER,
+    MODEL_WORKER,
+    BudgetExceeded,
+    InfraFailure,
+    PricingError,
+    RunStats,
+    ensure_priced,
+    prompt_sha,
+)
 from taste.memory import Checkpoint, Memory, MergeConflict
 from taste.tools import ToolRegistry, make_builtin_tools
+
+# Typed harness failures that must be classified (never crash unclassified) and
+# must leave the session branch clean when they interrupt a step.
+_HARNESS_FAILURES = (BudgetExceeded, InfraFailure, PricingError)
+
+
+def _failure_kind_of(exc: Exception) -> Literal["task", "infra", "budget"]:
+    """Single source of truth for the failure taxonomy (see RunResult)."""
+    kind = getattr(exc, "failure_kind", None)
+    if kind in ("infra", "budget"):
+        return kind
+    return "task" if isinstance(exc, PlannerError) else "infra"
 
 # ================================================================= events
 
@@ -78,6 +103,10 @@ class RunResult:
     elapsed_seconds: float
     failure_reason: str | None = None
     stats: RunStats | None = None
+    # Failure taxonomy for analysis: "task" (the agent genuinely failed),
+    # "infra" (API errors persisted past retries), "budget" (dollar cap hit).
+    # Infra/budget runs must be excluded from task-success rates, never pooled.
+    failure_kind: Literal["task", "infra", "budget"] | None = None
 
     def summary(self) -> str:
         passed = sum(1 for o in self.outcomes if o.verdict.passed)
@@ -123,15 +152,32 @@ class Kernel:
         max_retries: int = 2,
         on_event: Callable[[Event], None] | None = None,
         max_parallel: int = 4,
+        planner_model: str | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.llm = llm
         self.max_retries = max_retries
         self.on_event = on_event or (lambda _e: None)
         self.max_parallel = max_parallel
+        # Planner model is a kernel knob, NOT spec.model: the agent spec's
+        # model field configures the Worker only (role-split invariant).
+        self.planner_model = planner_model
         self._events_path: Path | None = None
+        self._runtime_dir_cache: Path | None = None
         # Guards _emit + LLM stats when multiple workers run on worktrees concurrently.
         self._lock = threading.Lock()
+
+    @property
+    def _runtime_dir(self) -> Path:
+        """Rollback-surviving runtime dir (events, manifests) inside git's own
+        metadata. Resolved via the repo's actual git dir so worktree checkouts
+        (where ``.git`` is a file, not a directory) work too.
+        """
+        if self._runtime_dir_cache is None:
+            from git import Repo
+
+            self._runtime_dir_cache = Path(Repo(self.workspace).git_dir) / "taste"
+        return self._runtime_dir_cache
 
     # ------------------------------------------------------------ public
 
@@ -162,12 +208,17 @@ class Kernel:
             branch=memory.branch,
             agent=spec.name,
         )
+        self._write_manifest(task=task, session_id=session_id, spec=spec, memory=memory)
 
-        # Planner: may fail if the model refuses or emits a malformed plan.
+        # Fail fast on unpriced models (before any money is spent), then plan.
+        # PlannerError = the model refused or emitted a malformed plan.
         try:
+            if self.llm is not None:
+                self._validate_models(spec)
             plan = plan_override or self._plan(task, spec, memory)
-        except PlannerError as exc:
-            self._emit("plan.error", reason=str(exc))
+        except (PlannerError, *_HARNESS_FAILURES) as exc:
+            kind = _failure_kind_of(exc)
+            self._emit("plan.error", reason=str(exc), failure_kind=kind)
             return self._halted_result(
                 task=task,
                 session_id=session_id,
@@ -176,6 +227,7 @@ class Kernel:
                 outcomes=[],
                 started=started,
                 reason=f"planner: {exc}",
+                failure_kind=kind,
             )
 
         self._persist_plan(memory, plan)
@@ -200,22 +252,40 @@ class Kernel:
         outcomes: list[StepOutcome] = []
         status: Literal["completed", "failed"] = "completed"
         failure_reason: str | None = None
+        failure_kind: Literal["task", "infra", "budget"] | None = None
 
-        for wave in waves:
-            wave_outcomes, ok, fail_reason = self._run_wave(
-                wave=wave,
-                plan=plan,
-                spec=spec,
-                memory=memory,
-                worker_override=worker_override,
-            )
-            outcomes.extend(wave_outcomes)
-            if not ok:
-                status = "failed"
-                failure_reason = fail_reason
-                failing = next((o for o in wave_outcomes if not o.verdict.passed), wave_outcomes[0])
-                self._emit("run.halt", step=failing.step.id, reason=fail_reason or failing.verdict.reason)
-                break
+        try:
+            for wave in waves:
+                wave_outcomes, ok, fail_reason, wave_exc = self._run_wave(
+                    wave=wave,
+                    plan=plan,
+                    spec=spec,
+                    memory=memory,
+                    worker_override=worker_override,
+                )
+                # Extend BEFORE re-raising a typed failure so completed sibling
+                # steps of an interrupted parallel wave stay in the record.
+                outcomes.extend(wave_outcomes)
+                if wave_exc is not None:
+                    raise wave_exc
+                if not ok:
+                    status = "failed"
+                    failure_reason = fail_reason
+                    failure_kind = "task"
+                    failing = next(
+                        (o for o in wave_outcomes if not o.verdict.passed), wave_outcomes[0]
+                    )
+                    self._emit(
+                        "run.halt",
+                        step=failing.step.id,
+                        reason=fail_reason or failing.verdict.reason,
+                    )
+                    break
+        except _HARNESS_FAILURES as exc:
+            status = "failed"
+            failure_reason = str(exc)
+            failure_kind = _failure_kind_of(exc)
+            self._emit("run.halt", reason=failure_reason, failure_kind=failure_kind)
 
         head = memory.head()
         result = RunResult(
@@ -229,6 +299,7 @@ class Kernel:
             elapsed_seconds=round(time.time() - started, 2),
             failure_reason=failure_reason,
             stats=self.llm.stats if self.llm else None,
+            failure_kind=failure_kind,
         )
         self._emit(
             "run.done",
@@ -249,13 +320,18 @@ class Kernel:
         spec: AgentSpec,
         memory: Memory,
         worker_override: Callable[[Step, Plan], WorkerResult] | None,
-    ) -> tuple[list[StepOutcome], bool, str | None]:
+    ) -> tuple[list[StepOutcome], bool, str | None, Exception | None]:
         """Run a wave of parallel-eligible steps, then merge them into the session.
 
         Single-step waves run in-place on the session branch (identical
         semantics to the old sequential path). Multi-step waves spawn a
         worktree per step, run the workers concurrently, and — only if all
         succeed — merge each worker's branch back into the session.
+
+        Returns ``(outcomes, ok, reason, typed_failure)``. When a typed
+        harness failure interrupts a parallel wave, the completed sibling
+        outcomes are still returned so the caller can record them before
+        re-raising the failure.
         """
         if len(wave) == 1:
             step = wave[0]
@@ -269,7 +345,7 @@ class Kernel:
             )
             ok = outcome.verdict.passed
             reason = None if ok else f"{step.id}: {outcome.verdict.reason}"
-            return [outcome], ok, reason
+            return [outcome], ok, reason, None
 
         self._emit("wave.begin", steps=[s.id for s in wave], size=len(wave))
 
@@ -294,6 +370,7 @@ class Kernel:
             # Run workers in parallel — one thread per worktree, capped.
             pool_size = min(len(wave), self.max_parallel)
             outcomes: dict[str, StepOutcome] = {}
+            typed_failure: Exception | None = None
             with ThreadPoolExecutor(max_workers=pool_size) as pool:
                 futures = {
                     pool.submit(
@@ -309,9 +386,20 @@ class Kernel:
                 }
                 for fut in as_completed(futures):
                     sid = futures[fut]
-                    outcomes[sid] = fut.result()
+                    try:
+                        outcomes[sid] = fut.result()
+                    except _HARNESS_FAILURES as exc:
+                        # Keep the first typed failure; still drain siblings so
+                        # their outcomes (and spend) stay attributable.
+                        if typed_failure is None:
+                            typed_failure = exc
 
-            ordered_outcomes = [outcomes[s.id] for s in wave]
+            ordered_outcomes = [outcomes[s.id] for s in wave if s.id in outcomes]
+
+            if typed_failure is not None:
+                aborted = [s.id for s in wave if s.id not in outcomes]
+                self._emit("wave.halt", aborted=aborted, reason=str(typed_failure))
+                return ordered_outcomes, False, str(typed_failure), typed_failure
 
             # If any worker failed, don't merge — halt with a clean session branch.
             failed = [o for o in ordered_outcomes if not o.verdict.passed]
@@ -319,7 +407,7 @@ class Kernel:
                 f = failed[0]
                 reason = f"{f.step.id}: {f.verdict.reason}"
                 self._emit("wave.halt", failed=[o.step.id for o in failed])
-                return ordered_outcomes, False, reason
+                return ordered_outcomes, False, reason, None
 
             # Merge each worktree's branch into the session, preserving topology.
             for step in wave:
@@ -331,7 +419,12 @@ class Kernel:
                     )
                 except MergeConflict as exc:
                     self._emit("worktree.conflict", step=step.id, detail=exc.detail)
-                    return ordered_outcomes, False, f"{step.id}: merge conflict — {exc.detail}"
+                    return (
+                        ordered_outcomes,
+                        False,
+                        f"{step.id}: merge conflict — {exc.detail}",
+                        None,
+                    )
                 self._emit(
                     "worktree.merge",
                     step=step.id,
@@ -339,7 +432,7 @@ class Kernel:
                     sha=merged.short_sha,
                 )
             self._emit("wave.done", steps=[s.id for s in wave], size=len(wave))
-            return ordered_outcomes, True, None
+            return ordered_outcomes, True, None, None
         finally:
             for wt in worktrees.values():
                 with contextlib.suppress(Exception):
@@ -365,6 +458,42 @@ class Kernel:
         tools.extend(make_builtin_tools(workspace))
 
         before = memory.head()
+
+        try:
+            return self._attempt_loop(
+                step=step,
+                plan=plan,
+                spec=spec,
+                memory=memory,
+                workspace=workspace,
+                worker_override=worker_override,
+                tools=tools,
+                before=before,
+            )
+        except _HARNESS_FAILURES:
+            # A typed failure mid-step leaves half-finished, unverified edits
+            # in the working tree. Left dirty, the NEXT run's first `git add
+            # --all` checkpoint would silently absorb them — cross-run
+            # contamination. Commit the debris (making untracked files
+            # tracked), then hard-reset back to the pre-step checkpoint so the
+            # branch is clean and the abort leaves no trace.
+            memory.checkpoint(step.id, f"{step.id}: aborted mid-step", allow_empty=True)
+            memory.rollback_to(before)
+            self._emit("step.abort", id=step.id, to=before.short_sha)
+            raise
+
+    def _attempt_loop(
+        self,
+        *,
+        step: Step,
+        plan: Plan,
+        spec: AgentSpec,
+        memory: Memory,
+        workspace: Path,
+        worker_override: Callable[[Step, Plan], WorkerResult] | None,
+        tools: ToolRegistry,
+        before: Checkpoint,
+    ) -> StepOutcome:
         attempts = 0
         rolled_back = False
         last_feedback: str | None = None
@@ -425,11 +554,20 @@ class Kernel:
             rolled_back=rolled_back,
         )
 
+    def _validate_models(self, spec: AgentSpec) -> None:
+        """Fail fast (PricingError) if any role's model lacks a pricing entry."""
+        for model in {
+            self.planner_model or MODEL_PLANNER,
+            spec.model or MODEL_WORKER,
+            MODEL_MONITOR,
+        }:
+            ensure_priced(model)
+
     def _plan(self, task: str, spec: AgentSpec, memory: Memory) -> Plan:
         if self.llm is None:
             raise RuntimeError("LLM not configured; pass plan_override or construct with llm=...")
         summary = _summarize_workspace(self.workspace)
-        return cores.plan(self.llm, task, spec, summary)
+        return cores.plan(self.llm, task, spec, summary, model=self.planner_model)
 
     def _worker(
         self,
@@ -496,6 +634,7 @@ class Kernel:
         outcomes: list[StepOutcome],
         started: float,
         reason: str,
+        failure_kind: Literal["task", "infra", "budget"] = "task",
     ) -> RunResult:
         head = memory.head()
         result = RunResult(
@@ -509,9 +648,68 @@ class Kernel:
             elapsed_seconds=round(time.time() - started, 2),
             failure_reason=reason,
             stats=self.llm.stats if self.llm else None,
+            failure_kind=failure_kind,
         )
         self._emit("run.done", status="failed", elapsed=result.elapsed_seconds, reason=reason)
         return result
+
+    def _write_manifest(
+        self,
+        *,
+        task: str,
+        session_id: str,
+        spec: AgentSpec,
+        memory: Memory,
+    ) -> None:
+        """Persist run provenance next to the event log (survives rollback).
+
+        Records everything needed to attribute a result months later: harness
+        commit, package version, per-role model assignments, sampling params,
+        and prompt hashes. Reproducibility on a seedless API means controlling
+        and *recording* every controllable knob.
+        """
+        from taste import __version__
+
+        manifest = {
+            "session": session_id,
+            "task": task,
+            "agent": spec.name,
+            "agent_spec_path": str(spec.source_path) if spec.source_path else None,
+            "branch": memory.branch,
+            "created_at": time.time(),
+            "harness_git_sha": _harness_git_sha(),
+            "taste_version": __version__,
+            "models": {
+                "planner": self.planner_model or MODEL_PLANNER,
+                "worker": spec.model or MODEL_WORKER,
+                "monitor": MODEL_MONITOR,
+            },
+            # Per-role: the Monitor deliberately judges at its own temperature.
+            "temperature": {
+                "planner": DEFAULT_TEMPERATURE,
+                "worker": DEFAULT_TEMPERATURE,
+                "monitor": cores.MONITOR_TEMPERATURE,
+            },
+            "max_retries": self.max_retries,
+            "max_parallel": self.max_parallel,
+            "prompt_sha": {
+                "planner_system": prompt_sha(cores.PLANNER_SYSTEM),
+                "worker_system": prompt_sha(cores.WORKER_SYSTEM),
+                "monitor_system": prompt_sha(cores.MONITOR_SYSTEM),
+                "agent_system_prompt": prompt_sha(spec.system_prompt),
+            },
+        }
+        # Keyed by session: a workspace accumulates one manifest per run, so
+        # provenance for older sessions survives later runs (their branches do).
+        path = self._runtime_dir / f"manifest-{session_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=2))
+        self._emit(
+            "run.manifest",
+            harness_git_sha=manifest["harness_git_sha"],
+            models=manifest["models"],
+            temperature=manifest["temperature"],
+        )
 
     # ------------------------------------------------------------ event sink
 
@@ -523,7 +721,7 @@ class Kernel:
         trail; the event stream is runtime-only trace and must NOT roll back
         with the working tree.
         """
-        path = self.workspace / ".git" / "taste" / "events.jsonl"
+        path = self._runtime_dir / "events.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("")
         self._events_path = path
@@ -540,6 +738,27 @@ class Kernel:
 
 
 # ================================================================= helpers
+
+
+@functools.lru_cache(maxsize=1)
+def _harness_git_sha() -> str:
+    """Commit SHA of the taste package's own checkout, or 'unknown'.
+
+    Uses GitPython WITHOUT parent-directory search on purpose: for a
+    pip-installed package, walking upward from site-packages would find
+    whatever unrelated repo encloses the venv and confidently record the
+    wrong SHA — worse than 'unknown'. Only an exact editable-checkout root
+    counts. Cached: the SHA cannot change within a process.
+    """
+    import taste
+
+    pkg_root = Path(taste.__file__).resolve().parent.parent
+    try:
+        from git import Repo
+
+        return Repo(pkg_root).head.commit.hexsha
+    except Exception:
+        return "unknown"
 
 
 def _summarize_workspace(workspace: Path) -> str:

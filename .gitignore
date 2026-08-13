@@ -19,3 +19,9 @@ htmlcov/
 .DS_Store
 *.swp
 .taste-runs/
+
+# Internal research/strategy docs — not part of the public project.
+docs/research_plan.md
+docs/research_log.md
+docs/related_work.md
+docs/provider_spec.md
