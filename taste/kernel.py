@@ -26,6 +26,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -79,6 +80,34 @@ class Event:
 
 
 # ================================================================= results
+
+
+@dataclass(frozen=True)
+class StepContext:
+    """Where the step running on *this thread* lives.
+
+    A step may execute on the session branch or on its own worktree, and only
+    the kernel knows which. Publishing it here lets a worker — or a test's
+    ``worker_override`` — locate its own working tree without reaching into
+    the kernel's call stack, which silently breaks whenever the kernel is
+    refactored. Set by :meth:`Kernel._run_step` in the executing thread, so
+    it is correct under ``ThreadPoolExecutor`` without any context copying.
+    """
+
+    step: Step
+    workspace: Path
+    branch: str
+
+
+CURRENT_STEP: ContextVar[StepContext | None] = ContextVar("taste_current_step", default=None)
+
+
+def current_step() -> StepContext:
+    """The step executing on this thread. Raises outside a step."""
+    ctx = CURRENT_STEP.get()
+    if ctx is None:
+        raise RuntimeError("current_step() called outside a running step")
+    return ctx
 
 
 @dataclass
@@ -301,13 +330,7 @@ class Kernel:
             stats=self.llm.stats if self.llm else None,
             failure_kind=failure_kind,
         )
-        self._emit(
-            "run.done",
-            status=status,
-            elapsed=result.elapsed_seconds,
-            cost_usd=round(result.stats.total_cost_usd, 4) if result.stats else 0.0,
-            cache_hit_rate=round(result.stats.cache_hit_rate, 3) if result.stats else 0.0,
-        )
+        self._emit_run_done(result)
         return result
 
     # ------------------------------------------------------------ waves
@@ -459,6 +482,11 @@ class Kernel:
 
         before = memory.head()
 
+        # Published for the duration of the step, in this thread. Parallel
+        # steps run in their own threads, so each sees only its own context.
+        ctx_token = CURRENT_STEP.set(
+            StepContext(step=step, workspace=Path(workspace), branch=memory.branch)
+        )
         try:
             return self._attempt_loop(
                 step=step,
@@ -481,6 +509,8 @@ class Kernel:
             memory.rollback_to(before)
             self._emit("step.abort", id=step.id, to=before.short_sha)
             raise
+        finally:
+            CURRENT_STEP.reset(ctx_token)
 
     def _attempt_loop(
         self,
@@ -665,8 +695,26 @@ class Kernel:
             stats=self.llm.stats if self.llm else None,
             failure_kind=failure_kind,
         )
-        self._emit("run.done", status="failed", elapsed=result.elapsed_seconds, reason=reason)
+        self._emit_run_done(result)
         return result
+
+    def _emit_run_done(self, result: RunResult) -> None:
+        """One shape for run.done, whatever path reached it.
+
+        Two emit sites used to carry different keys (cost on success, reason
+        on halt), so any consumer parsing the event had to branch on how the
+        run ended. A single key set keeps the stream mechanically diffable —
+        which is what makes ablation-equivalence testable.
+        """
+        self._emit(
+            "run.done",
+            status=result.status,
+            elapsed=result.elapsed_seconds,
+            reason=result.failure_reason,
+            failure_kind=result.failure_kind,
+            cost_usd=round(result.stats.total_cost_usd, 4) if result.stats else 0.0,
+            cache_hit_rate=round(result.stats.cache_hit_rate, 3) if result.stats else 0.0,
+        )
 
     def _write_manifest(
         self,

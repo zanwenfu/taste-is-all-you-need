@@ -16,7 +16,7 @@ import pytest
 
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
-from taste.kernel import Event, Kernel
+from taste.kernel import Event, Kernel, current_step
 
 # -------------------------------------------------------------- fixtures
 
@@ -129,19 +129,11 @@ def test_parallel_wave_runs_on_worktrees_and_merges_back(parallel_workspace: Pat
         if step.id == "step-01":
             (ws / "SMOKE.md").write_text("ok\n")
             return WorkerResult(summary="smoke", tool_calls=0, stopped_reason="end_turn")
-        # Parallel steps: worker edits a module inside its worktree.
-        # We use the Step to resolve the target; the path comes from the thread
-        # since only the worktree's Memory knows where it lives.
-        import inspect
-        # Grab the Memory for the calling step from the Kernel's frame.
-        frame = inspect.currentframe()
-        while frame is not None:
-            if "memory" in frame.f_locals and frame.f_locals["memory"].branch.endswith(step.id):
-                wt_path = frame.f_locals["memory"].repo_path
-                break
-            frame = frame.f_back
-        else:
-            raise RuntimeError("could not find worktree memory in stack")
+        # Parallel steps: worker edits a module inside its own worktree. The
+        # kernel publishes which one via CURRENT_STEP.
+        ctx = current_step()
+        assert ctx.step.id == step.id
+        wt_path = ctx.workspace
 
         witnesses[step.id] = wt_path
         start_latches[step.id].set()
@@ -191,23 +183,10 @@ def test_parallel_wave_halt_when_any_worker_fails(parallel_workspace: Path) -> N
         if step.id == "step-01":
             (ws / "SMOKE.md").write_text("ok\n")
         elif step.id == "step-03":
-            # Corrupt string_utils so pytest fails on the worktree.
-            # (We have to find the worktree path via the call stack again.)
-            import inspect
-            frame = inspect.currentframe()
-            while frame is not None:
-                if "memory" in frame.f_locals and frame.f_locals["memory"].branch.endswith(step.id):
-                    (frame.f_locals["memory"].repo_path / "string_utils.py").write_text("def broken(\n")
-                    break
-                frame = frame.f_back
+            # Corrupt string_utils so pytest fails on this worker's worktree.
+            (current_step().workspace / "string_utils.py").write_text("def broken(\n")
         else:
-            import inspect
-            frame = inspect.currentframe()
-            while frame is not None:
-                if "memory" in frame.f_locals and frame.f_locals["memory"].branch.endswith(step.id):
-                    _type_hint_module(frame.f_locals["memory"].repo_path / _module_for(step.id))
-                    break
-                frame = frame.f_back
+            _type_hint_module(current_step().workspace / _module_for(step.id))
         return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
 
     events: list[Event] = []
@@ -242,13 +221,7 @@ def test_session_events_record_every_parallel_step(parallel_workspace: Path) -> 
         if step.id == "step-01":
             (ws / "SMOKE.md").write_text("ok\n")
             return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
-        import inspect
-        frame = inspect.currentframe()
-        while frame is not None:
-            if "memory" in frame.f_locals and frame.f_locals["memory"].branch.endswith(step.id):
-                _type_hint_module(frame.f_locals["memory"].repo_path / _module_for(step.id))
-                break
-            frame = frame.f_back
+        _type_hint_module(current_step().workspace / _module_for(step.id))
         return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
 
     Kernel(workspace=ws, max_retries=0).run(
