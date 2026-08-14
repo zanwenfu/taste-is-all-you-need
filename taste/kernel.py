@@ -34,6 +34,7 @@ from typing import Any, Literal
 from taste import cores
 from taste.agent import AgentSpec
 from taste.cores import MonitorResult, Plan, PlannerError, Step, WorkerResult
+from taste.journal import FileChange, Journal, card_from_step, parse_numstat
 from taste.llm import (
     DEFAULT_TEMPERATURE,
     LLM,
@@ -182,12 +183,17 @@ class Kernel:
         on_event: Callable[[Event], None] | None = None,
         max_parallel: int = 4,
         planner_model: str | None = None,
+        journal: bool = False,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.llm = llm
         self.max_retries = max_retries
         self.on_event = on_event or (lambda _e: None)
         self.max_parallel = max_parallel
+        # Off by default: with journalling disabled the kernel must produce a
+        # byte-identical event stream and commit chain to the pre-journal
+        # harness. tests/test_journal.py asserts exactly that.
+        self.journal_enabled = journal
         # Planner model is a kernel knob, NOT spec.model: the agent spec's
         # model field configures the Worker only (role-split invariant).
         self.planner_model = planner_model
@@ -527,9 +533,12 @@ class Kernel:
         attempts = 0
         rolled_back = False
         last_feedback: str | None = None
+        journal = self._journal_for(memory)
+        cost_before = self.llm.stats.total_cost_usd if self.llm else None
 
         while attempts <= self.max_retries:
             attempts += 1
+            attempt_started = time.time()
             self._emit("step.begin", id=step.id, attempt=attempts)
 
             if worker_override is not None:
@@ -545,6 +554,9 @@ class Kernel:
                 llm=self.llm,
                 before=before,
             )
+            # Read the change set BEFORE committing: after the checkpoint the
+            # working tree is clean and there is nothing pending to measure.
+            changes = self._changes_since(memory, before) if journal else ((), 0)
             self._write_verdict(workspace, step, verdict)
             message = f"{step.id}: {step.description} [Monitor: {'PASS' if verdict.passed else 'FAIL'}]"
             checkpoint = memory.checkpoint(step.id, message, allow_empty=True)
@@ -555,6 +567,21 @@ class Kernel:
                 reason=verdict.reason,
                 sha=checkpoint.short_sha,
             )
+            if journal:
+                cost_now = self.llm.stats.total_cost_usd if self.llm else None
+                self._write_card(
+                    journal,
+                    memory=memory,
+                    step=step,
+                    checkpoint=checkpoint,
+                    attempt=attempts,
+                    verdict=verdict,
+                    worker=worker,
+                    changes=changes,
+                    cost=(cost_now - cost_before) if cost_now is not None else None,
+                    elapsed=time.time() - attempt_started,
+                )
+                cost_before = cost_now
 
             if verdict.passed:
                 return StepOutcome(
@@ -566,6 +593,17 @@ class Kernel:
                     rolled_back=rolled_back,
                 )
 
+            # Anchor before the reset: once the branch moves, these commits
+            # are unreachable and the failed attempt becomes unreadable.
+            if journal:
+                ref = journal.anchor(
+                    session=memory.branch.rsplit("-", 1)[-1],
+                    step_id=step.id,
+                    attempt=attempts,
+                    sha=checkpoint.sha,
+                )
+                if ref:
+                    self._emit("journal.anchor", id=step.id, attempt=attempts, ref=ref)
             memory.rollback_to(before)
             rolled_back = True
             last_feedback = _build_feedback(step, verdict)
@@ -584,6 +622,68 @@ class Kernel:
             attempts=attempts,
             rolled_back=rolled_back,
         )
+
+    # ------------------------------------------------------------ journal
+
+    def _journal_for(self, memory: Memory) -> Journal | None:
+        """A Journal bound to this step's memory, or None when disabled.
+
+        Bound per step because a parallel step's memory is its own worktree,
+        and a card must be written against the repo that owns the commit.
+        """
+        if not self.journal_enabled:
+            return None
+        return Journal(memory, gitdir=self._runtime_dir, enabled=True)
+
+    def _changes_since(self, memory: Memory, before: Checkpoint) -> tuple[tuple[FileChange, ...], int]:
+        """File-level change summary for the pending work. Never fatal.
+
+        Called before ``_write_verdict``, so the card describes what the
+        *worker* changed, not the harness's own bookkeeping file.
+        """
+        try:
+            return parse_numstat(memory.numstat_pending(before.sha))
+        except Exception:
+            return ((), 0)
+
+    def _write_card(
+        self,
+        journal: Journal,
+        *,
+        memory: Memory,
+        step: Step,
+        checkpoint: Checkpoint,
+        attempt: int,
+        verdict: MonitorResult,
+        worker: WorkerResult,
+        changes: tuple[tuple[FileChange, ...], int],
+        cost: float | None,
+        elapsed: float,
+    ) -> None:
+        files, diff_lines = changes
+        card = card_from_step(
+            session=memory.branch,
+            branch=memory.branch,
+            sha=checkpoint.sha,
+            parent_sha=checkpoint.parent_sha,
+            step=step,
+            attempt=attempt,
+            verdict_passed=verdict.passed,
+            verdict_reason=verdict.reason,
+            files=files,
+            diff_lines=diff_lines,
+            worker=worker,
+            cost_usd=cost,
+            elapsed_s=round(elapsed, 3),
+        )
+        if journal.card(card):
+            self._emit(
+                "journal.card",
+                id=step.id,
+                attempt=attempt,
+                sha=checkpoint.short_sha,
+                files=len(files),
+            )
 
     def _validate_models(self, spec: AgentSpec) -> None:
         """Fail fast (PricingError) if any role's model lacks a pricing entry."""

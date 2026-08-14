@@ -190,6 +190,16 @@ class Memory:
         out = self.repo.git.diff("--cached", "--name-only", from_ref)
         return [line for line in out.splitlines() if line.strip()]
 
+    def numstat_pending(self, from_ref: str) -> str:
+        """``git diff --numstat`` for the *uncommitted* tree against ``from_ref``.
+
+        Staging first is required for untracked files to appear at all; the
+        kernel's checkpoint stages identically a moment later, so this
+        changes nothing about what ends up committed.
+        """
+        self.repo.git.add("--all", ".")
+        return self.repo.git.diff("--cached", "--numstat", from_ref)
+
     def log(self, *, limit: int | None = None, branch: str | None = None) -> list[Checkpoint]:
         """Return checkpoints (most-recent first) for the session branch."""
         target = branch or self.branch
@@ -201,6 +211,62 @@ class Memory:
 
     def working_tree_dirty(self) -> bool:
         return self.repo.is_dirty(untracked_files=True)
+
+    # ------------------------------------------------------------------ notes & anchors
+
+    def write_note(self, sha: str, body: str, *, ref: str) -> None:
+        """Attach ``body`` to commit ``sha`` under the notes ref ``ref``.
+
+        Notes live outside the working tree, so a note is invisible to the
+        diff the Monitor judges, survives ``reset --hard``, and never
+        participates in a merge — the three properties that disqualify a
+        tracked sidecar file for run metadata.
+        """
+        self.repo.git.notes("--ref", ref, "add", "-f", "-m", body, sha)
+
+    def read_note(self, sha: str, *, ref: str) -> str | None:
+        """Return the note attached to ``sha``, or None if there is none."""
+        try:
+            return self.repo.git.notes("--ref", ref, "show", sha)
+        except GitCommandError:
+            return None
+
+    def anchor(self, ref: str, sha: str) -> None:
+        """Point a ref at ``sha`` so the commit stays reachable.
+
+        A hard reset makes the discarded commits unreachable and therefore
+        garbage-collectable. Anchoring first is what turns "the rolled-back
+        attempt" from a lost object into something a human can still read.
+        """
+        self.repo.git.update_ref(ref, sha)
+
+    def list_refs(self, prefix: str) -> list[tuple[str, str]]:
+        """(ref name, sha) for every ref under ``prefix``."""
+        out = self.repo.git.for_each_ref("--format=%(refname) %(objectname)", prefix)
+        pairs = []
+        for line in out.splitlines():
+            if " " in line:
+                name, sha = line.rsplit(" ", 1)
+                pairs.append((name.strip(), sha.strip()))
+        return pairs
+
+    def delete_ref(self, ref: str) -> None:
+        with contextlib.suppress(GitCommandError):
+            self.repo.git.update_ref("-d", ref)
+
+    def commit_subjects(self, branch: str | None = None, *, limit: int | None = None) -> list[tuple[str, str]]:
+        """(sha, subject) pairs for ``branch``, newest first — one git call."""
+        args = ["--format=%H%x00%s"]
+        if limit:
+            args.append(f"--max-count={limit}")
+        args.append(branch or self.branch)
+        out = self.repo.git.log(*args)
+        pairs = []
+        for line in out.splitlines():
+            if "\x00" in line:
+                sha, subject = line.split("\x00", 1)
+                pairs.append((sha, subject))
+        return pairs
 
     # ------------------------------------------------------------------ worktrees
 
