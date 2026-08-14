@@ -144,6 +144,7 @@ def test_kernel_kwargs_covers_every_switch() -> None:
         "guard_config",
         "two_phase_merge",
         "union_gate",
+        "shadow",
     }
 
 

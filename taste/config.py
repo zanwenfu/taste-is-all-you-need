@@ -44,6 +44,7 @@ EVENT_OWNERS = {
     "guard": "guardrails",
     "merge": "integrate",
     "ipc": "ipc",
+    "shadow": "shadow",
 }
 
 
@@ -62,6 +63,10 @@ class HarnessConfig:
     guardrails: GuardConfig = field(default_factory=GuardConfig)
     two_phase_merge: bool = False
     union_gate: bool = True
+    shadow: bool = False
+    """Observational checkpointing. Required for the four regression metrics,
+    and uniform across arms by design — an arm that never checkpoints has no
+    timeline of its own to measure against."""
 
     # --- identity
     label: str = "baseline"
@@ -102,6 +107,7 @@ class HarnessConfig:
             },
             "two_phase_merge": self.two_phase_merge,
             "union_gate": self.union_gate,
+            "shadow": self.shadow,
         }
 
     # ------------------------------------------------------------ presets
@@ -127,16 +133,17 @@ class HarnessConfig:
         full      everything on — the complete Agent OS.
         """
         arms: dict[str, HarnessConfig] = {
-            "A1": cls(label="A1-self-verify", journal=True, recovery=RecoveryConfig.arm("A1")),
-            "A2": cls(label="A2-repair-in-place", journal=True, recovery=RecoveryConfig.arm("A2")),
-            "A3": cls(label="A3-rollback", journal=True, recovery=RecoveryConfig.arm("A3")),
+            "A1": cls(label="A1-self-verify", journal=True, shadow=True, recovery=RecoveryConfig.arm("A1")),
+            "A2": cls(label="A2-repair-in-place", journal=True, shadow=True, recovery=RecoveryConfig.arm("A2")),
+            "A3": cls(label="A3-rollback", journal=True, shadow=True, recovery=RecoveryConfig.arm("A3")),
             "A3prime": cls(
-                label="A3prime-no-reset", journal=True, recovery=RecoveryConfig.arm("A3prime")
+                label="A3prime-no-reset", journal=True, shadow=True, recovery=RecoveryConfig.arm("A3prime")
             ),
-            "tiered": cls(label="tiered", journal=True, recovery=RecoveryConfig.arm("tiered")),
+            "tiered": cls(label="tiered", journal=True, shadow=True, recovery=RecoveryConfig.arm("tiered")),
             "full": cls(
                 label="full-agent-os",
                 journal=True,
+                shadow=True,
                 recovery=RecoveryConfig.arm("tiered"),
                 guardrails=GuardConfig(enabled=True),
                 two_phase_merge=True,
@@ -162,6 +169,7 @@ def kernel_kwargs(config: HarnessConfig) -> dict:
         "guard_config": config.guardrails,
         "two_phase_merge": config.two_phase_merge,
         "union_gate": config.union_gate,
+        "shadow": config.shadow,
     }
 
 

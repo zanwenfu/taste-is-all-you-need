@@ -51,6 +51,7 @@ from taste.llm import (
     prompt_sha,
 )
 from taste.memory import Checkpoint, Memory, MergeConflict
+from taste.shadow import ShadowLog
 from taste.tools import ToolRegistry, make_builtin_tools
 
 # Typed harness failures that must be classified (never crash unclassified) and
@@ -190,6 +191,7 @@ class Kernel:
         guard_config: GuardConfig | None = None,
         two_phase_merge: bool = False,
         union_gate: bool = True,
+        shadow: bool = False,
         config: HarnessConfig | None = None,
     ) -> None:
         # A HarnessConfig names an entire arm in one object and one hash. When
@@ -207,6 +209,7 @@ class Kernel:
             guard_config = resolved["guard_config"]
             two_phase_merge = resolved["two_phase_merge"]
             union_gate = resolved["union_gate"]
+            shadow = resolved["shadow"]
         self.config = config
         self.workspace = Path(workspace).resolve()
         self.llm = llm
@@ -229,6 +232,11 @@ class Kernel:
         # single-step waves and existing behavior are untouched.
         self.two_phase_merge = two_phase_merge
         self.union_gate = union_gate
+        # Observational checkpointing. Off by default; when on it must be
+        # invisible to the agent, the Monitor and the session branch — it
+        # exists to measure the run, not to participate in it.
+        self.shadow_enabled = shadow
+        self._shadow: ShadowLog | None = None
         # Planner model is a kernel knob, NOT spec.model: the agent spec's
         # model field configures the Worker only (role-split invariant).
         self.planner_model = planner_model
@@ -283,6 +291,21 @@ class Kernel:
             agent=spec.name,
         )
         self._write_manifest(task=task, session_id=session_id, spec=spec, memory=memory)
+        self._shadow = (
+            ShadowLog(
+                memory,
+                gitdir=self._runtime_dir,
+                session=session_id,
+                cost_reader=(
+                    (lambda: (self.llm.stats.total_cost_usd, self.llm.stats.total_work_usd))
+                    if self.llm
+                    else None
+                ),
+            )
+            if self.shadow_enabled
+            else None
+        )
+        self._observe(step_id="run", attempt=0, trigger="run")
 
         # Fail fast on unpriced models (before any money is spent), then plan.
         # PlannerError = the model refused or emitted a malformed plan.
@@ -631,6 +654,9 @@ class Kernel:
                 self._emit(
                     "worker.done", id=step.id, tools=worker.tool_calls, stop=worker.stopped_reason
                 )
+                # Observe what the worker left behind, before the Monitor
+                # judges it and before any checkpoint or reset moves it.
+                self._observe(step_id=step.id, attempt=attempts, trigger="worker")
 
             verdict = cores.evaluate(
                 step=step,
@@ -931,6 +957,25 @@ class Kernel:
         if action.guidance:
             return action.guidance
         return _build_feedback(step, verdict)
+
+    # ------------------------------------------------------------ shadow
+
+    def _observe(self, *, step_id: str, attempt: int, trigger: str, tool: str | None = None) -> None:
+        """Record an observation point. Never fatal, never agent-visible."""
+        if self._shadow is None:
+            return
+        commit = self._shadow.observe(
+            step_id=step_id, attempt=attempt, trigger=trigger, tool=tool
+        )
+        if commit is not None:
+            self._emit(
+                "shadow.observe",
+                id=step_id,
+                seq=commit.seq,
+                sha=commit.sha[:7],
+                trigger=trigger,
+                files=len(commit.files),
+            )
 
     # ------------------------------------------------------------ journal
 
