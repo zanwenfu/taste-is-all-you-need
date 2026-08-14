@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from taste.llm import MODEL_WORKER, RunStats
+from taste.providers.base import Completion, ToolCall, Usage
 
 
 @dataclass
@@ -99,13 +100,13 @@ class FakeLLM:
                 f"but only {len(self._turns)} were scripted"
             )
         turn = self._turns[index]
-        message = _message_for(turn, call_index=index)
+        completion = _completion_for(turn, call_index=index, model=kwargs.get("model", self.model))
         self.stats.record(
             kwargs.get("model", self.model),
-            message,
+            completion,
             role=kwargs.get("role", "unspecified"),
         )
-        return message
+        return completion
 
     # ------------------------------------------------------------ helpers
 
@@ -125,35 +126,83 @@ class FakeLLM:
         raise AssertionError("no user message in the last call")
 
 
-def _message_for(turn: FakeTurn, *, call_index: int) -> SimpleNamespace:
-    """Build an object shaped like ``anthropic.types.Message``.
+def _completion_for(turn: FakeTurn, *, call_index: int, model: str) -> Completion:
+    """Build the normalized :class:`Completion` a provider adapter returns.
 
-    Only the attributes the cores actually read are provided: block ``.type``
-    / ``.text`` / ``.id`` / ``.name`` / ``.input``, plus ``.stop_reason`` and
-    a ``.usage`` carrying the same field names the SDK uses.
+    Faking at the provider boundary rather than at the wire keeps these tests
+    honest about what the cores actually consume, and means they do not have
+    to be rewritten when a second provider arrives.
     """
-    blocks: list[SimpleNamespace] = []
+    texts: tuple[str, ...] = (turn.text,) if turn.text is not None else ()
+    transcript: list[dict[str, Any]] = []
     if turn.text is not None:
-        blocks.append(SimpleNamespace(type="text", text=turn.text))
+        transcript.append({"type": "text", "text": turn.text})
+
+    calls: list[ToolCall] = []
     for tool_index, (name, payload) in enumerate(turn.tool_calls):
-        blocks.append(
-            SimpleNamespace(
-                type="tool_use",
-                id=f"toolu_{call_index:02d}_{tool_index:02d}",
-                name=name,
-                input=payload,
-            )
+        call = ToolCall(
+            id=f"toolu_{call_index:02d}_{tool_index:02d}", name=name, arguments=payload
         )
-    return SimpleNamespace(
-        content=blocks,
+        calls.append(call)
+        transcript.append(
+            {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
+        )
+
+    return Completion(
+        text_blocks=texts,
+        tool_calls=tuple(calls),
         stop_reason=turn.resolved_stop_reason(),
-        usage=SimpleNamespace(
+        model=model,
+        provider="fake",
+        usage=Usage(
             input_tokens=turn.input_tokens,
             output_tokens=turn.output_tokens,
-            cache_read_input_tokens=turn.cache_read_tokens,
-            cache_creation_input_tokens=turn.cache_creation_tokens,
+            cache_read_tokens=turn.cache_read_tokens,
+            cache_write_tokens=turn.cache_creation_tokens,
         ),
+        transcript_blocks=tuple(transcript),
     )
+
+
+class FakeProvider:
+    """A scripted :class:`~taste.providers.base.Provider`.
+
+    Lets the facade — retries, budget caps, telemetry — be tested without a
+    network, at the same seam a real adapter plugs into.
+    """
+
+    name = "fake"
+
+    def __init__(
+        self,
+        turns: list[FakeTurn] | None = None,
+        *,
+        errors: list[Exception | None] | None = None,
+        retryable: bool = True,
+    ) -> None:
+        self._turns = list(turns or [])
+        self._errors = list(errors or [])
+        self._retryable = retryable
+        self.calls: list[Any] = []
+        self.ready_checks = 0
+
+    def ensure_ready(self) -> None:
+        self.ready_checks += 1
+
+    def complete(self, request):
+        index = len(self.calls)
+        self.calls.append(request)
+        if index < len(self._errors) and self._errors[index] is not None:
+            raise self._errors[index]
+        turn = self._turns[min(index, len(self._turns) - 1)] if self._turns else FakeTurn(text="ok")
+        return _completion_for(turn, call_index=index, model=request.model)
+
+    def is_retryable(self, exc: Exception) -> bool:
+        return self._retryable
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
 
 
 def plan_turn(steps: list[dict[str, Any]], **usage: int) -> FakeTurn:

@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -26,7 +25,8 @@ from taste.cores import (
     plan,
 )
 from taste.kernel import Kernel
-from taste.llm import BudgetExceeded, InfraFailure, RunStats
+from taste.llm import BudgetExceeded, InfraFailure
+from tests.fakes import FakeLLM, plan_turn
 
 
 def _spec(model: str | None = None) -> AgentSpec:
@@ -55,28 +55,22 @@ def _noop_worker(step: Step, plan_: Plan) -> WorkerResult:
     return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
 
 
-def _fake_planner_llm(captured: dict):
-    """LLM stub that records call kwargs and answers with a minimal plan."""
-
-    class FakeLLM:
-        def call(self, **kwargs):
-            captured.update(kwargs)
-            block = SimpleNamespace(
-                type="tool_use",
-                name="submit_plan",
-                input={
-                    "steps": [
-                        {
-                            "id": "step-01",
-                            "description": "d",
-                            "verification": {"kind": "shell", "command": "true"},
-                        }
-                    ]
-                },
+def _fake_planner_llm() -> FakeLLM:
+    """A Planner that answers with a minimal one-step plan."""
+    return FakeLLM(
+        [
+            plan_turn(
+                [
+                    {
+                        "id": "step-01",
+                        "description": "d",
+                        "verification": {"kind": "shell", "command": "true"},
+                    }
+                ]
             )
-            return SimpleNamespace(content=[block], stop_reason="tool_use")
-
-    return FakeLLM()
+        ],
+        model=MODEL_PLANNER,
+    )
 
 
 def _manifest(ws: Path, session_id: str) -> dict:
@@ -209,7 +203,8 @@ def test_completed_run_has_no_failure_kind(refactor_workspace: Path) -> None:
 def test_unpriced_spec_model_halts_cleanly_before_spend(refactor_workspace: Path) -> None:
     """A spec naming an unpriced model must yield a classified result, not a crash."""
     kernel = Kernel(workspace=refactor_workspace)
-    kernel.llm = SimpleNamespace(stats=RunStats())  # "real run" as far as validation cares
+    # Any LLM at all makes this a "real run" as far as model validation cares.
+    kernel.llm = FakeLLM([])
     result = kernel.run(
         task="unpriced",
         spec=_spec(model="claude-sonnet-99-imaginary"),
@@ -218,7 +213,7 @@ def test_unpriced_spec_model_halts_cleanly_before_spend(refactor_workspace: Path
     )
     assert result.status == "failed"
     assert result.failure_kind == "infra"
-    assert "no pricing entry" in (result.failure_reason or "")
+    assert "no verified price" in (result.failure_reason or "")
 
 
 def test_mid_step_infra_failure_leaves_branch_clean(refactor_workspace: Path) -> None:
@@ -249,17 +244,17 @@ def test_mid_step_infra_failure_leaves_branch_clean(refactor_workspace: Path) ->
 
 def test_spec_model_does_not_override_planner_model() -> None:
     """The audited validity threat: spec.model used to hijack the Planner too."""
-    captured: dict = {}
-    result = plan(_fake_planner_llm(captured), "task", _spec(model="claude-sonnet-4-6"), "(empty)")
-    assert captured["model"] == MODEL_PLANNER, "spec.model must configure the Worker only"
-    assert captured["role"] == "planner"
+    llm = _fake_planner_llm()
+    result = plan(llm, "task", _spec(model="claude-sonnet-4-6"), "(empty)")
+    assert llm.calls[0]["model"] == MODEL_PLANNER, "spec.model configures the Worker only"
+    assert llm.calls[0]["role"] == "planner"
     assert len(result.steps) == 1
 
 
 def test_explicit_planner_model_override_wins() -> None:
-    captured: dict = {}
-    plan(_fake_planner_llm(captured), "task", _spec(), "(empty)", model="claude-haiku-4-5-20251001")
-    assert captured["model"] == "claude-haiku-4-5-20251001"
+    llm = _fake_planner_llm()
+    plan(llm, "task", _spec(), "(empty)", model="claude-haiku-4-5-20251001")
+    assert llm.calls[0]["model"] == "claude-haiku-4-5-20251001"
 
 
 if __name__ == "__main__":

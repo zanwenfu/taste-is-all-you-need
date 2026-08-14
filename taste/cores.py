@@ -386,7 +386,7 @@ def execute(
                 stop_reason = "interrupted"
                 break
 
-        response = llm.call(
+        completion = llm.call(
             model=spec.model or MODEL_WORKER,
             system=system,
             messages=messages,
@@ -394,16 +394,14 @@ def execute(
             max_tokens=4096,
             role="worker",
         )
-        stop_reason = response.stop_reason or "unknown"
-        assistant_blocks = [_block_to_dict(b) for b in response.content]
-        messages.append({"role": "assistant", "content": assistant_blocks})
+        stop_reason = completion.stop_reason
+        messages.append({"role": "assistant", "content": list(completion.transcript_blocks)})
 
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
-        text_blocks = [b for b in response.content if b.type == "text"]
-        if text_blocks:
-            summary = text_blocks[-1].text
+        tool_uses = completion.tool_calls
+        if completion.text_blocks:
+            summary = completion.text_blocks[-1]
         if hook is not None:
-            _safe_after_turn(hook, turn, response, stop_reason)
+            _safe_after_turn(hook, turn, completion, stop_reason)
 
         if stop_reason == "end_turn" or not tool_uses:
             break
@@ -411,7 +409,7 @@ def execute(
         tool_results = []
         for call in tool_uses:
             tool_calls += 1
-            payload = dict(call.input)
+            payload = dict(call.arguments)
             decision = _safe_before_tool(hook, turn, call.name, payload) if hook else ALLOW
 
             if decision.action == "veto":
@@ -648,23 +646,14 @@ def _run_llm_check(
 # ============================================================== helpers
 
 
-def _extract_tool_input(response, tool_name: str) -> dict[str, Any]:  # type: ignore[no-untyped-def]
-    for block in response.content:
-        if block.type == "tool_use" and block.name == tool_name:
-            return dict(block.input)
+def _extract_tool_input(completion: Any, tool_name: str) -> dict[str, Any]:
+    """The arguments of the named tool call, whichever provider produced it."""
+    for call in completion.tool_calls:
+        if call.name == tool_name:
+            return dict(call.arguments)
     raise RuntimeError(
-        f"model did not call `{tool_name}` (stop_reason={response.stop_reason})"
+        f"model did not call `{tool_name}` (stop_reason={completion.stop_reason})"
     )
-
-
-def _block_to_dict(block: Any) -> dict[str, Any]:
-    """Convert an Anthropic SDK content block back into the raw dict form."""
-    if block.type == "text":
-        return {"type": "text", "text": block.text}
-    if block.type == "tool_use":
-        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
-    # Thinking and other block types pass through via model_dump
-    return block.model_dump()
 
 
 def _tail(text: str, max_lines: int) -> str:

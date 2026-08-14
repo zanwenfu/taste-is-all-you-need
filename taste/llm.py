@@ -1,22 +1,22 @@
-"""Anthropic client wrapper: prompt caching, retries, budget caps, run telemetry.
+"""The model facade: one call surface, whichever provider answers.
 
-Kept intentionally thin: one ``call`` method that returns the raw message,
-plus helpers for cacheable system blocks and per-role token/cost accounting.
+Providers translate wire formats and nothing else (see ``taste/providers``).
+Everything a run's integrity depends on lives here, once, so it cannot drift
+between families:
 
-Experiment-integrity guarantees this layer owns (research_plan.md Wave 0):
+* **Typed failures.** Transient errors retry with backoff; if they persist,
+  :class:`InfraFailure`. Non-retryable API errors — a revoked key, an
+  exhausted balance — surface typed as well, so an environment problem is
+  never recorded as an agent task failure.
+* **A hard dollar cap** per run, checked before every call
+  (:class:`BudgetExceeded`). The cost-matching instrument *is* the budget guard.
+* **Per-(role, model) accounting**, in both currencies. ``billed`` is the
+  invoice; ``work`` prices every prompt token as if no cache existed. See
+  :mod:`taste.pricing` for why an experiment caps on one and reports both.
+* **Unpriced models refuse to run**, rather than being billed at a guess.
 
-* **Typed failure classes.** Transient API errors are retried with exponential
-  backoff; if they persist, ``InfraFailure`` is raised so infra outages are
-  never recorded as task failures. ``BudgetExceeded`` enforces a hard per-run
-  dollar cap — the cost-matching instrument *is* the budget guard.
-* **No silent mispricing.** An unknown model ID raises ``PricingError`` before
-  any API call instead of silently billing at a fallback rate.
-* **Per-role attribution.** Usage is recorded per (role, model) so planner /
-  worker / monitor spend can be separated in cost-matched comparisons.
-
-The harness components (planner, worker, monitor) drive their own tool-use
-loops — this module never owns the loop. That separation is what lets the
-kernel insert a checkpoint commit between any two model turns.
+The cores drive their own tool-use loops; this module never owns one. That
+separation is what lets the kernel insert a checkpoint between any two turns.
 """
 
 from __future__ import annotations
@@ -31,78 +31,63 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import anthropic
-from anthropic import Anthropic
-from anthropic.types import Message
 from dotenv import load_dotenv
 
-# Default model assignments. Planner gets the strongest reasoning (long-horizon
-# decomposition is the task that benefits most from it), Worker gets Sonnet
-# (implementation sweet-spot), Monitor gets Haiku (cheap, high-frequency eval).
+from taste import providers
+from taste.pricing import PricingError, call_cost, ensure_priced
+from taste.providers.base import (
+    Completion,
+    CompletionRequest,
+    ProtocolFailure,
+    SamplingConfig,
+)
+
+# Default model per role. The Planner gets the strongest reasoning
+# (long-horizon decomposition benefits most), the Worker a mid tier, the
+# Monitor a cheap one it calls often.
 MODEL_PLANNER = "claude-opus-4-7"
 MODEL_WORKER = "claude-sonnet-4-6"
 MODEL_MONITOR = "claude-haiku-4-5-20251001"
 
-# Single sampling default, surfaced here so the kernel can log it in the run
-# manifest. Experiments override per call; nothing hardcodes temperature inline.
 DEFAULT_TEMPERATURE = 1.0
 
-
-# USD per 1M tokens, verified against https://platform.claude.com/docs/en/about-claude/pricing
-# Cache columns are the 5-minute-TTL write (1.25x base input) and cache hit
-# (0.1x base input). We never request 1-hour caching (2x write).
+# Measured minimum cacheable prefix, by model family. A block shorter than
+# this caches nothing at all — silently, with no error and no warning.
 #
-# Cost is a PRIMARY dependent variable in the experiments, so these numbers are
-# load-bearing: a wrong rate silently corrupts every cost-matched comparison.
-# Re-verify against the live page before each sweep and bump PRICING_AS_OF.
-#
-# WARNING when adding models: Claude 4.7+ uses a newer tokenizer that emits
-# ~30% more tokens for the same text than 4.6-and-earlier. Token counts are
-# therefore NOT comparable across that boundary — always match on dollars.
-PRICING_AS_OF = "2026-08-13"
+# Verified empirically 2026-08-15 (two identical calls, checking whether the
+# second reads from cache): Sonnet 4.6 caches at ~1.4k tokens; Haiku 4.5 does
+# NOT cache at 3.5k but does at 7k. The consequence is worth stating plainly:
+# the Monitor runs on Haiku with a short system prompt and a diff, so in
+# practice **the Monitor never caches**. Its cost is what it appears to be,
+# and a run's cache-hit rate is effectively the Worker's alone.
+CACHE_MINIMUM_TOKENS = {"opus": 1024, "sonnet": 1024, "haiku": 4096}
 
-_PRICING: dict[str, dict[str, float]] = {
-    "claude-opus-5":              {"input":  5.00, "output": 25.00, "cache_write":  6.25, "cache_read": 0.50},
-    "claude-opus-4-7":            {"input":  5.00, "output": 25.00, "cache_write":  6.25, "cache_read": 0.50},
-    "claude-sonnet-5":            {"input":  2.00, "output": 10.00, "cache_write":  2.50, "cache_read": 0.20},
-    "claude-sonnet-4-6":          {"input":  3.00, "output": 15.00, "cache_write":  3.75, "cache_read": 0.30},
-    "claude-haiku-4-5-20251001":  {"input":  1.00, "output":  5.00, "cache_write":  1.25, "cache_read": 0.10},
-}
 
-# HTTP statuses worth retrying: rate limits, transient server errors, overload.
-_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+def cache_minimum_for(model: str) -> int:
+    """Tokens a system prefix must exceed before caching engages at all."""
+    for family, minimum in CACHE_MINIMUM_TOKENS.items():
+        if family in model:
+            return minimum
+    return 1024
 
-# Shared across every LLM instance in the process so parallel kernels can't
-# stampede the API. Override the size with TASTE_API_CONCURRENCY.
+# Shared across every LLM in the process so parallel kernels cannot stampede
+# a provider. Size with TASTE_API_CONCURRENCY.
 _API_SEMAPHORE = threading.Semaphore(int(os.environ.get("TASTE_API_CONCURRENCY", "8")))
 
 
-class PricingError(RuntimeError):
-    """Raised before any API call when a model has no pricing entry.
-
-    A silent fallback rate would corrupt every cost-matched comparison the
-    experiments run, so unknown models fail fast instead. Classified as an
-    "infra" failure (configuration problem, not an agent task failure).
-    """
-
-    failure_kind = "infra"
-
-
 class BudgetExceeded(RuntimeError):
-    """The per-run dollar cap was hit. The run must halt, typed as 'budget'."""
+    """The per-run dollar cap was reached. The run halts, typed 'budget'."""
 
     failure_kind = "budget"
 
     def __init__(self, spent_usd: float, budget_usd: float) -> None:
-        super().__init__(
-            f"budget exceeded: ${spent_usd:.4f} spent >= ${budget_usd:.4f} cap"
-        )
+        super().__init__(f"budget exceeded: ${spent_usd:.4f} spent >= ${budget_usd:.4f} cap")
         self.spent_usd = spent_usd
         self.budget_usd = budget_usd
 
 
 class InfraFailure(RuntimeError):
-    """The API kept failing after retries. Must never count as a task failure."""
+    """The provider could not be used. Never counts as a task failure."""
 
     failure_kind = "infra"
 
@@ -112,31 +97,39 @@ class InfraFailure(RuntimeError):
         self.last_error = last_error
 
 
-def _is_retryable(exc: Exception) -> bool:
-    if isinstance(exc, anthropic.APIConnectionError):  # includes APITimeoutError
-        return True
-    if isinstance(exc, anthropic.APIStatusError):
-        return exc.status_code in _RETRYABLE_STATUS
-    return False
-
-
 @dataclass
 class ModelUsage:
-    """Token totals for one (role, model) cell."""
+    """Token totals and both costs for one (role, model) cell."""
 
     calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    reasoning_tokens: int = 0
+    billed_usd: float = 0.0
+    work_usd: float = 0.0
 
-    def add(self, message: Message) -> None:
-        u = message.usage
+    def add(self, completion: Completion, model: str) -> None:
+        u = completion.usage
         self.calls += 1
         self.input_tokens += u.input_tokens
         self.output_tokens += u.output_tokens
-        self.cache_read_tokens += getattr(u, "cache_read_input_tokens", 0) or 0
-        self.cache_creation_tokens += getattr(u, "cache_creation_input_tokens", 0) or 0
+        self.cache_read_tokens += u.cache_read_tokens
+        self.cache_creation_tokens += u.cache_write_tokens
+        self.reasoning_tokens += u.reasoning_tokens
+        # Priced per call: a provider whose long-context tier reprices the
+        # whole request gives a different answer if tokens are summed first.
+        billed, work = call_cost(
+            model,
+            input_tokens=u.input_tokens,
+            output_tokens=u.output_tokens,
+            cache_read_tokens=u.cache_read_tokens,
+            cache_write_tokens=u.cache_write_tokens,
+            reasoning_tokens=u.reasoning_tokens,
+        )
+        self.billed_usd += billed
+        self.work_usd += work
 
     def merge(self, other: ModelUsage) -> None:
         self.calls += other.calls
@@ -144,39 +137,45 @@ class ModelUsage:
         self.output_tokens += other.output_tokens
         self.cache_read_tokens += other.cache_read_tokens
         self.cache_creation_tokens += other.cache_creation_tokens
+        self.reasoning_tokens += other.reasoning_tokens
+        self.billed_usd += other.billed_usd
+        self.work_usd += other.work_usd
 
-    def cost_usd(self, model: str) -> float:
-        rates = _require_pricing(model)
-        return (
-            self.input_tokens * rates["input"]
-            + self.output_tokens * rates["output"]
-            + self.cache_creation_tokens * rates["cache_write"]
-            + self.cache_read_tokens * rates["cache_read"]
-        ) / 1_000_000
+    def cost_usd(self, model: str = "") -> float:
+        """Billed cost. ``model`` is accepted for backward compatibility."""
+        return self.billed_usd
 
 
 @dataclass
 class RunStats:
-    """Aggregate + per-(role, model) usage for one kernel run. Thread-safe:
-    parallel workers on worktrees share one RunStats via the shared ``LLM``
-    client. One RunStats belongs to exactly one run — construct a fresh LLM
-    per run so cost attribution never bleeds across trials.
+    """Per-(role, model) usage for one run. Thread-safe: parallel workers
+    share one instance through the shared client.
 
-    The running dollar total is maintained incrementally under the lock so the
-    per-call budget check is an O(1) read that can never race a concurrent
-    ``record()`` (iterating the cells unlocked could observe a mid-insert dict).
+    One RunStats belongs to exactly one run — construct a fresh LLM per run,
+    or cost attribution bleeds across trials. Running totals are maintained
+    incrementally under the lock, so the pre-call budget check is an O(1)
+    read that cannot race a concurrent record.
     """
 
     per_role_model: dict[tuple[str, str], ModelUsage] = field(
         default_factory=lambda: defaultdict(ModelUsage)
     )
-    _total_cost_usd: float = field(default=0.0, repr=False)
+    _billed_usd: float = field(default=0.0, repr=False)
+    _work_usd: float = field(default=0.0, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
-    def record(self, model: str, message: Message, *, role: str = "unspecified") -> None:
+    def record(self, model: str, completion: Completion, *, role: str = "unspecified") -> None:
+        billed, work = call_cost(
+            model,
+            input_tokens=completion.usage.input_tokens,
+            output_tokens=completion.usage.output_tokens,
+            cache_read_tokens=completion.usage.cache_read_tokens,
+            cache_write_tokens=completion.usage.cache_write_tokens,
+        )
         with self._lock:
-            self.per_role_model[(role, model)].add(message)
-            self._total_cost_usd += _message_cost_usd(model, message)
+            self.per_role_model[(role, model)].add(completion, model)
+            self._billed_usd += billed
+            self._work_usd += work
 
     def _snapshot(self) -> list[tuple[tuple[str, str], ModelUsage]]:
         with self._lock:
@@ -184,10 +183,8 @@ class RunStats:
 
     @property
     def per_model(self) -> dict[str, ModelUsage]:
-        """Role-agnostic aggregation (the CLI usage table reads this).
-
-        Derived snapshot — mutating the returned objects records nothing.
-        """
+        """Role-agnostic aggregation. A derived snapshot — mutating the
+        returned objects records nothing."""
         agg: dict[str, ModelUsage] = defaultdict(ModelUsage)
         for (_role, model), usage in self._snapshot():
             agg[model].merge(usage)
@@ -202,8 +199,30 @@ class RunStats:
 
     @property
     def total_cost_usd(self) -> float:
+        """Billed cost — what the invoice will say."""
         with self._lock:
-            return self._total_cost_usd
+            return self._billed_usd
+
+    @property
+    def total_work_usd(self) -> float:
+        """Cost with every prompt token at the uncached rate.
+
+        Order-invariant, so it is the unit an experiment caps on: billed cost
+        depends on what ran before this run and would make each trial's
+        budget a function of its neighbours.
+        """
+        with self._lock:
+            return self._work_usd
+
+    @property
+    def cache_delta_usd(self) -> float:
+        """work - billed. SIGNED: negative when cache writes outweigh reads.
+
+        Reported rather than presented as a saving, because a policy that
+        discards its cache prefix pays a real tax that must stay visible.
+        """
+        with self._lock:
+            return self._work_usd - self._billed_usd
 
     @property
     def cache_hit_rate(self) -> float:
@@ -213,49 +232,58 @@ class RunStats:
 
 
 class LLM:
-    """A thin Anthropic wrapper focused on caching, retries, and observability.
+    """The single call surface. Owns retries, budget, and telemetry.
 
-    Auto-loads `.env` from the caller's working directory (walking up) before
-    reading ``ANTHROPIC_API_KEY``. The key is never logged, echoed, or
-    exposed through the public API.
-
-    Parameters
-    ----------
-    budget_usd:
-        Hard per-run dollar cap. Checked before every call; once estimated
-        spend reaches the cap, :class:`BudgetExceeded` is raised. The check is
-        check-then-act, so calls already in flight complete: overshoot is
-        bounded by the number of concurrently in-flight calls (≤ the kernel's
-        max_parallel) times one call's cost. Cost-matched analysis must use
-        realized spend from RunStats, never assume spend == cap.
-    max_attempts / backoff_base:
-        Retry policy for transient API errors (429/5xx/529/connection). Delays
-        are ``backoff_base * 2^attempt`` capped at 30s with jitter. SDK-level
-        retries are disabled so this layer owns the classification.
+    Auto-loads `.env` from the working directory upwards. Keys are never
+    logged, echoed, or exposed through the public API.
     """
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
+        api_keys: dict[str, str] | None = None,
         env_dir: Path | None = None,
         budget_usd: float | None = None,
         max_attempts: int = 5,
         backoff_base: float = 1.0,
         semaphore: threading.Semaphore | None = None,
+        run_id: str = "",
     ) -> None:
         load_dotenv(_find_env(env_dir), override=False)
-        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. Put it in .env or export it in your shell."
-            )
-        self.client = Anthropic(api_key=key, max_retries=0)
+        self._api_keys = dict(api_keys or {})
+        if api_key:  # legacy single-key form: the Anthropic slot
+            self._api_keys.setdefault("anthropic", api_key)
         self.stats = RunStats()
         self.budget_usd = budget_usd
         self.max_attempts = max(1, max_attempts)
         self.backoff_base = backoff_base
+        self.run_id = run_id
         self._semaphore = semaphore or _API_SEMAPHORE
+        self._providers: dict[str, Any] = {}
+
+    # ------------------------------------------------------------ providers
+
+    def provider_for(self, model: str) -> Any:
+        """The adapter serving ``model``, cached per instance."""
+        from taste.pricing import provider_for as _provider_for
+
+        name = _provider_for(model)
+        if name not in self._providers:
+            self._providers[name] = providers.get(name, api_key=self._api_keys.get(name))
+        return self._providers[name]
+
+    def ensure_ready(self, *models: str) -> None:
+        """Validate pricing and credentials for the models a run will use.
+
+        Called once at run start, for exactly the providers that run declares
+        — so an OpenAI-only run does not require an Anthropic key to exist.
+        """
+        for model in {m for m in models if m}:
+            ensure_priced(model)
+            self.provider_for(model).ensure_ready()
+
+    # ------------------------------------------------------------ the call
 
     def call(
         self,
@@ -265,74 +293,77 @@ class LLM:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 4096,
-        temperature: float = DEFAULT_TEMPERATURE,
+        temperature: float | None = DEFAULT_TEMPERATURE,
+        effort: str | None = None,
         role: str = "unspecified",
-    ) -> Message:
-        """Single API call with retry/backoff. Returns the full Message.
+    ) -> Completion:
+        """One model turn, retried on transient failure.
 
-        Raises :class:`PricingError` for unknown models, :class:`BudgetExceeded`
-        when the per-run cap is reached, and :class:`InfraFailure` when
-        transient errors persist past ``max_attempts``. Non-retryable API
-        errors (4xx other than 408/409/429) propagate unchanged.
+        Raises :class:`PricingError` for unpriced models, :class:`BudgetExceeded`
+        at the cap, and :class:`InfraFailure` when the provider cannot serve
+        the request. All three are typed so the kernel classifies the run
+        rather than crashing.
         """
-        _require_pricing(model)
+        ensure_priced(model)
         if self.budget_usd is not None and self.stats.total_cost_usd >= self.budget_usd:
             raise BudgetExceeded(self.stats.total_cost_usd, self.budget_usd)
 
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "system": _as_system_blocks(system),
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        if tools:
-            kwargs["tools"] = tools
+        provider = self.provider_for(model)
+        request = CompletionRequest(
+            model=model,
+            system=_as_system_blocks(system),
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            sampling=SamplingConfig(temperature=temperature, effort=effort),
+            role=role,
+            run_id=self.run_id,
+        )
 
         last_exc: Exception | None = None
         for attempt in range(self.max_attempts):
             try:
                 with self._semaphore:
-                    message = self.client.messages.create(**kwargs)
-            except anthropic.APIError as exc:
-                if not _is_retryable(exc):
-                    # Non-retryable API errors (credit exhausted, auth revoked,
-                    # malformed request) are environment problems, not agent
-                    # task failures — surface them typed so the kernel
-                    # classifies the run as infra instead of crashing raw.
+                    completion = provider.complete(request)
+            except ProtocolFailure:
+                raise  # already typed and already infra; retrying will not help
+            except Exception as exc:
+                if not provider.is_retryable(exc):
+                    # Credit exhausted, key revoked, malformed request: an
+                    # environment problem, surfaced typed so the kernel never
+                    # records it as the agent failing its task.
                     raise InfraFailure(
-                        "non-retryable API error",
-                        attempts=attempt + 1,
-                        last_error=exc,
+                        "non-retryable provider error", attempts=attempt + 1, last_error=exc
                     ) from exc
                 last_exc = exc
                 if attempt < self.max_attempts - 1:
                     delay = min(self.backoff_base * (2**attempt), 30.0)
                     time.sleep(delay * (0.5 + random.random()))
                 continue
-            self.stats.record(model, message, role=role)
-            return message
+            self.stats.record(model, completion, role=role)
+            return completion
 
         raise InfraFailure(
-            "API call failed on transient errors",
+            "provider failed on transient errors",
             attempts=self.max_attempts,
             last_error=last_exc,
         ) from last_exc
 
 
+# ---------------------------------------------------------------- prompts
+
+
 def cached(text: str) -> dict[str, Any]:
-    """Wrap a block of text as a cacheable system block (one cache breakpoint)."""
+    """A cacheable system block (one cache breakpoint)."""
     return {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
 
 
 def static_system(*parts: str) -> dict[str, Any]:
     """Join static prompt parts into ONE cacheable block.
 
-    Prompt caching has a minimum cacheable-prefix length (1024 tokens on
-    Sonnet-class models); several small blocks each below the minimum cache
-    nothing. Consolidating the static prefix into a single block (tools +
-    system share the prefix) is the Wave-0 cache fix — verify with
-    ``scripts/cache_smoke.py``.
+    Caching has a minimum cacheable-prefix length; several small blocks each
+    below it cache nothing. Consolidating the static prefix is what makes the
+    cache actually engage — verify with ``scripts/cache_smoke.py``.
     """
     return cached("\n\n".join(p.strip() for p in parts if p and p.strip()))
 
@@ -342,48 +373,35 @@ def prompt_sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
-def ensure_priced(model: str) -> None:
-    """Raise :class:`PricingError` if ``model`` has no pricing entry.
-
-    The kernel calls this for every role's model at run start so unpriced
-    configurations fail fast, before any money is spent.
-    """
-    _require_pricing(model)
-
-
-def _message_cost_usd(model: str, message: Message) -> float:
-    rates = _require_pricing(model)
-    u = message.usage
-    return (
-        u.input_tokens * rates["input"]
-        + u.output_tokens * rates["output"]
-        + (getattr(u, "cache_creation_input_tokens", 0) or 0) * rates["cache_write"]
-        + (getattr(u, "cache_read_input_tokens", 0) or 0) * rates["cache_read"]
-    ) / 1_000_000
-
-
-def _require_pricing(model: str) -> dict[str, float]:
-    if model not in _PRICING:
-        known = ", ".join(sorted(_PRICING))
-        raise PricingError(
-            f"no pricing entry for model {model!r}; add it to taste.llm._PRICING "
-            f"(known: {known}). Refusing to run with silently mispriced cost telemetry."
-        )
-    return _PRICING[model]
-
-
 def _as_system_blocks(system: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalize system into block form so cache_control is always respected."""
     if isinstance(system, str):
         return [cached(system)]
     return system
 
 
 def _find_env(start: Path | None) -> Path | None:
-    """Walk up from ``start`` (default: cwd) to find a .env file."""
     here = (start or Path.cwd()).resolve()
     for candidate in [here, *here.parents]:
         env = candidate / ".env"
         if env.is_file():
             return env
     return None
+
+
+__all__ = [
+    "DEFAULT_TEMPERATURE",
+    "LLM",
+    "MODEL_MONITOR",
+    "MODEL_PLANNER",
+    "MODEL_WORKER",
+    "BudgetExceeded",
+    "Completion",
+    "InfraFailure",
+    "ModelUsage",
+    "PricingError",
+    "RunStats",
+    "cached",
+    "ensure_priced",
+    "prompt_sha",
+    "static_system",
+]

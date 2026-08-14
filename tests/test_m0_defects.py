@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -26,7 +25,9 @@ from taste import cores
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Kernel
+from taste.llm import MODEL_MONITOR
 from taste.memory import Memory
+from tests.fakes import FakeLLM, verdict_turn
 
 
 def _spec() -> AgentSpec:
@@ -48,30 +49,18 @@ def test_llm_monitor_judges_current_work_not_previous_step(refactor_workspace: P
     # The worker's actual (uncommitted) change for THIS step.
     (ws / "new_work.py").write_text("# the current step's work\n")
 
-    seen: dict[str, str] = {}
-
-    class FakeLLM:
-        def call(self, **kwargs):
-            seen["prompt"] = kwargs["messages"][0]["content"]
-            block = SimpleNamespace(
-                type="tool_use",
-                name="report_verdict",
-                input={"passed": True, "reason": "ok"},
-            )
-            return SimpleNamespace(content=[block], stop_reason="tool_use")
-
+    llm = FakeLLM([verdict_turn(passed=True, reason="ok")], model=MODEL_MONITOR)
     step = Step(
         id="step-01",
         description="do the thing",
         verification=Verification(kind="llm", criteria="did it"),
     )
-    result = cores.evaluate(
-        step=step, memory=memory, workspace=ws, llm=FakeLLM(), before=before
-    )
+    result = cores.evaluate(step=step, memory=memory, workspace=ws, llm=llm, before=before)
 
     assert result.passed
-    assert "new_work.py" in seen["prompt"], "judge must see the current step's work"
-    assert "old_work.py" not in seen["prompt"], "judge must NOT see the previous step"
+    prompt = llm.calls[0]["messages"][0]["content"]
+    assert "new_work.py" in prompt, "judge must see the current step's work"
+    assert "old_work.py" not in prompt, "judge must NOT see the previous step"
 
 
 def test_diff_pending_includes_untracked_files(refactor_workspace: Path) -> None:
