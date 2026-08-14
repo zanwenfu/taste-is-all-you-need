@@ -234,6 +234,9 @@ class Kernel:
         self.planner_model = planner_model
         self._events_path: Path | None = None
         self._runtime_dir_cache: Path | None = None
+        # The session currently executing. Set by run(); read by anchor
+        # naming, which must not infer it from a branch name.
+        self._session_id: str | None = None
         # Guards _emit + LLM stats when multiple workers run on worktrees concurrently.
         self._lock = threading.Lock()
 
@@ -269,6 +272,7 @@ class Kernel:
         """
         started = time.time()
         session_id = session_id or uuid.uuid4().hex[:8]
+        self._session_id = session_id
         memory = Memory.open_session(self.workspace, session_id, base_ref=base_ref)
         self._open_event_log()
         self._emit(
@@ -601,20 +605,32 @@ class Kernel:
         # REPAIR_IN_PLACE reframes the next attempt as fixing what is on disk
         # rather than starting over; every other verb starts fresh.
         worker_mode: Literal["fresh", "repair"] = "fresh"
+        # Set by REVERIFY: re-run the check against the unchanged tree without
+        # invoking the worker again.
+        reverifying = False
+        worker = WorkerResult("", 0, "unknown")
+        attempt_started = time.time()
+        # One guard per STEP, not per attempt: rebuilt each attempt it would
+        # re-baseline its spend and turn a step ceiling into a per-attempt one.
+        guard = self._guard_for(workspace)
 
         while attempts <= self.max_retries:
-            attempts += 1
-            attempt_started = time.time()
-            self._emit("step.begin", id=step.id, attempt=attempts)
-
-            if worker_override is not None:
-                worker = worker_override(step, plan)
+            if reverifying:
+                reverifying = False
             else:
-                guard = self._guard_for(workspace)
-                worker = self._worker(
-                    step, plan, spec, tools, last_feedback, hook=guard, mode=worker_mode
+                attempts += 1
+                attempt_started = time.time()
+                self._emit("step.begin", id=step.id, attempt=attempts)
+
+                if worker_override is not None:
+                    worker = worker_override(step, plan)
+                else:
+                    worker = self._worker(
+                        step, plan, spec, tools, last_feedback, hook=guard, mode=worker_mode
+                    )
+                self._emit(
+                    "worker.done", id=step.id, tools=worker.tool_calls, stop=worker.stopped_reason
                 )
-            self._emit("worker.done", id=step.id, tools=worker.tool_calls, stop=worker.stopped_reason)
 
             verdict = cores.evaluate(
                 step=step,
@@ -625,7 +641,14 @@ class Kernel:
             )
             # Read the change set BEFORE committing: after the checkpoint the
             # working tree is clean and there is nothing pending to measure.
-            changes = self._changes_since(memory, before) if journal else ((), 0)
+            # Needed by the journal AND by diagnosis — gating it on the
+            # journal alone left recovery seeing an empty diff always, which
+            # silently disabled the blast-radius and empty-diff rules.
+            changes = (
+                self._changes_since(memory, before)
+                if (journal or history is not None)
+                else ((), 0)
+            )
             self._write_verdict(workspace, step, verdict)
             message = f"{step.id}: {step.description} [Monitor: {'PASS' if verdict.passed else 'FAIL'}]"
             checkpoint = memory.checkpoint(step.id, message, allow_empty=True)
@@ -714,9 +737,10 @@ class Kernel:
                 break
 
             if action.kind is recovery.ActionKind.REVERIFY:
-                # Re-run the check only. Costs an action, never an attempt —
-                # which is what keeps reset and no-reset arms attempt-matched.
-                attempts -= 1
+                # Re-run the check only: no worker, no new edits, no API
+                # spend. Costs an action, never an attempt — which is what
+                # keeps the reset and no-reset arms attempt-matched.
+                reverifying = True
                 continue
 
             self._finish_attempt(
@@ -760,8 +784,12 @@ class Kernel:
         is unreachable and the attempt becomes unreadable.
         """
         if journal:
+            # The run's own session id, never derived from the branch name:
+            # a worktree branch (taste-wt/…-step-02) would yield "02", so
+            # anchors from different sessions would collide and a targeted
+            # prune would never match.
             ref = journal.anchor(
-                session=memory.branch.rsplit("-", 1)[-1],
+                session=self._session_id or "unknown",
                 step_id=step.id,
                 attempt=attempt,
                 sha=checkpoint.sha,
@@ -847,6 +875,18 @@ class Kernel:
         if history.baseline_probe == "skipped":
             history.baseline_probe = signals.baseline_probe
 
+        # Record BEFORE diagnosing, so no_progress_streak counts the attempt
+        # being diagnosed. Reading the streak first meant "two identical
+        # failures running" needed a third attempt to notice the second.
+        history.record(
+            recovery.AttemptRecord(
+                attempt=attempts,
+                fingerprint=signals.fingerprint,
+                failure_class=recovery.FailureClass.UNKNOWN,
+                action=recovery.ActionKind.HALT,
+                failed_count=signals.failed_count,
+            )
+        )
         diagnosis = recovery.diagnose(signals, history)
         self._emit(
             "recovery.diagnosis",
@@ -871,15 +911,8 @@ class Kernel:
             signals=signals,
         )
         history.book.add(signals.fingerprint, recovery.guidance_bullet(signals, diagnosis))
-        history.record(
-            recovery.AttemptRecord(
-                attempt=attempts,
-                fingerprint=signals.fingerprint,
-                failure_class=diagnosis.failure_class,
-                action=action.kind,
-                failed_count=signals.failed_count,
-            )
-        )
+        # Fill in what the placeholder record could not know until now.
+        history.amend_last(failure_class=diagnosis.failure_class, action=action.kind)
         self._emit(
             "recovery.action",
             id=step.id,

@@ -27,9 +27,12 @@ exists to measure.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
+
+from git.exc import GitCommandError
 
 from taste.memory import Memory, MergeConflict
 
@@ -65,15 +68,19 @@ class IntegrationResult:
 def supports_merge_tree(memory: Memory) -> bool:
     """Whether this git can fold branches without touching the working tree.
 
-    ``merge-tree --write-tree`` arrived in git 2.38. Older gits fall back to
-    the sequential merge, so the harness stays usable rather than refusing to
-    run.
+    Decided on the version number rather than by pattern-matching an error
+    message: older gits reject ``--write-tree`` with wording that varies, and
+    guessing wrong here is expensive in the wrong direction — every fold
+    would be misreported as a conflict instead of falling back.
     """
     try:
-        memory.repo.git.merge_tree("--write-tree", "HEAD", "HEAD")
-    except Exception as exc:
-        return "unknown option" not in str(exc) and "usage:" not in str(exc).lower()
-    return True
+        raw = memory.repo.git.version()
+    except Exception:
+        return False
+    match = re.search(r"(\d+)\.(\d+)", raw or "")
+    if not match:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= (2, 38)
 
 
 def preview_merge(memory: Memory, base: str, other: str) -> tuple[str | None, str]:
@@ -85,7 +92,10 @@ def preview_merge(memory: Memory, base: str, other: str) -> tuple[str | None, st
     """
     try:
         out = memory.repo.git.merge_tree("--write-tree", base, other)
-    except Exception as exc:
+    except GitCommandError as exc:
+        # A non-zero exit from merge-tree IS the conflict signal; anything
+        # else (a missing object, a broken repo) is infrastructure and must
+        # not be reported to the operator as "your steps conflict".
         detail = getattr(exc, "stdout", "") or str(exc)
         return None, str(detail)[:2000]
     tree = out.splitlines()[0].strip() if out else ""

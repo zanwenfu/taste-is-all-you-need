@@ -326,3 +326,74 @@ def test_an_interrupt_halts_instead_of_triggering_a_retry(refactor_workspace: Pa
     assert actions[0].payload["action"] == ActionKind.HALT.value
     # One worker invocation, not four.
     assert len([e for e in events if e.kind == "worker.done"]) == 1
+
+
+# ------------------------------------------------------------------ veto bypasses
+
+
+def test_git_on_its_own_line_is_still_vetoed(tmp_path: Path) -> None:
+    """A newline is a shell separator; a line-anchored regex missed it."""
+    guard = _guard(tmp_path)
+    decision = guard.before_tool(1, "run_shell", {"command": "pytest -q\ngit reset --hard HEAD~1"})
+    assert decision.action == "veto"
+
+
+def test_git_with_global_flags_is_still_vetoed(tmp_path: Path) -> None:
+    """`git -C . reset` resolves to "reset", not to the flag or its argument."""
+    guard = _guard(tmp_path)
+    for command in (
+        "git -C . reset --hard",
+        "git -c user.name=x commit -am wip",
+        "git --git-dir=.git checkout main",
+        "/usr/bin/git reset --hard",
+    ):
+        assert guard.before_tool(1, "run_shell", {"command": command}).action == "veto", command
+
+
+def test_git_subcommand_extraction() -> None:
+    from taste.guardrails import git_subcommands
+
+    assert git_subcommands("git status") == ["status"]
+    assert git_subcommands("git -C /tmp/x log --oneline") == ["log"]
+    assert git_subcommands("pytest && git commit -am x; git push") == ["commit", "push"]
+    # "git" as an argument is not a git invocation.
+    assert git_subcommands("echo no git here") == []
+    assert git_subcommands("grep -r 'git commit' docs/") == []
+    # Leading environment assignments precede the command.
+    assert git_subcommands("GIT_TRACE=1 git status") == ["status"]
+    # A quoted string that would break shlex must not crash the guard.
+    assert isinstance(git_subcommands("echo 'unbalanced"), list)
+
+
+def test_guard_is_one_per_step_not_per_attempt(refactor_workspace: Path) -> None:
+    """A per-attempt guard re-baselines its spend, turning a step ceiling
+    into a ceiling times the retry count."""
+    from taste.cores import Plan, Step, Verification, WorkerResult
+    from taste.kernel import Kernel
+
+    ws = refactor_workspace
+    built: list[object] = []
+    kernel = Kernel(
+        workspace=ws,
+        max_retries=2,
+        guard_config=GuardConfig(enabled=True),
+    )
+    original = kernel._guard_for
+
+    def counting(workspace):
+        guard = original(workspace)
+        built.append(guard)
+        return guard
+
+    kernel._guard_for = counting
+    kernel.run(
+        task="g",
+        spec=_spec(),
+        session_id="g",
+        plan_override=Plan(
+            task="g",
+            steps=[Step("step-01", "x", Verification(kind="shell", command="test -f nope.py"))],
+        ),
+        worker_override=lambda s, p: WorkerResult("", 0, "end_turn"),
+    )
+    assert len(built) == 1, "one guard per step, however many attempts it takes"

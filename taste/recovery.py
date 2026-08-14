@@ -306,18 +306,32 @@ def run_baseline_probe(
             elapsed = _time.monotonic() - started
             if proc.returncode == 0:
                 return "pass", elapsed
-            parsed = parse_output(proc.stdout, proc.stderr)
+            # Fingerprint the SAME slice the failure fingerprint saw. The
+            # verdict carries a 40-line tail, so hashing the probe's full
+            # output would never collide and "fail_same" would be
+            # unreachable for any verification without test node ids.
+            stdout = _tail_lines(proc.stdout, 40)
+            stderr = _tail_lines(proc.stderr, 40)
+            parsed = parse_output(stdout, stderr)
             probe_fp = fingerprint(
                 exit_code=proc.returncode,
                 failing_tests=parsed["failing_tests"],
-                stdout=proc.stdout,
-                stderr=proc.stderr,
+                stdout=stdout,
+                stderr=stderr,
             )
             return ("fail_same" if probe_fp == failure_fingerprint else "fail_other"), elapsed
     except Exception:
         # A probe that cannot run tells us nothing; it must never be the
         # reason a step fails.
         return "skipped", _time.monotonic() - started
+
+
+def _tail_lines(text: str, max_lines: int) -> str:
+    """The same truncation cores._tail applies to captured evidence."""
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "... (truncated) ...\n" + "\n".join(lines[-max_lines:])
 
 
 def _in_blast_radius(failing_tests: tuple[str, ...], changed_files: tuple[str, ...]) -> bool:
@@ -540,8 +554,21 @@ class StepHistory:
 
     def record(self, record: AttemptRecord) -> None:
         self.records.append(record)
-        self.action_counts[record.action] = self.action_counts.get(record.action, 0) + 1
-        if record.action is ActionKind.ROLLBACK_AND_RETRY:
+
+    def amend_last(self, *, failure_class: FailureClass, action: ActionKind) -> None:
+        """Attach the decision to the attempt it was made about.
+
+        The attempt is recorded before diagnosis so the streak detector can
+        see it; the class and action are only known afterwards. Action counts
+        are tallied here, once, when the decision is final.
+        """
+        if not self.records:
+            return
+        last = self.records[-1]
+        last.failure_class = failure_class
+        last.action = action
+        self.action_counts[action] = self.action_counts.get(action, 0) + 1
+        if action is ActionKind.ROLLBACK_AND_RETRY:
             self.reset_count += 1
 
     def no_progress_streak(self) -> int:
@@ -792,8 +819,9 @@ class TieredPolicy:
                 resets=action.resets,
             )
 
-        # L3: a hard ceiling on total decisions, whatever they were.
-        if budget.actions_used + 1 >= budget.max_actions:
+        # L3: a hard ceiling on total decisions, whatever they were. Same
+        # comparison Budget.exhausted uses, so the two cannot disagree.
+        if budget.actions_used >= budget.max_actions:
             return Action(
                 ActionKind.HALT, reason="action ceiling reached", resets=action.resets
             )

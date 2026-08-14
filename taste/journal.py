@@ -34,6 +34,7 @@ Every write here is non-fatal. Bookkeeping must never be able to fail a step.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -47,6 +48,12 @@ CARD_SCHEMA = "taste.card/1"
 
 NOTES_REF = "taste-cards"
 ANCHOR_PREFIX = "refs/taste/attempt"
+
+# Notes live on one ref, which git locks per write. Parallel workers in a wave
+# contend for it; serializing in-process plus a short retry covers both this
+# process's threads and any external writer holding the lock briefly.
+_NOTE_LOCK = threading.Lock()
+_NOTE_WRITE_ATTEMPTS = 4
 
 # A card is an index entry, not an archive. These caps keep it scannable and
 # stop a pathological step from writing a megabyte of bookkeeping per commit.
@@ -219,11 +226,20 @@ class Journal:
         except OSError:
             self.errors += 1
             ok = False
-        try:
-            self.memory.write_note(card.sha, body, ref=NOTES_REF)
-        except Exception:
-            self.errors += 1
-            ok = False
+        # Parallel steps write the one notes ref concurrently, and git takes a
+        # lock on it. Without a retry the losers fail, the fail-open handler
+        # swallows it, and cards vanish for exactly the runs that need them
+        # most. The JSONL line above is already safely appended either way.
+        for attempt in range(_NOTE_WRITE_ATTEMPTS):
+            try:
+                with _NOTE_LOCK:
+                    self.memory.write_note(card.sha, body, ref=NOTES_REF)
+                return ok
+            except Exception:
+                if attempt == _NOTE_WRITE_ATTEMPTS - 1:
+                    self.errors += 1
+                    return False
+                time.sleep(0.05 * (attempt + 1))
         return ok
 
     def anchor(self, *, session: str, step_id: str, attempt: int, sha: str) -> str | None:

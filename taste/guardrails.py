@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,57 @@ _GIT_READERS = (
     "rev-parse", "describe", "cat-file", "for-each-ref", "shortlog",
 )
 
-_GIT_CALL = re.compile(r"(?:^|[;&|]\s*|\$\(\s*|`\s*)git\s+(?:-[^\s]+\s+)*([a-z-]+)", re.IGNORECASE)
+# Global flags that consume the following token, so the subcommand is not the
+# next word: `git -C . reset` must resolve to "reset", not "-C" or ".".
+_GIT_FLAGS_WITH_ARG = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+)
+
+
+# Shell separators that begin a new command. A newline is one of them, which
+# a start-of-string anchor misses.
+_SEGMENTS = re.compile(r"\|\||&&|[;&|\n]|\$\(|`")
+
+
+def git_subcommands(command: str) -> list[str]:
+    """Every git subcommand invoked in a shell string.
+
+    Two properties, and both were wrong before. ``git`` must be in *command*
+    position — otherwise ``echo use git commit`` reads as a git invocation —
+    and global flags must be consumed with their arguments, so
+    ``git -C . reset`` resolves to ``reset`` rather than to ``-C`` or ``.``.
+    Newline counts as a separator; the previous pattern anchored only on the
+    start of the string, so ``pytest\\ngit reset`` slipped through entirely.
+    """
+    found: list[str] = []
+    for segment in _SEGMENTS.split(command):
+        try:
+            tokens = shlex.split(segment, comments=False, posix=True)
+        except ValueError:
+            tokens = segment.split()
+        if not tokens:
+            continue
+
+        index = 0
+        # Leading VAR=value assignments precede the command itself.
+        while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
+            index += 1
+        # Strip any path prefix, so /usr/bin/git is still git.
+        if index >= len(tokens) or tokens[index].rsplit("/", 1)[-1] != "git":
+            continue
+
+        cursor = index + 1
+        while cursor < len(tokens):
+            token = tokens[cursor]
+            if token in _GIT_FLAGS_WITH_ARG:
+                cursor += 2
+                continue
+            if token.startswith("-"):
+                cursor += 1
+                continue
+            found.append(token.lower())
+            break
+    return found
 
 # Paths a worker has no business writing to, relative to the workspace.
 _PROTECTED_PREFIXES = (".git", ".taste")
@@ -213,8 +264,7 @@ class Guardrails:
         command = str(payload.get("command", ""))
 
         if self.config.deny_git_mutations:
-            for verb in _GIT_CALL.findall(command):
-                verb_lower = verb.lower()
+            for verb_lower in git_subcommands(command):
                 if verb_lower in _GIT_READERS:
                     continue
                 if verb_lower in _GIT_MUTATORS:

@@ -592,3 +592,174 @@ def test_probe_reports_pass_when_the_check_was_healthy(refactor_workspace: Path)
         failure_fingerprint="x",
     )
     assert result == "pass"
+
+
+# ================================================================ review fixes
+
+
+def test_reverify_does_not_re_run_the_worker(refactor_workspace: Path) -> None:
+    """REVERIFY re-runs the check, not the step.
+
+    Re-invoking the worker would spend API budget, produce new edits, and
+    break the attempt-matching that A3 vs A3' depends on.
+    """
+    ws = refactor_workspace
+    (ws / "flaky_marker.txt").write_text("0\n")
+    # A check that fails once then passes, without the tree changing.
+    plan = Plan(
+        task="flaky",
+        steps=[
+            Step(
+                "step-01",
+                "do it",
+                Verification(
+                    kind="shell",
+                    command=(
+                        "n=$(cat flaky_marker.txt); echo $((n+1)) > flaky_marker.txt; "
+                        "test $n -ge 1"
+                    ),
+                ),
+            )
+        ],
+    )
+    calls = {"n": 0}
+
+    def worker(step, plan_):
+        calls["n"] += 1
+        (ws / "made.py").write_text("# work\n")
+        return WorkerResult("did it", 1, "end_turn")
+
+    events = []
+    from taste.recovery import RecoveryConfig as RC
+
+    Kernel(
+        workspace=ws,
+        max_retries=2,
+        on_event=events.append,
+        recovery_config=RC(enabled=True, policy="tiered"),
+    ).run(task="f", spec=_spec(), session_id="f", plan_override=plan, worker_override=worker)
+
+    reverifies = [e for e in events if e.kind == "recovery.action"
+                  and e.payload["action"] == ActionKind.REVERIFY.value]
+    if reverifies:
+        worker_runs = len([e for e in events if e.kind == "worker.done"])
+        step_begins = len([e for e in events if e.kind == "step.begin"])
+        assert calls["n"] == worker_runs == step_begins, (
+            "a reverify must not add a worker invocation"
+        )
+
+
+def test_diagnosis_sees_the_change_set_without_the_journal(refactor_workspace: Path) -> None:
+    """Recovery must not depend on journalling being switched on.
+
+    Gating the diff on the journal left every fault frame reporting an empty
+    diff, which silently disabled the blast-radius and empty-diff rules.
+    """
+    ws = refactor_workspace
+    plan = Plan(
+        task="nojournal",
+        steps=[Step("step-01", "edit", Verification(kind="shell", command="test -f nope.py"))],
+    )
+
+    def worker(step, plan_):
+        (ws / "touched.py").write_text("# edited\n")
+        return WorkerResult("edited", 1, "end_turn")
+
+    events = []
+    from taste.recovery import RecoveryConfig as RC
+
+    Kernel(
+        workspace=ws,
+        max_retries=0,
+        journal=False,
+        on_event=events.append,
+        recovery_config=RC(enabled=True, policy="tiered"),
+    ).run(task="n", spec=_spec(), session_id="n", plan_override=plan, worker_override=worker)
+
+    diagnoses = [e for e in events if e.kind == "recovery.diagnosis"]
+    assert diagnoses
+    # The worker DID change a file, so this must not read as an empty diff.
+    assert diagnoses[0].payload["failure_class"] != FailureClass.UNDER_SPECIFIED_STEP.value
+
+
+def test_no_progress_streak_counts_the_current_attempt() -> None:
+    """Reading the streak before recording meant two identical failures
+    needed a third attempt to be noticed."""
+    from taste.recovery import AttemptRecord
+
+    history = _hist()
+    history.record(AttemptRecord(1, "same", FailureClass.UNKNOWN, ActionKind.HALT))
+    history.amend_last(
+        failure_class=FailureClass.IMPLEMENTATION_BUG, action=ActionKind.ROLLBACK_AND_RETRY
+    )
+    # One failure is not yet a streak.
+    assert history.no_progress_streak() == 0
+
+    # The second identical failure completes it — and is visible on the very
+    # attempt it happens, because the record precedes the diagnosis.
+    history.record(AttemptRecord(2, "same", FailureClass.UNKNOWN, ActionKind.HALT))
+    assert history.no_progress_streak() == 2, "the current attempt must count"
+
+    # A different failure breaks it: progress, not repetition.
+    history.record(AttemptRecord(3, "different", FailureClass.UNKNOWN, ActionKind.HALT))
+    assert history.no_progress_streak() == 1
+
+
+def test_amend_last_tallies_actions_once() -> None:
+    from taste.recovery import AttemptRecord
+
+    history = _hist()
+    history.record(AttemptRecord(1, "fp", FailureClass.UNKNOWN, ActionKind.HALT))
+    history.amend_last(
+        failure_class=FailureClass.IMPLEMENTATION_BUG, action=ActionKind.ROLLBACK_AND_RETRY
+    )
+    assert history.action_counts == {ActionKind.ROLLBACK_AND_RETRY: 1}
+    assert history.reset_count == 1
+    assert history.records[-1].failure_class is FailureClass.IMPLEMENTATION_BUG
+
+
+def test_action_ceiling_agrees_with_the_budget() -> None:
+    """L3 and Budget.exhausted must use the same comparison or they disagree
+    about when a step is finished."""
+    budget = Budget(actions_used=8, max_actions=8)
+    assert budget.exhausted is True
+    action = TieredPolicy().decide(
+        diagnosis=_diag(FailureClass.IMPLEMENTATION_BUG, 0.75),
+        history=_hist(),
+        budget=budget,
+        config=RecoveryConfig(enabled=True, policy="tiered"),
+    )
+    assert action.kind is ActionKind.HALT
+
+    fine = Budget(actions_used=7, max_actions=8)
+    assert fine.exhausted is False
+
+
+def test_probe_and_failure_fingerprints_use_the_same_slice(refactor_workspace: Path) -> None:
+    """A probe hashing full output while the verdict carries a 40-line tail
+    could never produce fail_same for a non-pytest check."""
+    from taste import recovery as rec
+    from taste.memory import Memory
+
+    ws = refactor_workspace
+    noisy = "; ".join(f"echo line{i}" for i in range(60))
+    (ws / "noisy.sh").write_text("#!/bin/sh\n" + noisy.replace("; ", "\n") + "\nexit 3\n")
+    (ws / "noisy.sh").chmod(0o755)
+    memory = Memory.open_session(ws, "fp")
+    memory.checkpoint("base", "base")
+
+    import subprocess
+
+    proc = subprocess.run("./noisy.sh", shell=True, cwd=ws, capture_output=True, text=True)
+    evidence = rec._tail_lines(proc.stdout, 40)
+    failure_fp = rec.fingerprint(
+        exit_code=proc.returncode, failing_tests=(), stdout=evidence, stderr=""
+    )
+
+    result, _ = rec.run_baseline_probe(
+        memory=memory,
+        before=memory.head(),
+        command="./noisy.sh",
+        failure_fingerprint=failure_fp,
+    )
+    assert result == "fail_same", "identical failing output must collide"
