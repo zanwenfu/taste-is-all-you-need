@@ -246,6 +246,8 @@ def observe(
         diff_lines=diff_lines,
         empty_diff=not changed_files,
         tool_calls=getattr(worker, "tool_calls", 0) or 0,
+        tool_errors=getattr(worker, "tool_errors", 0) or 0,
+        tool_error_kinds=tuple(getattr(worker, "tool_error_kinds", ()) or ()),
         stopped_reason=getattr(worker, "stopped_reason", "") or "",
         turns_exhausted=getattr(worker, "stopped_reason", "") == "tool_use",
         interrupt_kind=interrupt_kind,

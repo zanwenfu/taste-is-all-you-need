@@ -34,6 +34,7 @@ from typing import Any, Literal
 from taste import cores, recovery
 from taste.agent import AgentSpec
 from taste.cores import MonitorResult, Plan, PlannerError, Step, WorkerResult
+from taste.guardrails import GuardConfig, Guardrails
 from taste.journal import FileChange, Journal, card_from_step, parse_numstat
 from taste.llm import (
     DEFAULT_TEMPERATURE,
@@ -185,6 +186,7 @@ class Kernel:
         planner_model: str | None = None,
         journal: bool = False,
         recovery_config: recovery.RecoveryConfig | None = None,
+        guard_config: GuardConfig | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.llm = llm
@@ -200,6 +202,9 @@ class Kernel:
         # diagnosis runs at all.
         self.recovery_config = recovery_config or recovery.RecoveryConfig()
         self._policy = recovery.build_policy(self.recovery_config)
+        # Also off by default; when disabled no hook is installed at all, so
+        # the worker loop is byte-identical to the unguarded version.
+        self.guard_config = guard_config or GuardConfig()
         # Planner model is a kernel knob, NOT spec.model: the agent spec's
         # model field configures the Worker only (role-split invariant).
         self.planner_model = planner_model
@@ -547,6 +552,9 @@ class Kernel:
             recovery.StepHistory(step_id=step.id) if self.recovery_config.enabled else None
         )
         actions_used = 0
+        # REPAIR_IN_PLACE reframes the next attempt as fixing what is on disk
+        # rather than starting over; every other verb starts fresh.
+        worker_mode: Literal["fresh", "repair"] = "fresh"
 
         while attempts <= self.max_retries:
             attempts += 1
@@ -556,7 +564,10 @@ class Kernel:
             if worker_override is not None:
                 worker = worker_override(step, plan)
             else:
-                worker = self._worker(step, plan, spec, tools, last_feedback)
+                guard = self._guard_for(workspace)
+                worker = self._worker(
+                    step, plan, spec, tools, last_feedback, hook=guard, mode=worker_mode
+                )
             self._emit("worker.done", id=step.id, tools=worker.tool_calls, stop=worker.stopped_reason)
 
             verdict = cores.evaluate(
@@ -673,6 +684,9 @@ class Kernel:
             )
             rolled_back = rolled_back or action.resets
             last_feedback = self._feedback_for(step, verdict, action)
+            worker_mode = (
+                "repair" if action.kind is recovery.ActionKind.REPAIR_IN_PLACE else "fresh"
+            )
 
         return StepOutcome(
             step=step,
@@ -744,12 +758,17 @@ class Kernel:
             )
 
         files, diff_lines = changes
+        # Without threading the interrupt through, a guardrail that kills an
+        # attempt for overspending produces an unclassifiable FAIL, which
+        # falls to the baseline action and re-runs the very worker that was
+        # just stopped — turning the budget guard into a retry trigger.
         signals = recovery.observe(
             verdict=verdict,
             worker=worker,
             changed_files=tuple(f.path for f in files),
             diff_lines=diff_lines,
             history=history,
+            interrupt_kind=worker.interrupt.kind if worker.interrupt else None,
         )
 
         # The baseline probe: re-run the same check against the pre-step
@@ -911,6 +930,17 @@ class Kernel:
         summary = _summarize_workspace(self.workspace)
         return cores.plan(self.llm, task, spec, summary, model=self.planner_model)
 
+    def _guard_for(self, workspace: Path) -> Guardrails | None:
+        """A guard bound to this step's workspace, or None when disabled."""
+        if not self.guard_config.enabled:
+            return None
+        return Guardrails(
+            workspace=workspace,
+            config=self.guard_config,
+            cost_reader=(lambda: self.llm.stats.total_cost_usd) if self.llm else None,
+            on_event=lambda kind, **payload: self._emit(kind, **payload),
+        )
+
     def _worker(
         self,
         step: Step,
@@ -918,18 +948,21 @@ class Kernel:
         spec: AgentSpec,
         tools: ToolRegistry,
         last_feedback: str | None,
+        *,
+        hook: Guardrails | None = None,
+        mode: Literal["fresh", "repair"] = "fresh",
     ) -> WorkerResult:
         if self.llm is None:
             raise RuntimeError("LLM not configured; pass worker_override or construct with llm=...")
-        context = plan.to_summary()
-        if last_feedback:
-            context = f"{context}\n\nLast attempt failed: {last_feedback}\nAddress the failure on this retry."
         return cores.execute(
             self.llm,
             spec=spec,
             step=step,
-            plan_context=context,
+            plan_context=plan.to_summary(),
             tools=tools,
+            hook=hook,
+            guidance=last_feedback,
+            mode=mode,
         )
 
     # ------------------------------------------------------------ artifacts
@@ -1100,7 +1133,9 @@ class Kernel:
         path.write_text("")
         self._events_path = path
 
-    def _emit(self, kind: str, **payload: object) -> None:
+    def _emit(self, kind: str, /, **payload: object) -> None:
+        # Positional-only so a payload key named "kind" cannot collide with
+        # this parameter — a TypeError that would surface far from its cause.
         event = Event(kind=kind, payload=payload)
         # Serialize file writes + user callback so parallel workers don't
         # interleave partial JSON lines.

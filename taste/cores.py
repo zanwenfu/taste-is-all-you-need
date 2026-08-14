@@ -10,10 +10,12 @@ principle.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from taste.agent import AgentSpec
 from taste.llm import (
@@ -249,6 +251,55 @@ def plan(
 # ============================================================== Worker
 
 
+@dataclass(frozen=True)
+class ToolDecision:
+    """What the harness says about a tool call the worker wants to make."""
+
+    action: Literal["allow", "rewrite", "veto"] = "allow"
+    payload: dict[str, Any] | None = None
+    """Replacement arguments, for ``rewrite``."""
+    message: str | None = None
+    """Returned to the model as the tool result, for ``veto``. The model must
+    learn *why* it was stopped, or it will simply try again."""
+    reason: str = ""
+
+
+ALLOW = ToolDecision()
+
+
+@dataclass(frozen=True)
+class Interrupt:
+    """A reason to stop a worker mid-flight."""
+
+    kind: str
+    detail: str
+    turn: int
+    failure_kind: Literal["task", "infra", "budget"] = "task"
+
+
+class TurnHook(Protocol):
+    """The only callback surface on the worker loop. A closed set of four
+    methods, deliberately.
+
+    Every implementation must be fail-open: it catches its own exceptions and
+    returns the no-op value. A broken hook degrades the run to unguarded
+    behavior; it must never be the reason a run halts.
+    """
+
+    def before_turn(self, turn: int) -> Interrupt | None: ...
+    def before_tool(self, turn: int, name: str, payload: dict[str, Any]) -> ToolDecision: ...
+    def after_tool(
+        self,
+        turn: int,
+        name: str,
+        payload: dict[str, Any],
+        output: str,
+        elapsed_s: float,
+        decision: ToolDecision,
+    ) -> None: ...
+    def after_turn(self, turn: int, message: Any, stop_reason: str) -> None: ...
+
+
 WORKER_SYSTEM = """You are a Worker core in an Agent OS. You execute exactly one planned step.
 
 Rules:
@@ -265,6 +316,11 @@ class WorkerResult:
     summary: str
     tool_calls: int
     stopped_reason: str
+    tool_errors: int = 0
+    tool_error_kinds: tuple[str, ...] = ()
+    vetoes: int = 0
+    interrupt: Interrupt | None = None
+    turns: int = 0
 
 
 def execute(
@@ -275,11 +331,19 @@ def execute(
     plan_context: str,
     tools: ToolRegistry,
     max_turns: int = 12,
+    hook: TurnHook | None = None,
+    guidance: str | None = None,
+    mode: Literal["fresh", "repair"] = "fresh",
 ) -> WorkerResult:
-    """Run the Anthropic tool-use loop for a single step.
+    """Run the model's tool-use loop for a single step.
 
     Returns a :class:`WorkerResult` describing what happened. The kernel is
     responsible for turning the filesystem changes into a commit.
+
+    ``hook`` is the only extension point: it may veto or rewrite a tool call
+    before it runs, and may interrupt between turns. ``guidance`` is prior
+    feedback to carry in, and ``mode`` frames the task as fresh work or as a
+    repair of what is already on disk.
     """
     # One consolidated static block (crosses the cache minimum) + the plan
     # context on its own breakpoint (stable across the turns of a step, so the
@@ -291,21 +355,37 @@ def execute(
         ),
         cached(f"Plan so far:\n{plan_context}"),
     ]
-    messages: list[dict[str, Any]] = [
-        {
-            "role": "user",
-            "content": (
-                f"Current step ({step.id}): {step.description}\n\n"
-                "Execute only this step. Stop when it's done."
-            ),
-        }
-    ]
+    framing = (
+        "Execute only this step. Stop when it's done."
+        if mode == "fresh"
+        else (
+            "A previous attempt at this step is already on disk and did not pass. "
+            "Repair it in place — build on what is there rather than starting over. "
+            "Stop when it's done."
+        )
+    )
+    opening = f"Current step ({step.id}): {step.description}\n\n{framing}"
+    if guidance:
+        opening += f"\n\nWhat went wrong before:\n{guidance}"
+    messages: list[dict[str, Any]] = [{"role": "user", "content": opening}]
 
     tool_calls = 0
+    tool_errors = 0
+    error_kinds: list[str] = []
+    vetoes = 0
     summary = ""
     stop_reason = "unknown"
+    interrupt: Interrupt | None = None
+    turns = 0
 
-    for _ in range(max_turns):
+    for turn in range(1, max_turns + 1):
+        turns = turn
+        if hook is not None:
+            interrupt = _safe_before_turn(hook, turn)
+            if interrupt is not None:
+                stop_reason = "interrupted"
+                break
+
         response = llm.call(
             model=spec.model or MODEL_WORKER,
             system=system,
@@ -322,6 +402,8 @@ def execute(
         text_blocks = [b for b in response.content if b.type == "text"]
         if text_blocks:
             summary = text_blocks[-1].text
+        if hook is not None:
+            _safe_after_turn(hook, turn, response, stop_reason)
 
         if stop_reason == "end_turn" or not tool_uses:
             break
@@ -329,10 +411,35 @@ def execute(
         tool_results = []
         for call in tool_uses:
             tool_calls += 1
-            try:
-                output = tools.invoke(call.name, dict(call.input))
-            except Exception as exc:  # surface to the model, don't crash the loop
-                output = f"TOOL ERROR ({type(exc).__name__}): {exc}"
+            payload = dict(call.input)
+            decision = _safe_before_tool(hook, turn, call.name, payload) if hook else ALLOW
+
+            if decision.action == "veto":
+                vetoes += 1
+                # The refusal goes back as the tool's result: a model that is
+                # not told why it was stopped simply tries again.
+                output = decision.message or f"BLOCKED: {decision.reason}"
+            else:
+                if decision.action == "rewrite" and decision.payload is not None:
+                    payload = decision.payload
+                started = time.monotonic()
+                try:
+                    output = tools.invoke(call.name, payload)
+                except Exception as exc:  # surface to the model, don't crash the loop
+                    tool_errors += 1
+                    error_kinds.append(type(exc).__name__)
+                    output = f"TOOL ERROR ({type(exc).__name__}): {exc}"
+                if hook is not None:
+                    _safe_after_tool(
+                        hook,
+                        turn,
+                        call.name,
+                        payload,
+                        output,
+                        time.monotonic() - started,
+                        decision,
+                    )
+
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -346,7 +453,47 @@ def execute(
         summary=summary or "(no summary emitted)",
         tool_calls=tool_calls,
         stopped_reason=stop_reason,
+        tool_errors=tool_errors,
+        tool_error_kinds=tuple(dict.fromkeys(error_kinds)),
+        vetoes=vetoes,
+        interrupt=interrupt,
+        turns=turns,
     )
+
+
+def _safe_after_turn(hook: TurnHook, turn: int, message: Any, stop_reason: str) -> None:
+    """Observation callbacks are advisory; a hook never breaks the loop."""
+    with contextlib.suppress(Exception):
+        hook.after_turn(turn, message, stop_reason)
+
+
+def _safe_after_tool(
+    hook: TurnHook,
+    turn: int,
+    name: str,
+    payload: dict[str, Any],
+    output: str,
+    elapsed_s: float,
+    decision: ToolDecision,
+) -> None:
+    with contextlib.suppress(Exception):
+        hook.after_tool(turn, name, payload, output, elapsed_s, decision)
+
+
+def _safe_before_turn(hook: TurnHook, turn: int) -> Interrupt | None:
+    try:
+        return hook.before_turn(turn)
+    except Exception:
+        return None
+
+
+def _safe_before_tool(
+    hook: TurnHook, turn: int, name: str, payload: dict[str, Any]
+) -> ToolDecision:
+    try:
+        return hook.before_tool(turn, name, payload)
+    except Exception:
+        return ALLOW  # fail open: a broken guard must not block real work
 
 
 # ============================================================== Monitor
