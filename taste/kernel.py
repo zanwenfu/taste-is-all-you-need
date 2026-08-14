@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from taste import cores, recovery
+from taste import cores, integrate, recovery
 from taste.agent import AgentSpec
 from taste.cores import MonitorResult, Plan, PlannerError, Step, WorkerResult
 from taste.guardrails import GuardConfig, Guardrails
@@ -187,6 +187,8 @@ class Kernel:
         journal: bool = False,
         recovery_config: recovery.RecoveryConfig | None = None,
         guard_config: GuardConfig | None = None,
+        two_phase_merge: bool = False,
+        union_gate: bool = True,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.llm = llm
@@ -205,6 +207,10 @@ class Kernel:
         # Also off by default; when disabled no hook is installed at all, so
         # the worker loop is byte-identical to the unguarded version.
         self.guard_config = guard_config or GuardConfig()
+        # Off by default: the sequential merge loop stays the default path so
+        # single-step waves and existing behavior are untouched.
+        self.two_phase_merge = two_phase_merge
+        self.union_gate = union_gate
         # Planner model is a kernel knob, NOT spec.model: the agent spec's
         # model field configures the Worker only (role-split invariant).
         self.planner_model = planner_model
@@ -449,28 +455,50 @@ class Kernel:
                 self._emit("wave.halt", failed=[o.step.id for o in failed])
                 return ordered_outcomes, False, reason, None
 
-            # Merge each worktree's branch into the session, preserving topology.
-            for step in wave:
-                wt = worktrees[step.id]
-                try:
-                    merged = memory.merge_branch(
-                        wt.branch,
-                        message=f"merge: {step.id} from {wt.branch}",
-                    )
-                except MergeConflict as exc:
-                    self._emit("worktree.conflict", step=step.id, detail=exc.detail)
-                    return (
-                        ordered_outcomes,
-                        False,
-                        f"{step.id}: merge conflict — {exc.detail}",
-                        None,
-                    )
-                self._emit(
-                    "worktree.merge",
-                    step=step.id,
-                    source=wt.branch,
-                    sha=merged.short_sha,
+            if self.two_phase_merge:
+                integration = integrate.integrate(
+                    memory,
+                    integrate.proposals_from_outcomes(ordered_outcomes, worktrees),
+                    gate=self.union_gate,
+                    emit=lambda kind, **payload: self._emit(kind, **payload),
                 )
+                if not integration.ok:
+                    reason = (
+                        f"{integration.conflicted[0][0]}: merge conflict"
+                        if integration.conflicted
+                        else f"combined tree failed verification: {integration.gate_failure}"
+                    )
+                    return ordered_outcomes, False, reason, None
+                for step in wave:
+                    self._emit(
+                        "worktree.merge",
+                        step=step.id,
+                        source=worktrees[step.id].branch,
+                        sha=memory.head().short_sha,
+                    )
+            else:
+                # Merge each worktree's branch into the session, preserving topology.
+                for step in wave:
+                    wt = worktrees[step.id]
+                    try:
+                        merged = memory.merge_branch(
+                            wt.branch,
+                            message=f"merge: {step.id} from {wt.branch}",
+                        )
+                    except MergeConflict as exc:
+                        self._emit("worktree.conflict", step=step.id, detail=exc.detail)
+                        return (
+                            ordered_outcomes,
+                            False,
+                            f"{step.id}: merge conflict — {exc.detail}",
+                            None,
+                        )
+                    self._emit(
+                        "worktree.merge",
+                        step=step.id,
+                        source=wt.branch,
+                        sha=merged.short_sha,
+                    )
             self._emit("wave.done", steps=[s.id for s in wave], size=len(wave))
             return ordered_outcomes, True, None, None
         finally:
