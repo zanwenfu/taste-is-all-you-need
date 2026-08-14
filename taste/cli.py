@@ -12,6 +12,7 @@ from rich.table import Table
 from taste import dashboard as dashboard_mod
 from taste import journal as journal_mod
 from taste.agent import AgentSpec
+from taste.config import HarnessConfig
 from taste.kernel import Event, Kernel, RunResult
 from taste.llm import LLM
 from taste.memory import Memory
@@ -43,6 +44,14 @@ def main() -> None:
 @click.option("--session", default=None, help="Session id (auto-generated if omitted).")
 @click.option("--base-ref", default="HEAD", help="Git ref to branch from.")
 @click.option("--max-retries", default=2, show_default=True, type=int)
+@click.option(
+    "--arm",
+    default=None,
+    help=(
+        "Harness configuration to run: A1, A2, A3, A3prime, tiered, full. "
+        "Omit for the original kernel with every subsystem off."
+    ),
+)
 def run_cmd(
     task: tuple[str, ...],
     agent_path: Path,
@@ -50,20 +59,25 @@ def run_cmd(
     session: str | None,
     base_ref: str,
     max_retries: int,
+    arm: str | None,
 ) -> None:
     """Run an agent on TASK. Every step becomes a commit on a fresh branch."""
     spec = AgentSpec.from_file(agent_path)
     task_text = " ".join(task)
 
-    console.print(
-        Panel.fit(
-            f"[bold]{spec.name}[/] — {spec.description}\n"
-            f"[dim]workspace:[/] {workspace}\n"
-            f"[dim]task:[/] {task_text}",
-            title="taste run",
-            border_style="cyan",
-        )
+    try:
+        config = HarnessConfig.arm(arm, max_retries=max_retries) if arm else None
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--arm") from exc
+
+    header = (
+        f"[bold]{spec.name}[/] — {spec.description}\n"
+        f"[dim]workspace:[/] {workspace}\n"
+        f"[dim]task:[/] {task_text}"
     )
+    if config is not None:
+        header += f"\n[dim]harness:[/] {config.label} [dim]({config.hash()})[/]"
+    console.print(Panel.fit(header, title="taste run", border_style="cyan"))
 
     llm = LLM()
     kernel = Kernel(
@@ -71,6 +85,7 @@ def run_cmd(
         llm=llm,
         max_retries=max_retries,
         on_event=_print_event,
+        config=config,
     )
     result = kernel.run(
         task=task_text,

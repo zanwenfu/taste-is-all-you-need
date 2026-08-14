@@ -33,6 +33,7 @@ from typing import Any, Literal
 
 from taste import cores, integrate, recovery
 from taste.agent import AgentSpec
+from taste.config import HarnessConfig
 from taste.cores import MonitorResult, Plan, PlannerError, Step, WorkerResult
 from taste.guardrails import GuardConfig, Guardrails
 from taste.journal import FileChange, Journal, card_from_step, parse_numstat
@@ -189,7 +190,24 @@ class Kernel:
         guard_config: GuardConfig | None = None,
         two_phase_merge: bool = False,
         union_gate: bool = True,
+        config: HarnessConfig | None = None,
     ) -> None:
+        # A HarnessConfig names an entire arm in one object and one hash. When
+        # given it wins outright, so a run's identity cannot be half-specified
+        # by a config and half by loose keyword arguments.
+        if config is not None:
+            from taste.config import kernel_kwargs
+
+            resolved = kernel_kwargs(config)
+            max_retries = resolved["max_retries"]
+            max_parallel = resolved["max_parallel"]
+            planner_model = resolved["planner_model"]
+            journal = resolved["journal"]
+            recovery_config = resolved["recovery_config"]
+            guard_config = resolved["guard_config"]
+            two_phase_merge = resolved["two_phase_merge"]
+            union_gate = resolved["union_gate"]
+        self.config = config
         self.workspace = Path(workspace).resolve()
         self.llm = llm
         self.max_retries = max_retries
@@ -1127,6 +1145,25 @@ class Kernel:
             },
             "max_retries": self.max_retries,
             "max_parallel": self.max_parallel,
+            # The arm's identity. A run whose harness cannot be recovered from
+            # its own manifest is a datapoint that cannot be grouped later.
+            "harness": (
+                self.config.to_manifest()
+                if self.config is not None
+                else {
+                    "label": "adhoc",
+                    "config_hash": None,
+                    "journal": self.journal_enabled,
+                    "recovery": {
+                        "enabled": self.recovery_config.enabled,
+                        "policy": self.recovery_config.policy,
+                        "fixed_action": self.recovery_config.fixed_action.value,
+                        "baseline_probe": self.recovery_config.baseline_probe,
+                    },
+                    "guardrails": {"enabled": self.guard_config.enabled},
+                    "two_phase_merge": self.two_phase_merge,
+                }
+            ),
             "prompt_sha": {
                 "planner_system": prompt_sha(cores.PLANNER_SYSTEM),
                 "worker_system": prompt_sha(cores.WORKER_SYSTEM),
