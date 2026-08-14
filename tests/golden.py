@@ -35,7 +35,15 @@ class RunSignature:
     carry SHAs and timings that differ between identical runs."""
 
     commits: tuple[tuple[str, str], ...]
-    """(checkpoint step_id, commit subject) from oldest to newest."""
+    """(checkpoint step_id, commit subject) from oldest to newest.
+
+    Commits with no ``Taste-Checkpoint`` trailer — the repo's own pre-run
+    history — have no step id, and :class:`Checkpoint` falls back to the raw
+    short SHA. A SHA depends on the commit timestamp, so two identical runs
+    bootstrapped a second apart would fingerprint differently. Those ids are
+    normalized to ``(untrailed)``: the instrument must be sensitive to
+    harness behavior and to nothing else.
+    """
 
     status: str
     failure_kind: str | None
@@ -62,11 +70,16 @@ class RunSignature:
         return "\n".join(lines) or "(identical)"
 
 
+def _stable_step_id(checkpoint) -> str:
+    """A step id that does not vary with commit timestamps."""
+    return "(untrailed)" if checkpoint.step_id == checkpoint.sha[:7] else checkpoint.step_id
+
+
 def signature_of(events: list[Event], result: RunResult, memory: Memory) -> RunSignature:
     return RunSignature(
         events=tuple((e.kind, tuple(sorted(e.payload))) for e in events),
         commits=tuple(
-            (c.step_id, c.message.splitlines()[0] if c.message else "")
+            (_stable_step_id(c), c.message.splitlines()[0] if c.message else "")
             for c in reversed(memory.log())
         ),
         status=result.status,

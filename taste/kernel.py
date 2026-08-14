@@ -27,11 +27,11 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from taste import cores
+from taste import cores, recovery
 from taste.agent import AgentSpec
 from taste.cores import MonitorResult, Plan, PlannerError, Step, WorkerResult
 from taste.journal import FileChange, Journal, card_from_step, parse_numstat
@@ -184,6 +184,7 @@ class Kernel:
         max_parallel: int = 4,
         planner_model: str | None = None,
         journal: bool = False,
+        recovery_config: recovery.RecoveryConfig | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.llm = llm
@@ -194,6 +195,11 @@ class Kernel:
         # byte-identical event stream and commit chain to the pre-journal
         # harness. tests/test_journal.py asserts exactly that.
         self.journal_enabled = journal
+        # Disabled by default. When off, the fault path answers every failure
+        # with rollback-and-retry — exactly the pre-recovery kernel — and no
+        # diagnosis runs at all.
+        self.recovery_config = recovery_config or recovery.RecoveryConfig()
+        self._policy = recovery.build_policy(self.recovery_config)
         # Planner model is a kernel knob, NOT spec.model: the agent spec's
         # model field configures the Worker only (role-split invariant).
         self.planner_model = planner_model
@@ -535,6 +541,12 @@ class Kernel:
         last_feedback: str | None = None
         journal = self._journal_for(memory)
         cost_before = self.llm.stats.total_cost_usd if self.llm else None
+        # None means "recovery off": the fault path skips diagnosis entirely
+        # and answers every failure the way the kernel always has.
+        history = (
+            recovery.StepHistory(step_id=step.id) if self.recovery_config.enabled else None
+        )
+        actions_used = 0
 
         while attempts <= self.max_retries:
             attempts += 1
@@ -584,6 +596,16 @@ class Kernel:
                 cost_before = cost_now
 
             if verdict.passed:
+                if history is not None:
+                    history.record(
+                        recovery.AttemptRecord(
+                            attempt=attempts,
+                            fingerprint="",
+                            failure_class=recovery.FailureClass.UNKNOWN,
+                            action=recovery.ActionKind.ACCEPT,
+                            passed=True,
+                        )
+                    )
                 return StepOutcome(
                     step=step,
                     worker=worker,
@@ -593,26 +615,64 @@ class Kernel:
                     rolled_back=rolled_back,
                 )
 
-            # Anchor before the reset: once the branch moves, these commits
-            # are unreachable and the failed attempt becomes unreadable.
-            if journal:
-                ref = journal.anchor(
-                    session=memory.branch.rsplit("-", 1)[-1],
-                    step_id=step.id,
-                    attempt=attempts,
-                    sha=checkpoint.sha,
-                )
-                if ref:
-                    self._emit("journal.anchor", id=step.id, attempt=attempts, ref=ref)
-            memory.rollback_to(before)
-            rolled_back = True
-            last_feedback = _build_feedback(step, verdict)
-            self._emit(
-                "step.rollback",
-                id=step.id,
-                to=before.short_sha,
-                remaining_retries=self.max_retries - attempts + 1,
+            # ---- the fault path: diagnose, decide, dispatch ----
+            action = self._handle_fault(
+                step=step,
+                verdict=verdict,
+                worker=worker,
+                changes=changes,
+                history=history,
+                attempts=attempts,
+                actions_used=actions_used,
+                memory=memory,
+                before=before,
             )
+            actions_used += 1
+
+            if action.kind is recovery.ActionKind.ACCEPT:
+                # The monitor's FAIL stands as the step's outcome, commit kept.
+                return StepOutcome(
+                    step=step,
+                    worker=worker,
+                    verdict=verdict,
+                    checkpoint=checkpoint,
+                    attempts=attempts,
+                    rolled_back=rolled_back,
+                )
+
+            if action.kind is recovery.ActionKind.HALT:
+                # Fall through to the anchor/reset block so a resetting arm
+                # discards its final failed attempt too — giving up is not a
+                # licence to leave unverified work on the branch.
+                self._finish_attempt(
+                    journal=journal,
+                    memory=memory,
+                    step=step,
+                    attempt=attempts,
+                    checkpoint=checkpoint,
+                    action=action,
+                    before=before,
+                )
+                rolled_back = rolled_back or action.resets
+                break
+
+            if action.kind is recovery.ActionKind.REVERIFY:
+                # Re-run the check only. Costs an action, never an attempt —
+                # which is what keeps reset and no-reset arms attempt-matched.
+                attempts -= 1
+                continue
+
+            self._finish_attempt(
+                journal=journal,
+                memory=memory,
+                step=step,
+                attempt=attempts,
+                checkpoint=checkpoint,
+                action=action,
+                before=before,
+            )
+            rolled_back = rolled_back or action.resets
+            last_feedback = self._feedback_for(step, verdict, action)
 
         return StepOutcome(
             step=step,
@@ -622,6 +682,157 @@ class Kernel:
             attempts=attempts,
             rolled_back=rolled_back,
         )
+
+    def _finish_attempt(
+        self,
+        *,
+        journal: Journal | None,
+        memory: Memory,
+        step: Step,
+        attempt: int,
+        checkpoint: Checkpoint,
+        action: recovery.Action,
+        before: Checkpoint,
+    ) -> None:
+        """Close out a failed attempt: preserve it, then discard it if asked.
+
+        Anchoring must precede the reset — once the branch moves, the commit
+        is unreachable and the attempt becomes unreadable.
+        """
+        if journal:
+            ref = journal.anchor(
+                session=memory.branch.rsplit("-", 1)[-1],
+                step_id=step.id,
+                attempt=attempt,
+                sha=checkpoint.sha,
+            )
+            if ref:
+                self._emit("journal.anchor", id=step.id, attempt=attempt, ref=ref)
+
+        if action.resets:
+            memory.rollback_to(before)
+            self._emit(
+                "step.rollback",
+                id=step.id,
+                to=before.short_sha,
+                remaining_retries=self.max_retries - attempt + 1,
+            )
+
+    def _handle_fault(
+        self,
+        *,
+        step: Step,
+        verdict: MonitorResult,
+        worker: WorkerResult,
+        changes: tuple[tuple[FileChange, ...], int],
+        history: recovery.StepHistory | None,
+        attempts: int,
+        actions_used: int,
+        memory: Memory,
+        before: Checkpoint,
+    ) -> recovery.Action:
+        """Read the fault frame, name the fault, choose the response.
+
+        With recovery disabled this collapses to the historical behavior —
+        always roll back and retry — without consulting anything.
+        """
+        if history is None:
+            return recovery.Action(
+                recovery.ActionKind.ROLLBACK_AND_RETRY,
+                reason="recovery disabled",
+                resets=True,
+            )
+
+        files, diff_lines = changes
+        signals = recovery.observe(
+            verdict=verdict,
+            worker=worker,
+            changed_files=tuple(f.path for f in files),
+            diff_lines=diff_lines,
+            history=history,
+        )
+
+        # The baseline probe: re-run the same check against the pre-step
+        # commit. If it was already failing there, the step cannot be at
+        # fault and retrying is pure waste. $0 of API spend, and only worth
+        # paying once per step — the answer cannot change.
+        if (
+            self.recovery_config.baseline_probe
+            and step.verification.kind == "shell"
+            and history.last() is None
+        ):
+            probe, probe_seconds = recovery.run_baseline_probe(
+                memory=memory,
+                before=before,
+                command=step.verification.command,
+                failure_fingerprint=signals.fingerprint,
+                max_seconds=self.recovery_config.probe_max_seconds,
+            )
+            signals = replace(signals, baseline_probe=probe, probe_seconds=probe_seconds)
+            self._emit(
+                "recovery.probe",
+                id=step.id,
+                result=probe,
+                seconds=round(probe_seconds, 3),
+            )
+        elif self.recovery_config.baseline_probe and history.last() is not None:
+            # Reuse the first probe's answer: the pre-step tree never changes.
+            signals = replace(signals, baseline_probe=history.baseline_probe)
+
+        if history.baseline_probe == "skipped":
+            history.baseline_probe = signals.baseline_probe
+
+        diagnosis = recovery.diagnose(signals, history)
+        self._emit(
+            "recovery.diagnosis",
+            id=step.id,
+            attempt=attempts,
+            failure_class=diagnosis.failure_class.value,
+            rule=diagnosis.top.rule_id,
+            confidence=diagnosis.confidence,
+        )
+
+        budget = recovery.Budget(
+            attempts_used=attempts,
+            max_attempts=self.max_retries + 1,
+            actions_used=actions_used,
+            max_actions=self.recovery_config.max_actions,
+        )
+        action = self._policy.decide(
+            diagnosis=diagnosis,
+            history=history,
+            budget=budget,
+            config=self.recovery_config,
+            signals=signals,
+        )
+        history.book.add(signals.fingerprint, recovery.guidance_bullet(signals, diagnosis))
+        history.record(
+            recovery.AttemptRecord(
+                attempt=attempts,
+                fingerprint=signals.fingerprint,
+                failure_class=diagnosis.failure_class,
+                action=action.kind,
+                failed_count=signals.failed_count,
+            )
+        )
+        self._emit(
+            "recovery.action",
+            id=step.id,
+            attempt=attempts,
+            action=action.kind.value,
+            resets=action.resets,
+            reason=action.reason,
+        )
+        return action
+
+    def _feedback_for(
+        self, step: Step, verdict: MonitorResult, action: recovery.Action
+    ) -> str:
+        """What the next attempt is told. Guidance when the policy supplied
+        it, the raw verdict otherwise."""
+        if action.guidance:
+            return action.guidance
+        return _build_feedback(step, verdict)
 
     # ------------------------------------------------------------ journal
 

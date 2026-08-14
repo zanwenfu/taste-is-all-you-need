@@ -303,6 +303,28 @@ class Memory:
         self.repo.git.worktree("add", "-b", branch, str(wt_path), base_ref)
         return Memory(wt_path, branch)
 
+    @contextlib.contextmanager
+    def probe_worktree(self, ref: str):
+        """A throwaway detached worktree at ``ref``, removed on exit.
+
+        Used to answer a question about the past — "was this check already
+        failing before the step ran?" — without disturbing the session
+        branch or the working tree the agent is using.
+        """
+        root = self.repo_path.parent / ".taste-worktrees" / "_probe"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"probe-{ref[:12]}-{id(self):x}"
+        self.repo.git.worktree("add", "--detach", str(path), ref)
+        try:
+            yield path
+        finally:
+            with contextlib.suppress(GitCommandError):
+                self.repo.git.worktree("remove", "--force", str(path))
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+                with contextlib.suppress(GitCommandError):
+                    self.repo.git.worktree("prune")
+
     def remove_worktree(self, other: Memory, *, force: bool = True) -> None:
         """Prune the worktree that ``other`` is bound to. Safe to call twice."""
         args = ["remove"]
