@@ -5,8 +5,10 @@ including in an arm that never checkpointed, never rolled back and never
 noticed — because that is precisely the arm a self-verification baseline
 gives you, and the whole study depends on being able to measure it.
 
-Everything here is hermetic. Reconstruction costs no API tokens; its expense
-is wall-clock, which is what the bisection exists to bound.
+Everything here is hermetic. Reconstruction costs no API tokens, and the scan
+is exhaustive by design: the arms under study produce non-monotone verdict
+sequences on purpose, so a search that assumes monotonicity cannot see the
+very recoveries the study is about.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from taste.config import HarnessConfig
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Kernel
 from taste.memory import Memory
-from taste.replay import Probe, Replayer, reconstruct
+from taste.replay import Probe, episodes_from, reconstruct
 from taste.shadow import SHADOW_PREFIX, ShadowLog, load_timeline
 from tests.golden import rollback_scenario
 from tests.test_golden_baseline import EXPECTED_EVENTS
@@ -157,74 +159,8 @@ PROBE = Probe(
 )
 
 
-def test_bisection_finds_the_exact_onset(refactor_workspace: Path) -> None:
-    ws = refactor_workspace
-    memory, log = _timeline_with_regression(ws)
-
-    report = reconstruct(memory, list(log.timeline()), [PROBE], session="regress")
-
-    assert report.contaminated
-    regression = report.regressions[0]
-    # The break was introduced at the 4th observation (1 baseline + 3 edits).
-    assert regression.onset_seq == 4
-    assert memory.show(regression.onset_sha, "lib.py").count("return 2") == 1
 
 
-def test_a_silent_regression_is_reported_as_silent(refactor_workspace: Path) -> None:
-    """The case the study exists for: nobody noticed, and we can still see it."""
-    ws = refactor_workspace
-    memory, log = _timeline_with_regression(ws)
-
-    report = reconstruct(
-        memory, list(log.timeline()), [PROBE], harness_failed_at=set(), session="regress"
-    )
-    regression = report.regressions[0]
-    assert regression.silent is True
-    assert regression.detected_seq is None
-
-
-def test_detection_latency_is_measured_in_dollars_and_observations(
-    refactor_workspace: Path,
-) -> None:
-    ws = refactor_workspace
-    memory, log = _timeline_with_regression(ws)
-
-    # The harness reported failure at the last observation.
-    last = log.timeline()[-1].seq
-    report = reconstruct(
-        memory, list(log.timeline()), [PROBE], harness_failed_at={last}, session="regress"
-    )
-    regression = report.regressions[0]
-
-    assert regression.silent is False
-    assert regression.detected_seq == last
-    assert regression.observations_to_detect == last - regression.onset_seq
-    assert regression.cost_to_detect_usd is not None
-
-
-def test_bisection_costs_far_fewer_replays_than_a_scan(refactor_workspace: Path) -> None:
-    """Wall-clock is the real budget here; the log-vs-linear gap is the point."""
-    ws = refactor_workspace
-    (ws / "lib.py").write_text("def value():\n    return 1\n")
-    memory, log = _shadow(ws, "wide")
-    log.observe(step_id="s", attempt=1, trigger="run")
-    for i in range(1, 33):
-        broken = i >= 20
-        (ws / "lib.py").write_text(
-            f"def value():\n    return {2 if broken else 1}\n\n\n# edit {i}\n"
-        )
-        log.observe(step_id=f"step-{i:02d}", attempt=1, trigger="worker")
-
-    timeline = list(log.timeline())
-    report = reconstruct(memory, timeline, [PROBE], session="wide")
-
-    # seq 1 is the baseline observation, so edit i lands at seq i+1; the
-    # first broken edit is i=20.
-    assert report.regressions[0].onset_seq == 21
-    assert report.replays < len(timeline) / 2, (
-        f"{report.replays} replays over {len(timeline)} observations — "
-        "bisection is not being used"
-    )
 
 
 def test_a_healthy_run_reports_no_regression(refactor_workspace: Path) -> None:
@@ -240,28 +176,6 @@ def test_a_healthy_run_reports_no_regression(refactor_workspace: Path) -> None:
     assert report.final_verdicts["value_is_one"] == "pass"
 
 
-def test_a_probe_broken_from_the_start_is_located_at_zero(refactor_workspace: Path) -> None:
-    ws = refactor_workspace
-    (ws / "lib.py").write_text("def value():\n    return 99\n")
-    memory, log = _shadow(ws, "prebroken")
-    log.observe(step_id="s", attempt=1, trigger="run")
-    (ws / "more.py").write_text("# x\n")
-    log.observe(step_id="s", attempt=2, trigger="worker")
-
-    report = reconstruct(memory, list(log.timeline()), [PROBE], session="prebroken")
-    assert report.regressions[0].onset_seq == log.timeline()[0].seq
-
-
-def test_verdicts_are_memoized_across_bisection(refactor_workspace: Path) -> None:
-    ws = refactor_workspace
-    memory, log = _timeline_with_regression(ws)
-    replayer = Replayer(memory, [PROBE])
-    timeline = list(log.timeline())
-
-    replayer.find_onset(timeline, PROBE)
-    first_count = replayer.replays
-    replayer.find_onset(timeline, PROBE)
-    assert replayer.replays == first_count, "a repeated search must cost nothing"
 
 
 def test_replay_leaves_the_workspace_untouched(refactor_workspace: Path) -> None:
@@ -303,3 +217,155 @@ def test_a_self_verifying_arm_still_yields_a_timeline(refactor_workspace: Path) 
     memory = Memory(ws, "taste/session-a1")
     timeline = load_timeline(Path(memory.repo.git_dir) / "taste", "a1")
     assert len(timeline) >= 2, "even a no-checkpoint arm gets observation points"
+
+
+# ------------------------------------------------------------------ episodes
+
+
+def _verdicts(*seq: str) -> list[str]:
+    return list(seq)
+
+
+def _fake_timeline(n: int):
+    from taste.shadow import ShadowCommit
+
+    return [
+        ShadowCommit(seq=i, sha=f"sha{i:02d}", session="s", step_id="s", attempt=1,
+                     trigger="worker", cost_work_usd=float(i))
+        for i in range(1, n + 1)
+    ]
+
+
+def test_a_recovered_regression_is_recorded() -> None:
+    """The bug that would have inverted the headline result.
+
+    The previous implementation bisected for a probe failing at the END of a
+    run, so a regression that was repaired left no trace. That is arm-
+    dependent in the worst possible way: the arm whose entire claim is that it
+    recovers would have shown the fewest regressions and no recovery rate.
+    """
+    timeline = _fake_timeline(6)
+    episodes, _unknown, ever = episodes_from(
+        _verdicts("pass", "pass", "fail", "fail", "pass", "pass"), timeline, "p"
+    )
+    assert ever is True
+    assert len(episodes) == 1
+    assert episodes[0].onset_seq == 3
+    assert episodes[0].recovered_seq == 5
+    assert episodes[0].recovered is True
+
+
+def test_multiple_episodes_per_probe() -> None:
+    """A probe can break, be fixed, and break again."""
+    timeline = _fake_timeline(7)
+    episodes, _u, _e = episodes_from(
+        _verdicts("pass", "fail", "pass", "fail", "fail", "pass", "pass"), timeline, "p"
+    )
+    assert [(e.onset_seq, e.recovered_seq) for e in episodes] == [(2, 3), (4, 6)]
+
+
+def test_an_unrecovered_regression_stays_open() -> None:
+    timeline = _fake_timeline(4)
+    episodes, _u, _e = episodes_from(
+        _verdicts("pass", "pass", "fail", "fail"), timeline, "p"
+    )
+    assert len(episodes) == 1 and episodes[0].recovered is False
+
+
+def test_a_probe_that_never_passed_is_not_a_regression() -> None:
+    """Nothing broke — the task was simply never done.
+
+    This is why a from-scratch benchmark cannot host this construct: every
+    check fails at observation one, so 100% of probes would read as regressions.
+    """
+    timeline = _fake_timeline(4)
+    episodes, _u, ever = episodes_from(
+        _verdicts("fail", "fail", "fail", "fail"), timeline, "p"
+    )
+    assert ever is False
+    assert episodes == []
+
+
+def test_pass_to_skip_is_unknown_not_maintained() -> None:
+    """A skipped test is not a passing one; counting it as maintained would
+    understate contamination."""
+    timeline = _fake_timeline(3)
+    episodes, unknown, _e = episodes_from(_verdicts("pass", "skip", "pass"), timeline, "p")
+    assert unknown == 1
+    assert episodes == []
+
+
+def test_errors_are_missing_observations_not_evidence() -> None:
+    """A probe that could not run says nothing about the tree."""
+    timeline = _fake_timeline(4)
+    episodes, _u, _e = episodes_from(
+        _verdicts("pass", "error", "error", "pass"), timeline, "p"
+    )
+    assert episodes == []
+
+
+def test_recovery_rate_is_none_when_there_were_no_regressions(
+    refactor_workspace: Path,
+) -> None:
+    """An empty run is not a 0% recovery rate."""
+    ws = refactor_workspace
+    (ws / "lib.py").write_text("def value():\n    return 1\n")
+    memory, log = _shadow(ws, "norr")
+    log.observe(step_id="s", attempt=1, trigger="run")
+
+    report = reconstruct(memory, list(log.timeline()), [PROBE], session="norr")
+    assert report.recovery_rate is None
+
+
+def test_detection_is_flagged_unattributed_without_coverage_data(
+    refactor_workspace: Path,
+) -> None:
+    """Co-occurrence is not attribution.
+
+    Crediting a harness with detecting THIS regression because it reported
+    SOME failure afterwards biases toward arms that fail more often.
+    """
+    ws = refactor_workspace
+    memory, log = _timeline_with_regression(ws)
+    timeline = list(log.timeline())
+
+    report = reconstruct(
+        memory, timeline, [PROBE], harness_failed_at={timeline[-1].seq}, session="regress"
+    )
+    assert report.episodes
+    episode = report.episodes[0]
+    assert episode.detected_seq == timeline[-1].seq
+    assert episode.attributed is False, "must be marked an upper bound"
+
+
+def test_attribution_rejects_an_unrelated_failure(refactor_workspace: Path) -> None:
+    ws = refactor_workspace
+    memory, log = _timeline_with_regression(ws)
+    timeline = list(log.timeline())
+    last = timeline[-1].seq
+
+    report = reconstruct(
+        memory, timeline, [PROBE],
+        harness_failed_at={last},
+        attribution={last: {"some_other_probe"}},
+        session="regress",
+    )
+    assert report.episodes[0].silent is True, "an unrelated failure is not detection"
+
+
+def test_wasted_work_spans_onset_to_close(refactor_workspace: Path) -> None:
+    ws = refactor_workspace
+    memory, log = _timeline_with_regression(ws)
+    report = reconstruct(memory, list(log.timeline()), [PROBE], session="regress")
+    assert report.episodes[0].wasted_work_usd >= 0.0
+    assert report.wasted_work_usd == report.episodes[0].wasted_work_usd
+
+
+def test_the_scan_is_exhaustive(refactor_workspace: Path) -> None:
+    """One replay per observation: no monotonicity assumed anywhere."""
+    ws = refactor_workspace
+    memory, log = _timeline_with_regression(ws)
+    timeline = list(log.timeline())
+
+    report = reconstruct(memory, timeline, [PROBE], session="regress")
+    assert report.replays == len(timeline)
