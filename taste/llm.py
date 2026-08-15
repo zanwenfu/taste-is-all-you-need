@@ -249,6 +249,7 @@ class LLM:
         backoff_base: float = 1.0,
         semaphore: threading.Semaphore | None = None,
         run_id: str = "",
+        cap_on: str = "work",
     ) -> None:
         load_dotenv(_find_env(env_dir), override=False)
         self._api_keys = dict(api_keys or {})
@@ -256,6 +257,15 @@ class LLM:
             self._api_keys.setdefault("anthropic", api_key)
         self.stats = RunStats()
         self.budget_usd = budget_usd
+        # Which currency the cap is enforced in. "work" by default and in
+        # every reported arm: billed cost depends on what ran BEFORE a run
+        # (prefix caches are organization-scoped), so a billed cap makes each
+        # trial's budget a function of its neighbours and breaks the
+        # independence a paired analysis needs. "billed" exists solely for the
+        # pre-registered cap-invariance rerun.
+        if cap_on not in ("work", "billed"):
+            raise ValueError(f"cap_on must be 'work' or 'billed', got {cap_on!r}")
+        self.cap_on = cap_on
         self.max_attempts = max(1, max_attempts)
         self.backoff_base = backoff_base
         self.run_id = run_id
@@ -283,6 +293,12 @@ class LLM:
             ensure_priced(model)
             self.provider_for(model).ensure_ready()
 
+    def spent_usd(self) -> float:
+        """Spend in the currency this run is capped on."""
+        return (
+            self.stats.total_work_usd if self.cap_on == "work" else self.stats.total_cost_usd
+        )
+
     # ------------------------------------------------------------ the call
 
     def call(
@@ -305,8 +321,10 @@ class LLM:
         rather than crashing.
         """
         ensure_priced(model)
-        if self.budget_usd is not None and self.stats.total_cost_usd >= self.budget_usd:
-            raise BudgetExceeded(self.stats.total_cost_usd, self.budget_usd)
+        if self.budget_usd is not None:
+            spent = self.spent_usd()
+            if spent >= self.budget_usd:
+                raise BudgetExceeded(spent, self.budget_usd)
 
         provider = self.provider_for(model)
         request = CompletionRequest(

@@ -79,12 +79,34 @@ class CellResult:
     failure_reason: str | None = None
     split_id: str = ""
     error: str | None = None
+    attempts_made: int = 1
+    """How many times this cell has been executed, including retries after
+    infrastructure faults. Reported as attrition, never hidden."""
     ts: float = field(default_factory=time.time)
 
     @property
     def counts_toward_success(self) -> bool:
-        """Infra and budget outcomes say nothing about the agent's ability."""
-        return self.status in ("completed", "failed")
+        """Whether this trial is evidence about the recovery policy.
+
+        Budget exhaustion COUNTS, as a failure — intention-to-treat. Running
+        out of money is precisely what an expensive policy costs, so dropping
+        those runs would flatter whichever arm spends most, which is the arm
+        under test. Only infrastructure faults and harness errors are
+        excluded, because those say nothing about any arm.
+        """
+        return self.status in ("completed", "failed", "budget")
+
+    @property
+    def retryable(self) -> bool:
+        """Whether re-running this cell could produce evidence.
+
+        An infra fault or a harness crash is not an outcome; leaving it on
+        disk as a finished cell would permanently shrink the sample. A budget
+        or task failure IS an outcome and must never be retried — retrying
+        until an arm succeeds is the purest form of selecting on the
+        dependent variable.
+        """
+        return self.status in ("infra", "error")
 
 
 @dataclass
@@ -100,23 +122,22 @@ class SweepReport:
         return out
 
     def summary(self) -> str:
-        lines = [
-            f"{len(self.results)} cells run, {self.skipped} resumed from disk",
-            f"{'arm':<20} {'n':>3} {'usable':>7} {'score':>7} {'billed':>9} {'work':>9}",
-        ]
-        for arm, results in sorted(self.by_arm().items()):
-            usable = [r for r in results if r.counts_toward_success]
-            scored = [r.score for r in usable if r.score is not None]
-            mean = sum(scored) / len(scored) if scored else float("nan")
-            lines.append(
-                f"{arm:<20} {len(results):>3} {len(usable):>7} {mean:>7.3f} "
-                f"${sum(r.billed_usd for r in results):>8.4f} "
-                f"${sum(r.work_usd for r in results):>8.4f}"
-            )
-        excluded = [r for r in self.results if not r.counts_toward_success]
-        if excluded:
-            kinds = sorted({r.status for r in excluded})
-            lines.append(f"excluded from success rates: {len(excluded)} ({', '.join(kinds)})")
+        """Per-arm description with attrition explicit.
+
+        Deliberately not a bare cross-arm mean: an unweighted mean over
+        whatever survived listwise deletion hides both how many trials each
+        arm lost and why, and it is the first thing a reviewer asks for.
+        Inference belongs in :mod:`taste.stats`, not here.
+        """
+        from taste.stats import summarise_arm
+
+        lines = [f"{len(self.results)} cells run, {self.skipped} resumed from disk"]
+        for arm, records in sorted(self.by_arm().items()):
+            lines.append(summarise_arm(arm, records).render())
+        lines.append(
+            "note: means are descriptive only; the pre-registered contrasts "
+            "are computed by taste.stats on paired blocks."
+        )
         return "\n".join(lines)
 
 
@@ -130,8 +151,17 @@ class Ledger:
     def path_for(self, cell: Cell) -> Path:
         return self.root / f"{cell.key}.json"
 
-    def done(self, cell: Cell) -> bool:
-        return self.path_for(cell).exists()
+    def done(self, cell: Cell, *, retry_budget: int = 0) -> bool:
+        """Whether this cell is finished for good.
+
+        A recorded infra fault or crash is retryable up to a declared budget:
+        treating it as done would silently shrink the sample, and the number
+        of retries spent is itself reportable attrition.
+        """
+        result = self.read(cell)
+        if result is None:
+            return False
+        return not (result.retryable and result.attempts_made <= retry_budget)
 
     def read(self, cell: Cell) -> CellResult | None:
         path = self.path_for(cell)
@@ -188,6 +218,7 @@ def run_sweep(
     execute: Callable[[Cell, Any], RunResult],
     score: Callable[[Cell, Any, RunResult], float | None] | None = None,
     on_cell: Callable[[CellResult], None] | None = None,
+    retry_budget: int = 0,
 ) -> SweepReport:
     """Run the grid, skipping cells already on disk.
 
@@ -201,9 +232,11 @@ def run_sweep(
     notify = on_cell or (lambda _r: None)
 
     for cell in cells(tasks, arms, trials):
-        if ledger.done(cell):
+        if ledger.done(cell, retry_budget=retry_budget):
             report.skipped += 1
             continue
+        previous = ledger.read(cell)
+        attempt_number = (previous.attempts_made + 1) if previous else 1
 
         started = time.time()
         try:
@@ -211,6 +244,7 @@ def run_sweep(
             result = execute(cell, context)
             value = score(cell, context, result) if score else None
             record = _record_from(cell, result, value, context)
+            record.attempts_made = attempt_number
         except Exception as exc:
             # A crash is data too — recorded so the cell is not silently
             # retried forever, and excluded from success rates.
@@ -222,6 +256,7 @@ def run_sweep(
                 config_hash="",
                 elapsed_s=round(time.time() - started, 2),
                 error=f"{type(exc).__name__}: {exc}",
+                attempts_made=attempt_number,
             )
             record.failure_reason = traceback.format_exc(limit=3)
 

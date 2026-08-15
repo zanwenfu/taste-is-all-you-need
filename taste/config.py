@@ -125,7 +125,7 @@ class HarnessConfig:
         step fails — which is what makes a comparison between them a
         statement about recovery policy rather than about four codebases.
 
-        A1        self-verification: the monitor's FAIL is final.
+        A0        no-recovery control: the Monitor's FAIL is final.
         A2        repair in place: keep the work, fix forward.
         A3        monitor-gated rollback: reset and retry.
         A3prime   attempt-matched control: same retries, same guidance, no reset.
@@ -133,7 +133,7 @@ class HarnessConfig:
         full      everything on — the complete Agent OS.
         """
         arms: dict[str, HarnessConfig] = {
-            "A1": cls(label="A1-self-verify", journal=True, shadow=True, recovery=RecoveryConfig.arm("A1")),
+            "A0": cls(label="A0-no-recovery", journal=True, shadow=True, recovery=RecoveryConfig.arm("A0")),
             "A2": cls(label="A2-repair-in-place", journal=True, shadow=True, recovery=RecoveryConfig.arm("A2")),
             "A3": cls(label="A3-rollback", journal=True, shadow=True, recovery=RecoveryConfig.arm("A3")),
             "A3prime": cls(
@@ -155,7 +155,7 @@ class HarnessConfig:
 
     @classmethod
     def arm_names(cls) -> list[str]:
-        return ["A1", "A2", "A3", "A3prime", "tiered", "full"]
+        return ["A0", "A2", "A3", "A3prime", "tiered", "full"]
 
 
 def kernel_kwargs(config: HarnessConfig) -> dict:

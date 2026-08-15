@@ -14,7 +14,7 @@ branch, or ``HEAD``. Nothing the agent reads changes; nothing the Monitor
 grades changes. An arm with shadow commits enabled must produce byte-identical
 agent-visible behaviour to one without.
 
-**It is uniform across arms.** A self-verifying arm has no checkpoints of its
+**It is uniform across arms.** A no-recovery arm has no checkpoints of its
 own, so any timeline built from *its* commits would be incomparable with an
 arm that checkpoints per step. Shadow commits give every arm the same
 granularity, which is the only way ``detection latency`` means the same thing

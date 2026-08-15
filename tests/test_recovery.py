@@ -388,7 +388,7 @@ def test_guidance_book_is_capped() -> None:
 
 
 def test_arms_are_configurations_not_code_paths() -> None:
-    assert RecoveryConfig.arm("A1").fixed_action is ActionKind.ACCEPT
+    assert RecoveryConfig.arm("A0").fixed_action is ActionKind.ACCEPT
     assert RecoveryConfig.arm("A2").fixed_action is ActionKind.REPAIR_IN_PLACE
     assert RecoveryConfig.arm("A3").fixed_action is ActionKind.ROLLBACK_AND_RETRY
     assert RecoveryConfig.arm("A3prime").fixed_action is ActionKind.RETRY_WITH_GUIDANCE
@@ -410,10 +410,10 @@ def _failing_scenario(ws: Path):
     return plan, worker
 
 
-def test_arm_A1_accepts_the_failure_without_retrying(refactor_workspace: Path) -> None:
+def test_arm_A0_accepts_the_failure_without_retrying(refactor_workspace: Path) -> None:
     ws = refactor_workspace
     plan, worker = _failing_scenario(ws)
-    result = Kernel(workspace=ws, recovery_config=RecoveryConfig.arm("A1")).run(
+    result = Kernel(workspace=ws, recovery_config=RecoveryConfig.arm("A0")).run(
         task="a1", spec=_spec(), session_id="a1", plan_override=plan, worker_override=worker
     )
     assert result.outcomes[0].attempts == 1, "A1 must never retry"

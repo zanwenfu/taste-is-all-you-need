@@ -39,15 +39,15 @@ def _run_result(
 def test_arms_interleave_within_a_task() -> None:
     """Arm-major order aligns condition with calendar time, so a quiet API
     day or a model update lands entirely on one arm."""
-    grid = list(cells(["lib"], ["A1", "A3"], trials=2))
+    grid = list(cells(["lib"], ["A0", "A3"], trials=2))
     assert [(c.arm, c.trial) for c in grid] == [
-        ("A1", 1), ("A3", 1),
-        ("A1", 2), ("A3", 2),
+        ("A0", 1), ("A3", 1),
+        ("A0", 2), ("A3", 2),
     ]
 
 
 def test_grid_covers_every_combination() -> None:
-    grid = list(cells(["a", "b"], ["A1", "A3", "A3prime"], trials=3))
+    grid = list(cells(["a", "b"], ["A0", "A3", "A3prime"], trials=3))
     assert len(grid) == 2 * 3 * 3
     assert len({c.key for c in grid}) == len(grid)
 
@@ -65,7 +65,7 @@ def test_a_completed_cell_is_never_re_run(tmp_path: Path) -> None:
 
     kwargs = dict(
         tasks=["lib"],
-        arms=["A1", "A3"],
+        arms=["A0", "A3"],
         trials=1,
         ledger_dir=tmp_path / "ledger",
         prepare=lambda cell: None,
@@ -91,7 +91,7 @@ def test_a_partial_sweep_resumes_where_it_stopped(tmp_path: Path) -> None:
 
     with contextlib.suppress(KeyboardInterrupt):
         run_sweep(
-            tasks=["lib"], arms=["A1", "A3", "A3prime"], trials=1,
+            tasks=["lib"], arms=["A0", "A3", "A3prime"], trials=1,
             ledger_dir=ledger_dir, prepare=lambda c: None, execute=flaky,
         )
 
@@ -99,7 +99,7 @@ def test_a_partial_sweep_resumes_where_it_stopped(tmp_path: Path) -> None:
     assert done == 1, "only the completed cell should be on disk"
 
     resumed = run_sweep(
-        tasks=["lib"], arms=["A1", "A3", "A3prime"], trials=1,
+        tasks=["lib"], arms=["A0", "A3", "A3prime"], trials=1,
         ledger_dir=ledger_dir, prepare=lambda c: None, execute=lambda c, x: _run_result(),
     )
     assert resumed.skipped == 1
@@ -119,28 +119,73 @@ def test_ledger_writes_are_atomic(tmp_path: Path) -> None:
 
 def test_ledger_round_trips_and_tolerates_extra_keys(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path)
-    ledger.write(CellResult(task="t", arm="A1", trial=2, status="failed", config_hash="h"))
+    ledger.write(CellResult(task="t", arm="A0", trial=2, status="failed", config_hash="h"))
 
-    path = ledger.path_for(Cell("t", "A1", 2))
+    path = ledger.path_for(Cell("t", "A0", 2))
     raw = json.loads(path.read_text())
     raw["a_field_from_the_future"] = 1
     path.write_text(json.dumps(raw))
 
-    restored = ledger.read(Cell("t", "A1", 2))
+    restored = ledger.read(Cell("t", "A0", 2))
     assert restored is not None and restored.status == "failed"
 
 
 # ------------------------------------------------------------------ accounting
 
 
-def test_infra_and_budget_outcomes_are_excluded_from_success() -> None:
-    """A rate limit is not evidence about the agent. Pooling them biases
-    against whichever arm makes more calls — the one under test."""
-    assert CellResult(task="t", arm="a", trial=1, status="completed", config_hash="").counts_toward_success
-    assert CellResult(task="t", arm="a", trial=1, status="failed", config_hash="").counts_toward_success
-    for status in ("infra", "budget", "error"):
-        record = CellResult(task="t", arm="a", trial=1, status=status, config_hash="")
-        assert not record.counts_toward_success, status
+def test_budget_exhaustion_is_an_outcome_but_infra_is_not() -> None:
+    """Intention-to-treat.
+
+    Running out of money is precisely what an expensive policy costs, so a
+    budget-exhausted run is a FAILURE, not an exclusion — dropping those would
+    flatter whichever arm spends most, which is the arm under test. A rate
+    limit says nothing about any arm and is excluded.
+    """
+    def record(status: str) -> CellResult:
+        return CellResult(task="t", arm="a", trial=1, status=status, config_hash="")
+
+    for status in ("completed", "failed", "budget"):
+        assert record(status).counts_toward_success, status
+    for status in ("infra", "error"):
+        assert not record(status).counts_toward_success, status
+
+
+def test_only_infra_and_crashes_are_retryable() -> None:
+    """Retrying a genuine failure until an arm succeeds is the purest form of
+    selecting on the dependent variable."""
+    def record(status: str) -> CellResult:
+        return CellResult(task="t", arm="a", trial=1, status=status, config_hash="")
+
+    for status in ("infra", "error"):
+        assert record(status).retryable, status
+    for status in ("completed", "failed", "budget"):
+        assert not record(status).retryable, status
+
+
+def test_an_infra_cell_is_retried_within_budget(tmp_path: Path) -> None:
+    """Leaving an infra fault on disk as finished silently shrinks the sample."""
+    attempts = {"n": 0}
+
+    def flaky(cell, ctx):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return _run_result(status="failed", failure_kind="infra")
+        return _run_result()
+
+    kwargs = dict(
+        tasks=["lib"], arms=["A3"], trials=1, ledger_dir=tmp_path,
+        prepare=lambda c: None, execute=flaky, retry_budget=1,
+    )
+    first = run_sweep(**kwargs)
+    assert first.results[0].status == "infra"
+
+    second = run_sweep(**kwargs)
+    assert second.skipped == 0, "an infra cell must be retried"
+    assert second.results[0].status == "completed"
+    assert second.results[0].attempts_made == 2
+
+    third = run_sweep(**kwargs)
+    assert third.skipped == 1, "a completed cell is never retried"
 
 
 def test_a_run_halted_by_infra_is_recorded_as_infra(tmp_path: Path) -> None:
@@ -216,7 +261,7 @@ def test_every_cell_gets_its_own_prepared_context(tmp_path: Path) -> None:
     prepared: list[str] = []
 
     report = run_sweep(
-        tasks=["a", "b"], arms=["A1", "A3"], trials=2, ledger_dir=tmp_path,
+        tasks=["a", "b"], arms=["A0", "A3"], trials=2, ledger_dir=tmp_path,
         prepare=lambda cell: prepared.append(cell.key) or cell.key,
         execute=lambda c, x: _run_result(),
     )
@@ -227,7 +272,8 @@ def test_every_cell_gets_its_own_prepared_context(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ reporting
 
 
-def test_summary_separates_usable_trials_from_excluded_ones() -> None:
+def test_summary_shows_attrition_and_refuses_to_infer() -> None:
+    """A bare cross-arm mean hides how many trials each arm lost and why."""
     report = SweepReport(
         results=[
             CellResult(task="t", arm="A3", trial=1, status="completed", config_hash="", score=1.0),
@@ -237,6 +283,6 @@ def test_summary_separates_usable_trials_from_excluded_ones() -> None:
     )
     text = report.summary()
     assert "A3" in text
-    # 2 usable of 3 run; the infra trial is named as excluded, not counted.
-    assert "excluded from success rates: 1" in text
-    assert " 3 " in text and " 2 " in text
+    assert "run=  3" in text and "usable=  2" in text
+    assert "infra=1" in text
+    assert "taste.stats" in text, "inference must be pointed elsewhere"

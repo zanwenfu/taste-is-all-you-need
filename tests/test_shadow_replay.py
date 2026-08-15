@@ -198,12 +198,12 @@ def test_replay_leaves_the_workspace_untouched(refactor_workspace: Path) -> None
 # ------------------------------------------------------------------ end to end
 
 
-def test_a_self_verifying_arm_still_yields_a_timeline(refactor_workspace: Path) -> None:
+def test_a_no_recovery_arm_still_yields_a_timeline(refactor_workspace: Path) -> None:
     """The arm with no checkpoints of its own is the one that most needs
     uniform instrumentation — otherwise it has no timeline to compare."""
     ws = refactor_workspace
     plan = Plan(
-        task="a1",
+        task="a0",
         steps=[Step("step-01", "edit", Verification(kind="shell", command="test -f made.py"))],
     )
 
@@ -211,13 +211,13 @@ def test_a_self_verifying_arm_still_yields_a_timeline(refactor_workspace: Path) 
         (ws / "made.py").write_text("# done\n")
         return WorkerResult("done", 1, "end_turn")
 
-    result = Kernel(workspace=ws, config=HarnessConfig.arm("A1")).run(
-        task="a1", spec=_spec(), session_id="a1", plan_override=plan, worker_override=worker
+    result = Kernel(workspace=ws, config=HarnessConfig.arm("A0")).run(
+        task="a0", spec=_spec(), session_id="a0", plan_override=plan, worker_override=worker
     )
     assert result.status == "completed"
 
-    memory = Memory(ws, "taste/session-a1")
-    timeline = load_timeline(Path(memory.repo.git_dir) / "taste", "a1")
+    memory = Memory(ws, "taste/session-a0")
+    timeline = load_timeline(Path(memory.repo.git_dir) / "taste", "a0")
     assert len(timeline) >= 2, "even a no-checkpoint arm gets observation points"
 
 
@@ -439,12 +439,20 @@ def test_the_agent_sees_byte_identical_git_output_with_and_without_shadow(
     off = _run_watching_git(refactor_workspace, shadow=False)
     on = _run_watching_git(bootstrap(tmp_path_factory.mktemp("shadow-on") / "ws"), shadow=True)
 
+    import re
+
+    def normalise(text: str) -> str:
+        # Two independently bootstrapped repos have different commit SHAs.
+        # Those differences are incidental; what must match is the SHAPE of
+        # what the agent sees — which refs exist, which files are dirty.
+        return re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", text)
+
     assert len(off) == len(on) == 2
     for turn, (a, b) in enumerate(zip(off, on, strict=True)):
         for cmd in GIT_PROBES:
             if cmd == "git rev-parse HEAD":
-                continue  # SHAs legitimately differ between two workspaces
-            assert a[cmd] == b[cmd], (
+                continue
+            assert normalise(a[cmd]) == normalise(b[cmd]), (
                 f"turn {turn}: `{cmd}` differs when shadow is enabled.\n"
                 f"  without: {a[cmd]!r}\n  with:    {b[cmd]!r}"
             )

@@ -604,14 +604,22 @@ class RecoveryConfig:
     def arm(cls, name: str) -> RecoveryConfig:
         """The paper's arms, as configuration rather than separate code paths.
 
-        A1  self-verification: take the monitor's FAIL as final, never retry.
-        A2  repair in place: keep the work, fix forward.
-        A3  monitor-gated rollback: reset and retry — the historical kernel.
-        A3' attempt-matched control: retry with the same guidance, no reset.
-            The only arm that separates "reset helps" from "more tries help".
+        A0  no-recovery control: the Monitor runs and its FAIL is recorded,
+            but the harness never retries. Deliberately NOT called
+            "self-verification" — nothing in this arm verifies anything, and
+            presenting it as a Reflexion-style self-critique baseline would be
+            a strawman a literate reviewer discounts the whole ordering for.
+            It is here because it IS the deployed default in harnesses without
+            verifier gating, and because it is cheap.
+        A2  repair in place: keep the work, fix forward. Dollar-capped.
+        A3  monitor-gated rollback: reset and retry. Same dollar cap, so it
+            buys fewer attempts per dollar — the honest price of resetting.
+        A3' attempt-matched control: same guidance, no reset, capped at A3's
+            REALIZED attempt count. Separates "reset helps" from "more tries
+            help"; together with A3-vs-A2 it brackets the cost objection.
         """
         arms = {
-            "A1": cls(enabled=True, policy="fixed", fixed_action=ActionKind.ACCEPT),
+            "A0": cls(enabled=True, policy="fixed", fixed_action=ActionKind.ACCEPT),
             "A2": cls(enabled=True, policy="fixed", fixed_action=ActionKind.REPAIR_IN_PLACE),
             "A3": cls(enabled=True, policy="fixed", fixed_action=ActionKind.ROLLBACK_AND_RETRY),
             "A3prime": cls(
@@ -647,7 +655,7 @@ class FixedPolicy:
         signals: Signals = EMPTY_SIGNALS,
     ) -> Action:
         if self.action is ActionKind.ACCEPT:
-            return Action(ActionKind.ACCEPT, reason="policy=accept (self-verification arm)")
+            return Action(ActionKind.ACCEPT, reason="policy=accept (no-recovery control)")
         if budget.exhausted:
             # Halting does not suspend the arm's discipline. A resetting arm
             # discards its last failed attempt too, or the step would leave

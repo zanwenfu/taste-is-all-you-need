@@ -82,7 +82,7 @@ def test_unknown_arm_is_rejected_with_the_known_ones() -> None:
 def test_arms_differ_only_in_recovery_policy() -> None:
     """What makes an arm comparison a statement about recovery policy rather
     than about four different codebases."""
-    arms = {n: HarnessConfig.arm(n) for n in ("A1", "A2", "A3", "A3prime")}
+    arms = {n: HarnessConfig.arm(n) for n in ("A0", "A2", "A3", "A3prime")}
     for config in arms.values():
         assert config.journal is True
         assert config.guardrails.enabled is False
@@ -91,7 +91,7 @@ def test_arms_differ_only_in_recovery_policy() -> None:
 
     actions = {n: c.recovery.fixed_action for n, c in arms.items()}
     assert actions == {
-        "A1": ActionKind.ACCEPT,
+        "A0": ActionKind.ACCEPT,
         "A2": ActionKind.REPAIR_IN_PLACE,
         "A3": ActionKind.ROLLBACK_AND_RETRY,
         "A3prime": ActionKind.RETRY_WITH_GUIDANCE,
