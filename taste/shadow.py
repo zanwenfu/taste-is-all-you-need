@@ -37,7 +37,19 @@ from typing import Any
 
 from taste.memory import Memory
 
-SHADOW_PREFIX = "refs/taste/shadow"
+# A top-level pseudo-ref, in the same family as ORIG_HEAD and FETCH_HEAD.
+# Anything under refs/ is enumerated by `git for-each-ref`, `git branch -a`
+# and `git log --all` — all read-only commands the guardrails permit — so a
+# ref there both perturbs what the agent sees AND hands it a way to read back
+# work the harness rolled away. A top-level ref is not enumerated, and one
+# pointer suffices because each shadow commit parents the previous, keeping
+# the whole chain reachable and safe from gc.
+#
+# This is containment, not a boundary: an agent that guesses the name can
+# still resolve it. The boundary is a container whose mount excludes the git
+# directory; that is an ops task, not a code one, and is recorded as such.
+SHADOW_HEAD = "TASTE_SHADOW_HEAD"
+SHADOW_PREFIX = SHADOW_HEAD  # retained for callers that report the ref name
 
 
 @dataclass(frozen=True)
@@ -86,6 +98,8 @@ class ShadowLog:
         self.enabled = enabled
         self.cost_reader = cost_reader
         self.path = Path(gitdir) / "shadow.jsonl"
+        # Private staging area, outside the repository's own index.
+        self._index_path = Path(gitdir) / f"shadow-index-{session}"
         self.commits: list[ShadowCommit] = []
         self.errors = 0
         self._seq = 0
@@ -137,17 +151,31 @@ class ShadowLog:
     def _write_tree_commit(self) -> tuple[str | None, tuple[str, ...]]:
         """Commit the current tree onto the shadow ref, touching nothing else.
 
-        Deliberately built with ``write-tree`` / ``commit-tree`` / ``update-ref``
-        rather than ``git commit``: those three write objects and move one ref
-        without checking anything out, without moving HEAD, and without running
-        hooks. The agent's working tree is never disturbed.
+        Built from ``write-tree`` / ``commit-tree`` / ``update-ref`` rather
+        than ``git commit``: those write objects and move one ref without
+        checking anything out, moving HEAD, or running hooks.
+
+        **Staged into a private index, never the repository's own.** Using the
+        real index looks harmless and is not: ``git add --all`` stages the
+        agent's edits, so an agent that changes a file and then runs ``git
+        diff`` to review its own work — a read-only command the guardrails
+        explicitly permit — sees an empty diff. Measured directly: a 103-char
+        diff became empty, and ``git status`` went from ``M file`` to ``M
+        file`` staged. An instrument that changes what the subject observes is
+        not an instrument. GIT_INDEX_FILE points the staging at a throwaway
+        file so the repository's index never moves.
         """
         repo = self.memory.repo
-        # Stage into the real index. The kernel's own checkpoint stages
-        # identically a moment later, so this changes nothing about what is
-        # eventually committed to the session branch.
-        repo.git.add("--all", ".")
-        tree = repo.git.write_tree().strip()
+        self._index_path.parent.mkdir(parents=True, exist_ok=True)
+        # A fresh empty index each time: "everything currently in the working
+        # tree" is exactly the snapshot semantics we want, and it makes
+        # deletions fall out naturally (an absent file is absent from the tree).
+        if self._index_path.exists():
+            self._index_path.unlink()
+
+        with repo.git.custom_environment(GIT_INDEX_FILE=str(self._index_path)):
+            repo.git.add("--all", ".")
+            tree = repo.git.write_tree().strip()
 
         parent = self._current_head()
         if parent is not None:
@@ -193,7 +221,9 @@ class ShadowLog:
 
     @property
     def ref(self) -> str:
-        return f"{SHADOW_PREFIX}/{self.session}"
+        # One pointer per session, kept out of the refs/ namespace so the
+        # agent's view of its own repository is unchanged.
+        return f"{SHADOW_HEAD}_{self.session.upper().replace('-', '_')}"
 
     def timeline(self) -> tuple[ShadowCommit, ...]:
         return tuple(self.commits)

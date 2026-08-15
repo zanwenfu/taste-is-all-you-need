@@ -22,7 +22,7 @@ from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Kernel
 from taste.memory import Memory
 from taste.replay import Probe, episodes_from, reconstruct
-from taste.shadow import SHADOW_PREFIX, ShadowLog, load_timeline
+from taste.shadow import ShadowLog, load_timeline
 from tests.golden import rollback_scenario
 from tests.test_golden_baseline import EXPECTED_EVENTS
 
@@ -64,8 +64,10 @@ def test_shadow_does_not_touch_the_session_branch(refactor_workspace: Path) -> N
     memory = Memory(ws, "taste/session-golden")
     subjects = [s for _sha, s in memory.commit_subjects()]
     assert not any("shadow" in s for s in subjects), "shadow commits must not be on the branch"
-    # They exist, just elsewhere.
-    assert memory.list_refs(f"{SHADOW_PREFIX}/")
+    # Nor anywhere under refs/, which the agent can enumerate.
+    assert not memory.list_refs("refs/taste/shadow")
+    # They exist, reachable from the top-level pseudo-ref.
+    assert memory.repo.git.rev_parse("TASTE_SHADOW_HEAD_GOLDEN").strip()
 
 
 # ------------------------------------------------------------------ observation
@@ -369,3 +371,95 @@ def test_the_scan_is_exhaustive(refactor_workspace: Path) -> None:
 
     report = reconstruct(memory, timeline, [PROBE], session="regress")
     assert report.replays == len(timeline)
+
+
+# ------------------------------------------------------------------ non-perturbation
+
+
+GIT_PROBES = (
+    "git diff",
+    "git diff --stat",
+    "git status --porcelain",
+    "git for-each-ref",
+    "git stash list",
+    "git rev-parse HEAD",
+)
+
+
+def _agent_view(ws: Path) -> dict[str, str]:
+    """Exactly what a worker sees through the read-only git it is allowed."""
+    return {
+        cmd: subprocess.run(
+            cmd, shell=True, cwd=ws, capture_output=True, text=True
+        ).stdout
+        for cmd in GIT_PROBES
+    }
+
+
+def _run_watching_git(ws: Path, *, shadow: bool) -> list[dict[str, str]]:
+    """A worker that edits, then inspects its own work every turn."""
+    from taste.cores import Plan, Step, Verification, WorkerResult
+    from taste.kernel import Kernel
+
+    views: list[dict[str, str]] = []
+    plan = Plan(
+        task="watch",
+        steps=[
+            Step("step-01", "edit and look", Verification(kind="shell", command="true")),
+            Step("step-02", "edit and look again", Verification(kind="shell", command="true")),
+        ],
+    )
+
+    def worker(step, plan_):
+        (ws / f"{step.id}.py").write_text(f"# {step.id}\n")
+        views.append(_agent_view(ws))
+        return WorkerResult("edited", 1, "end_turn")
+
+    Kernel(workspace=ws, shadow=shadow).run(
+        task="watch",
+        spec=_spec(),
+        session_id="watch",
+        plan_override=plan,
+        worker_override=worker,
+    )
+    return views
+
+
+def test_the_agent_sees_byte_identical_git_output_with_and_without_shadow(
+    refactor_workspace: Path, tmp_path_factory
+) -> None:
+    """The property the instrument must have, tested where it can fail.
+
+    The previous version of this test used scripted workers that never
+    invoked git, so it could not have caught the real defect: staging into the
+    repository's index made the agent's own `git diff` come back empty.
+    """
+    from examples.refactor_demo.bootstrap import bootstrap
+
+    off = _run_watching_git(refactor_workspace, shadow=False)
+    on = _run_watching_git(bootstrap(tmp_path_factory.mktemp("shadow-on") / "ws"), shadow=True)
+
+    assert len(off) == len(on) == 2
+    for turn, (a, b) in enumerate(zip(off, on, strict=True)):
+        for cmd in GIT_PROBES:
+            if cmd == "git rev-parse HEAD":
+                continue  # SHAs legitimately differ between two workspaces
+            assert a[cmd] == b[cmd], (
+                f"turn {turn}: `{cmd}` differs when shadow is enabled.\n"
+                f"  without: {a[cmd]!r}\n  with:    {b[cmd]!r}"
+            )
+
+
+def test_observation_does_not_stage_the_agents_work(refactor_workspace: Path) -> None:
+    """The specific regression: a private index, never the repository's."""
+    ws = refactor_workspace
+    _memory, log = _shadow(ws, "noindex")
+    (ws / "edited.py").write_text("x = 1\n")
+
+    before = _agent_view(ws)
+    log.observe(step_id="s", attempt=1, trigger="worker")
+    after = _agent_view(ws)
+
+    assert before["git status --porcelain"] == after["git status --porcelain"]
+    assert before["git diff"] == after["git diff"]
+    assert "edited.py" in after["git status --porcelain"]

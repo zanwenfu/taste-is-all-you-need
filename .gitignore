@@ -22,3 +22,4 @@ htmlcov/
 
 # Internal research/strategy docs — not part of the public project.
 docs/
+docs/eval_protocol.md
