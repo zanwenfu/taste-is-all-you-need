@@ -336,8 +336,12 @@ def test_detection_is_flagged_unattributed_without_coverage_data(
     )
     assert report.episodes
     episode = report.episodes[0]
-    assert episode.detected_seq == timeline[-1].seq
-    assert episode.attributed is False, "must be marked an upper bound"
+    # The co-occurrence variant sees it; the primary measure does not, because
+    # nothing links that failure to this test.
+    assert episode.detected_seq_any == timeline[-1].seq
+    assert episode.detected_seq_attributed is None
+    assert episode.silent is True, "unlinked detection is not detection"
+    assert episode.silent_unattributed is False, "the bound must still see it"
 
 
 def test_attribution_rejects_an_unrelated_failure(refactor_workspace: Path) -> None:

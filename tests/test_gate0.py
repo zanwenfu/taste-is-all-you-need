@@ -104,10 +104,14 @@ def test_the_whole_gate_passes_on_a_working_instrument(root: Path) -> None:
 
 def test_the_gate_fails_when_the_probe_cannot_run(root: Path, monkeypatch) -> None:
     """A gate that cannot fail validates nothing."""
-    from taste.replay import Replayer
+    from taste.replay import LocalWorktreeExecutor, SuiteRun
 
     monkeypatch.setattr(
-        Replayer, "_execute", lambda self, probe, path: "error"
+        LocalWorktreeExecutor,
+        "run",
+        lambda self, sha, suite: SuiteRun(
+            statuses=dict.fromkeys(suite.members, "error"), infra_error="broken"
+        ),
     )
     result = gate0.unknown_rate(_workspace_factory(root))
     assert not result.passed
@@ -132,15 +136,16 @@ def test_the_gate_fails_when_onsets_are_mislocated(root: Path, monkeypatch) -> N
 
 def test_the_gate_fails_on_a_manufactured_regression(root: Path, monkeypatch) -> None:
     """A false positive is the worst failure the instrument can have."""
-    from taste.replay import Replayer
+    from taste.replay import LocalWorktreeExecutor, SuiteRun
 
     calls = {"n": 0}
 
-    def flapping(self, probe, path):
+    def flapping(self, sha, suite):
         calls["n"] += 1
-        return "fail" if calls["n"] % 2 == 0 else "pass"
+        verdict = "fail" if calls["n"] % 2 == 0 else "pass"
+        return SuiteRun(statuses=dict.fromkeys(suite.members, verdict))
 
-    monkeypatch.setattr(Replayer, "_execute", flapping)
+    monkeypatch.setattr(LocalWorktreeExecutor, "run", flapping)
     result = gate0.negative_control(_workspace_factory(root), samples=2)
     assert not result.passed
 
