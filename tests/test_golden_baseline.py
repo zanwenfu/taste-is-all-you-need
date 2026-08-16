@@ -13,23 +13,36 @@ from pathlib import Path
 from tests.golden import rollback_scenario
 
 # The event stream of a run with one failure, one rollback, one retry.
-# Payload keys are part of the contract: existing kinds are frozen, so new
-# information goes in NEW event kinds, never a widened payload. That is what
-# keeps ablation-equivalence a mechanical diff.
+#
+# Payload keys are part of the contract: information produced by an optional
+# subsystem goes in a NEW event kind, never a widened payload on an existing
+# one. That is what keeps ablation-equivalence a mechanical diff — a widened
+# payload carrying subsystem output would appear in one arm and not another
+# and the diff would stop meaning "the subsystem is off".
+#
+# `attempt` on monitor.verdict is a deliberate exception, and it is sound for
+# the reason the rule exists: it is core kernel identity, emitted in every
+# configuration, already present on step.begin. Nothing optional produces it,
+# so it shifts every arm's baseline identically and no ablation diff moves.
+# It is here because attribution has to join a Monitor failure to the shadow
+# observation it graded, and the key for that is (step_id, attempt).
+# Recovering `attempt` by walking back to the preceding step.begin would work
+# only while steps run one at a time; under a parallel wave the events
+# interleave and the walk-back silently picks up another step's attempt.
 EXPECTED_EVENTS = (
     ("run.start", ("agent", "branch", "session", "task")),
     ("run.manifest", ("harness_git_sha", "models", "temperature")),
     ("plan.ready", ("parallel_waves", "steps", "waves")),
     ("step.begin", ("attempt", "id")),
     ("worker.done", ("id", "stop", "tools")),
-    ("monitor.verdict", ("id", "passed", "reason", "sha")),
+    ("monitor.verdict", ("attempt", "id", "passed", "reason", "sha")),
     ("step.rollback", ("id", "remaining_retries", "to")),
     ("step.begin", ("attempt", "id")),
     ("worker.done", ("id", "stop", "tools")),
-    ("monitor.verdict", ("id", "passed", "reason", "sha")),
+    ("monitor.verdict", ("attempt", "id", "passed", "reason", "sha")),
     ("step.begin", ("attempt", "id")),
     ("worker.done", ("id", "stop", "tools")),
-    ("monitor.verdict", ("id", "passed", "reason", "sha")),
+    ("monitor.verdict", ("attempt", "id", "passed", "reason", "sha")),
     (
         "run.done",
         ("cache_hit_rate", "cost_usd", "elapsed", "failure_kind", "reason", "status"),

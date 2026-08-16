@@ -681,6 +681,7 @@ class Kernel:
             self._emit(
                 "monitor.verdict",
                 id=step.id,
+                attempt=attempts,
                 passed=verdict.passed,
                 reason=verdict.reason,
                 sha=checkpoint.short_sha,
