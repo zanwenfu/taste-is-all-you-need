@@ -57,6 +57,12 @@ ignore = ["E501"]
 # both via `python <path>` and `python -m ...`.
 "examples/refactor_demo/simulate.py" = ["E402", "I001"]
 "scripts/*.py" = ["E402"]
+# Vendored verbatim from the SWE-bench harness so the regexes stay diffable
+# against upstream. Auditability is the entire point of these files, and a
+# reformat that "modernises" an import or collapses a multi-line condition
+# destroys the line-for-line correspondence a reviewer needs to check them.
+"taste/benchmarks/swebench_log.py" = ["UP", "SIM", "B", "RUF", "E"]
+"taste/benchmarks/swebench_specs.py" = ["UP", "SIM", "B", "RUF", "E"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -36,13 +36,17 @@ bound* on regression, not a repository-wide detector.
 
 from __future__ import annotations
 
+import functools
 import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from taste.replay import Probe
+from taste.benchmarks.swebench_log import PARSER_REGISTRY
+from taste.benchmarks.swebench_log import parse as parse_log
+from taste.benchmarks.swebench_specs import spec_for, test_directives
+from taste.replay import SuiteProbe
 
 # The dataset fields this adapter depends on. Named here so a schema change
 # surfaces as a clear error rather than a silent KeyError mid-sweep.
@@ -278,28 +282,126 @@ def graded_test_files(instance: SWEInstance) -> set[str]:
 # ------------------------------------------------------------------ probes
 
 
-def pass_to_pass_probe(instance: SWEInstance, *, runner: str = "python -m pytest") -> Probe:
-    """A probe that runs the instance's PASS_TO_PASS set.
+START_MARKER = "TASTE_START_TEST_OUTPUT"
+END_MARKER = "TASTE_END_TEST_OUTPUT"
 
-    Applied out of band against a historical tree. The gold ``test_patch`` is
-    applied first, exactly as the official grader does, so the tests being run
-    are the benchmark's own rather than any version the agent may have edited.
+
+def resolve_parser(name: str) -> str:
+    """Reconcile the two vendored tables' naming.
+
+    The spec table records a parser as upstream's registry *value* names it
+    (``django``); the parser module keys its registry by upstream's *function*
+    names (``parse_log_django``). Both are faithful to their own source, and
+    the mismatch sits exactly on the seam between them — so it is resolved
+    once, here, loudly, rather than by either table quietly renaming what it
+    vendored.
     """
-    node_ids = " ".join(_quote(t) for t in instance.pass_to_pass)
-    return Probe(
-        name=f"p2p::{instance.instance_id}",
-        command=(
-            f"git apply -v - <<'TASTE_TEST_PATCH' || true\n"
-            f"{instance.test_patch}\n"
-            f"TASTE_TEST_PATCH\n"
-            f"{runner} -q -p no:cacheprovider {node_ids}"
-        ),
-        timeout=600,
+    if name in PARSER_REGISTRY:
+        return name
+    prefixed = f"parse_log_{name}"
+    if prefixed in PARSER_REGISTRY:
+        return prefixed
+    raise KeyError(
+        f"no log parser for {name!r}; the spec table and the parser registry "
+        f"disagree. Known: {sorted(PARSER_REGISTRY)}"
     )
 
 
-def _quote(node_id: str) -> str:
-    return "'" + node_id.replace("'", "'\\''") + "'"
+def build_eval_script(instance: SWEInstance, *, workdir: str = "/testbed") -> str:
+    """The command that evaluates PASS_TO_PASS inside the instance's image.
+
+    This mirrors the official harness rather than approximating it, because
+    every approximation available here fails silently. The version this
+    replaced ran ``python -m pytest <node_ids>``, which is wrong for 70% of
+    SWE-bench Verified in two independent ways: django (46% of the set) runs
+    its suite through ``./tests/runtests.py``, not pytest, and its
+    PASS_TO_PASS identifiers are unittest reprs like
+    ``test_defaults (str.tests.SimpleTests)`` — which pytest reads as a
+    *file path* and exits 4 on. The probe therefore failed at every
+    observation including the baseline, so the whole stratum was classified
+    "never passed" and contributed no episodes at all, which a negative
+    control scores as a clean run.
+
+    Four things this does that the old command did not:
+
+    *Activates the environment.* The image puts conda ``base`` on PATH and
+    activates ``testbed`` only from ``.bashrc``, which a non-interactive shell
+    never reads. Without this the suite runs against an interpreter where the
+    repository under test is not installed.
+
+    *Restores the graded tests before applying the gold patch, and again
+    afterwards.* The agent may have edited the test files, and the old
+    command's ``|| true`` swallowed the resulting conflict and then graded
+    whatever the agent had written — in the exact scenario the probe exists
+    to detect. There is no ``|| true`` here; a failed apply is an
+    infrastructure error and the caller records a hole.
+
+    *Passes file directives, not test ids.* The official harness runs
+    test *files* and filters afterwards, so the command stays a fixed size
+    whatever the instance holds — one instance names 1,432 PASS_TO_PASS
+    tests and another 2,476, which as argv approaches ARG_MAX.
+
+    *Brackets the output.* Everything the setup prints is outside the
+    markers, so a line in a traceback cannot be mistaken for a test result.
+    """
+    spec = spec_for(instance.repo, instance.version)
+    directives = " ".join(test_directives(instance.repo, instance.test_patch))
+    graded = " ".join(sorted(graded_test_files(instance))) or "."
+    setup = "\n".join(spec.eval_commands)
+    return "\n".join(
+        part
+        for part in (
+            "source /opt/miniconda3/bin/activate && conda activate testbed",
+            f"cd {workdir}",
+            setup,
+            f"git config --global --add safe.directory {workdir}",
+            f"git checkout {instance.base_commit} -- {graded}",
+            f"git apply -v - <<'TASTE_TEST_PATCH'\n{instance.test_patch}\nTASTE_TEST_PATCH",
+            f": '{START_MARKER}'",
+            f"{spec.test_cmd} {directives}".strip(),
+            f": '{END_MARKER}'",
+            f"git checkout {instance.base_commit} -- {graded}",
+        )
+        if part
+    )
+
+
+def parse_eval_output(instance: SWEInstance, log: str) -> dict[str, str]:
+    """Per-test statuses from the bracketed slice of a run's output.
+
+    Only the slice between the markers is parsed. Setup noise — a conda
+    banner, a ``git apply`` diagnostic, a deprecation warning — can otherwise
+    match a runner's grammar and be recorded as a test result.
+    """
+    spec = spec_for(instance.repo, instance.version)
+    start = log.find(START_MARKER)
+    end = log.find(END_MARKER, start + 1) if start >= 0 else -1
+    if start >= 0:
+        # Skip past the marker's own line.
+        newline = log.find("\n", start)
+        body = log[newline + 1 : end] if end > newline >= 0 else log[start:]
+    else:
+        # No markers: the script died before reaching them. Parsing the whole
+        # log here would read setup output as results.
+        return {}
+    return dict(parse_log(resolve_parser(spec.log_parser), body))
+
+
+def pass_to_pass_suite(instance: SWEInstance, *, timeout: int = 1800) -> SuiteProbe:
+    """The instance's silent-regression oracle, as one executable suite.
+
+    ``members`` is the published PASS_TO_PASS list. The command runs whole
+    test *files* and the parser reports everything they contained, so the run
+    is file-scoped while the grading stays test-scoped — a member the log
+    never mentions is a hole, not a failure.
+    """
+    return SuiteProbe(
+        name=f"p2p::{instance.instance_id}",
+        command=build_eval_script(instance),
+        members=instance.pass_to_pass,
+        parse=functools.partial(parse_eval_output, instance),
+        timeout=timeout,
+    )
 
 
 # ------------------------------------------------------------------ grading

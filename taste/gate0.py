@@ -6,7 +6,15 @@ would have inverted the headline result. So it is validated first, against
 cases whose answers are known by construction, at zero API cost. If Gate 0
 fails, no amount of model spend produces an interpretable number.
 
-Four checks, each with a pre-declared threshold:
+Five checks, each with a pre-declared threshold:
+
+**Baseline liveness.** Every observation of a clean run must actually answer
+`pass`. This exists because zero contamination events is *also* what a totally
+dead instrument reports — if every probe errors, no episode can open, and the
+negative control scored that as a perfect result. The instrument's death and
+its best possible outcome were the same number. It is exactly the shape of the
+probe command being wrong for 46% of the benchmark: nothing ran, and every
+downstream figure was computed over holes.
 
 **Negative control.** Replay a trajectory that contains no regression. The
 pipeline must report zero regression events. A false positive here means the
@@ -49,6 +57,11 @@ FLAKE_MAX = 0.02
 """Maximum probe-verdict disagreement across repeats."""
 UNKNOWN_MAX = 0.05
 """Maximum fraction of probe executions returning neither pass nor fail."""
+BASELINE_LIVENESS_MIN = 0.99
+"""Minimum fraction of clean-run observations that must answer `pass`.
+
+Zero contamination events is also what a dead instrument reports, so the
+gate needs one check that fails loudly when nothing ran at all."""
 
 
 @dataclass
@@ -175,13 +188,23 @@ def materialise(trajectory: Trajectory, workspace: Path) -> tuple[Memory, list[S
 
 
 def negative_control(make_workspace: Callable[[str], Path], *, samples: int = 5) -> CheckResult:
-    """Clean trajectories must produce zero regression events."""
+    """Clean trajectories must produce zero regression events *and be alive*.
+
+    The liveness half is not belt-and-braces. Zero events is also what a
+    completely dead instrument reports: if every probe execution errors, no
+    episode can open, and the naive form of this check scored that as a
+    perfect result. The instrument's death and its best possible outcome were
+    the same number — so a gate that only counted events would certify a
+    harness that could not run a single test.
+    """
     clean = 0
     offenders: list[str] = []
     for index in range(samples):
         memory, timeline = materialise(clean_trajectory(), make_workspace(f"neg{index}"))
         report = reconstruct(memory, timeline, [PROBE], session="gate0")
-        if report.contamination_events == 0:
+        if report.never_passed:
+            offenders.append(f"{index}:dead")
+        elif report.contamination_events == 0:
             clean += 1
         else:
             offenders.append(f"{index}:{report.contamination_events}")
@@ -190,6 +213,39 @@ def negative_control(make_workspace: Callable[[str], Path], *, samples: int = 5)
         "negative control", rate >= NEGATIVE_CONTROL_MIN, rate, NEGATIVE_CONTROL_MIN,
         detail=f"false positives on {offenders}" if offenders else "no false positives",
         samples=samples,
+    )
+
+
+def baseline_liveness(make_workspace: Callable[[str], Path], *, samples: int = 3) -> CheckResult:
+    """Every observation of a clean run must yield a real verdict.
+
+    Stated separately from the negative control so that a broken environment
+    reports as a broken environment rather than as a subtly worse score. This
+    is the check that would have caught the probe command being wrong for 46%
+    of the benchmark: those probes never ran, every verdict was an error, and
+    every downstream number was silently computed over holes.
+
+    On a real instance the same property is asserted per instance before it
+    enters the frame — an instance whose PASS_TO_PASS does not pass at
+    ``base_commit`` is excluded, with the reason recorded like any other.
+    """
+    live = 0
+    total = 0
+    dead: list[str] = []
+    for index in range(samples):
+        memory, timeline = materialise(clean_trajectory(), make_workspace(f"live{index}"))
+        replayer = Replayer(memory, [PROBE])
+        for verdict in replayer.verdicts_across(timeline, PROBE):
+            total += 1
+            if verdict == "pass":
+                live += 1
+            else:
+                dead.append(verdict)
+    rate = live / total if total else 0.0
+    return CheckResult(
+        "baseline liveness", rate >= BASELINE_LIVENESS_MIN, rate, BASELINE_LIVENESS_MIN,
+        detail="every observation answered" if not dead else f"non-passing verdicts: {dead[:5]}",
+        samples=total,
     )
 
 
@@ -274,6 +330,7 @@ def run(root: Path) -> Gate0Report:
 
     return Gate0Report(
         checks=[
+            baseline_liveness(workspace),
             negative_control(workspace),
             positive_control(workspace),
             flake_screen(workspace),

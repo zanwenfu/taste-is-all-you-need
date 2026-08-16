@@ -17,13 +17,17 @@ from pathlib import Path
 import pytest
 
 from taste.benchmarks.swebench import (
+    END_MARKER,
+    START_MARKER,
     GradeReport,
+    build_eval_script,
     eligible,
     graded_test_files,
     load_dataset,
     monitor_scope,
+    parse_eval_output,
     parse_report,
-    pass_to_pass_probe,
+    pass_to_pass_suite,
     patch_for,
     stratified_sample,
     task_text,
@@ -225,18 +229,77 @@ def test_monitor_scope_can_be_empty_and_that_is_detectable(tmp_path: Path) -> No
 def test_the_probe_applies_the_gold_test_patch_first(dataset: Path) -> None:
     """The graded tests must be the benchmark's own, not any version the
     agent may have edited."""
-    probe = pass_to_pass_probe(load_dataset(dataset)[0])
-    assert "TASTE_TEST_PATCH" in probe.command
-    assert "tests/test_core.py" in probe.command
+    suite = pass_to_pass_suite(load_dataset(dataset)[0])
+    assert "TASTE_TEST_PATCH" in suite.command
+    assert "tests/test_core.py" in suite.command
 
 
-def test_the_probe_runs_exactly_the_pass_to_pass_set(dataset: Path) -> None:
-    probe = pass_to_pass_probe(load_dataset(dataset)[0])
-    assert "'t::a'" in probe.command and "'t::b'" in probe.command
+def test_the_graded_tests_are_restored_before_the_patch_is_applied(
+    dataset: Path,
+) -> None:
+    """The agent may have edited the test files. Applying the gold patch onto
+    its edits conflicts, and the previous command's `|| true` swallowed that
+    and then graded the agent's own tests -- in exactly the scenario the probe
+    exists to detect."""
+    script = build_eval_script(load_dataset(dataset)[0])
+    checkout = script.index("git checkout")
+    apply_at = script.index("git apply")
+    assert checkout < apply_at, "tests must be restored before the patch"
+    assert "|| true" not in script, "a failed apply must not be swallowed"
+
+
+def test_the_environment_is_activated(dataset: Path) -> None:
+    """The image puts conda base on PATH and activates testbed only from
+    .bashrc, which a non-interactive shell never reads."""
+    script = build_eval_script(load_dataset(dataset)[0])
+    assert "conda activate testbed" in script
+
+
+def test_output_is_bracketed_so_setup_noise_cannot_score(dataset: Path) -> None:
+    script = build_eval_script(load_dataset(dataset)[0])
+    assert script.index(START_MARKER) < script.index(END_MARKER)
+
+
+def test_the_suite_grades_exactly_the_pass_to_pass_members(dataset: Path) -> None:
+    suite = pass_to_pass_suite(load_dataset(dataset)[0])
+    assert suite.members == ("t::a", "t::b")
+
+
+def test_the_command_does_not_splat_test_ids_into_argv(dataset: Path) -> None:
+    """One instance names 1,432 PASS_TO_PASS tests and another 2,476. As argv
+    that approaches ARG_MAX, so the harness runs whole files and filters
+    afterwards -- which is also what upstream does."""
+    suite = pass_to_pass_suite(load_dataset(dataset)[0])
+    for member in suite.members:
+        assert member not in suite.command
+
+
+def test_setup_output_outside_the_markers_is_never_parsed(dataset: Path) -> None:
+    """A traceback line or a conda banner can match a runner's grammar."""
+    instance = load_dataset(dataset)[0]
+    noisy = (
+        "PASSED tests/decoy.py::test_should_not_count\n"
+        f"{START_MARKER}\n"
+        "PASSED t::a\n"
+        f"{END_MARKER}\n"
+        "PASSED tests/after.py::test_also_not\n"
+    )
+    parsed = parse_eval_output(instance, noisy)
+    assert "tests/decoy.py::test_should_not_count" not in parsed
+    assert "tests/after.py::test_also_not" not in parsed
+
+
+def test_a_script_that_died_before_the_markers_parses_to_nothing(
+    dataset: Path,
+) -> None:
+    """Parsing the whole log would read setup output as results -- and a
+    non-empty parse is what separates 'the suite ran' from 'a hole'."""
+    instance = load_dataset(dataset)[0]
+    assert parse_eval_output(instance, "conda: command not found") == {}
 
 
 def test_probe_names_carry_the_instance(dataset: Path) -> None:
-    assert pass_to_pass_probe(load_dataset(dataset)[0]).name == "p2p::django__django-1"
+    assert pass_to_pass_suite(load_dataset(dataset)[0]).name == "p2p::django__django-1"
 
 
 # ------------------------------------------------------------------ grading

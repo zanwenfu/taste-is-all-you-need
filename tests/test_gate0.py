@@ -13,6 +13,7 @@ import pytest
 
 from taste import gate0
 from taste.gate0 import (
+    BASELINE_LIVENESS_MIN,
     FLAKE_MAX,
     NEGATIVE_CONTROL_MIN,
     POSITIVE_CONTROL_MIN,
@@ -96,7 +97,7 @@ def test_unknown_rate_is_zero_when_probes_run(root: Path) -> None:
 def test_the_whole_gate_passes_on_a_working_instrument(root: Path) -> None:
     report = gate0.run(root)
     assert report.passed, report.render()
-    assert len(report.checks) == 4
+    assert len(report.checks) == 5
 
 
 # ------------------------------------------------------------------ can it fail?
@@ -159,6 +160,7 @@ def test_thresholds_are_declared_before_results() -> None:
     assert POSITIVE_CONTROL_MIN == 0.90
     assert FLAKE_MAX == 0.02
     assert UNKNOWN_MAX == 0.05
+    assert BASELINE_LIVENESS_MIN == 0.99
 
 
 def test_a_report_with_one_failure_does_not_pass() -> None:
@@ -176,3 +178,35 @@ def test_a_report_with_one_failure_does_not_pass() -> None:
 def test_an_empty_report_does_not_pass() -> None:
     """No checks run is not the same as every check passing."""
     assert not Gate0Report().passed
+
+
+def test_the_gate_fails_on_a_dead_instrument(root: Path, monkeypatch) -> None:
+    """The failure this check exists for, and the one it used to miss.
+
+    Zero contamination events is also what an instrument that cannot run
+    anything reports. Before the liveness check, a totally dead probe
+    environment scored a perfect 1.000 on the negative control — the
+    instrument's death and its best possible result were the same number.
+    """
+    from taste.replay import LocalWorktreeExecutor, SuiteRun
+
+    monkeypatch.setattr(
+        LocalWorktreeExecutor,
+        "run",
+        lambda self, sha, suite: SuiteRun(
+            statuses=dict.fromkeys(suite.members, "error"),
+            infra_error="environment is dead",
+        ),
+    )
+    factory = _workspace_factory(root)
+
+    assert not gate0.baseline_liveness(factory, samples=2).passed
+    # and the negative control must no longer certify it either
+    assert not gate0.negative_control(factory, samples=2).passed
+
+
+def test_liveness_is_reported_before_anything_derived_from_it(root: Path) -> None:
+    """A dead instrument should read as dead, not as a subtly worse score."""
+    report = gate0.run(root)
+    assert report.checks[0].name == "baseline liveness"
+    assert len(report.checks) == 5

@@ -302,3 +302,36 @@ def test_an_unusable_log_never_yields_a_regression(bad: str) -> None:
     """Belt and braces on the defect class that motivated all of this."""
     run = verdicts_from(SUITE, ExecResult(4, bad, ""))
     assert "fail" not in set(run.statuses.values())
+
+
+def test_an_xfail_reason_suffix_becomes_a_hole_not_a_regression() -> None:
+    """The one upstream hazard that could manufacture our dependent variable.
+
+    The vendored parser (upstream `main`) keys a pytest line by everything
+    after the status, so an xfail whose reason prints on the same line keys as
+    ``"<id> - reason: ..."`` and no longer matches its PASS_TO_PASS id. Under
+    the official grader that reads as a regression. Here it cannot, because a
+    member the parser did not mention is `error`.
+
+    The cost is a lost observation rather than a false event, and that is the
+    right side to fail on. The rate is worth counting in the first real sweep
+    on astropy / scikit-learn / sphinx, since it bounds coverage there.
+    """
+    from taste.benchmarks import swebench_log
+
+    log = (
+        "PASSED pkg/test_x.py::test_ok\n"
+        "XFAIL pkg/test_x.py::test_flaky - reason: upstream dask bug\n"
+    )
+    suite = SuiteProbe(
+        name="s",
+        command="c",
+        members=("pkg/test_x.py::test_ok", "pkg/test_x.py::test_flaky"),
+        parse=lambda body: swebench_log.parse("parse_log_pytest_v2", body),
+    )
+    run = verdicts_from(suite, ExecResult(1, log, ""))
+
+    assert run.statuses["pkg/test_x.py::test_ok"] == "pass"
+    assert run.statuses["pkg/test_x.py::test_flaky"] == "error", (
+        "an unmatched id must be a hole; 'fail' here would fabricate an event"
+    )
