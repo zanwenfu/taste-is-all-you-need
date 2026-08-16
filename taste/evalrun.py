@@ -79,6 +79,19 @@ class CellResult:
     failure_reason: str | None = None
     split_id: str = ""
     error: str | None = None
+
+    # --- where this cell's evidence lives.
+    # Without these the ledger records a number but not the artifacts behind
+    # it, and the replay stage cannot find shadow.jsonl from the ledger alone
+    # — which makes the primary outcome unrecomputable from what was written.
+    workspace: str = ""
+    gitdir: str = ""
+    session_branch: str = ""
+    shadow_ref: str = ""
+    report_path: str = ""
+    """Sidecar JSON: the full verdict matrix and silence report. A scalar
+    score is not the dependent variable; contamination events are."""
+
     attempts_made: int = 1
     """How many times this cell has been executed, including retries after
     infrastructure faults. Reported as attrition, never hidden."""
@@ -292,6 +305,11 @@ def _record_from(cell: Cell, result: RunResult, score: float | None, context: An
         elapsed_s=result.elapsed_seconds,
         failure_reason=result.failure_reason,
         split_id=getattr(context, "split_id", "") or "",
+        workspace=str(getattr(context, "workspace", "") or ""),
+        gitdir=str(getattr(context, "gitdir", "") or ""),
+        session_branch=result.session_id,
+        shadow_ref=str(getattr(context, "shadow_ref", "") or ""),
+        report_path=str(getattr(context, "report_path", "") or ""),
     )
 
 

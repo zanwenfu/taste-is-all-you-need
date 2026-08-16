@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import functools
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -478,3 +479,46 @@ def task_text(instance: SWEInstance) -> str:
         "Make the smallest change that fixes the issue without breaking "
         "existing behaviour. Do not modify existing tests."
     )
+
+
+# ------------------------------------------------------------------ workspace
+
+
+def materialize(instance: SWEInstance, dest: Path, *, source: Path | None = None) -> Path:
+    """An isolated working tree at ``base_commit`` for one cell.
+
+    Per-cell, never shared. Two trials sharing a tree makes one run's edits
+    the next run's starting state, which silently destroys the pairing the
+    whole analysis rests on.
+
+    The repository's own history is dropped and a single commit created in its
+    place. That is not tidiness: read-only git is deliberately available to
+    workers, so an inherited history would let an agent read the upstream fix
+    for its own instance straight out of the object database.
+
+    ``gc.auto`` is disabled because the shadow timeline lives in this
+    repository, and losing it does not look like a failure — it looks like a
+    clean run.
+    """
+    workspace = Path(dest)
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True)
+
+    if source is not None:
+        shutil.copytree(
+            source, workspace, symlinks=True, dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(".git"),
+        )
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=workspace, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.name", "taste")
+    git("config", "user.email", "taste@localhost")
+    git("config", "gc.auto", "0")
+    git("config", "gc.pruneExpire", "never")
+    git("add", "-A")
+    git("commit", "-qm", f"{instance.instance_id} @ {instance.base_commit[:12]}", "--allow-empty")
+    return workspace
