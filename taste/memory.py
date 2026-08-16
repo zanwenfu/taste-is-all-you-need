@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import re
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -313,7 +314,12 @@ class Memory:
         """
         root = self.repo_path.parent / ".taste-worktrees" / "_probe"
         root.mkdir(parents=True, exist_ok=True)
-        path = root / f"probe-{ref[:12]}-{id(self):x}"
+        # Not id(self): CPython reuses addresses after collection, so two
+        # Memory objects probing the same ref can land on the same path. The
+        # `worktree add` then fails on an existing directory, the caller
+        # catches it, and the probe records "error" — a hole in the timeline
+        # that looks exactly like a clean observation.
+        path = root / f"probe-{ref[:12]}-{uuid.uuid4().hex[:8]}"
         self.repo.git.worktree("add", "--detach", str(path), ref)
         try:
             yield path

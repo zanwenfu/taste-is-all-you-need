@@ -52,6 +52,7 @@ REQUIRED_FIELDS = (
     "base_commit",
     "problem_statement",
     "test_patch",
+    "version",
     "FAIL_TO_PASS",
     "PASS_TO_PASS",
 )
@@ -66,6 +67,12 @@ class SWEInstance:
     base_commit: str
     problem_statement: str
     test_patch: str
+    version: str
+    """Which release line this instance sits on. Required, not defaulted: the
+    test *runner* is a function of ``(repo, version)`` — django 3.0 and django
+    4.1 do not take the same arguments — so a snapshot without it cannot be
+    graded, and should fail at load rather than silently run the wrong
+    command halfway through a sweep."""
     fail_to_pass: tuple[str, ...]
     pass_to_pass: tuple[str, ...]
     environment_setup_commit: str = ""
@@ -114,6 +121,7 @@ def load_dataset(path: Path) -> list[SWEInstance]:
                 base_commit=raw["base_commit"],
                 problem_statement=raw["problem_statement"],
                 test_patch=raw["test_patch"],
+                version=str(raw["version"]),
                 fail_to_pass=tuple(_as_list(raw["FAIL_TO_PASS"])),
                 pass_to_pass=tuple(_as_list(raw["PASS_TO_PASS"])),
                 environment_setup_commit=raw.get("environment_setup_commit", ""),

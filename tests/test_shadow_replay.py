@@ -98,7 +98,7 @@ def test_observations_carry_cumulative_cost(refactor_workspace: Path) -> None:
         memory,
         gitdir=Path(memory.repo.git_dir) / "taste",
         session="cost",
-        cost_reader=lambda: (spend["billed"], spend["work"]),
+        cost_pair_reader=lambda: (spend["billed"], spend["work"]),
     )
     log.observe(step_id="s", attempt=1, trigger="worker")
     spend["billed"], spend["work"] = 0.25, 0.40
@@ -471,3 +471,96 @@ def test_observation_does_not_stage_the_agents_work(refactor_workspace: Path) ->
     assert before["git status --porcelain"] == after["git status --porcelain"]
     assert before["git diff"] == after["git diff"]
     assert "edited.py" in after["git status --porcelain"]
+
+
+# ------------------------------------------------------------------ durability
+
+
+def test_the_shadow_chain_survives_a_forced_gc(tmp_path: Path) -> None:
+    """A destroyed timeline replays as "error" everywhere, which scores as a
+    clean run rather than as a lost measurement — so durability is not a
+    hygiene concern, it is the difference between a result and a fiction.
+
+    A top-level pseudo-ref sits outside refs/ and therefore outside git's gc
+    roots. The reflog is what makes it a root without making it enumerable.
+    """
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    (ws / "f.py").write_text("x = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-qm", "base"],
+        cwd=ws, check=True,
+    )
+    _memory, log = _shadow(ws, "durable")
+    shas = []
+    for value in (2, 3, 4):
+        (ws / "f.py").write_text(f"x = {value}\n")
+        commit = log.observe(step_id="s", attempt=1, trigger="worker")
+        if commit is not None:
+            shas.append(commit.sha)
+
+    assert shas, "no shadow commits were written"
+    subprocess.run(["git", "reset", "--hard", "-q", "HEAD"], cwd=ws, check=True)
+    subprocess.run(["git", "gc", "--prune=now", "-q"], cwd=ws, check=True)
+
+    for sha in shas:
+        proc = subprocess.run(["git", "cat-file", "-e", sha], cwd=ws)
+        assert proc.returncode == 0, f"gc destroyed shadow commit {sha}"
+
+
+def test_durability_does_not_cost_us_invisibility(tmp_path: Path) -> None:
+    """The reason the ref is not under refs/ in the first place: anything
+    there is walked by `git log --all`, handing a rolled-back agent a way to
+    read work the harness discarded."""
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    (ws / "f.py").write_text("x = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-qm", "base"],
+        cwd=ws, check=True,
+    )
+    _memory, log = _shadow(ws, "hidden")
+    (ws / "f.py").write_text("secret = 'rolled away'\n")
+    log.observe(step_id="s", attempt=1, trigger="worker")
+
+    def out(*args: str) -> str:
+        return subprocess.run(args, cwd=ws, capture_output=True, text=True).stdout
+
+    assert "TASTE" not in out("git", "for-each-ref")
+    assert "shadow" not in out("git", "log", "--all", "--oneline")
+    assert "rolled away" not in out("git", "log", "--all", "-p")
+
+
+# ------------------------------------------------------------------ cost shape
+
+
+def test_a_scalar_cost_reader_is_rejected_at_construction(tmp_path: Path) -> None:
+    """Guardrails takes an identically-named reader that returns a bare float.
+    Passing that one here used to raise inside a fail-open wrapper, recording
+    0.0/0.0 for every observation — zeroing two headline metrics in a way that
+    reads as a finding rather than as a bug.
+    """
+    import pytest
+
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    (ws / "f.py").write_text("x = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-qm", "base"],
+        cwd=ws, check=True,
+    )
+    memory = Memory.open_session(ws, "shape")
+
+    with pytest.raises(TypeError, match="billed_usd"):
+        ShadowLog(
+            memory,
+            gitdir=Path(memory.repo.git_dir) / "taste",
+            session="shape",
+            cost_pair_reader=lambda: 1.25,  # the Guardrails shape
+        )

@@ -166,7 +166,7 @@ def materialise(trajectory: Trajectory, workspace: Path) -> tuple[Memory, list[S
         memory,
         gitdir=Path(memory.repo.git_dir) / "taste",
         session="gate0",
-        cost_reader=lambda: (0.0, 0.0),
+        cost_pair_reader=lambda: (0.0, 0.0),
     )
     for state in trajectory.states:
         (workspace / "lib.py").write_text(state)

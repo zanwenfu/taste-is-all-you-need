@@ -48,7 +48,7 @@ def main() -> None:
     "--arm",
     default=None,
     help=(
-        "Harness configuration to run: A1, A2, A3, A3prime, tiered, full. "
+        "Harness configuration to run: A0, A2, A3, A3prime, tiered, full. "
         "Omit for the original kernel with every subsystem off."
     ),
 )

@@ -38,13 +38,21 @@ TEST_PATCH = """diff --git a/tests/test_core.py b/tests/test_core.py
 """
 
 
-def _row(instance_id: str, repo: str, *, p2p: list[str], f2p: list[str] | None = None) -> dict:
+def _row(
+    instance_id: str,
+    repo: str,
+    *,
+    p2p: list[str],
+    f2p: list[str] | None = None,
+    version: str = "4.1",
+) -> dict:
     return {
         "instance_id": instance_id,
         "repo": repo,
         "base_commit": "abc123",
         "problem_statement": "Something is broken.",
         "test_patch": TEST_PATCH,
+        "version": version,
         "FAIL_TO_PASS": json.dumps(f2p or ["tests/test_core.py::test_new"]),
         "PASS_TO_PASS": json.dumps(p2p),
         "image": "swebench/x@sha256:deadbeef",
@@ -94,6 +102,25 @@ def test_a_missing_field_fails_loudly_with_its_name(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="PASS_TO_PASS"):
         load_dataset(path)
+
+
+def test_version_is_required_because_the_runner_depends_on_it(tmp_path: Path) -> None:
+    """The test command is a function of (repo, version). A snapshot without
+    it cannot be graded, and must fail at load rather than run the wrong
+    command halfway through a sweep."""
+    row = _row("x__y-1", "x/y", p2p=["t::a"])
+    del row["version"]
+    path = tmp_path / "d.jsonl"
+    path.write_text(json.dumps(row))
+
+    with pytest.raises(ValueError, match="version"):
+        load_dataset(path)
+
+
+def test_version_survives_loading(tmp_path: Path) -> None:
+    path = tmp_path / "d.jsonl"
+    path.write_text(json.dumps(_row("x__y-1", "django/django", p2p=["t::a"], version="3.2")))
+    assert load_dataset(path)[0].version == "3.2"
 
 
 # ------------------------------------------------------------------ exclusion

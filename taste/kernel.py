@@ -296,7 +296,7 @@ class Kernel:
                 memory,
                 gitdir=self._runtime_dir,
                 session=session_id,
-                cost_reader=(
+                cost_pair_reader=(
                     (lambda: (self.llm.stats.total_cost_usd, self.llm.stats.total_work_usd))
                     if self.llm
                     else None

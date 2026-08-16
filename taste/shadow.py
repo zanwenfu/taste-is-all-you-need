@@ -37,17 +37,44 @@ from typing import Any
 
 from taste.memory import Memory
 
+
 # A top-level pseudo-ref, in the same family as ORIG_HEAD and FETCH_HEAD.
 # Anything under refs/ is enumerated by `git for-each-ref`, `git branch -a`
 # and `git log --all` — all read-only commands the guardrails permit — so a
 # ref there both perturbs what the agent sees AND hands it a way to read back
 # work the harness rolled away. A top-level ref is not enumerated, and one
-# pointer suffices because each shadow commit parents the previous, keeping
-# the whole chain reachable and safe from gc.
+# pointer suffices because each shadow commit parents the previous.
+#
+# Being outside refs/ also puts the chain outside git's gc roots, so the ref
+# is written with --create-reflog: reflogs are gc roots and are not walked by
+# --all, which is the only construction that keeps the chain both durable and
+# unenumerable. See _write_tree_commit.
 #
 # This is containment, not a boundary: an agent that guesses the name can
 # still resolve it. The boundary is a container whose mount excludes the git
 # directory; that is an ops task, not a code one, and is recorded as such.
+def _assert_pair_shape(reader: Any) -> None:
+    """Reject a scalar cost reader at construction rather than at use.
+
+    The failure this prevents is silent by nature: the reader is only called
+    from inside a fail-open wrapper, so a wrong-shaped one degrades to
+    0.0/0.0 on every observation instead of raising. Two headline metrics
+    then read as exactly zero for every arm, which looks like a finding.
+    """
+    try:
+        sample = reader()
+    except Exception as exc:
+        raise TypeError(f"cost_pair_reader raised on call: {exc!r}") from exc
+    try:
+        billed, work = sample
+        float(billed), float(work)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "cost_pair_reader must return (billed_usd, work_usd); "
+            f"got {sample!r}. A bare float is the Guardrails reader shape."
+        ) from exc
+
+
 SHADOW_HEAD = "TASTE_SHADOW_HEAD"
 SHADOW_PREFIX = SHADOW_HEAD  # retained for callers that report the ref name
 
@@ -91,12 +118,20 @@ class ShadowLog:
         gitdir: Path,
         session: str,
         enabled: bool = True,
-        cost_reader: Any = None,
+        cost_pair_reader: Any = None,
     ) -> None:
         self.memory = memory
         self.session = session
         self.enabled = enabled
-        self.cost_reader = cost_reader
+        # Named for its *shape*, not its subject. Guardrails takes a reader of
+        # the same name and the same `Any` type that returns a bare float, and
+        # handing that one to this one raises TypeError on unpack — which the
+        # fail-open wrapper in _costs swallows, recording 0.0/0.0 for every
+        # observation and silently zeroing wasted_work_usd and
+        # cost_to_detect_usd, two of the four headline metrics.
+        self.cost_pair_reader = cost_pair_reader
+        if cost_pair_reader is not None:
+            _assert_pair_shape(cost_pair_reader)
         self.path = Path(gitdir) / "shadow.jsonl"
         # Private staging area, outside the repository's own index.
         self._index_path = Path(gitdir) / f"shadow-index-{session}"
@@ -187,7 +222,15 @@ class ShadowLog:
         if parent is not None:
             args = [tree, "-p", parent, "-m", f"shadow {self._seq + 1}"]
         sha = repo.git.commit_tree(*args).strip()
-        repo.git.update_ref(self.ref, sha)
+        # --create-reflog is load-bearing, not hygiene. A top-level pseudo-ref
+        # is deliberately outside refs/ so the agent cannot enumerate it, but
+        # that also puts it outside the set git treats as gc roots: a forced
+        # `git gc --prune=now` deletes the entire shadow chain, and the
+        # timeline then replays as "error" at every observation — which scores
+        # as a clean run rather than as the destroyed measurement it is.
+        # Reflogs *are* gc roots and are *not* enumerated by --all, so a reflog
+        # on the pseudo-ref buys durability without giving the isolation back.
+        repo.git.update_ref("--create-reflog", self.ref, sha)
 
         files = ()
         if parent is not None:
@@ -202,10 +245,10 @@ class ShadowLog:
             return None
 
     def _costs(self) -> tuple[float, float]:
-        if self.cost_reader is None:
+        if self.cost_pair_reader is None:
             return 0.0, 0.0
         try:
-            return self.cost_reader()
+            return self.cost_pair_reader()
         except Exception:
             return 0.0, 0.0
 
