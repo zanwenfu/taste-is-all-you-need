@@ -59,7 +59,6 @@ def main() -> int:
     ap.add_argument("--budget", type=float, default=1.00, help="work-cost cap per cell")
     ap.add_argument("--root", default="/tmp/taste-dryrun")
     ap.add_argument("--dataset", default="data/verified.jsonl")
-    ap.add_argument("--model", default=None)
     ap.add_argument("--offline", action="store_true",
                     help="No model calls: exercise materialize + replay only.")
     args = ap.parse_args()
@@ -79,9 +78,10 @@ def main() -> int:
     for i in chosen:
         print(f"  {i.instance_id:32s} {i.repo:26s} |P2P|={len(i.pass_to_pass)}")
 
-    instances = {i.instance_id: dict_i for i, dict_i in ((i, i) for i in chosen)}
-    for i in chosen:  # attach the resolved image; the dataset has no tag column
+    # The dataset carries no image column, so resolve the published tag here.
+    for i in chosen:
         object.__setattr__(i, "image", image_for(i))
+    instances = {i.instance_id: i for i in chosen}
 
     provider = DockerProvider()
 
@@ -90,8 +90,7 @@ def main() -> int:
             return None
         from taste.llm import LLM
 
-        return LLM(budget_usd=args.budget, cap_on="work",
-                   **({"worker_model": args.model} if args.model else {}))
+        return LLM(budget_usd=args.budget, cap_on="work")
 
     started = time.time()
     report = run_sweep(

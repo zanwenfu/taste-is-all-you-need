@@ -108,17 +108,27 @@ def make_prepare(
     root: Path,
     budget_usd: float = 1.50,
     source_root: Path | None = None,
+    repo_cache: Path | None = None,
     coverage: dict[str, tuple[CoverageMap, CoverageMap]] | None = None,
     provider: SandboxProvider | None = None,
 ):
-    """Build the ``prepare`` callable for a sweep over these instances."""
+    """Build the ``prepare`` callable for a sweep over these instances.
+
+    ``repo_cache`` switches materialization to the real repository at
+    ``base_commit``, cloned once per repo and reused. ``source_root`` is the
+    fixture path, for tests. Neither means an empty workspace, which is only
+    ever right for a synthetic task.
+    """
 
     def prepare(cell: Cell) -> CellContext:
         instance = instances[cell.task]
         # Fresh per cell — see the module docstring; this is not reusable.
         workspace = Path(root) / cell.task / cell.arm / f"t{cell.trial}"
-        source = Path(source_root) / instance.instance_id if source_root else None
-        swebench.materialize(instance, workspace, source=source)
+        if repo_cache is not None:
+            swebench.materialize_from_repo(instance, workspace, cache=Path(repo_cache))
+        else:
+            source = Path(source_root) / instance.instance_id if source_root else None
+            swebench.materialize(instance, workspace, source=source)
 
         # max_parallel=1 for every measured arm. The shadow log is bound to
         # the primary session memory, so a parallel worker's edits are not
