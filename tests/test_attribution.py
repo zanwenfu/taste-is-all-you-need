@@ -283,3 +283,102 @@ def test_both_variants_are_reported_side_by_side() -> None:
         "the bound must under-count silence; if it ever exceeds the primary "
         "measure the two variants have been swapped"
     )
+
+
+# ------------------------------------------------------------------ id shapes
+
+
+def test_every_published_id_grammar_parses() -> None:
+    """PASS_TO_PASS uses four grammars across the frame; a parser that handles
+    only pytest node ids silently drops 38.5% of the graded tests."""
+    from taste.attribution import parse_member_id
+
+    cases = {
+        "astropy/modeling/tests/test_separable.py::test_coord_matrix":
+            ("test_coord_matrix", None, "test_separable"),
+        "tests/_core/test_plot.py::TestInit::test_empty":
+            ("test_empty", "TestInit", "test_plot"),
+        "test_defaults (str.tests.SimpleTests)":
+            ("test_defaults", "SimpleTests", "str.tests"),
+        # django 4.2+ repeats the method at the end of the dotted path
+        "test_x (user_commands.tests.UtilsTests.test_x)":
+            ("test_x", "UtilsTests", "user_commands.tests"),
+        "test_point3D": ("test_point3D", None, ""),
+    }
+    for raw, (func, cls, module) in cases.items():
+        key = parse_member_id(raw)
+        assert key is not None, raw
+        assert (key.func, key.cls, key.module) == (func, cls, module), raw
+
+
+def test_a_docstring_is_not_a_test_identifier() -> None:
+    """django's runner prints a test's docstring instead of its name when it
+    has one, so 6.1% of published ids are prose. Returning a bogus key would
+    attribute coverage to a test that does not exist."""
+    from taste.attribution import parse_member_id
+
+    assert parse_member_id("Trailing zeros in the fractional part aren't truncated.") is None
+    assert parse_member_id("[100%]") is None
+    assert parse_member_id("") is None
+
+
+def test_coverage_contexts_parse_from_any_runner() -> None:
+    """coverage.py's dynamic_context names the context after the executing
+    test function whoever invoked it -- which is why it works for django and
+    sympy, and pytest-cov's --cov-context does not."""
+    from taste.attribution import parse_context
+
+    assert parse_context("pkg.mod.TestCls.test_thing|call").func == "test_thing"
+    assert parse_context("pkg.mod.TestCls.test_thing").cls == "TestCls"
+    assert parse_context("pkg.mod.test_thing").cls is None
+    assert parse_context("pkg.mod.helper") is None, "not a test function"
+
+
+def test_ids_and_contexts_reconcile_across_schemes() -> None:
+    from taste.attribution import reconcile_contexts
+
+    result = reconcile_contexts(
+        ["str.tests.SimpleTests.test_defaults|call", "sympy.geometry.tests.test_point.test_point3D"],
+        ["test_defaults (str.tests.SimpleTests)", "test_point3D"],
+    )
+    assert len(result.matched) == 2
+    assert result.unresolved == ()
+
+
+def test_a_class_disambiguates_a_shared_function_name() -> None:
+    from taste.attribution import reconcile_contexts
+
+    result = reconcile_contexts(
+        ["m.AlphaTests.test_run", "m.BetaTests.test_run"],
+        ["test_run (m.BetaTests)"],
+    )
+    assert result.matched["test_run (m.BetaTests)"] == "m.BetaTests.test_run"
+
+
+def test_genuine_ambiguity_is_reported_never_guessed() -> None:
+    """A wrong match attributes a Monitor failure to the wrong test, which is
+    the exact error the coverage rule exists to prevent. sympy's bare names
+    carry no module, so this case is real, not hypothetical."""
+    from taste.attribution import reconcile_contexts
+
+    result = reconcile_contexts(
+        ["a.mod.Cls.test_x", "b.other.Other.test_x"], ["test_x"]
+    )
+    assert result.matched == {}
+    assert result.ambiguous == ("test_x",)
+    assert "test_x" in result.unresolved
+
+
+def test_the_three_unresolved_kinds_stay_distinct() -> None:
+    """Each says something different about why coverage is missing, and the
+    protocol reports them separately."""
+    from taste.attribution import reconcile_contexts
+
+    result = reconcile_contexts(
+        ["m.Cls.test_present", "a.test_dup", "b.test_dup"],
+        ["test_present (m.Cls)", "[100%]", "test_never_ran", "test_dup"],
+    )
+    assert list(result.matched) == ["test_present (m.Cls)"]
+    assert result.unmappable == ("[100%]",)
+    assert result.unmatched == ("test_never_ran",)
+    assert result.ambiguous == ("test_dup",)

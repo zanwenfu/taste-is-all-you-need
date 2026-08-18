@@ -39,6 +39,7 @@ measurable error rate is not a fallback, it is a guess with a citation.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -48,7 +49,10 @@ from typing import Literal
 from taste.replay import RegressionEpisode
 from taste.shadow import ShadowCommit
 
-CoverageMethod = Literal["pytest_cov_context", "pytest_cov_per_test", "declared", "none"]
+CoverageMethod = Literal[
+    "coverage_dynamic_context", "pytest_cov_context", "pytest_cov_per_test",
+    "declared", "none",
+]
 
 AttributionVerdict = Literal["attributed", "unattributed", "unknown"]
 
@@ -223,6 +227,150 @@ def read_coverage_sqlite(
         method="pytest_cov_context",
         covers={k: frozenset(v) for k, v in covers.items()},
     )
+
+
+# ------------------------------------------------------------------ id shapes
+
+
+@dataclass(frozen=True)
+class TestKey:
+    """A test identity reduced to the parts two naming schemes can share."""
+
+    func: str
+    cls: str | None = None
+    module: str = ""
+
+
+_UNITTEST_LABEL = re.compile(r"^(?P<func>[\w]+)\s+\((?P<path>[\w.]+)\)$")
+_IDENTIFIER = re.compile(r"^[\w.]+$")
+
+
+def parse_member_id(test_id: str) -> TestKey | None:
+    """Reduce a PASS_TO_PASS identifier to a comparable key.
+
+    The published set uses four different grammars, and a fifth thing that is
+    not an identifier at all. Measured across all 60,142 ids in Verified:
+    61.5% pytest node ids, 24.7% unittest labels, 6.5% bare function names
+    (sympy), 1.3% unittest labels with the method re-appended (django 4.2+),
+    and **6.1% that are not test names** — django's runner prints a test's
+    docstring instead of its name when it has one, and one instance captured
+    a pytest progress marker as an id.
+
+    ``None`` means unmappable, and callers must treat that as UNKNOWN rather
+    than as a test that covers nothing.
+    """
+    raw = test_id.strip()
+    if not raw:
+        return None
+
+    if "::" in raw:
+        parts = raw.split("::")
+        path, tail = parts[0], parts[1:]
+        module = Path(path).stem
+        if len(tail) >= 2:
+            return TestKey(func=tail[-1], cls=tail[-2], module=module)
+        return TestKey(func=tail[-1], cls=None, module=module) if tail else None
+
+    label = _UNITTEST_LABEL.match(raw)
+    if label:
+        func, path = label.group("func"), label.group("path")
+        segments = path.split(".")
+        # django 4.2+ repeats the method name at the end of the dotted path.
+        if segments and segments[-1] == func:
+            segments = segments[:-1]
+        cls = segments[-1] if segments and segments[-1][:1].isupper() else None
+        module = ".".join(segments[:-1] if cls else segments)
+        return TestKey(func=func, cls=cls, module=module)
+
+    if _IDENTIFIER.match(raw) and raw.startswith("test"):
+        return TestKey(func=raw.split(".")[-1])
+
+    return None  # a docstring, a progress marker, or something else entirely
+
+
+def parse_context(context: str) -> TestKey | None:
+    """Reduce a coverage.py dynamic context to the same key.
+
+    ``dynamic_context = test_function`` is what makes coverage buildable at
+    all here. pytest-cov's ``--cov-context`` only works under pytest, and
+    django and sympy — 61% of the frame between them — do not run under
+    pytest. coverage.py's own setting is runner-agnostic: it names the context
+    after whatever test function is executing, whoever invoked it.
+    """
+    raw = context.split("|", 1)[0].strip()
+    if not raw:
+        return None
+    segments = raw.split(".")
+    func = segments[-1]
+    if not func.startswith("test"):
+        return None
+    rest = segments[:-1]
+    cls = rest[-1] if rest and rest[-1][:1].isupper() else None
+    module = ".".join(rest[:-1] if cls else rest)
+    return TestKey(func=func, cls=cls, module=module)
+
+
+@dataclass
+class Reconciliation:
+    """Which graded tests were matched to a coverage context, and which were not."""
+
+    matched: dict[str, str] = field(default_factory=dict)
+    """graded id -> coverage context"""
+    unmappable: tuple[str, ...] = ()
+    """Ids that are not test identifiers — docstrings and the like."""
+    unmatched: tuple[str, ...] = ()
+    """Parsed fine, but no context ran under that name."""
+    ambiguous: tuple[str, ...] = ()
+    """Several contexts share the name and nothing disambiguates them."""
+
+    @property
+    def unresolved(self) -> tuple[str, ...]:
+        return tuple(sorted({*self.unmappable, *self.unmatched, *self.ambiguous}))
+
+
+def reconcile_contexts(contexts: Iterable[str], members: Sequence[str]) -> Reconciliation:
+    """Match graded test ids to coverage contexts across naming schemes.
+
+    Narrowed in three passes — function name, then class, then module tail.
+    Anything still ambiguous is reported as ambiguous, never guessed: a wrong
+    match would attribute a Monitor failure to the wrong test, which is
+    exactly the error the coverage rule exists to prevent.
+    """
+    by_func: dict[str, list[tuple[str, TestKey]]] = {}
+    for context in contexts:
+        key = parse_context(context)
+        if key is not None:
+            by_func.setdefault(key.func, []).append((context, key))
+
+    result = Reconciliation()
+    unmappable: list[str] = []
+    unmatched: list[str] = []
+    ambiguous: list[str] = []
+
+    for member in members:
+        key = parse_member_id(member)
+        if key is None:
+            unmappable.append(member)
+            continue
+        candidates = by_func.get(key.func, [])
+        if not candidates:
+            unmatched.append(member)
+            continue
+        if len(candidates) > 1 and key.cls:
+            candidates = [c for c in candidates if c[1].cls == key.cls] or candidates
+        if len(candidates) > 1 and key.module:
+            tail = key.module.split(".")[-1]
+            narrowed = [c for c in candidates if tail and tail in c[1].module.split(".")]
+            candidates = narrowed or candidates
+        if len(candidates) == 1:
+            result.matched[member] = candidates[0][0]
+        else:
+            ambiguous.append(member)
+
+    result.unmappable = tuple(unmappable)
+    result.unmatched = tuple(unmatched)
+    result.ambiguous = tuple(ambiguous)
+    return result
 
 
 # ------------------------------------------------------------------ classify
