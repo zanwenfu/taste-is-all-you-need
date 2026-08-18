@@ -335,3 +335,61 @@ def test_an_xfail_reason_suffix_becomes_a_hole_not_a_regression() -> None:
     assert run.statuses["pkg/test_x.py::test_flaky"] == "error", (
         "an unmatched id must be a hole; 'fail' here would fabricate an event"
     )
+
+
+def test_the_upstream_sha_is_never_used_for_the_local_diff(tmp_path: Path) -> None:
+    """The bug that made the first real dry run report nothing.
+
+    The workspace is built with `git archive` so no upstream objects reach it
+    -- otherwise an agent could read the fix for its own issue. So the
+    benchmark's base_commit is NOT resolvable locally. Diffing against it
+    fails with "bad object", which becomes an infra error, which makes every
+    graded test a hole, which reports as zero regressions on a clean-looking
+    run. All five graded tests came back "never passed".
+    """
+    _ws, memory, _base = _repo(tmp_path)
+    upstream = "22623bd8c265b78b161542663ee980738441c307"  # not in this repo
+
+    executor = SandboxProbeExecutor(ScriptedSandbox(), memory, upstream)
+
+    assert executor.local_base and executor.local_base != upstream, (
+        "the local base must default to the workspace root, not the upstream sha"
+    )
+    run = executor.run(executor.local_base, SuiteProbe(name="s", command="c", members=("t",)))
+    assert run.infra_error is None, f"diff should succeed locally, got {run.infra_error}"
+
+
+def test_the_container_still_resets_to_the_upstream_commit(tmp_path: Path) -> None:
+    """The two bases are for different machines and must not be merged: the
+    image's /testbed carries the real history and is reset to the upstream
+    sha, while the diff is computed against the local root."""
+    _ws, memory, _base = _repo(tmp_path)
+    upstream = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    sandbox = ScriptedSandbox()
+
+    SandboxProbeExecutor(sandbox, memory, upstream).run(
+        "HEAD", SuiteProbe(name="s", command="run-tests", members=("t",))
+    )
+
+    assert any(upstream in c for c in sandbox.commands), (
+        "the container reset must use the benchmark's own commit"
+    )
+
+
+def test_no_resolvable_local_base_yields_a_hole_not_a_crash(tmp_path: Path) -> None:
+    """A workspace with nothing to diff against reports a hole and says why,
+    rather than raising through the middle of a scan."""
+    _ws, memory, _base = _repo(tmp_path)
+
+    run = SandboxProbeExecutor(ScriptedSandbox(), memory, "abc", local_base="").run(
+        "HEAD", SuiteProbe(name="s", command="c", members=("t",))
+    )
+    # An explicit empty local_base falls back to the root commit, so force the
+    # degenerate case the guard exists for.
+    executor = SandboxProbeExecutor(ScriptedSandbox(), memory, "abc")
+    executor.local_base = ""
+    degenerate = executor.run("HEAD", SuiteProbe(name="s", command="c", members=("t",)))
+
+    assert run.infra_error is None or "t" in run.statuses
+    assert degenerate.statuses["t"] == "error"
+    assert "no local base" in (degenerate.infra_error or "")

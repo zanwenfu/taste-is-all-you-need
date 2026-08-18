@@ -309,10 +309,43 @@ class SandboxProbeExecutor:
     reported as such.
     """
 
-    def __init__(self, sandbox: Sandbox, memory: Memory, base_commit: str) -> None:
+    def __init__(
+        self,
+        sandbox: Sandbox,
+        memory: Memory,
+        base_commit: str,
+        *,
+        local_base: str = "",
+    ) -> None:
+        """Two different base commits, and conflating them silently kills a run.
+
+        ``base_commit`` is the benchmark's upstream sha. It exists *inside the
+        image*, whose ``/testbed`` carries the real history, and it is what
+        resets that tree.
+
+        ``local_base`` is the workspace's own root commit, and it is what the
+        agent's changes are measured against. These are not the same object:
+        the workspace is built with ``git archive`` precisely so that no
+        upstream objects reach it — otherwise an agent could read the fix for
+        its own issue — so the upstream sha is *not resolvable locally at all*.
+
+        Passing the upstream sha to the local diff makes it fail with "bad
+        object", which becomes an infra error, which makes every graded test a
+        hole, which reports as zero regressions on a clean-looking run. Found
+        on the first real dry run, where all five graded tests came back
+        "never passed". It defaults to the repository's root commit so the
+        right thing happens when nobody thinks about it.
+        """
         self.sandbox = sandbox
         self.memory = memory
         self.base_commit = base_commit
+        self.local_base = local_base or self._root_commit()
+
+    def _root_commit(self) -> str:
+        try:
+            return self.memory.repo.git.rev_list("--max-parents=0", "HEAD").split()[0]
+        except Exception:
+            return ""
 
     def run(self, sha: str, suite: SuiteProbe) -> SuiteRun:
         def hole(reason: str) -> SuiteRun:
@@ -320,8 +353,10 @@ class SandboxProbeExecutor:
                 statuses=dict.fromkeys(suite.members, "error"), infra_error=reason
             )
 
+        if not self.local_base:
+            return hole("no local base commit to diff against")
         try:
-            patch = self.memory.repo.git.diff(self.base_commit, sha)
+            patch = self.memory.repo.git.diff(self.local_base, sha)
         except Exception as exc:
             return hole(f"diff failed: {exc!r}")
 

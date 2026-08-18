@@ -59,6 +59,7 @@ def main() -> int:
     ap.add_argument("--budget", type=float, default=1.00, help="work-cost cap per cell")
     ap.add_argument("--root", default="/tmp/taste-dryrun")
     ap.add_argument("--dataset", default="data/verified.jsonl")
+    ap.add_argument("--only", default="", help="Comma-separated instance ids.")
     ap.add_argument("--offline", action="store_true",
                     help="No model calls: exercise materialize + replay only.")
     args = ap.parse_args()
@@ -69,6 +70,21 @@ def main() -> int:
 
     everything = swebench.load_dataset(Path(args.dataset))
     pool = [i for i in everything if image_for(i) in have]
+    if args.only:
+        wanted = set(args.only.split(","))
+        pool = [i for i in pool if i.instance_id in wanted]
+
+    # Prefer repositories whose mirror is already on disk, then small ones.
+    # The clone, not the model, is the long pole on a cold cache: astropy is
+    # half a gigabyte and requests is fifteen megabytes.
+    cache = Path(args.root) / "mirrors"
+    small = ("psf/requests", "pallets/flask", "mwaskom/seaborn", "pytest-dev/pytest")
+
+    def cost(instance: swebench.SWEInstance) -> tuple[int, int]:
+        mirror = cache / f"{instance.repo.replace('/', '__')}.git"
+        return (0 if mirror.exists() else 1, 0 if instance.repo in small else 1)
+
+    pool.sort(key=cost)
     if not pool:
         print("No SWE-bench images present locally. Pull at least one, e.g.:")
         print(f"  docker pull --platform linux/amd64 {image_for(everything[0])}")
