@@ -19,10 +19,12 @@ from __future__ import annotations
 import html
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from taste import observability as obs
 
 
 @dataclass
@@ -33,6 +35,10 @@ class RunArtifacts:
     events: list[dict[str, Any]]
     monitor: dict[str, dict[str, Any]]
     git_log: list[tuple[str, str]]  # (sha, subject)
+    shadow: list[dict[str, Any]] = field(default_factory=list)
+    """Observations, when the run was measured. Absent is normal."""
+    evidence: dict[str, Any] = field(default_factory=dict)
+    """The replay sidecar: episodes and the silence report, if scored."""
 
     @classmethod
     def load(cls, workspace: Path, branch: str | None = None) -> RunArtifacts:
@@ -82,6 +88,15 @@ class RunArtifacts:
                     sha, subject = line.split(" ", 1)
                     git_log.append((sha, subject))
 
+        shadow = obs.load_shadow(workspace / ".git" / "taste")
+        # The sidecar is written next to the ledger by the sweep driver; when a
+        # run was executed standalone there simply is not one.
+        evidence: dict[str, Any] = {}
+        for candidate in (taste_dir / "evidence.json", workspace / "evidence.json"):
+            if candidate.exists():
+                evidence = json.loads(candidate.read_text())
+                break
+
         return cls(
             workspace=workspace,
             branch=resolved_branch or "(unknown)",
@@ -89,6 +104,8 @@ class RunArtifacts:
             events=events,
             monitor=monitor,
             git_log=git_log,
+            shadow=shadow,
+            evidence=evidence,
         )
 
 
@@ -106,6 +123,10 @@ def render(artifacts: RunArtifacts) -> str:
     cache_rate = done.get("payload", {}).get("cache_hit_rate", 0.0)
 
     step_summary = _summarize_steps(artifacts)
+    trace = obs.build_trace(
+        artifacts.events, plan=artifacts.plan,
+        shadow=artifacts.shadow, evidence=artifacts.evidence,
+    )
     t0 = artifacts.events[0]["ts"] if artifacts.events else 0.0
 
     return _HTML_TEMPLATE.format(
@@ -126,6 +147,14 @@ def render(artifacts: RunArtifacts) -> str:
         steps_count=len(artifacts.plan.get("steps", [])),
         passed_count=sum(1 for s in step_summary.values() if s["passed"]),
         rollback_count=sum(1 for s in step_summary.values() if s["rolled_back"]),
+        dag_svg=obs.render_dag(trace),
+        lanes_svg=obs.render_lanes(trace),
+        regression_svg=obs.render_regression_timeline(trace),
+        models_table=obs.render_models(trace),
+        branches_table=obs.render_branches(trace),
+        episode_count=len(trace.episodes),
+        silent_count=sum(1 for e in trace.episodes if e.silent),
+        observation_count=len(trace.observations),
     )
 
 
@@ -309,6 +338,26 @@ section {{ margin-bottom: 24px; }}
 .card.pass .value {{ color: #3fb950; }}
 .card.fail .value {{ color: #f85149; }}
 .card.info .value {{ color: #58a6ff; }}
+.card.danger .value {{ color: #f85149; }}
+
+/* Panels added by taste.observability. The SVGs reference these variables so
+   the drawing inherits the page theme rather than hard-coding two palettes. */
+:root {{
+  --card: #161b22;
+  --fg: #e6edf3;
+  --fg-dim: #8b949e;
+  --rule: #30363d;
+}}
+.note {{ color: #8b949e; font-size: 12.5px; margin: 0 0 10px; max-width: 78ch; }}
+.note em {{ color: #e6edf3; font-style: normal; font-weight: 600; }}
+.empty {{ color: #6e7681; font-size: 13px; font-style: italic; }}
+svg {{ display: block; max-width: 100%; overflow: visible; }}
+.split {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; }}
+.split h2 {{ margin-top: 0; }}
+.mono {{ font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }}
+.pill {{ display: inline-block; padding: 1px 8px; border-radius: 10px; color: #fff;
+         font-size: 11px; font-weight: 600; }}
+
 table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
 th, td {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid #21262d;
          vertical-align: top; }}
@@ -361,8 +410,43 @@ ol.timeline {{ list-style: none; padding-left: 0; margin: 0; border-left: 2px so
     <div class="card info"><div class="label">cost (USD)</div><div class="value">${cost}</div></div>
     <div class="card info"><div class="label">cache hit rate</div><div class="value">{cache_rate}</div></div>
     <div class="card info"><div class="label">events</div><div class="value">{events_count}</div></div>
+    <div class="card info"><div class="label">observations</div><div class="value">{observation_count}</div></div>
+    <div class="card info"><div class="label">regressions</div><div class="value">{episode_count}</div></div>
+    <div class="card danger"><div class="label">silent</div><div class="value">{silent_count}</div></div>
   </div>
 </header>
+
+<section>
+  <h2>Ground truth vs what the harness noticed</h2>
+  <p class="note">The upper band is what was <em>true</em>, recovered by replaying probes
+  the agent never saw. The lower row is what the Monitor <em>reported</em>. A red band with
+  green squares across it is a silent regression.</p>
+  {regression_svg}
+</section>
+
+<section>
+  <h2>Workflow</h2>
+  <p class="note">Steps by wave; edges are declared dependencies. Border colour is the
+  Monitor's verdict.</p>
+  {dag_svg}
+</section>
+
+<section>
+  <h2>Threads</h2>
+  <p class="note">One row per concurrent thread. Hover any point for its event.</p>
+  {lanes_svg}
+</section>
+
+<section class="split">
+  <div>
+    <h2>Models</h2>
+    {models_table}
+  </div>
+  <div>
+    <h2>Branches</h2>
+    {branches_table}
+  </div>
+</section>
 
 <section>
   <h2>Plan &amp; outcomes</h2>
