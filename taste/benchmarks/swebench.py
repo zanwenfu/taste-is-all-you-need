@@ -495,6 +495,23 @@ def task_text(instance: SWEInstance) -> str:
 # ------------------------------------------------------------------ workspace
 
 
+def _mirror_is_usable(mirror: Path) -> bool:
+    """Whether a cached mirror can actually answer for a commit.
+
+    Being a git directory is not enough, and the difference is not academic:
+    an interrupted `git clone --bare` leaves a directory that satisfies
+    `rev-parse --git-dir` while containing **zero commits**. Observed on two
+    of five mirrors during a dry run. Accepting one means the top-up fetch is
+    skipped, `git archive` fails, and the instance dies far from the cause.
+    """
+    probe = subprocess.run(
+        ["git", "rev-list", "--all", "--count"], cwd=mirror, capture_output=True, text=True
+    )
+    if probe.returncode != 0:
+        return False
+    return probe.stdout.strip().isdigit() and int(probe.stdout.strip()) > 0
+
+
 def fetch_repo(instance: SWEInstance, cache: Path) -> Path:
     """A local mirror of the instance's repository, cloned once and reused.
 
@@ -508,16 +525,11 @@ def fetch_repo(instance: SWEInstance, cache: Path) -> Path:
     cache = Path(cache)
     cache.mkdir(parents=True, exist_ok=True)
     mirror = cache / f"{instance.repo.replace('/', '__')}.git"
-    if mirror.exists():
-        # An interrupted clone leaves a directory that is not a repository.
-        # Left alone it poisons every later cell: `git cat-file` fails, the
-        # top-up fetch fails, and the instance dies for a reason that has
-        # nothing to do with the arm under test.
-        intact = subprocess.run(
-            ["git", "rev-parse", "--git-dir"], cwd=mirror, capture_output=True
-        )
-        if intact.returncode != 0:
-            shutil.rmtree(mirror, ignore_errors=True)
+    if mirror.exists() and not _mirror_is_usable(mirror):
+        # An interrupted clone leaves a directory that poisons every later
+        # cell on this repository: cat-file fails, the top-up fetch fails, and
+        # instances die for a reason that has nothing to do with the arm.
+        shutil.rmtree(mirror, ignore_errors=True)
     if not mirror.exists():
         subprocess.run(
             ["git", "clone", "--bare", "--quiet",

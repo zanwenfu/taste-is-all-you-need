@@ -326,3 +326,23 @@ def test_a_partial_mirror_is_replaced_not_reused(tmp_path: Path, monkeypatch) ->
 
     assert cloned, "an invalid mirror must be re-cloned, not reused"
     assert not (poisoned / "junk").exists(), "the poisoned directory survived"
+
+
+def test_a_mirror_that_is_a_git_dir_but_has_no_commits_is_rejected(tmp_path: Path) -> None:
+    """Being a git directory is not enough, and the gap is not academic.
+
+    An interrupted `git clone --bare` leaves a directory that satisfies
+    `rev-parse --git-dir` while containing zero commits. Observed on two of
+    five mirrors during a dry run. Accepting one skips the top-up fetch,
+    `git archive` then fails, and the instance dies far from the cause.
+    """
+    import subprocess as sp
+
+    cache = tmp_path / "mirrors"
+    empty = cache / "psf__requests.git"
+    empty.mkdir(parents=True)
+    sp.run(["git", "init", "--bare", "-q", str(empty)], check=True)
+    assert sp.run(["git", "rev-parse", "--git-dir"], cwd=empty,
+                  capture_output=True).returncode == 0, "fixture must look like a git dir"
+
+    assert swebench._mirror_is_usable(empty) is False
