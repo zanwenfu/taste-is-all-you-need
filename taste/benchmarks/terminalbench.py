@@ -43,8 +43,15 @@ from taste.replay import SuiteProbe
 
 CANARY = re.compile(r"<!--\s*harbor-canary[^>]*-->\s*", re.I)
 
-# Keywords that mark a task as a multi-hour build rather than a trial.
-_HEAVY = ("compiler", "kernel", "renderer", "rasterizer", "emulator", "browser")
+# Signals that a task is a multi-hour build rather than a trial. The list grew
+# after the first version scored `inference-engine-codegolf` as light: its
+# keywords are cuda / moe / multi-gpu / nccl, none of which mentioned building
+# anything, and the task needs hardware this project does not have.
+_HEAVY = (
+    "compiler", "kernel", "renderer", "rasterizer", "emulator", "browser",
+    "cuda", "gpu", "nccl", "inference", "serving", "wasm", "rust",
+    "operating-system", "database", "distributed",
+)
 
 
 @dataclass(frozen=True)
@@ -77,14 +84,26 @@ class HarborTask:
         return self.dockerfile.is_file() and self.test_script.is_file()
 
     @property
-    def is_long_running(self) -> bool:
-        """A heuristic, and deliberately conservative.
-
-        Getting this wrong in the cautious direction costs a warning; getting
-        it wrong the other way costs hours of compute and a large bill.
-        """
+    def heavy_signals(self) -> tuple[str, ...]:
+        """Which terms suggested this is a large build. Facts, not a verdict."""
         haystack = f"{self.name} {self.description} {' '.join(self.keywords)}".lower()
-        return any(word in haystack for word in _HEAVY)
+        return tuple(word for word in _HEAVY if word in haystack)
+
+    @property
+    def is_long_running(self) -> bool:
+        """A heuristic, and one that has already been wrong once.
+
+        The first version scored `inference-engine-codegolf` as light because
+        none of its keywords named a thing being built, and it is in fact a
+        multi-GPU CUDA task. Treat this as a prompt to check, never as a
+        budget guarantee — read :attr:`heavy_signals` and decide.
+
+        Note that every task in the published ``terminal-bench-challenges``
+        set is long-running by that set's own definition: it exists precisely
+        for "token-intensive, long-running, single task benchmarks". A task
+        from that repository should be assumed heavy whatever this returns.
+        """
+        return bool(self.heavy_signals)
 
 
 def load_task(root: Path) -> HarborTask:

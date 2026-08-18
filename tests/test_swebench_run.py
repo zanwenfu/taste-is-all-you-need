@@ -287,3 +287,42 @@ def test_the_agent_is_given_the_problem_and_not_the_oracle(
 def test_a_spec_can_be_supplied_without_touching_the_driver() -> None:
     execute = make_execute(spec=AgentSpec(name="custom", description="d", system_prompt="p"))
     assert callable(execute)
+
+
+def test_a_partial_mirror_is_replaced_not_reused(tmp_path: Path, monkeypatch) -> None:
+    """An interrupted clone leaves a directory that is not a repository.
+
+    Left alone it poisons every later cell on that repo: cat-file fails, the
+    top-up fetch fails, and instances die for a reason that has nothing to do
+    with the arm under test. Found when a clone was killed mid-run.
+    """
+    import subprocess as sp
+
+    cache = tmp_path / "mirrors"
+    poisoned = cache / "psf__requests.git"
+    poisoned.mkdir(parents=True)
+    (poisoned / "junk").write_text("not a repo")
+
+    real_run = sp.run
+    cloned: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        # `git rev-parse --git-dir` must really run so the validity check is
+        # the thing under test; only the network clone is stubbed.
+        if isinstance(args, list) and args[:2] == ["git", "clone"]:
+            cloned.append(args)
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+            return sp.CompletedProcess(args, 0, b"", b"")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(swebench.subprocess, "run", fake_run)
+
+    inst = swebench.SWEInstance(
+        instance_id="psf__requests-1", repo="psf/requests", base_commit="0" * 40,
+        problem_statement="x", test_patch="", version="2.27",
+        fail_to_pass=(), pass_to_pass=("t::a",),
+    )
+    swebench.fetch_repo(inst, cache)
+
+    assert cloned, "an invalid mirror must be re-cloned, not reused"
+    assert not (poisoned / "junk").exists(), "the poisoned directory survived"

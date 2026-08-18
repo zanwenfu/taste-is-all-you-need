@@ -150,6 +150,25 @@ def test_a_multi_hour_task_is_flagged_before_a_budget_is_committed(task_dir: Pat
     assert tb.load_task(task_dir).is_long_running is True
 
 
+def test_the_real_published_challenges_are_all_flagged() -> None:
+    """Pinned against the actual published keyword sets, because the first
+    version of this heuristic scored inference-engine-codegolf as light --
+    a multi-GPU CUDA task -- purely because none of its keywords named a thing
+    being built."""
+    cases = {
+        "inference-engine-codegolf": ["inference", "cuda", "moe", "multi-gpu", "llm-serving", "nccl"],
+        "rust-compiler-speedup": ["rust", "compiler", "performance", "systems-programming"],
+        "wasm-render": ["webgl", "glsl", "compiler", "rasterizer", "software-rendering", "wasm"],
+    }
+    for slug, keywords in cases.items():
+        task = tb.HarborTask(
+            name=f"terminal-bench/{slug}", description="", instruction="",
+            root=Path("/nonexistent"), keywords=tuple(keywords),
+        )
+        assert task.is_long_running, f"{slug} must be flagged before a budget is committed"
+        assert task.heavy_signals, f"{slug} should report why"
+
+
 def test_an_ordinary_task_is_not_flagged(tmp_path: Path) -> None:
     root = tmp_path / "small"
     root.mkdir()

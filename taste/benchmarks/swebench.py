@@ -497,6 +497,16 @@ def fetch_repo(instance: SWEInstance, cache: Path) -> Path:
     cache = Path(cache)
     cache.mkdir(parents=True, exist_ok=True)
     mirror = cache / f"{instance.repo.replace('/', '__')}.git"
+    if mirror.exists():
+        # An interrupted clone leaves a directory that is not a repository.
+        # Left alone it poisons every later cell: `git cat-file` fails, the
+        # top-up fetch fails, and the instance dies for a reason that has
+        # nothing to do with the arm under test.
+        intact = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=mirror, capture_output=True
+        )
+        if intact.returncode != 0:
+            shutil.rmtree(mirror, ignore_errors=True)
     if not mirror.exists():
         subprocess.run(
             ["git", "clone", "--bare", "--quiet",
