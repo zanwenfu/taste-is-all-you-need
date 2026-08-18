@@ -90,9 +90,9 @@ def main() -> int:
         print(f"  docker pull --platform linux/amd64 {image_for(everything[0])}")
         return 2
     chosen = pool[: args.instances]
-    print(f"{len(pool)} instance image(s) available locally; running {len(chosen)}:")
+    print(f"{len(pool)} instance image(s) available locally; running {len(chosen)}:", flush=True)
     for i in chosen:
-        print(f"  {i.instance_id:32s} {i.repo:26s} |P2P|={len(i.pass_to_pass)}")
+        print(f"  {i.instance_id:32s} {i.repo:26s} |P2P|={len(i.pass_to_pass)}", flush=True)
 
     # The dataset carries no image column, so resolve the published tag here.
     for i in chosen:
@@ -108,6 +108,10 @@ def main() -> int:
 
         return LLM(budget_usd=args.budget, cap_on="work")
 
+    def announce(record) -> None:
+        print(f"  [cell] {record.task:30s} {record.status:9s} "
+              f"${record.billed_usd:6.4f} {record.error or ''}", flush=True)
+
     started = time.time()
     report = run_sweep(
         tasks=[i.instance_id for i in chosen],
@@ -119,6 +123,7 @@ def main() -> int:
         ),
         execute=make_execute(llm_factory=llm_factory),
         score=make_score(ledger_dir=ledger),
+        on_cell=announce,
     )
 
     print(f"\n=== {len(report.results)} cells in {time.time()-started:.0f}s ===")

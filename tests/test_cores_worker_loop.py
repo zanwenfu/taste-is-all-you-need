@@ -240,3 +240,40 @@ def test_cache_tokens_are_recorded_from_usage(tmp_path: Path) -> None:
     llm = FakeLLM([FakeTurn(text="done", input_tokens=10, cache_read_tokens=990)])
     _run(llm, tmp_path)
     assert llm.stats.cache_hit_rate == pytest.approx(0.99)
+
+
+def test_a_plan_step_sent_as_a_json_string_still_parses() -> None:
+    """Found on a real planner call, which killed the run before a single
+    step executed.
+
+    The tool schema asks for objects and models mostly comply, but one
+    returned `steps` as a list of JSON strings -- "string indices must be
+    integers". Nested-object stringification differs across providers, so this
+    is portability, not a one-off.
+    """
+    from taste.cores import _coerce_step
+
+    encoded = '{"id": "step-01", "description": "do it", "verification": {"kind": "shell"}}'
+    assert _coerce_step(encoded)["id"] == "step-01"
+    assert _coerce_step({"id": "step-02"})["id"] == "step-02"
+
+
+def test_a_step_that_is_neither_object_nor_encoded_object_raises() -> None:
+    """Decoding a string is not the same as accepting anything. A plan we
+    cannot read must fail loudly rather than run half of itself."""
+    from taste.cores import _coerce_step
+
+    for bad in (["step-01"], 42, '"just a string"', "[1,2]"):
+        with pytest.raises((TypeError, ValueError)):
+            _coerce_step(bad)
+
+
+def test_the_error_names_the_shape_that_arrived() -> None:
+    """Without it the failure reads "string indices must be integers" with no
+    hint of which layer was wrong, and diagnosing it costs a run."""
+    from taste.cores import _describe_shape
+
+    assert _describe_shape({"steps": ["a", "b"]}) == "steps=list[str] n=2"
+    assert _describe_shape({"steps": [{"id": "x"}]}) == "steps=list[dict] n=1"
+    assert _describe_shape({"steps": "oops"}) == "steps=str"
+    assert _describe_shape("not a dict") == "str"

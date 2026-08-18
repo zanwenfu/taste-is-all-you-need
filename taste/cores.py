@@ -11,6 +11,7 @@ principle.
 from __future__ import annotations
 
 import contextlib
+import json
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -238,10 +239,11 @@ def plan(
                 verification=Verification(**s["verification"]),
                 depends_on=list(s.get("depends_on") or []),
             )
-            for s in payload["steps"]
+            for s in (_coerce_step(raw) for raw in payload["steps"])
         ]
-    except (KeyError, TypeError) as exc:
-        raise PlannerError(f"malformed plan payload: {exc}") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        shape = _describe_shape(payload)
+        raise PlannerError(f"malformed plan payload: {exc} (got {shape})") from exc
 
     if not steps:
         raise PlannerError("planner returned an empty step list")
@@ -644,6 +646,44 @@ def _run_llm_check(
 
 
 # ============================================================== helpers
+
+
+def _coerce_step(raw: Any) -> dict[str, Any]:
+    """One plan step, whatever shape the model actually emitted.
+
+    The tool schema asks for objects, and models mostly comply — but not
+    always: a real planner call returned ``steps`` as a list of JSON *strings*,
+    which failed with "string indices must be integers" and killed the whole
+    run before a single step executed. Nested-object stringification differs
+    across providers, so this is a portability issue rather than a one-off.
+
+    Decoding a string here is not the same as accepting anything: a value that
+    is neither an object nor an object-encoding string still raises, because a
+    plan we cannot read must fail loudly rather than run half of itself.
+    """
+    if isinstance(raw, str):
+        decoded = json.loads(raw)
+        if not isinstance(decoded, dict):
+            raise TypeError(f"plan step decoded to {type(decoded).__name__}, not an object")
+        return decoded
+    if isinstance(raw, dict):
+        return raw
+    raise TypeError(f"plan step is {type(raw).__name__}, not an object")
+
+
+def _describe_shape(payload: Any) -> str:
+    """A short description of what the planner sent, for the error message.
+
+    Without it the failure reads "string indices must be integers" with no
+    hint of which layer was wrong, and diagnosing it costs a run.
+    """
+    if not isinstance(payload, dict):
+        return type(payload).__name__
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        return f"steps={type(steps).__name__}"
+    kinds = sorted({type(s).__name__ for s in steps})
+    return f"steps=list[{'|'.join(kinds) or 'empty'}] n={len(steps)}"
 
 
 def _extract_tool_input(completion: Any, tool_name: str) -> dict[str, Any]:
