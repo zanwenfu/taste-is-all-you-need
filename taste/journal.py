@@ -375,6 +375,13 @@ def card_from_step(
         files=files,
         diff_lines=diff_lines,
         tool_calls=getattr(worker, "tool_calls", 0) or 0,
+        # Declared on the card since it existed and never populated, so every
+        # card in every run reported zero tool errors. Caught on a real run
+        # where the recovery table diagnosed R1.tool_errors -- correctly, the
+        # tooling really had raised -- while the audit trail beside it said
+        # there had been none. Anyone reading the cards would have concluded
+        # that tool errors never happen.
+        tool_errors=getattr(worker, "tool_errors", 0) or 0,
         stopped_reason=getattr(worker, "stopped_reason", "") or "",
         summary=getattr(worker, "summary", "") or "",
         cost_usd=cost_usd,

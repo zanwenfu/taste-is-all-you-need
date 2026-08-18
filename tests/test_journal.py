@@ -278,3 +278,31 @@ def test_journal_survives_a_failed_run(refactor_workspace: Path) -> None:
     assert result.status == "failed"
     text = (ws / ".git" / "taste" / "journal.jsonl").read_text()
     assert '"verdict": "fail"' in text
+
+
+def test_the_card_records_tool_errors() -> None:
+    """The field existed on the card from the start and was never populated,
+    so every card in every run reported zero tool errors.
+
+    Caught on a real run where the recovery table diagnosed R1.tool_errors --
+    correctly, the tooling really had raised -- while the card beside it said
+    there had been none. Anyone diagnosing from the audit trail would have
+    concluded tool errors never happen.
+    """
+    from taste.cores import Step, Verification, WorkerResult
+    from taste.journal import card_from_step
+
+    worker = WorkerResult(
+        summary="s", tool_calls=12, stopped_reason="end_turn",
+        tool_errors=3, tool_error_kinds=("TypeError", "KeyError"),
+    )
+    card = card_from_step(
+        session="s", branch="b", sha="abc", parent_sha=None,
+        step=Step(id="step-01", description="d",
+                  verification=Verification(kind="shell", command="true")),
+        attempt=1, verdict_passed=False, verdict_reason="r",
+        files=(), diff_lines=0, worker=worker,
+    )
+
+    assert card.tool_errors == 3, "the card must not under-report tool failures"
+    assert card.tool_calls == 12
