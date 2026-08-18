@@ -10,7 +10,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from taste import dashboard as dashboard_mod
+from taste import journal as journal_mod
 from taste.agent import AgentSpec
+from taste.config import HarnessConfig
 from taste.kernel import Event, Kernel, RunResult
 from taste.llm import LLM
 from taste.memory import Memory
@@ -42,6 +44,14 @@ def main() -> None:
 @click.option("--session", default=None, help="Session id (auto-generated if omitted).")
 @click.option("--base-ref", default="HEAD", help="Git ref to branch from.")
 @click.option("--max-retries", default=2, show_default=True, type=int)
+@click.option(
+    "--arm",
+    default=None,
+    help=(
+        "Harness configuration to run: A0, A2, A3, A3prime, tiered, full. "
+        "Omit for the original kernel with every subsystem off."
+    ),
+)
 def run_cmd(
     task: tuple[str, ...],
     agent_path: Path,
@@ -49,20 +59,25 @@ def run_cmd(
     session: str | None,
     base_ref: str,
     max_retries: int,
+    arm: str | None,
 ) -> None:
     """Run an agent on TASK. Every step becomes a commit on a fresh branch."""
     spec = AgentSpec.from_file(agent_path)
     task_text = " ".join(task)
 
-    console.print(
-        Panel.fit(
-            f"[bold]{spec.name}[/] — {spec.description}\n"
-            f"[dim]workspace:[/] {workspace}\n"
-            f"[dim]task:[/] {task_text}",
-            title="taste run",
-            border_style="cyan",
-        )
+    try:
+        config = HarnessConfig.arm(arm, max_retries=max_retries) if arm else None
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--arm") from exc
+
+    header = (
+        f"[bold]{spec.name}[/] — {spec.description}\n"
+        f"[dim]workspace:[/] {workspace}\n"
+        f"[dim]task:[/] {task_text}"
     )
+    if config is not None:
+        header += f"\n[dim]harness:[/] {config.label} [dim]({config.hash()})[/]"
+    console.print(Panel.fit(header, title="taste run", border_style="cyan"))
 
     llm = LLM()
     kernel = Kernel(
@@ -70,6 +85,7 @@ def run_cmd(
         llm=llm,
         max_retries=max_retries,
         on_event=_print_event,
+        config=config,
     )
     result = kernel.run(
         task=task_text,
@@ -98,6 +114,72 @@ def log_cmd(workspace: Path, session: str) -> None:
     for cp in reversed(history):
         table.add_row(cp.step_id, cp.short_sha, cp.message)
     console.print(table)
+
+
+@main.command("index")
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path.cwd(),
+)
+@click.option("--yaml", "as_yaml", is_flag=True, help="Render as YAML instead of a table.")
+@click.option("--limit", default=None, type=int, help="Show only the last N checkpoints.")
+@click.argument("session")
+def index_cmd(workspace: Path, session: str, as_yaml: bool, limit: int | None) -> None:
+    """Scan SESSION's checkpoints — the cheap read before paging in a diff.
+
+    One `git log` for the whole branch. Use `taste card <sha>` for one
+    checkpoint's detail, and plain `git show <sha>` for the full diff.
+    """
+    memory = Memory(workspace, f"taste/session-{session}")
+    index = journal_mod.load_index(memory)
+
+    if as_yaml:
+        console.print(index.to_yaml(limit=limit))
+        return
+
+    cards = index.cards[-limit:] if limit else index.cards
+    table = Table(title=f"Session {session} — {len(index.cards)} checkpoints")
+    table.add_column("sha", style="magenta")
+    table.add_column("step", style="cyan")
+    table.add_column("verdict")
+    table.add_column("files", justify="right")
+    table.add_column("cost", justify="right")
+    table.add_column("intent")
+    for card in cards:
+        verdict_style = {"pass": "green", "fail": "red"}.get(card.verdict, "dim")
+        table.add_row(
+            card.sha[:7],
+            card.step_id,
+            f"[{verdict_style}]{card.verdict}[/]",
+            str(len(card.files)) if card.files else "-",
+            f"${card.cost_usd:.4f}" if card.cost_usd else "-",
+            (card.intent[:60] + "…") if len(card.intent) > 60 else card.intent,
+        )
+    console.print(table)
+    if index.degraded:
+        console.print(f"[dim]{index.degraded} checkpoint(s) predate journalling[/]")
+
+
+@main.command("card")
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path.cwd(),
+)
+@click.option("--session", default=None, help="Session branch to read from.")
+@click.argument("sha")
+def card_cmd(workspace: Path, sha: str, session: str | None) -> None:
+    """Show one checkpoint's card — the node detail, without the full diff."""
+    branch = f"taste/session-{session}" if session else "HEAD"
+    memory = Memory(workspace, branch)
+    card = journal_mod.Journal(
+        memory, gitdir=Path(memory.repo.git_dir) / "taste"
+    ).read(sha)
+    if card is None:
+        console.print(f"[yellow]no card for {sha}[/] — try `git show {sha}`")
+        raise SystemExit(1)
+    console.print(Panel.fit(card.to_yaml_block(), title=f"card {card.sha[:7]}"))
 
 
 @main.command("dashboard")

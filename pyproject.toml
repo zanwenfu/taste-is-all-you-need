@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+openai = ["openai>=3.0"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
@@ -52,9 +53,16 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-# simulate.py is a runnable script that adjusts sys.path so it works both
-# via `python examples/refactor_demo/simulate.py` and `python -m ...`.
+# Runnable scripts that adjust sys.path before importing taste, so they work
+# both via `python <path>` and `python -m ...`.
 "examples/refactor_demo/simulate.py" = ["E402", "I001"]
+"scripts/*.py" = ["E402"]
+# Vendored verbatim from the SWE-bench harness so the regexes stay diffable
+# against upstream. Auditability is the entire point of these files, and a
+# reformat that "modernises" an import or collapses a multi-line condition
+# destroys the line-for-line correspondence a reviewer needs to check them.
+"taste/benchmarks/swebench_log.py" = ["UP", "SIM", "B", "RUF", "E"]
+"taste/benchmarks/swebench_specs.py" = ["UP", "SIM", "B", "RUF", "E"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

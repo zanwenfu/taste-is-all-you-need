@@ -10,14 +10,23 @@ principle.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from taste.agent import AgentSpec
-from taste.llm import LLM, MODEL_MONITOR, MODEL_PLANNER, MODEL_WORKER, cached
-from taste.memory import Memory
+from taste.llm import (
+    LLM,
+    MODEL_MONITOR,
+    MODEL_PLANNER,
+    MODEL_WORKER,
+    cached,
+    static_system,
+)
+from taste.memory import Checkpoint, Memory
 from taste.tools import ToolRegistry
 
 
@@ -177,11 +186,26 @@ PLAN_TOOL = {
 }
 
 
-def plan(llm: LLM, task: str, spec: AgentSpec, workspace_summary: str) -> Plan:
-    """Ask the Planner model to decompose ``task`` into steps with verifications."""
+def plan(
+    llm: LLM,
+    task: str,
+    spec: AgentSpec,
+    workspace_summary: str,
+    *,
+    model: str | None = None,
+) -> Plan:
+    """Ask the Planner model to decompose ``task`` into steps with verifications.
+
+    ``spec.model`` deliberately does NOT reach the Planner: the agent spec's
+    model field configures the Worker only. Letting it override every role
+    (the pre-Wave-0 behavior) made the model-size role split inexpressible —
+    an audited validity threat. Pass ``model=`` explicitly to override.
+    """
     system = [
-        cached(PLANNER_SYSTEM),
-        cached(f"Agent capability:\n{spec.description}\n\nAgent instructions:\n{spec.system_prompt}"),
+        static_system(
+            PLANNER_SYSTEM,
+            f"Agent capability:\n{spec.description}\n\nAgent instructions:\n{spec.system_prompt}",
+        ),
     ]
     messages = [
         {
@@ -194,11 +218,12 @@ def plan(llm: LLM, task: str, spec: AgentSpec, workspace_summary: str) -> Plan:
         }
     ]
     response = llm.call(
-        model=spec.model or MODEL_PLANNER,
+        model=model or MODEL_PLANNER,
         system=system,
         messages=messages,
         tools=[PLAN_TOOL],
         max_tokens=4096,
+        role="planner",
     )
     try:
         payload = _extract_tool_input(response, "submit_plan")
@@ -226,6 +251,55 @@ def plan(llm: LLM, task: str, spec: AgentSpec, workspace_summary: str) -> Plan:
 # ============================================================== Worker
 
 
+@dataclass(frozen=True)
+class ToolDecision:
+    """What the harness says about a tool call the worker wants to make."""
+
+    action: Literal["allow", "rewrite", "veto"] = "allow"
+    payload: dict[str, Any] | None = None
+    """Replacement arguments, for ``rewrite``."""
+    message: str | None = None
+    """Returned to the model as the tool result, for ``veto``. The model must
+    learn *why* it was stopped, or it will simply try again."""
+    reason: str = ""
+
+
+ALLOW = ToolDecision()
+
+
+@dataclass(frozen=True)
+class Interrupt:
+    """A reason to stop a worker mid-flight."""
+
+    kind: str
+    detail: str
+    turn: int
+    failure_kind: Literal["task", "infra", "budget"] = "task"
+
+
+class TurnHook(Protocol):
+    """The only callback surface on the worker loop. A closed set of four
+    methods, deliberately.
+
+    Every implementation must be fail-open: it catches its own exceptions and
+    returns the no-op value. A broken hook degrades the run to unguarded
+    behavior; it must never be the reason a run halts.
+    """
+
+    def before_turn(self, turn: int) -> Interrupt | None: ...
+    def before_tool(self, turn: int, name: str, payload: dict[str, Any]) -> ToolDecision: ...
+    def after_tool(
+        self,
+        turn: int,
+        name: str,
+        payload: dict[str, Any],
+        output: str,
+        elapsed_s: float,
+        decision: ToolDecision,
+    ) -> None: ...
+    def after_turn(self, turn: int, message: Any, stop_reason: str) -> None: ...
+
+
 WORKER_SYSTEM = """You are a Worker core in an Agent OS. You execute exactly one planned step.
 
 Rules:
@@ -242,6 +316,11 @@ class WorkerResult:
     summary: str
     tool_calls: int
     stopped_reason: str
+    tool_errors: int = 0
+    tool_error_kinds: tuple[str, ...] = ()
+    vetoes: int = 0
+    interrupt: Interrupt | None = None
+    turns: int = 0
 
 
 def execute(
@@ -252,47 +331,77 @@ def execute(
     plan_context: str,
     tools: ToolRegistry,
     max_turns: int = 12,
+    hook: TurnHook | None = None,
+    guidance: str | None = None,
+    mode: Literal["fresh", "repair"] = "fresh",
 ) -> WorkerResult:
-    """Run the Anthropic tool-use loop for a single step.
+    """Run the model's tool-use loop for a single step.
 
     Returns a :class:`WorkerResult` describing what happened. The kernel is
     responsible for turning the filesystem changes into a commit.
+
+    ``hook`` is the only extension point: it may veto or rewrite a tool call
+    before it runs, and may interrupt between turns. ``guidance`` is prior
+    feedback to carry in, and ``mode`` frames the task as fresh work or as a
+    repair of what is already on disk.
     """
+    # One consolidated static block (crosses the cache minimum) + the plan
+    # context on its own breakpoint (stable across the turns of a step, so the
+    # tool-loop turns hit cache; varies across steps/retries).
     system = [
-        cached(WORKER_SYSTEM),
-        cached(f"Agent capability:\n{spec.description}\n\nAgent instructions:\n{spec.system_prompt}"),
+        static_system(
+            WORKER_SYSTEM,
+            f"Agent capability:\n{spec.description}\n\nAgent instructions:\n{spec.system_prompt}",
+        ),
         cached(f"Plan so far:\n{plan_context}"),
     ]
-    messages: list[dict[str, Any]] = [
-        {
-            "role": "user",
-            "content": (
-                f"Current step ({step.id}): {step.description}\n\n"
-                "Execute only this step. Stop when it's done."
-            ),
-        }
-    ]
+    framing = (
+        "Execute only this step. Stop when it's done."
+        if mode == "fresh"
+        else (
+            "A previous attempt at this step is already on disk and did not pass. "
+            "Repair it in place — build on what is there rather than starting over. "
+            "Stop when it's done."
+        )
+    )
+    opening = f"Current step ({step.id}): {step.description}\n\n{framing}"
+    if guidance:
+        opening += f"\n\nWhat went wrong before:\n{guidance}"
+    messages: list[dict[str, Any]] = [{"role": "user", "content": opening}]
 
     tool_calls = 0
+    tool_errors = 0
+    error_kinds: list[str] = []
+    vetoes = 0
     summary = ""
     stop_reason = "unknown"
+    interrupt: Interrupt | None = None
+    turns = 0
 
-    for _ in range(max_turns):
-        response = llm.call(
+    for turn in range(1, max_turns + 1):
+        turns = turn
+        if hook is not None:
+            interrupt = _safe_before_turn(hook, turn)
+            if interrupt is not None:
+                stop_reason = "interrupted"
+                break
+
+        completion = llm.call(
             model=spec.model or MODEL_WORKER,
             system=system,
             messages=messages,
             tools=tools.to_anthropic(),
             max_tokens=4096,
+            role="worker",
         )
-        stop_reason = response.stop_reason or "unknown"
-        assistant_blocks = [_block_to_dict(b) for b in response.content]
-        messages.append({"role": "assistant", "content": assistant_blocks})
+        stop_reason = completion.stop_reason
+        messages.append({"role": "assistant", "content": list(completion.transcript_blocks)})
 
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
-        text_blocks = [b for b in response.content if b.type == "text"]
-        if text_blocks:
-            summary = text_blocks[-1].text
+        tool_uses = completion.tool_calls
+        if completion.text_blocks:
+            summary = completion.text_blocks[-1]
+        if hook is not None:
+            _safe_after_turn(hook, turn, completion, stop_reason)
 
         if stop_reason == "end_turn" or not tool_uses:
             break
@@ -300,10 +409,35 @@ def execute(
         tool_results = []
         for call in tool_uses:
             tool_calls += 1
-            try:
-                output = tools.invoke(call.name, dict(call.input))
-            except Exception as exc:  # surface to the model, don't crash the loop
-                output = f"TOOL ERROR ({type(exc).__name__}): {exc}"
+            payload = dict(call.arguments)
+            decision = _safe_before_tool(hook, turn, call.name, payload) if hook else ALLOW
+
+            if decision.action == "veto":
+                vetoes += 1
+                # The refusal goes back as the tool's result: a model that is
+                # not told why it was stopped simply tries again.
+                output = decision.message or f"BLOCKED: {decision.reason}"
+            else:
+                if decision.action == "rewrite" and decision.payload is not None:
+                    payload = decision.payload
+                started = time.monotonic()
+                try:
+                    output = tools.invoke(call.name, payload)
+                except Exception as exc:  # surface to the model, don't crash the loop
+                    tool_errors += 1
+                    error_kinds.append(type(exc).__name__)
+                    output = f"TOOL ERROR ({type(exc).__name__}): {exc}"
+                if hook is not None:
+                    _safe_after_tool(
+                        hook,
+                        turn,
+                        call.name,
+                        payload,
+                        output,
+                        time.monotonic() - started,
+                        decision,
+                    )
+
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -317,7 +451,47 @@ def execute(
         summary=summary or "(no summary emitted)",
         tool_calls=tool_calls,
         stopped_reason=stop_reason,
+        tool_errors=tool_errors,
+        tool_error_kinds=tuple(dict.fromkeys(error_kinds)),
+        vetoes=vetoes,
+        interrupt=interrupt,
+        turns=turns,
     )
+
+
+def _safe_after_turn(hook: TurnHook, turn: int, message: Any, stop_reason: str) -> None:
+    """Observation callbacks are advisory; a hook never breaks the loop."""
+    with contextlib.suppress(Exception):
+        hook.after_turn(turn, message, stop_reason)
+
+
+def _safe_after_tool(
+    hook: TurnHook,
+    turn: int,
+    name: str,
+    payload: dict[str, Any],
+    output: str,
+    elapsed_s: float,
+    decision: ToolDecision,
+) -> None:
+    with contextlib.suppress(Exception):
+        hook.after_tool(turn, name, payload, output, elapsed_s, decision)
+
+
+def _safe_before_turn(hook: TurnHook, turn: int) -> Interrupt | None:
+    try:
+        return hook.before_turn(turn)
+    except Exception:
+        return None
+
+
+def _safe_before_tool(
+    hook: TurnHook, turn: int, name: str, payload: dict[str, Any]
+) -> ToolDecision:
+    try:
+        return hook.before_tool(turn, name, payload)
+    except Exception:
+        return ALLOW  # fail open: a broken guard must not block real work
 
 
 # ============================================================== Monitor
@@ -333,6 +507,11 @@ class MonitorResult:
         status = "PASS" if self.passed else "FAIL"
         return f"[{status}] {self.reason}"
 
+
+# The Monitor judges deterministically on purpose — its verdicts gate commits.
+# Recorded in the run manifest; keep manifest and call site in sync via this
+# constant, never an inline literal.
+MONITOR_TEMPERATURE = 0.0
 
 MONITOR_SYSTEM = """You are the Monitor core in an Agent OS.
 
@@ -371,14 +550,20 @@ def evaluate(
     workspace: Path,
     llm: LLM | None = None,
     monitor_model: str = MODEL_MONITOR,
+    before: Checkpoint | None = None,
 ) -> MonitorResult:
     """Evaluate the current step's verification.
 
     Shell verifications are executed in ``workspace`` and pass iff exit 0. LLM
-    verifications delegate to the Monitor model, which sees the diff produced
-    by the latest checkpoint and is asked to judge against natural-language
-    criteria. Deterministic checks are preferred because they are cheap,
-    reproducible, and immune to the self-praise failure mode.
+    verifications delegate to the Monitor model, which judges the worker's
+    *uncommitted* changes against natural-language criteria. Deterministic
+    checks are preferred because they are cheap, reproducible, and immune to
+    the self-praise failure mode.
+
+    ``before`` is the pre-step checkpoint the kernel anchored on. It defines
+    what "the worker's changes" means: everything between that commit and the
+    current working tree. Without it we fall back to HEAD, which is correct
+    but attributes any pre-existing uncommitted state to this step.
     """
     v = step.verification
     if v.kind == "shell":
@@ -386,7 +571,7 @@ def evaluate(
     if v.kind == "llm":
         if llm is None:
             raise ValueError("LLM verification requested but no LLM provided.")
-        return _run_llm_check(v.criteria or "", step, memory, llm, monitor_model)
+        return _run_llm_check(v.criteria or "", step, memory, llm, monitor_model, before=before)
     raise ValueError(f"unknown verification kind: {v.kind}")
 
 
@@ -418,17 +603,25 @@ def _run_llm_check(
     memory: Memory,
     llm: LLM,
     model: str,
+    *,
+    before: Checkpoint | None = None,
 ) -> MonitorResult:
-    head = memory.head()
-    diff = memory.diff(head.parent_sha or head.sha, head.sha) if head.parent_sha else ""
-    system = [cached(MONITOR_SYSTEM)]
+    # The judge must see what the worker JUST did. Verification runs before
+    # the kernel commits, so the changes are still uncommitted — diffing the
+    # last commit against its parent would grade the *previous* step's work.
+    anchor = before.sha if before is not None else memory.head().sha
+    diff = memory.diff_pending(anchor)
+    # Single consolidated block for consistency with the other cores. Note the
+    # monitor prompt alone sits below the cache minimum on Haiku-class models,
+    # so this block may not cache — shell monitors (the default) dominate runs.
+    system = [static_system(MONITOR_SYSTEM)]
     messages = [
         {
             "role": "user",
             "content": (
                 f"Step: {step.id} — {step.description}\n\n"
                 f"Criteria:\n{criteria}\n\n"
-                f"Diff of the Worker's checkpoint ({head.short_sha}):\n"
+                f"The Worker's changes (uncommitted, since {anchor[:7]}):\n"
                 f"```diff\n{_tail(diff, 400)}\n```"
             ),
         }
@@ -439,36 +632,28 @@ def _run_llm_check(
         messages=messages,
         tools=[VERDICT_TOOL],
         max_tokens=1024,
-        temperature=0.0,
+        temperature=MONITOR_TEMPERATURE,
+        role="monitor",
     )
     verdict = _extract_tool_input(response, "report_verdict")
     return MonitorResult(
         passed=bool(verdict["passed"]),
         reason=str(verdict["reason"]),
-        evidence=f"judged on diff {head.short_sha}",
+        evidence=f"judged on pending changes since {anchor[:7]}",
     )
 
 
 # ============================================================== helpers
 
 
-def _extract_tool_input(response, tool_name: str) -> dict[str, Any]:  # type: ignore[no-untyped-def]
-    for block in response.content:
-        if block.type == "tool_use" and block.name == tool_name:
-            return dict(block.input)
+def _extract_tool_input(completion: Any, tool_name: str) -> dict[str, Any]:
+    """The arguments of the named tool call, whichever provider produced it."""
+    for call in completion.tool_calls:
+        if call.name == tool_name:
+            return dict(call.arguments)
     raise RuntimeError(
-        f"model did not call `{tool_name}` (stop_reason={response.stop_reason})"
+        f"model did not call `{tool_name}` (stop_reason={completion.stop_reason})"
     )
-
-
-def _block_to_dict(block: Any) -> dict[str, Any]:
-    """Convert an Anthropic SDK content block back into the raw dict form."""
-    if block.type == "text":
-        return {"type": "text", "text": block.text}
-    if block.type == "tool_use":
-        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
-    # Thinking and other block types pass through via model_dump
-    return block.model_dump()
 
 
 def _tail(text: str, max_lines: int) -> str:

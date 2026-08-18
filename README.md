@@ -152,7 +152,7 @@ The dashboard reads four runtime artifacts — `plan.json`, `monitor/*.json`, `.
                  ┌───────────────────────────────────────────────────────┐
                  │                       Kernel                          │
                  │   plan → waves of [ worker × N → monitor × N          │
-                 │                    → merge worktrees into session ]   │
+                 │                    → integrate worktrees into session ]│
                  └─────────┬─────────┬────────────┬──────────────────────┘
                            │         │            │
                            ▼         ▼            ▼
@@ -173,19 +173,45 @@ The dashboard reads four runtime artifacts — `plan.json`, `monitor/*.json`, `.
                     native Python + lazy-loaded CLI descriptors
 ```
 
+**On a step failure, the kernel does not simply retry.** It reads a fault
+frame, names the fault against a deterministic rule table, and dispatches a
+typed action — the trap-handler layer:
+
+```
+FAIL → observe (free)      exit code, diff, fingerprint, blast radius
+     → probe  (free, $0)   was this check already failing before the step ran?
+     → diagnose            12 rules, first match wins, zero model calls
+     → decide              accept │ reverify │ retry │ repair │ rollback │ halt
+```
+
 Each module pulls one concept from the blog's OS analogy:
 
 | File | Thesis role | What it owns |
 |---|---|---|
-| [taste/memory.py](taste/memory.py) | *Persistent storage + virtual memory* | Session branches, checkpoints, rollback, `git show` demand paging |
+| [taste/memory.py](taste/memory.py) | *Persistent storage + virtual memory* | Session branches, checkpoints, rollback, `git show` demand paging, worktrees, notes |
 | [taste/cores.py](taste/cores.py) | *Multi-core CPU* | Planner / Worker / Monitor as pure functions over Memory |
 | [taste/kernel.py](taste/kernel.py) | *Scheduler* | The orchestration loop; the only module that decides when to commit or roll back |
+| [taste/recovery.py](taste/recovery.py) | *Trap handler* | Fault frame, failure taxonomy, rule table, action space, recovery policies |
+| [taste/journal.py](taste/journal.py) | *Inode table* | One scannable card per checkpoint; attempt anchors that survive rollback |
+| [taste/guardrails.py](taste/guardrails.py) | *Memory-protection bits* | Pre-execution veto on tool calls; substrate protection; budget ceiling |
+| [taste/integrate.py](taste/integrate.py) | *Transaction commit* | Two-phase merge and the union gate over the combined tree |
+| [taste/config.py](taste/config.py) | *Boot configuration* | `HarnessConfig` — every switch in one object, with a hash that names the arm |
 | [taste/agent.py](taste/agent.py) | *Package manager* | `agent_desp.md` parsing, `@agent` decorator, global registry |
 | [taste/tools.py](taste/tools.py) | *Syscalls* | Native Python tools **and** filesystem-walked CLI tools (98.7% token pattern) |
-| [taste/llm.py](taste/llm.py) | *I/O layer* | Anthropic client with ephemeral prompt caching + cache hit telemetry |
-| [taste/cli.py](taste/cli.py) | *Task manager* | `taste run` / `taste log` — htop for agent runs |
+| [taste/llm.py](taste/llm.py) | *I/O layer* | Model client with prompt caching, retries, per-role cost telemetry, budget caps |
+| [taste/cli.py](taste/cli.py) | *Task manager* | `taste run` / `log` / `index` / `card` — htop for agent runs |
 
-None of these modules import each other in a cycle. Delete `cores.Monitor` (say, because the next model self-evaluates reliably) and nothing else breaks — the Kernel just reads the pass/fail flag and moves on.
+None of these modules import each other in a cycle, and **every subsystem
+above the kernel is off by default**. That is not a disclaimer, it is the
+central discipline: each one is a bet against the model, so each must be
+independently removable. A test asserts that the default configuration
+reproduces the original kernel's event stream and commit chain exactly —
+"build to delete" is a checked property here, not an intention.
+
+```python
+Kernel(workspace=ws, config=HarnessConfig.arm("full"))   # everything on
+Kernel(workspace=ws)                                      # the original kernel
+```
 
 ## Quickstart with a real Claude
 
@@ -243,17 +269,25 @@ def python_refactor_agent(task: str) -> str:
 pytest -v
 ```
 
-40 tests across five files. The load-bearing ones:
+209 tests, none of which need an API key. The load-bearing ones:
 
 ```
 tests/test_kernel_rollback.py   step-87 rollback story (real pytest as Monitor)
 tests/test_memory.py            git primitives + worktrees + merge conflict as typed exception
 tests/test_parallel.py          parallel waves, atomic merge, event stream integrity
-tests/test_dashboard.py         self-contained HTML artifact from run artifacts
-tests/test_agent_spec.py        agent_desp.md frontmatter parser + @agent decorator
+tests/test_recovery.py          fault frame, rule table, action space, arms, baseline probe
+tests/test_guardrails.py        tool veto, substrate protection, budget ceiling, fail-open
+tests/test_integrate.py         two-phase merge; a semantic conflict git happily merges
+tests/test_journal.py           checkpoint cards, anchors, index; and that OFF writes nothing
+tests/test_golden_baseline.py   the frozen run signature every subsystem must reproduce when off
+tests/test_cores_worker_loop.py the model-facing tool loop, driven by a scripted LLM
 ```
 
-If those go green, the core claims of this repo are empirically true, not just argued.
+If those go green, the core claims of this repo are empirically true, not just
+argued. `tests/golden.py` is worth a look on its own: it reduces a run to a
+fingerprint — event-kind sequence, payload keys, commit chain, per-step
+outcomes — with SHAs and timings excluded, so "this subsystem changes nothing
+when disabled" is a single assertion rather than a hope.
 
 ## What's shipped vs what's next
 
@@ -264,14 +298,17 @@ If those go green, the core claims of this repo are empirically true, not just a
 | A — Credibility | Real Claude end-to-end, recorded transcript ([todo_api/runs/polished.md](examples/todo_api/runs/polished.md)), cost + token telemetry surfaced, planner hardened against weak verifications |
 | B — Multi-core | `Step.depends_on` DAG, `Memory.add_worktree` / `merge_branch` / `MergeConflict`, Kernel parallel wave execution, recorded parallel run ([parallel_demo/runs/parallel.md](examples/parallel_demo/runs/parallel.md)) |
 | C — Transparency | JSONL event stream (outside tracked tree to survive rollback), self-contained HTML dashboard, `taste dashboard` CLI command, [screenshots](docs/img/) |
+| D — Recovery | A step failure became a *fault*: `taste/recovery.py` reads a fault frame, names it against a 12-rule deterministic table at zero model cost, and dispatches one of seven typed actions. Recovery policies are configuration, so the same kernel expresses self-verification, repair-in-place, rollback, and an attempt-matched no-reset control |
+| E — Memory & protection | `taste/journal.py` — a scannable card per checkpoint in git notes, plus attempt anchors that keep a rolled-back attempt readable. `taste/guardrails.py` — pre-execution veto on tool calls, substrate protection, per-step budget ceiling |
+| F — Integration | `taste/integrate.py` — two-phase merge (compute in the object store, verify, then move refs) and a union gate that catches combinations which merge cleanly and break anyway |
 
 **Deliberately held back:**
 
-- **LLM-judge monitor in production.** The `llm` verification kind is implemented and tested, but no real run uses it. It comes in when a task has subjective criteria the test suite can't express ("docstrings are clear").
-- **CLI tool discovery in the default registry.** `discover_cli_tools()` works (tested), but no example uses it. A later demo will showcase the lazy-loaded filesystem registry end-to-end.
-- **Semantic merge resolution.** Acknowledged-hard per the blog. Current design sidesteps by requiring disjoint worktrees per worker; `MergeConflict` halts the run so a human can intervene.
-- **Autonomous parallelism selection.** The Planner will parallelize when the task tells it to; having it spot parallel opportunities on its own is prompt-engineering territory, not a kernel change.
-- **Long-horizon real-model rollback.** The step-87 story is proven hermetically in `tests/test_kernel_rollback.py`; reproducing it with a real Claude requires a task hard enough that the model reliably stumbles. Natural future demo.
+- **Inter-agent communication.** Workers still cannot ask for data another step produced. The syscall shape is designed (a request the kernel resolves by paging from a verified branch, or by scheduling a producer) but not built — and free-form agent-to-agent chat is rejected outright, because nothing should cross an agent boundary that a Monitor has not passed.
+- **Agent provisioning.** Fetching an agent definition from the internet and feeding it to a worker's system prompt is remote code execution with extra steps. Not built, and not planned until execution is containerized.
+- **LLM merge resolution.** `git merge-tree` computes conflicts exactly and for free; a model asked to *resolve* one over-merges, inventing a combination no step produced — which is precisely the contamination this harness exists to detect.
+- **The guardrail boundary is a speed bump, not a sandbox.** A denylist over a shell string is defeated by `sh -c`, `eval`, or a variable. It catches the common accidental case and records every attempt. The real boundary is a container with no network and no `.env` in scope.
+- **Long-horizon real-model rollback.** The step-87 story is proven hermetically; reproducing it with a real model requires a task hard enough that it reliably stumbles.
 
 Everything on the "held back" list can be added without breaking the kernel's public API — that's what *build to delete* buys you.
 

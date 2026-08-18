@@ -19,3 +19,10 @@ htmlcov/
 .DS_Store
 *.swp
 .taste-runs/
+
+# Internal research/strategy docs — not part of the public project.
+docs/
+docs/eval_protocol.md
+
+# Dataset snapshots: 8MB of JSONL, pinned by digest in data/*.sha256
+data/*.jsonl

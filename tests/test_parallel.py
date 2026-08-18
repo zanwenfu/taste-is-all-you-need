@@ -8,7 +8,6 @@ into the session.
 from __future__ import annotations
 
 import json
-import subprocess
 import threading
 from pathlib import Path
 
@@ -16,41 +15,9 @@ import pytest
 
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
-from taste.kernel import Event, Kernel
+from taste.kernel import Event, Kernel, current_step
 
 # -------------------------------------------------------------- fixtures
-
-
-@pytest.fixture
-def parallel_workspace(tmp_path: Path) -> Path:
-    """Small repo with 3 independent modules — the parallel demo target.
-
-    Modules are disjoint by construction: workers can edit all three in
-    parallel without any merge conflicts.
-    """
-    ws = tmp_path / "parallel"
-    ws.mkdir()
-
-    (ws / "math_utils.py").write_text("def add(a, b):\n    return a + b\n")
-    (ws / "string_utils.py").write_text("def upper(s):\n    return s.upper()\n")
-    (ws / "list_utils.py").write_text("def head(xs):\n    return xs[0] if xs else None\n")
-    tests = ws / "tests"
-    tests.mkdir()
-    (tests / "test_math.py").write_text("from math_utils import add\ndef test_add(): assert add(1, 2) == 3\n")
-    (tests / "test_string.py").write_text("from string_utils import upper\ndef test_upper(): assert upper('hi') == 'HI'\n")
-    (tests / "test_list.py").write_text("from list_utils import head\ndef test_head(): assert head([1]) == 1\n")
-    (ws / "conftest.py").write_text(
-        "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent))\n"
-    )
-
-    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
-    subprocess.run(["git", "add", "."], cwd=ws, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=p", "-c", "user.email=p@p.local", "commit", "-q", "-m", "init"],
-        cwd=ws,
-        check=True,
-    )
-    return ws
 
 
 def _parallel_plan() -> Plan:
@@ -129,19 +96,11 @@ def test_parallel_wave_runs_on_worktrees_and_merges_back(parallel_workspace: Pat
         if step.id == "step-01":
             (ws / "SMOKE.md").write_text("ok\n")
             return WorkerResult(summary="smoke", tool_calls=0, stopped_reason="end_turn")
-        # Parallel steps: worker edits a module inside its worktree.
-        # We use the Step to resolve the target; the path comes from the thread
-        # since only the worktree's Memory knows where it lives.
-        import inspect
-        # Grab the Memory for the calling step from the Kernel's frame.
-        frame = inspect.currentframe()
-        while frame is not None:
-            if "memory" in frame.f_locals and frame.f_locals["memory"].branch.endswith(step.id):
-                wt_path = frame.f_locals["memory"].repo_path
-                break
-            frame = frame.f_back
-        else:
-            raise RuntimeError("could not find worktree memory in stack")
+        # Parallel steps: worker edits a module inside its own worktree. The
+        # kernel publishes which one via CURRENT_STEP.
+        ctx = current_step()
+        assert ctx.step.id == step.id
+        wt_path = ctx.workspace
 
         witnesses[step.id] = wt_path
         start_latches[step.id].set()
@@ -191,23 +150,10 @@ def test_parallel_wave_halt_when_any_worker_fails(parallel_workspace: Path) -> N
         if step.id == "step-01":
             (ws / "SMOKE.md").write_text("ok\n")
         elif step.id == "step-03":
-            # Corrupt string_utils so pytest fails on the worktree.
-            # (We have to find the worktree path via the call stack again.)
-            import inspect
-            frame = inspect.currentframe()
-            while frame is not None:
-                if "memory" in frame.f_locals and frame.f_locals["memory"].branch.endswith(step.id):
-                    (frame.f_locals["memory"].repo_path / "string_utils.py").write_text("def broken(\n")
-                    break
-                frame = frame.f_back
+            # Corrupt string_utils so pytest fails on this worker's worktree.
+            (current_step().workspace / "string_utils.py").write_text("def broken(\n")
         else:
-            import inspect
-            frame = inspect.currentframe()
-            while frame is not None:
-                if "memory" in frame.f_locals and frame.f_locals["memory"].branch.endswith(step.id):
-                    _type_hint_module(frame.f_locals["memory"].repo_path / _module_for(step.id))
-                    break
-                frame = frame.f_back
+            _type_hint_module(current_step().workspace / _module_for(step.id))
         return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
 
     events: list[Event] = []
@@ -242,13 +188,7 @@ def test_session_events_record_every_parallel_step(parallel_workspace: Path) -> 
         if step.id == "step-01":
             (ws / "SMOKE.md").write_text("ok\n")
             return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
-        import inspect
-        frame = inspect.currentframe()
-        while frame is not None:
-            if "memory" in frame.f_locals and frame.f_locals["memory"].branch.endswith(step.id):
-                _type_hint_module(frame.f_locals["memory"].repo_path / _module_for(step.id))
-                break
-            frame = frame.f_back
+        _type_hint_module(current_step().workspace / _module_for(step.id))
         return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
 
     Kernel(workspace=ws, max_retries=0).run(

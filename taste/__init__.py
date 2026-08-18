@@ -6,14 +6,18 @@ Public surface:
 
 from taste.agent import AgentSpec, agent
 from taste.kernel import Kernel, RunResult
+from taste.llm import BudgetExceeded, InfraFailure, PricingError
 from taste.memory import Checkpoint, Memory
 from taste.tools import Tool, tool
 
 __all__ = [
     "AgentSpec",
+    "BudgetExceeded",
     "Checkpoint",
+    "InfraFailure",
     "Kernel",
     "Memory",
+    "PricingError",
     "RunResult",
     "Tool",
     "agent",

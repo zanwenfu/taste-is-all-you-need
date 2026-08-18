@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import re
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,6 +173,34 @@ class Memory:
             args += ["--", path]
         return self.repo.git.diff(*args)
 
+    def diff_pending(self, from_ref: str) -> str:
+        """Diff the *uncommitted* working tree against ``from_ref``.
+
+        The Monitor runs before the kernel checkpoints, so at verification
+        time the worker's changes exist only in the working tree. Staging
+        first (``git add --all``) is what makes untracked files visible to
+        ``git diff``; it commits nothing, and the kernel's own checkpoint
+        stages identically a moment later.
+        """
+        self.repo.git.add("--all", ".")
+        return self.repo.git.diff("--cached", from_ref)
+
+    def changed_files(self, from_ref: str) -> list[str]:
+        """Paths that differ between ``from_ref`` and the working tree."""
+        self.repo.git.add("--all", ".")
+        out = self.repo.git.diff("--cached", "--name-only", from_ref)
+        return [line for line in out.splitlines() if line.strip()]
+
+    def numstat_pending(self, from_ref: str) -> str:
+        """``git diff --numstat`` for the *uncommitted* tree against ``from_ref``.
+
+        Staging first is required for untracked files to appear at all; the
+        kernel's checkpoint stages identically a moment later, so this
+        changes nothing about what ends up committed.
+        """
+        self.repo.git.add("--all", ".")
+        return self.repo.git.diff("--cached", "--numstat", from_ref)
+
     def log(self, *, limit: int | None = None, branch: str | None = None) -> list[Checkpoint]:
         """Return checkpoints (most-recent first) for the session branch."""
         target = branch or self.branch
@@ -183,6 +212,62 @@ class Memory:
 
     def working_tree_dirty(self) -> bool:
         return self.repo.is_dirty(untracked_files=True)
+
+    # ------------------------------------------------------------------ notes & anchors
+
+    def write_note(self, sha: str, body: str, *, ref: str) -> None:
+        """Attach ``body`` to commit ``sha`` under the notes ref ``ref``.
+
+        Notes live outside the working tree, so a note is invisible to the
+        diff the Monitor judges, survives ``reset --hard``, and never
+        participates in a merge — the three properties that disqualify a
+        tracked sidecar file for run metadata.
+        """
+        self.repo.git.notes("--ref", ref, "add", "-f", "-m", body, sha)
+
+    def read_note(self, sha: str, *, ref: str) -> str | None:
+        """Return the note attached to ``sha``, or None if there is none."""
+        try:
+            return self.repo.git.notes("--ref", ref, "show", sha)
+        except GitCommandError:
+            return None
+
+    def anchor(self, ref: str, sha: str) -> None:
+        """Point a ref at ``sha`` so the commit stays reachable.
+
+        A hard reset makes the discarded commits unreachable and therefore
+        garbage-collectable. Anchoring first is what turns "the rolled-back
+        attempt" from a lost object into something a human can still read.
+        """
+        self.repo.git.update_ref(ref, sha)
+
+    def list_refs(self, prefix: str) -> list[tuple[str, str]]:
+        """(ref name, sha) for every ref under ``prefix``."""
+        out = self.repo.git.for_each_ref("--format=%(refname) %(objectname)", prefix)
+        pairs = []
+        for line in out.splitlines():
+            if " " in line:
+                name, sha = line.rsplit(" ", 1)
+                pairs.append((name.strip(), sha.strip()))
+        return pairs
+
+    def delete_ref(self, ref: str) -> None:
+        with contextlib.suppress(GitCommandError):
+            self.repo.git.update_ref("-d", ref)
+
+    def commit_subjects(self, branch: str | None = None, *, limit: int | None = None) -> list[tuple[str, str]]:
+        """(sha, subject) pairs for ``branch``, newest first — one git call."""
+        args = ["--format=%H%x00%s"]
+        if limit:
+            args.append(f"--max-count={limit}")
+        args.append(branch or self.branch)
+        out = self.repo.git.log(*args)
+        pairs = []
+        for line in out.splitlines():
+            if "\x00" in line:
+                sha, subject = line.split("\x00", 1)
+                pairs.append((sha, subject))
+        return pairs
 
     # ------------------------------------------------------------------ worktrees
 
@@ -218,6 +303,33 @@ class Memory:
 
         self.repo.git.worktree("add", "-b", branch, str(wt_path), base_ref)
         return Memory(wt_path, branch)
+
+    @contextlib.contextmanager
+    def probe_worktree(self, ref: str):
+        """A throwaway detached worktree at ``ref``, removed on exit.
+
+        Used to answer a question about the past — "was this check already
+        failing before the step ran?" — without disturbing the session
+        branch or the working tree the agent is using.
+        """
+        root = self.repo_path.parent / ".taste-worktrees" / "_probe"
+        root.mkdir(parents=True, exist_ok=True)
+        # Not id(self): CPython reuses addresses after collection, so two
+        # Memory objects probing the same ref can land on the same path. The
+        # `worktree add` then fails on an existing directory, the caller
+        # catches it, and the probe records "error" — a hole in the timeline
+        # that looks exactly like a clean observation.
+        path = root / f"probe-{ref[:12]}-{uuid.uuid4().hex[:8]}"
+        self.repo.git.worktree("add", "--detach", str(path), ref)
+        try:
+            yield path
+        finally:
+            with contextlib.suppress(GitCommandError):
+                self.repo.git.worktree("remove", "--force", str(path))
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+                with contextlib.suppress(GitCommandError):
+                    self.repo.git.worktree("prune")
 
     def remove_worktree(self, other: Memory, *, force: bool = True) -> None:
         """Prune the worktree that ``other`` is bound to. Safe to call twice."""
