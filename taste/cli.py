@@ -11,6 +11,7 @@ from rich.table import Table
 
 from taste import dashboard as dashboard_mod
 from taste import journal as journal_mod
+from taste import viz as viz_mod
 from taste.agent import AgentSpec
 from taste.config import HarnessConfig
 from taste.kernel import Event, Kernel, RunResult
@@ -180,6 +181,31 @@ def card_cmd(workspace: Path, sha: str, session: str | None) -> None:
         console.print(f"[yellow]no card for {sha}[/] — try `git show {sha}`")
         raise SystemExit(1)
     console.print(Panel.fit(card.to_yaml_block(), title=f"card {card.sha[:7]}"))
+
+
+@main.command("report")
+@click.option("--workspace", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=Path.cwd(), help="Workspace containing a .taste/ directory.")
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="Where to write the HTML. Defaults to <workspace>/.taste/report.html.")
+@click.option("--ledger", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=None, help="A sweep ledger directory. Builds the index across all cells.")
+@click.option("--no-diffs", is_flag=True, help="Skip per-observation diffs (much smaller file).")
+def report_cmd(workspace: Path, output: Path | None, ledger: Path | None, no_diffs: bool) -> None:
+    """Interactive HTML report: click an observation to see what changed there."""
+    if ledger is not None:
+        path = viz_mod.write_index(ledger, output=output)
+        label = "sweep index"
+    else:
+        path = viz_mod.write_run(workspace, output=output, with_diffs=not no_diffs)
+        label = "run report"
+    console.print(
+        Panel.fit(
+            f"{label}:  [cyan]{path}[/]\n"
+            f"Open with:  [dim]open {path}[/]  (macOS)  |  [dim]xdg-open {path}[/]  (Linux)",
+            title="taste report", border_style="cyan",
+        )
+    )
 
 
 @main.command("dashboard")
