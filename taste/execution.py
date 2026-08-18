@@ -310,6 +310,28 @@ class DockerSandbox:
             network_disabled=True,
             auto_remove=False,
         )
+        self._assert_workdir()
+
+    def _assert_workdir(self) -> None:
+        """Fail loudly now rather than silently on every command later.
+
+        Docker resolves the exec working directory at *start*, so if it does
+        not exist every subsequent exec dies with exit 127 and the OCI error
+        text on **stdout**. Downstream that parses as "no results for any
+        graded test" — an infrastructure hole, which is the correct
+        classification but the wrong moment to discover it: the whole
+        instance would replay as holes and score as a clean run.
+        """
+        probe = self.container.exec_run(
+            ["test", "-d", self.workdir], demux=False
+        )
+        code = probe[0] if isinstance(probe, tuple) else probe.exit_code
+        if code != 0:
+            self.close()
+            raise RuntimeError(
+                f"workdir {self.workdir!r} does not exist in image {self.image!r}; "
+                "every command would fail with exit 127 and be recorded as a hole"
+            )
 
     def exec(
         self, command: str, *, timeout: int = 600, env: dict[str, str] | None = None

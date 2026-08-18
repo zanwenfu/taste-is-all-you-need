@@ -145,9 +145,15 @@ class _FakeContainer:
         self.archives: list[tuple[str, bytes]] = []
         self.removed = False
         self.next_result: tuple[int, tuple[bytes, bytes]] = (0, (b"ok", b""))
+        self.workdir_ok = 0
 
     def exec_run(self, cmd, workdir=None, environment=None, demux=False):
         self.execs.append({"cmd": cmd, "workdir": workdir, "environment": environment})
+        # The workdir probe is issued once at open and is not the command
+        # under test; a fake that answered it with the canned result would
+        # make every timeout/exit-code test fail at construction instead.
+        if isinstance(cmd, list) and cmd[:2] == ["test", "-d"]:
+            return (self.workdir_ok, (b"", b""))
         return self.next_result
 
     def put_archive(self, path, data):
@@ -197,7 +203,7 @@ def test_timeouts_are_enforced_inside_the_container() -> None:
     sandbox = DockerSandbox(image="i", name="t", client=client)
     sandbox.exec("pytest -q", timeout=42)
 
-    issued = client.containers.container.execs[0]["cmd"][-1]
+    issued = client.containers.container.execs[-1]["cmd"][-1]  # [0] is the workdir probe
     assert "timeout --signal=KILL 42" in issued
     assert "pytest -q" in issued
 
@@ -253,3 +259,28 @@ def test_importing_this_module_does_not_require_docker() -> None:
     import sys
 
     assert "docker" not in sys.modules
+
+
+def test_a_missing_workdir_fails_loudly_at_open() -> None:
+    """Found by running against a real daemon for the first time.
+
+    Docker resolves the exec working directory at start, so a missing workdir
+    makes every later command exit 127 with the OCI error on *stdout*.
+    Downstream that classifies as "no results for any graded test" -- correct,
+    but discovered far too late: the whole instance replays as holes and
+    scores as a clean run.
+    """
+    client = _FakeClient()
+    client.containers.container.workdir_ok = 1  # `test -d` reports missing
+
+    with pytest.raises(RuntimeError, match="does not exist in image"):
+        DockerSandbox(image="i", name="t", client=client)
+
+    assert client.containers.container.removed, "a failed open must not leak the container"
+
+
+def test_the_workdir_is_checked_before_any_command_runs() -> None:
+    client = _FakeClient()
+    DockerSandbox(image="i", name="t", workdir="/testbed", client=client)
+    first = client.containers.container.execs[0]["cmd"]
+    assert first == ["test", "-d", "/testbed"]

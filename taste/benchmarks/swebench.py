@@ -484,6 +484,62 @@ def task_text(instance: SWEInstance) -> str:
 # ------------------------------------------------------------------ workspace
 
 
+def fetch_repo(instance: SWEInstance, cache: Path) -> Path:
+    """A local mirror of the instance's repository, cloned once and reused.
+
+    Cloning per cell would be absurd — django is hundreds of megabytes and a
+    sweep touches the same repo dozens of times — so the clone is cached per
+    repository and every cell copies a working tree out of it.
+
+    The mirror is bare and fetched with full history because ``base_commit``
+    is usually not on any branch tip; a shallow clone cannot reach it.
+    """
+    cache = Path(cache)
+    cache.mkdir(parents=True, exist_ok=True)
+    mirror = cache / f"{instance.repo.replace('/', '__')}.git"
+    if not mirror.exists():
+        subprocess.run(
+            ["git", "clone", "--bare", "--quiet",
+             f"https://github.com/{instance.repo}.git", str(mirror)],
+            check=True, capture_output=True,
+        )
+    have = subprocess.run(
+        ["git", "cat-file", "-e", f"{instance.base_commit}^{{commit}}"],
+        cwd=mirror, capture_output=True,
+    )
+    if have.returncode != 0:
+        # The mirror predates this instance's commit; top it up rather than
+        # re-cloning several hundred megabytes.
+        subprocess.run(["git", "fetch", "--quiet", "origin", "+refs/*:refs/*"],
+                       cwd=mirror, check=False, capture_output=True)
+    return mirror
+
+
+def materialize_from_repo(
+    instance: SWEInstance, dest: Path, *, cache: Path, mirror: Path | None = None
+) -> Path:
+    """A working tree at the instance's ``base_commit``, with no history.
+
+    The tree is extracted with ``git archive`` rather than checked out, so the
+    upstream history never reaches the workspace at all. That is not tidiness:
+    read-only git is deliberately available to workers, and a real clone would
+    let an agent read the upstream fix for its own issue — and every later
+    commit that references it — straight out of the object database.
+    """
+    mirror = Path(mirror) if mirror else fetch_repo(instance, cache)
+    workspace = Path(dest)
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True)
+
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", instance.base_commit],
+        cwd=mirror, capture_output=True, check=True,
+    )
+    subprocess.run(["tar", "-x", "-C", str(workspace)], input=archive.stdout, check=True)
+    return _init_workspace(instance, workspace)
+
+
 def materialize(instance: SWEInstance, dest: Path, *, source: Path | None = None) -> Path:
     """An isolated working tree at ``base_commit`` for one cell.
 
@@ -510,6 +566,12 @@ def materialize(instance: SWEInstance, dest: Path, *, source: Path | None = None
             source, workspace, symlinks=True, dirs_exist_ok=True,
             ignore=shutil.ignore_patterns(".git"),
         )
+
+    return _init_workspace(instance, workspace)
+
+
+def _init_workspace(instance: SWEInstance, workspace: Path) -> Path:
+    """A fresh single-commit repository over whatever is already in the tree."""
 
     def git(*args: str) -> None:
         subprocess.run(["git", *args], cwd=workspace, check=True, capture_output=True)
