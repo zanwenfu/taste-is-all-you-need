@@ -352,15 +352,26 @@ def build_eval_script(instance: SWEInstance, *, workdir: str = "/testbed") -> st
     return "\n".join(
         part
         for part in (
+            # Everything on one stream, in the order a terminal would show it.
+            # django's runner reports results on STDERR while the markers below
+            # go to STDOUT, so without this the results land *after* the end
+            # marker once the streams are concatenated and the slice misses
+            # them entirely -- every test reads as a hole.
+            "exec 2>&1",
             "source /opt/miniconda3/bin/activate && conda activate testbed",
             f"cd {workdir}",
             setup,
             f"git config --global --add safe.directory {workdir}",
             f"git checkout {instance.base_commit} -- {graded}",
             f"git apply -v - <<'TASTE_TEST_PATCH'\n{instance.test_patch}\nTASTE_TEST_PATCH",
-            f": '{START_MARKER}'",
+            # `echo`, not `:`. The shell's null command accepts an argument and
+            # prints nothing, so the marker never reached the log, the slice
+            # found no start, and the parser returned no results at all --
+            # which classified every graded test as an infrastructure hole on
+            # a run where pytest had in fact reported them perfectly.
+            f"echo '{START_MARKER}'",
             f"{spec.test_cmd} {directives}".strip(),
-            f": '{END_MARKER}'",
+            f"echo '{END_MARKER}'",
             f"git checkout {instance.base_commit} -- {graded}",
         )
         if part

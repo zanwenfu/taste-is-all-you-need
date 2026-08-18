@@ -398,3 +398,58 @@ def test_the_agent_is_never_told_the_test_names(dataset: Path) -> None:
 def test_the_repo_is_the_clustering_unit(dataset: Path) -> None:
     instances = load_dataset(dataset)
     assert {i.repo_short for i in instances} == {"django", "sympy", "astropy"}
+
+
+def test_the_markers_are_echoed_not_shell_no_ops(dataset: Path) -> None:
+    """Found by running against a real SWE-bench image.
+
+    `: 'MARKER'` is the shell null command: it accepts the argument and prints
+    NOTHING. The marker never reached the log, the slice found no start, and
+    parse_eval_output returned {} -- so every graded test was classified as an
+    infrastructure hole on a run where pytest had reported all 13 of them
+    perfectly. An entire sweep would have read as "no results anywhere".
+    """
+    script = build_eval_script(load_dataset(dataset)[0])
+    assert f"echo '{START_MARKER}'" in script
+    assert f"echo '{END_MARKER}'" in script
+    assert f": '{START_MARKER}'" not in script, "the null command prints nothing"
+
+
+def test_stderr_is_folded_into_stdout(dataset: Path) -> None:
+    """django reports test results on STDERR while the markers go to STDOUT.
+
+    Concatenated afterwards, the results land *after* the end marker and the
+    slice misses them entirely -- so django, 46% of the frame, would report
+    every test as a hole even with the markers fixed.
+    """
+    script = build_eval_script(load_dataset(dataset)[0])
+    assert script.splitlines()[0] == "exec 2>&1", (
+        "the redirect must come first, or anything failing before it is lost"
+    )
+
+
+def test_a_real_pytest_log_round_trips(tmp_path: Path) -> None:
+    """The exact shape captured from a real image run.
+
+    Uses a pytest repository deliberately: the fixture dataset is django,
+    whose runner has a different grammar entirely, and feeding pytest output
+    to the django parser is how this test was wrong the first time.
+    """
+    path = tmp_path / "d.jsonl"
+    path.write_text(json.dumps(_row(
+        "astropy__astropy-1", "astropy/astropy", version="5.1",
+        p2p=["astropy/tests/test_x.py::test_a", "astropy/tests/test_x.py::test_b"],
+    )))
+    instance = load_dataset(path)[0]
+
+    log = (
+        "Applied patch cleanly.\n"
+        f"{START_MARKER}\n"
+        "PASSED astropy/tests/test_x.py::test_a\n"
+        "FAILED astropy/tests/test_x.py::test_b\n"
+        "===================== 1 failed, 1 passed in 0.42s =====================\n"
+        f"{END_MARKER}\n"
+    )
+    parsed = parse_eval_output(instance, log)
+    assert parsed.get("astropy/tests/test_x.py::test_a") == "PASSED"
+    assert parsed.get("astropy/tests/test_x.py::test_b") == "FAILED"
