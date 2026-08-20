@@ -277,3 +277,44 @@ def test_the_error_names_the_shape_that_arrived() -> None:
     assert _describe_shape({"steps": [{"id": "x"}]}) == "steps=list[dict] n=1"
     assert _describe_shape({"steps": "oops"}) == "steps=str"
     assert _describe_shape("not a dict") == "str"
+
+
+def test_a_malformed_plan_is_retried_with_the_complaint_fed_back() -> None:
+    """Measured on real tasks: a single bad tool call killed 2 of 6 runs.
+
+    Once with steps as JSON strings, once with `steps` missing entirely. Each
+    was recorded as a *task* failure, so it would have counted as evidence
+    about whichever arm happened to draw it.
+    """
+    from taste.cores import plan
+    from tests.fakes import FakeLLM, FakeTurn
+
+    good = {"steps": [{"id": "step-01", "description": "d",
+                       "verification": {"kind": "shell", "command": "true"}}]}
+    llm = FakeLLM([
+        FakeTurn(tool_calls=[("submit_plan", {"steps": None})]),
+        FakeTurn(tool_calls=[("submit_plan", good)]),
+    ])
+    spec = AgentSpec(name="a", description="", system_prompt="p")
+
+    result = plan(llm, "task", spec, "summary")
+
+    assert [s.id for s in result.steps] == ["step-01"]
+    assert len(llm.calls) == 2, "the planner must be asked again"
+    retry = llm.calls[-1]["messages"][-1]["content"]
+    assert "could not be read" in retry and "steps=NoneType" in retry, (
+        "the model must be told what actually arrived, not just asked again"
+    )
+
+
+def test_a_planner_that_never_complies_still_fails() -> None:
+    """Retrying is not the same as accepting. A genuine refusal must surface."""
+    import pytest
+
+    from taste.cores import PlannerError, plan
+    from tests.fakes import FakeLLM, FakeTurn
+
+    llm = FakeLLM([FakeTurn(tool_calls=[("submit_plan", {"steps": None})]) for _ in range(3)])
+    with pytest.raises(PlannerError, match="malformed plan payload"):
+        plan(llm, "task", AgentSpec(name="a", description="", system_prompt="p"), "s")
+    assert len(llm.calls) == 3, "bounded, not infinite"

@@ -194,6 +194,7 @@ def plan(
     workspace_summary: str,
     *,
     model: str | None = None,
+    attempts: int = 3,
 ) -> Plan:
     """Ask the Planner model to decompose ``task`` into steps with verifications.
 
@@ -201,6 +202,15 @@ def plan(
     model field configures the Worker only. Letting it override every role
     (the pre-Wave-0 behavior) made the model-size role split inexpressible —
     an audited validity threat. Pass ``model=`` explicitly to override.
+
+    **A malformed plan is retried, with the complaint fed back.** Measured on
+    real tasks, a single bad tool call killed **2 of 6 runs** outright — once
+    with steps as JSON strings, once with the ``steps`` field missing entirely
+    — and each was recorded as a *task* failure, so it would have counted as
+    evidence about whichever arm happened to draw it. A schema violation on
+    one sample is a transient model failure, not an outcome, and telling the
+    model exactly what arrived fixes it far more often than asking again
+    blindly. Genuine refusals still fail after the last attempt.
     """
     system = [
         static_system(
@@ -218,14 +228,43 @@ def plan(
             ),
         }
     ]
-    response = llm.call(
-        model=model or MODEL_PLANNER,
-        system=system,
-        messages=messages,
-        tools=[PLAN_TOOL],
-        max_tokens=4096,
-        role="planner",
-    )
+    last: PlannerError | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        response = llm.call(
+            model=model or MODEL_PLANNER,
+            system=system,
+            messages=messages,
+            tools=[PLAN_TOOL],
+            max_tokens=4096,
+            role="planner",
+        )
+        try:
+            return _plan_from(task, response)
+        except PlannerError as exc:
+            last = exc
+            if attempt == attempts:
+                break
+            # Feed the complaint back. A model told *what arrived* corrects it;
+            # one asked again blindly usually repeats itself.
+            messages = [
+                *messages,
+                {"role": "assistant", "content": "(previous submit_plan call)"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"That plan could not be read: {exc}. "
+                        "Call submit_plan again. `steps` must be a JSON array of "
+                        "objects, each with `id`, `description`, and a "
+                        "`verification` object — not strings, and not omitted."
+                    ),
+                },
+            ]
+    raise last or PlannerError("planner produced no usable plan")
+
+
+def _plan_from(task: str, response: Any) -> Plan:
+    """One planner response, parsed. Raises :class:`PlannerError` on anything
+    it cannot read, so the retry loop above has a single thing to catch."""
     try:
         payload = _extract_tool_input(response, "submit_plan")
     except RuntimeError as exc:
