@@ -11,6 +11,7 @@ from rich.table import Table
 
 from taste import dashboard as dashboard_mod
 from taste import journal as journal_mod
+from taste import server as server_mod
 from taste import viz as viz_mod
 from taste.agent import AgentSpec
 from taste.config import HarnessConfig
@@ -181,6 +182,25 @@ def card_cmd(workspace: Path, sha: str, session: str | None) -> None:
         console.print(f"[yellow]no card for {sha}[/] — try `git show {sha}`")
         raise SystemExit(1)
     console.print(Panel.fit(card.to_yaml_block(), title=f"card {card.sha[:7]}"))
+
+
+@main.command("serve")
+@click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=Path.cwd(), help="Directory to scan for runs.")
+@click.option("--port", default=8765, show_default=True, type=int)
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Bound to localhost by default: the console has no auth.")
+def serve_cmd(root: Path, port: int, host: str) -> None:
+    """Live console. Watch runs as they happen, step by step."""
+    console.print(
+        Panel.fit(
+            f"Console:  [cyan]http://{host}:{port}[/]\n"
+            f"Watching: [dim]{root.resolve()}[/]\n"
+            f"[dim]Ctrl-C to stop.[/]",
+            title="taste serve", border_style="cyan",
+        )
+    )
+    server_mod.serve_forever(root, host=host, port=port)
 
 
 @main.command("report")
