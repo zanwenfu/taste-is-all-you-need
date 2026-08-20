@@ -43,6 +43,28 @@ from taste.replay import SuiteProbe
 
 CANARY = re.compile(r"<!--\s*harbor-canary[^>]*-->\s*", re.I)
 
+DEPENDENCY_IGNORES = """\
+# Installed dependencies and build output are not the agent's work, and
+# counting them as such defeats attribution rather than merely adding noise.
+# Measured on wasm-render: one `npm install` put 3,640 of 3,641 "changed
+# files" into a single observation. `modified_files_at` is the set the
+# coverage rule intersects against, so when everything reads as modified that
+# term goes vacuous and any coverage overlap links -- attributing essentially
+# everything and erasing the phenomenon the rule exists to isolate.
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+target/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.tox/
+*.egg-info/
+"""
+
 # Signals that a task is a multi-hour build rather than a trial. The list grew
 # after the first version scored `inference-engine-codegolf` as light: its
 # keywords are cuda / moe / multi-gpu / nccl, none of which mentioned building
@@ -210,6 +232,7 @@ def materialize(task: HarborTask, dest: Path) -> Path:
     if environment.is_dir():
         shutil.copytree(environment, workspace, dirs_exist_ok=True)
     (workspace / "INSTRUCTION.md").write_text(task_text(task), encoding="utf-8")
+    (workspace / ".gitignore").write_text(DEPENDENCY_IGNORES, encoding="utf-8")
 
     def git(*args: str) -> None:
         subprocess.run(["git", *args], cwd=workspace, check=True, capture_output=True)
