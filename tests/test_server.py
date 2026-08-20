@@ -46,7 +46,8 @@ RUNNING = [
     {"ts": 1.1, "kind": "plan.ready", "payload": {"steps": 2}},
     {"ts": 1.2, "kind": "step.begin", "payload": {"id": "step-01", "attempt": 1}},
 ]
-FINISHED = RUNNING + [
+FINISHED = [
+    *RUNNING,
     {"ts": 2.0, "kind": "run.done",
      "payload": {"status": "completed", "elapsed": 1.0, "cost_usd": 0.5}},
 ]
@@ -175,6 +176,7 @@ def test_the_console_binds_to_localhost_by_default() -> None:
 
 def test_the_server_answers_its_own_endpoints(tmp_path: Path) -> None:
     import threading
+    import urllib.error
     import urllib.request
 
     from taste.server import serve
@@ -192,7 +194,9 @@ def test_the_server_answers_its_own_endpoints(tmp_path: Path) -> None:
         )
         assert len(runs) == 1 and runs[0]["instance"] == "inst-h"
 
-        with pytest.raises(Exception):
+        # An unknown run must 404 rather than 500 or hang.
+        with pytest.raises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/api/run/nope", timeout=5)
+        assert caught.value.code == 404
     finally:
         httpd.shutdown()
