@@ -157,6 +157,54 @@ class RunResult:
 # ================================================================= kernel
 
 
+@dataclass
+class _ObservingHook:
+    """Adds a shadow observation after every tool call, wrapping any inner hook.
+
+    Composition rather than replacement: guardrails are an arm-defining
+    subsystem, and an observer bolted onto them would only fire in arms that
+    guard — making observation density follow the treatment, which is the
+    exact bias a finer grid is meant to remove.
+
+    Observation runs **after** the inner hook, so a veto is already recorded
+    before the tree is sampled, and the sample reflects what actually
+    happened rather than what was attempted.
+
+    Fail-open, per the TurnHook contract. A hook must never be the reason a
+    run halts, and an instrument that can halt the thing it measures is worse
+    than no instrument.
+    """
+
+    observe: Callable[[str], None]
+    inner: Any = None
+
+    def before_turn(self, turn: int) -> Any:
+        return self.inner.before_turn(turn) if self.inner is not None else None
+
+    def before_tool(self, turn: int, name: str, payload: dict[str, Any]) -> Any:
+        if self.inner is not None:
+            return self.inner.before_tool(turn, name, payload)
+        return cores.ALLOW
+
+    def after_tool(
+        self, turn: int, name: str, payload: dict[str, Any],
+        output: str, elapsed_s: float, decision: Any,
+    ) -> None:
+        if self.inner is not None:
+            with contextlib.suppress(Exception):
+                self.inner.after_tool(turn, name, payload, output, elapsed_s, decision)
+        # A read-only tool leaves the tree byte-identical, and ShadowLog
+        # already declines to write a commit for an unchanged tree — so no
+        # tool classification is needed here, and none is done.
+        with contextlib.suppress(Exception):
+            self.observe(name)
+
+    def after_turn(self, turn: int, message: Any, stop_reason: str) -> None:
+        if self.inner is not None:
+            with contextlib.suppress(Exception):
+                self.inner.after_turn(turn, message, stop_reason)
+
+
 class Kernel:
     """The orchestrator. Owns the loop; owns nothing else.
 
@@ -192,6 +240,7 @@ class Kernel:
         two_phase_merge: bool = False,
         union_gate: bool = True,
         shadow: bool = False,
+        observe_tools: bool = False,
         config: HarnessConfig | None = None,
     ) -> None:
         # A HarnessConfig names an entire arm in one object and one hash. When
@@ -210,6 +259,7 @@ class Kernel:
             two_phase_merge = resolved["two_phase_merge"]
             union_gate = resolved["union_gate"]
             shadow = resolved["shadow"]
+            observe_tools = resolved["observe_tools"]
         self.config = config
         self.workspace = Path(workspace).resolve()
         self.llm = llm
@@ -236,6 +286,9 @@ class Kernel:
         # invisible to the agent, the Monitor and the session branch — it
         # exists to measure the run, not to participate in it.
         self.shadow_enabled = shadow
+        # A finer observation grid. See HarnessConfig.observe_tools for why
+        # this is a pre-registered protocol knob and not a default.
+        self.observe_tools = observe_tools
         self._shadow: ShadowLog | None = None
         # Planner model is a kernel knob, NOT spec.model: the agent spec's
         # model field configures the Worker only (role-split invariant).
@@ -633,9 +686,11 @@ class Kernel:
         reverifying = False
         worker = WorkerResult("", 0, "unknown")
         attempt_started = time.time()
-        # One guard per STEP, not per attempt: rebuilt each attempt it would
-        # re-baseline its spend and turn a step ceiling into a per-attempt one.
-        guard = self._guard_for(workspace)
+        # One hook per STEP, not per attempt: a guard rebuilt each attempt
+        # would re-baseline its spend and turn a step ceiling into a
+        # per-attempt one. The observer inside it reads the attempt number
+        # lazily for the same reason — the hook outlives every attempt.
+        guard = self._hook_for(workspace, step, lambda: attempts)
 
         while attempts <= self.max_retries:
             if reverifying:
@@ -1064,6 +1119,30 @@ class Kernel:
             config=self.guard_config,
             cost_reader=(lambda: self.llm.stats.total_cost_usd) if self.llm else None,
             on_event=lambda kind, **payload: self._emit(kind, **payload),
+        )
+
+    def _hook_for(
+        self, workspace: Path, step: Step, attempt_of: Callable[[], int]
+    ) -> cores.TurnHook | None:
+        """The worker's callback surface: guard, observer, both, or neither.
+
+        The observer must not be attached to the guard. Guardrails are an
+        *arm-defining* subsystem that some arms switch off, so hanging the
+        observation grid off it would make the grid follow the treatment —
+        precisely the confound a finer grid exists to remove.
+
+        ``attempt_of`` is read at call time rather than captured: one hook is
+        built per step and lives across every attempt, so a bound integer
+        would stamp every observation with the first attempt's number.
+        """
+        guard = self._guard_for(workspace)
+        if not (self.observe_tools and self._shadow is not None):
+            return guard
+        return _ObservingHook(
+            inner=guard,
+            observe=lambda tool: self._observe(
+                step_id=step.id, attempt=attempt_of(), trigger="tool", tool=tool
+            ),
         )
 
     def _worker(

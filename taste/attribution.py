@@ -99,11 +99,19 @@ def harness_failures(
     for commit in timeline:
         if session and commit.session != session:
             continue
-        # A step may be observed more than once; the worker observation is the
-        # one the Monitor graded.
-        key = (commit.step_id, commit.attempt)
-        if key not in index or commit.trigger == "worker":
-            index[key] = commit
+        # The Monitor evaluates *after* the worker finishes, so the tree it
+        # graded is the LAST observation of that (step_id, attempt) —
+        # whatever produced it.
+        #
+        # This used to prefer the `worker`-triggered commit and otherwise keep
+        # the first. Under the per-tool grid that is wrong in a way that
+        # matters: the final tool observation already captures the tree the
+        # worker left, so ShadowLog dedupes the boundary commit away, no
+        # `worker` observation exists, and the fallback pinned the failure to
+        # the *earliest* tree of the attempt — understating detection latency
+        # and attributing the failure to a tree that did not yet contain the
+        # break.
+        index[(commit.step_id, commit.attempt)] = commit
 
     failures: list[MonitorFailure] = []
     for event in events:

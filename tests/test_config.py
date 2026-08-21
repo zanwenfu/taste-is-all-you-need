@@ -143,6 +143,7 @@ def test_kernel_kwargs_covers_every_switch() -> None:
         "recovery_config",
         "guard_config",
         "two_phase_merge",
+        "observe_tools",
         "union_gate",
         "shadow",
     }

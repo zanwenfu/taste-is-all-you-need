@@ -64,6 +64,21 @@ class HarnessConfig:
     two_phase_merge: bool = False
     union_gate: bool = True
     shadow: bool = False
+    observe_tools: bool = False
+    """Observe after every tool call, not only at step boundaries.
+
+    Off by default because it changes the observation grid, which is a
+    pre-registered quantity rather than an implementation detail — and
+    because the frozen ablation signature is defined against the coarse grid.
+
+    Measured on a real 5-instance sweep, the per-attempt grid produced **10
+    observations across 5 runs**: only 5 adjacent pairs in which a PASS→FAIL
+    transition could be seen at all, against 70 tool calls. Worse than low
+    power, that grid is *treatment-dependent* — an arm that retries emits up
+    to 3 observations per step where a no-retry arm emits 1, so the recovering
+    arm samples its own timeline more finely purely by recovering, biasing the
+    event count toward the hypothesis.
+    """
     """Observational checkpointing. Required for the four regression metrics,
     and uniform across arms by design — an arm that never checkpoints has no
     timeline of its own to measure against."""
@@ -170,6 +185,7 @@ def kernel_kwargs(config: HarnessConfig) -> dict:
         "two_phase_merge": config.two_phase_merge,
         "union_gate": config.union_gate,
         "shadow": config.shadow,
+        "observe_tools": config.observe_tools,
     }
 
 

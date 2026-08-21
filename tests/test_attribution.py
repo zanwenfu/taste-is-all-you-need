@@ -382,3 +382,33 @@ def test_the_three_unresolved_kinds_stay_distinct() -> None:
     assert result.unmappable == ("[100%]",)
     assert result.unmatched == ("test_never_ran",)
     assert result.ambiguous == ("test_dup",)
+
+
+def test_a_failure_lands_on_the_last_tree_of_the_attempt() -> None:
+    """Exposed by the per-tool observation grid.
+
+    The Monitor evaluates after the worker finishes, so the tree it graded is
+    the LAST observation of that (step_id, attempt). The previous rule
+    preferred a `worker`-triggered commit and otherwise kept the first — but
+    under the fine grid the final tool observation already captures the tree
+    the worker left, so the boundary commit dedupes away and no `worker`
+    observation exists. The failure was then pinned to the earliest tree of
+    the attempt, understating detection latency and blaming a tree that did
+    not yet contain the break.
+    """
+    timeline = [
+        _commit(1, "step-01", 1, trigger="tool"),
+        _commit(2, "step-01", 1, trigger="tool"),
+        _commit(3, "step-01", 1, trigger="tool"),
+    ]
+    failures = harness_failures([_verdict("step-01", 1, passed=False)], timeline)
+
+    assert [f.seq for f in failures] == [3], "must be the last tree, not the first"
+
+
+def test_the_coarse_grid_still_joins_the_same_way() -> None:
+    """With one observation per attempt, last and worker are the same commit,
+    so the fix cannot change any existing behaviour."""
+    timeline = [_commit(1, "step-01", 1, trigger="worker"), _commit(2, "step-02", 1)]
+    failures = harness_failures([_verdict("step-01", 1, passed=False)], timeline)
+    assert [f.seq for f in failures] == [1]
