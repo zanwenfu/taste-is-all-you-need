@@ -1030,6 +1030,12 @@ class Kernel:
                 seq=commit.seq,
                 sha=commit.sha[:7],
                 trigger=trigger,
+                # Carried on the event as well as the shadow record. Under the
+                # per-tool grid the event stream is what the console renders,
+                # and without this every tool observation reads as anonymous
+                # there while the record on disk knows exactly which call
+                # produced it.
+                tool=commit.tool,
                 files=len(commit.files),
             )
 
