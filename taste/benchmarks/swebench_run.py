@@ -43,10 +43,10 @@ from taste.attribution import (
     summarise_silence,
 )
 from taste.benchmarks import swebench
-from taste.config import HarnessConfig
-from taste.evalrun import Cell, kernel_for
+from taste.config import HarnessConfig, kernel_kwargs
+from taste.evalrun import Cell
 from taste.execution import SandboxProvider
-from taste.kernel import RunResult
+from taste.kernel import Kernel, RunResult
 from taste.memory import Memory
 from taste.replay import SandboxProbeExecutor, reconstruct
 from taste.shadow import SHADOW_HEAD, load_timeline
@@ -111,6 +111,7 @@ def make_prepare(
     repo_cache: Path | None = None,
     coverage: dict[str, tuple[CoverageMap, CoverageMap]] | None = None,
     provider: SandboxProvider | None = None,
+    observe_tools: bool = False,
 ):
     """Build the ``prepare`` callable for a sweep over these instances.
 
@@ -135,7 +136,9 @@ def make_prepare(
         # visible to the observation stamped with that worker's step -- which
         # would make the recorded file set wrong exactly where attribution
         # reads it.
-        config = HarnessConfig.arm(cell.arm, max_parallel=1)
+        config = HarnessConfig.arm(
+            cell.arm, max_parallel=1, observe_tools=observe_tools
+        )
         probe_cov, monitor_cov = (coverage or {}).get(instance.instance_id, (None, None))
         return CellContext(
             instance=instance,
@@ -178,7 +181,16 @@ def make_execute(
 
     def execute(cell: Cell, ctx: CellContext) -> RunResult:
         llm = llm_factory(ctx) if llm_factory else None
-        kernel = kernel_for(cell.arm, ctx.workspace, llm, max_parallel=1)
+        # The kernel runs the config `prepare` built, not one rebuilt from the
+        # arm name. Rebuilding drops anything prepare decided -- the
+        # observation grid, the parallelism pin -- while the ledger still
+        # records prepare's config_hash, so the manifest would describe a run
+        # that never happened. A reproducibility claim rests on those being
+        # the same object.
+        kernel = Kernel(
+            workspace=ctx.workspace, llm=llm,
+            **kernel_kwargs(ctx.config), config=ctx.config,
+        )
         agent = spec or AgentSpec(
             name="swe",
             description="Resolve the reported issue.",

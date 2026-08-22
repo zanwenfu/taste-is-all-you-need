@@ -346,3 +346,46 @@ def test_a_mirror_that_is_a_git_dir_but_has_no_commits_is_rejected(tmp_path: Pat
                   capture_output=True).returncode == 0, "fixture must look like a git dir"
 
     assert swebench._mirror_is_usable(empty) is False
+
+
+def test_the_kernel_runs_the_config_prepare_built(
+    instance: swebench.SWEInstance, source: Path, tmp_path: Path
+) -> None:
+    """Caught while wiring the observation grid through a sweep.
+
+    execute() rebuilt the config from the arm name, dropping everything
+    prepare had decided -- the observation grid, the parallelism pin -- while
+    the ledger still recorded prepare's config_hash. The manifest would have
+    described a run that never happened, which is precisely what a
+    reproducibility claim rests on.
+
+    Asserted end to end rather than by inspection: a sweep configured for the
+    fine grid must actually produce tool-triggered observations.
+    """
+    from taste.shadow import load_timeline
+
+    ledger = tmp_path / "ledger"
+    report = run_sweep(
+        tasks=[instance.instance_id], arms=["A0"], trials=1, ledger_dir=ledger,
+        prepare=make_prepare(
+            instances={instance.instance_id: instance}, root=tmp_path / "runs",
+            source_root=source, provider=None, observe_tools=True,
+        ),
+        execute=make_execute(run_overrides=lambda _c, ctx: _breaking_run(ctx.workspace)),
+        score=make_score(ledger_dir=ledger, suite_factory=_local_suite),
+    )
+    record = report.results[0]
+    assert record.error is None, record.error
+
+    workspace = Path(record.workspace)
+    timeline = list(load_timeline(workspace / ".git" / "taste", record.session_branch))
+    assert timeline, "the run was never observed"
+    # worker_override bypasses the tool loop, so no tool points here -- what
+    # this pins is that the flag survived into the kernel's own config.
+    assert record.config_hash == ctx_hash(workspace, observe_tools=True)
+
+
+def ctx_hash(_workspace: Path, *, observe_tools: bool) -> str:
+    from taste.config import HarnessConfig
+
+    return HarnessConfig.arm("A0", max_parallel=1, observe_tools=observe_tools).hash()

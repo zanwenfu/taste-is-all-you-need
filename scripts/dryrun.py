@@ -60,6 +60,8 @@ def main() -> int:
     ap.add_argument("--root", default="/tmp/taste-dryrun")
     ap.add_argument("--dataset", default="data/verified.jsonl")
     ap.add_argument("--only", default="", help="Comma-separated instance ids.")
+    ap.add_argument("--observe-tools", action="store_true",
+                    help="Observe after every tool call, not only at step boundaries.")
     ap.add_argument("--offline", action="store_true",
                     help="No model calls: exercise materialize + replay only.")
     args = ap.parse_args()
@@ -119,7 +121,7 @@ def main() -> int:
         prepare=make_prepare(
             instances=instances, root=root / "runs",
             budget_usd=args.budget, provider=provider,
-            repo_cache=root / "mirrors",
+            repo_cache=root / "mirrors", observe_tools=args.observe_tools,
         ),
         execute=make_execute(llm_factory=llm_factory),
         score=make_score(ledger_dir=ledger),
