@@ -18,16 +18,23 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
+# Upper bounds are not caution, they are a correctness requirement. With
+# `anthropic>=0.40.0` alone, a fresh machine installed 1.0.0 -- a major
+# version that removed `temperature` from Messages.create() -- and every
+# planner call died with a TypeError while the laptop that developed this ran
+# 0.96.0 and was fine. Two machines, different code, and which numbers you get
+# depends on the day you ran `pip install`. See requirements-lock.txt for the
+# exact stack the reported results were produced on.
 dependencies = [
-    "anthropic>=0.40.0",
-    "click>=8.1",
-    "rich>=13.7",
-    "gitpython>=3.1.43",
-    "python-dotenv>=1.0",
+    "anthropic>=0.90,<1.0",
+    "click>=8.1,<9",
+    "rich>=13.7,<15",
+    "gitpython>=3.1.43,<4",
+    "python-dotenv>=1.0,<2",
 ]
 
 [project.optional-dependencies]
-openai = ["openai>=3.0"]
+openai = ["openai>=3.0,<4"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
