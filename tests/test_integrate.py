@@ -31,7 +31,7 @@ def _spec() -> AgentSpec:
 
 def _commit(ws: Path, message: str) -> str:
     subprocess.run(["git", "add", "-A"], cwd=ws, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", message], cwd=ws, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-m", message], cwd=ws, check=True, capture_output=True)
     return subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=ws, check=True, capture_output=True, text=True
     ).stdout.strip()

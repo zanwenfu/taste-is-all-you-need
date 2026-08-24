@@ -488,7 +488,7 @@ def test_probe_detects_a_verification_that_was_already_failing(refactor_workspac
     import subprocess
 
     subprocess.run(["git", "add", "-A"], cwd=ws, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "pre-broken"], cwd=ws, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-m", "pre-broken"], cwd=ws, check=True, capture_output=True)
 
     plan = Plan(
         task="probe",
