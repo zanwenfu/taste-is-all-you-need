@@ -605,3 +605,52 @@ def test_observation_does_not_depend_on_a_global_git_identity(tmp_path: Path) ->
 
     assert commit is not None, "no global git identity must not silence the instrument"
     assert log.errors == 0
+
+
+def test_checkpointing_works_with_no_git_identity_on_the_host(tmp_path: Path) -> None:
+    """Same defect as the shadow chain, in the agent-visible substrate.
+
+    `git commit` refuses without an author identity, so on a clean host every
+    checkpoint failed — while passing on any developer laptop that happened to
+    have one configured. A fresh machine is exactly what a reproduction is.
+    """
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    (ws / "f.py").write_text("x = 1\n")
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "nohome"),
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "absent"),
+        "GIT_CONFIG_SYSTEM": str(tmp_path / "absent"),
+    }
+    (tmp_path / "nohome").mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=ws, check=True, env=env)
+    subprocess.run(["git", "add", "-A"], cwd=ws, check=True, env=env)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-qm", "base"],
+        cwd=ws, check=True, env=env,
+    )
+
+    memory = Memory.open_session(ws, "noident2")
+    (ws / "f.py").write_text("x = 2\n")
+    checkpoint = memory.checkpoint("step-01", "a change")
+    assert checkpoint.short_sha
+
+
+def test_an_existing_identity_is_never_overwritten(tmp_path: Path) -> None:
+    """Clobbering a user's own git identity to run an experiment would be an
+    unpleasant surprise, and the harness has no business rewriting it."""
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    (ws / "f.py").write_text("x = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
+    subprocess.run(["git", "config", "user.name", "Real Person"], cwd=ws, check=True)
+    subprocess.run(["git", "config", "user.email", "real@example.com"], cwd=ws, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=ws, check=True)
+
+    Memory.open_session(ws, "keep")
+
+    got = subprocess.run(["git", "config", "--get", "user.email"],
+                         cwd=ws, capture_output=True, text=True).stdout.strip()
+    assert got == "real@example.com"

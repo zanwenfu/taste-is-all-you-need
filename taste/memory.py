@@ -23,6 +23,11 @@ from pathlib import Path
 from git import Repo
 from git.exc import GitCommandError
 
+# Used only when the host resolves no identity of its own. Fixed rather than
+# generated so a reproduction on another machine yields the same commits.
+IDENTITY_NAME = "taste"
+IDENTITY_EMAIL = "taste@localhost"
+
 
 @dataclass(frozen=True)
 class Checkpoint:
@@ -54,6 +59,29 @@ class Memory:
         self.repo = Repo(self.repo_path)
         if self.repo.bare:
             raise ValueError(f"{self.repo_path} is a bare repository; need a working tree.")
+        self._ensure_identity()
+
+    def _ensure_identity(self) -> None:
+        """Guarantee `git commit` can run here, without overriding a real one.
+
+        `git commit` refuses without an author identity, and a fresh machine
+        has no global git config — which is exactly what a reproduction is.
+        Every checkpoint then failed on a clean host while passing on any
+        developer laptop that happened to have one configured.
+
+        Only set when nothing is resolvable, and only in *this repository's*
+        config: clobbering a user's own identity to run an experiment would be
+        an unpleasant surprise, and the harness has no business rewriting it.
+        """
+        try:
+            existing = self.repo.git.config("--get", "user.email")
+        except GitCommandError:
+            existing = ""
+        if existing.strip():
+            return
+        with contextlib.suppress(GitCommandError):
+            self.repo.git.config("user.name", IDENTITY_NAME)
+            self.repo.git.config("user.email", IDENTITY_EMAIL)
 
     # ------------------------------------------------------------------ lifecycle
 
