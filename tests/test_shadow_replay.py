@@ -13,6 +13,7 @@ very recoveries the study is about.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -568,3 +569,39 @@ def test_a_scalar_cost_reader_is_rejected_at_construction(tmp_path: Path) -> Non
             session="shape",
             cost_pair_reader=lambda: 1.25,  # the Guardrails shape
         )
+
+
+def test_observation_does_not_depend_on_a_global_git_identity(tmp_path: Path) -> None:
+    """Found on a fresh cloud box, which is exactly what a reproduction is.
+
+    `git commit-tree` refuses to run without an author identity. With no
+    global git config, every observation raised, the fail-open wrapper
+    swallowed it, and the timeline came back EMPTY -- which reads as "the run
+    did nothing", not as "the instrument could not run". The single most
+    reproducibility-relevant failure in this project: anyone cloning the repo
+    onto a clean machine got silence.
+    """
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    (ws / "f.py").write_text("x = 1\n")
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "nohome"),      # no ~/.gitconfig
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "absent"),
+        "GIT_CONFIG_SYSTEM": str(tmp_path / "absent"),
+    }
+    (tmp_path / "nohome").mkdir()
+    for args in (["init", "-q"], ["add", "-A"]):
+        subprocess.run(["git", *args], cwd=ws, check=True, env=env)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-qm", "base"],
+        cwd=ws, check=True, env=env,
+    )
+
+    memory = Memory.open_session(ws, "noident")
+    log = ShadowLog(memory, gitdir=Path(memory.repo.git_dir) / "taste", session="noident")
+    (ws / "f.py").write_text("x = 2\n")
+    commit = log.observe(step_id="s", attempt=1, trigger="worker")
+
+    assert commit is not None, "no global git identity must not silence the instrument"
+    assert log.errors == 0

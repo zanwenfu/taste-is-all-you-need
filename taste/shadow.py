@@ -75,6 +75,11 @@ def _assert_pair_shape(reader: Any) -> None:
         ) from exc
 
 
+# The shadow chain's author. Fixed, so the timeline does not depend on whose
+# machine it was produced on.
+_IDENTITY_NAME = "taste-shadow"
+_IDENTITY_EMAIL = "shadow@taste.localhost"
+
 SHADOW_HEAD = "TASTE_SHADOW_HEAD"
 SHADOW_PREFIX = SHADOW_HEAD  # retained for callers that report the ref name
 
@@ -221,7 +226,23 @@ class ShadowLog:
         args = [tree, "-m", f"shadow {self._seq + 1}"]
         if parent is not None:
             args = [tree, "-p", parent, "-m", f"shadow {self._seq + 1}"]
-        sha = repo.git.commit_tree(*args).strip()
+        # Identity is supplied explicitly rather than inherited from the
+        # machine's global git config. `commit-tree` refuses to run without
+        # one, and on a fresh host -- which is exactly what a reproduction
+        # is -- there is no global identity, so every observation raised,
+        # the fail-open wrapper below swallowed it, and the timeline came
+        # back EMPTY. Zero observations reads as "the run did nothing",
+        # not as "the instrument could not run".
+        #
+        # It also makes the shadow chain independent of who is running it,
+        # which is the property a reproducibility claim actually needs.
+        with repo.git.custom_environment(
+            GIT_AUTHOR_NAME=_IDENTITY_NAME,
+            GIT_AUTHOR_EMAIL=_IDENTITY_EMAIL,
+            GIT_COMMITTER_NAME=_IDENTITY_NAME,
+            GIT_COMMITTER_EMAIL=_IDENTITY_EMAIL,
+        ):
+            sha = repo.git.commit_tree(*args).strip()
         # --create-reflog is load-bearing, not hygiene. A top-level pseudo-ref
         # is deliberately outside refs/ so the agent cannot enumerate it, but
         # that also puts it outside the set git treats as gc roots: a forced
