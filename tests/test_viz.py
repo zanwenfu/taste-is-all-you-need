@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,7 @@ def run_workspace(tmp_path: Path) -> Path:
 
     def suite(_i):
         return SuiteProbe(
-            name="p", command='python -c "import lib; assert lib.rate() == 1"',
+            name="p", command=f'{sys.executable} -c "import lib; assert lib.rate() == 1"',
             members=("t::rate",), timeout=30,
         )
 

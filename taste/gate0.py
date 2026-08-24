@@ -40,6 +40,7 @@ the numbers.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,9 +153,14 @@ def recovered_trajectory(length: int = 9, onset: int = 4, recovery: int = 7) -> 
     )
 
 
+# sys.executable, not "python". A clean Ubuntu ships python3 and no `python`
+# at all, so the bare name made every probe exit 127 -- and Gate 0 then failed
+# on a fresh host for a reason that had nothing to do with the instrument it
+# was validating. Using the running interpreter also keeps the probe inside
+# whatever virtualenv invoked it.
 PROBE = Probe(
     name="value_is_one",
-    command='python -c "import lib; assert lib.value() == 1"',
+    command=f'{sys.executable} -c "import lib; assert lib.value() == 1"',
 )
 
 

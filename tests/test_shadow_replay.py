@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from taste.agent import AgentSpec
@@ -158,7 +159,7 @@ def _timeline_with_regression(ws: Path) -> tuple[Memory, ShadowLog]:
 
 PROBE = Probe(
     name="value_is_one",
-    command="python -c \"import lib; assert lib.value() == 1\"",
+    command=f"{sys.executable} -c \"import lib; assert lib.value() == 1\"",
 )
 
 

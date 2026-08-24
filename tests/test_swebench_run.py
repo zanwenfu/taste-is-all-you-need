@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -72,7 +73,7 @@ def source(tmp_path: Path) -> Path:
 def _local_suite(_instance: swebench.SWEInstance) -> SuiteProbe:
     return SuiteProbe(
         name="p2p::toy",
-        command='python -c "import lib; assert lib.value() == 1"',
+        command=f'{sys.executable} -c "import lib; assert lib.value() == 1"',
         members=("tests/test_core.py::test_old",),
         timeout=30,
     )
