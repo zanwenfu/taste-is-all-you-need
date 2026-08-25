@@ -31,6 +31,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from taste import attempts as attempts_mod
 from taste import cores, integrate, recovery
 from taste.agent import AgentSpec
 from taste.config import HarnessConfig
@@ -242,6 +243,7 @@ class Kernel:
         shadow: bool = False,
         observe_tools: bool = False,
         config: HarnessConfig | None = None,
+        retry_pool: attempts_mod.RetryPool | None = None,
     ) -> None:
         # A HarnessConfig names an entire arm in one object and one hash. When
         # given it wins outright, so a run's identity cannot be half-specified
@@ -261,6 +263,10 @@ class Kernel:
             shadow = resolved["shadow"]
             observe_tools = resolved["observe_tools"]
         self.config = config
+        # Runtime, never config: this takes a different value on every
+        # instance, and folding it into HarnessConfig would give one arm a
+        # different config_hash per instance. See taste/attempts.py.
+        self.retry_pool = retry_pool
         self.workspace = Path(workspace).resolve()
         self.llm = llm
         self.max_retries = max_retries
@@ -825,6 +831,13 @@ class Kernel:
                 reverifying = True
                 continue
 
+            # Past ACCEPT, HALT and REVERIFY, the action is a retry. Charge it
+            # to the matched arm's allowance here rather than at the top of the
+            # next iteration, so a retry that the loop's own ceiling then
+            # refuses is still counted as spent -- the arm asked for it.
+            if self.retry_pool is not None:
+                self.retry_pool.spend()
+
             self._finish_attempt(
                 journal=journal,
                 memory=memory,
@@ -888,6 +901,21 @@ class Kernel:
                 remaining_retries=self.max_retries - attempt + 1,
             )
 
+    def _attempt_ceiling(self, attempts_used: int) -> int:
+        """The ``max_attempts`` the policy is shown for this step.
+
+        Without a pool this is the arm's flat ceiling. With one it also cannot
+        exceed what is left of the run-level allowance, so the *policy* sees
+        the exhaustion and answers it with the arm's own discipline -- HALT,
+        resetting if the arm resets. Stopping the loop directly instead would
+        skip that discipline and leave a resetting arm's unverified work on
+        the branch at exactly the moment it ran out of tries.
+        """
+        hard = self.max_retries + 1
+        if self.retry_pool is None:
+            return hard
+        return min(hard, attempts_used + self.retry_pool.remaining)
+
     def _handle_fault(
         self,
         *,
@@ -907,6 +935,16 @@ class Kernel:
         always roll back and retry — without consulting anything.
         """
         if history is None:
+            # The legacy path does not consult Budget, so the run-level
+            # allowance has to bind here explicitly. Letting it fall through
+            # would make a matched arm silently unmatched -- a pool that is
+            # configured, reported, and does nothing.
+            if self.retry_pool is not None and self.retry_pool.exhausted:
+                return recovery.Action(
+                    recovery.ActionKind.HALT,
+                    reason="retry pool exhausted",
+                    resets=True,
+                )
             return recovery.Action(
                 recovery.ActionKind.ROLLBACK_AND_RETRY,
                 reason="recovery disabled",
@@ -981,7 +1019,7 @@ class Kernel:
 
         budget = recovery.Budget(
             attempts_used=attempts,
-            max_attempts=self.max_retries + 1,
+            max_attempts=self._attempt_ceiling(attempts),
             actions_used=actions_used,
             max_actions=self.recovery_config.max_actions,
         )
