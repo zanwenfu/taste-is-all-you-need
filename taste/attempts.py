@@ -40,7 +40,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["RetryPool", "retries_in", "harvest_retries", "harvest_by_instance"]
+__all__ = ["RetryPool", "harvest_by_instance", "harvest_retries", "retries_in"]
 
 
 @dataclass
