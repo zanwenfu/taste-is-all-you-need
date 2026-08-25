@@ -11,7 +11,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.integrate import (
@@ -24,6 +23,7 @@ from taste.integrate import (
 )
 from taste.kernel import Kernel, current_step
 from taste.memory import Memory
+from tests.conftest import PYTEST_CMD
 
 
 def _spec() -> AgentSpec:

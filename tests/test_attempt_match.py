@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import PYTEST_CMD
 from taste import recovery
 from taste.agent import AgentSpec
 from taste.attempts import RetryPool, harvest_by_instance, harvest_retries, retries_in
 from taste.config import HarnessConfig
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Event, Kernel
+from tests.conftest import PYTEST_CMD
 
 LEGACY_MATH = "legacy_math.py"
 

@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import PYTEST_CMD
 from taste.cores import MonitorResult, Plan, Step, Verification, WorkerResult
 from taste.kernel import Kernel
 from taste.recovery import (
@@ -33,6 +32,7 @@ from taste.recovery import (
     observe,
     parse_output,
 )
+from tests.conftest import PYTEST_CMD
 from tests.golden import rollback_scenario
 from tests.test_golden_baseline import EXPECTED_EVENTS
 

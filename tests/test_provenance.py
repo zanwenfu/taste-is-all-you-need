@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import (
     MODEL_PLANNER,
@@ -27,6 +26,7 @@ from taste.cores import (
 )
 from taste.kernel import Kernel
 from taste.llm import BudgetExceeded, InfraFailure
+from tests.conftest import PYTEST_CMD
 from tests.fakes import FakeLLM, plan_turn
 
 

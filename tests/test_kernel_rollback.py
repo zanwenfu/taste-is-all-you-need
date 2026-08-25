@@ -15,10 +15,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Event, Kernel
+from tests.conftest import PYTEST_CMD
 
 LEGACY_MATH = "legacy_math.py"
 

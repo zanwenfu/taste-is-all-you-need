@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Event, Kernel, current_step
+from tests.conftest import PYTEST_CMD
 
 # -------------------------------------------------------------- fixtures
 

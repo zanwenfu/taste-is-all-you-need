@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.dashboard import RunArtifacts, render, write
 from taste.kernel import Kernel
+from tests.conftest import PYTEST_CMD
 
 BROKEN = """\
 def run(items):
