@@ -87,6 +87,22 @@ class SWEInstance:
     comparable to one graded against ours."""
 
     @property
+    def published_image(self) -> str:
+        """SWE-bench's published image tag for this instance.
+
+        The dataset carries no image column, so every driver has to derive the
+        tag, and each one that derives it separately is a chance to derive it
+        differently. That failure would not raise: it would quietly evaluate
+        the instance in some other environment and report the difference as a
+        change in the agent's behaviour. One definition, used by the sweep
+        driver and the re-scorer alike.
+
+        The ``_1776_`` separator is upstream's, not ours -- ``__`` is not
+        legal in a Docker tag.
+        """
+        return f"swebench/sweb.eval.x86_64.{self.instance_id.replace('__', '_1776_')}:latest"
+
+    @property
     def repo_short(self) -> str:
         """The clustering unit. Django alone is 231/500 of Verified, which is
         why the analysis clusters on repository and a leave-one-repo-out

@@ -40,9 +40,9 @@ from taste.viz import write_index, write_run
 
 
 def image_for(instance: swebench.SWEInstance) -> str:
-    """SWE-bench's published naming. The dataset does not carry the tag."""
-    slug = instance.instance_id.replace("__", "_1776_")
-    return f"swebench/sweb.eval.x86_64.{slug}:latest"
+    """SWE-bench's published naming. Defined on the instance so the sweep
+    driver and the re-scorer cannot drift into two different tags."""
+    return instance.published_image
 
 
 def local_images() -> set[str]:

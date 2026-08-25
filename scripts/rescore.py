@@ -31,8 +31,6 @@ from taste.config import HarnessConfig
 from taste.evalrun import Cell
 from taste.execution import DockerProvider
 
-from dryrun import image_for  # same tag derivation as the sweep driver
-
 
 def _ledger_cells(root: Path) -> list[dict]:
     out = []
@@ -65,7 +63,7 @@ def main() -> int:
     # a change in the agent's behaviour.
     instances = {}
     for inst in swebench.load_dataset(Path(args.dataset)):
-        object.__setattr__(inst, "image", image_for(inst))
+        object.__setattr__(inst, "image", inst.published_image)
         instances[inst.instance_id] = inst
     rows = [r for r in _ledger_cells(root) if not wanted or r["task"] in wanted]
     if not rows:
@@ -98,7 +96,7 @@ def main() -> int:
         cell = Cell(task=row["task"], arm=row["arm"], trial=row.get("trial", 1))
         try:
             score(cell, ctx, stub)
-        except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        except Exception as exc:
             print(f"  {row['task']:32s} ERROR {type(exc).__name__}: {exc}")
             continue
 

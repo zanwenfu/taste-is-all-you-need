@@ -20,6 +20,7 @@ from taste.benchmarks.swebench import (
     END_MARKER,
     START_MARKER,
     GradeReport,
+    SWEInstance,
     build_eval_script,
     eligible,
     graded_test_files,
@@ -453,3 +454,22 @@ def test_a_real_pytest_log_round_trips(tmp_path: Path) -> None:
     parsed = parse_eval_output(instance, log)
     assert parsed.get("astropy/tests/test_x.py::test_a") == "PASSED"
     assert parsed.get("astropy/tests/test_x.py::test_b") == "FAILED"
+
+
+def test_published_image_uses_upstreams_tag_separator() -> None:
+    """One definition of the image tag, because a wrong one does not raise.
+
+    A driver that derives the tag differently evaluates the instance in some
+    other environment and reports the difference as a change in the agent's
+    behaviour. ``__`` is not legal in a Docker tag; ``_1776_`` is upstream's
+    substitution, not ours.
+    """
+    instance = SWEInstance(
+        instance_id="psf__requests-5414", repo="psf/requests",
+        base_commit="0" * 40, problem_statement="", test_patch="",
+        version="2.0", fail_to_pass=(), pass_to_pass=(),
+    )
+    assert instance.published_image == (
+        "swebench/sweb.eval.x86_64.psf_1776_requests-5414:latest"
+    )
+    assert "__" not in instance.published_image.split(":")[0].split(".")[-1]
