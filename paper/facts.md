@@ -64,7 +64,15 @@ machine, correctly, because of the bare-`python` defect — see the bug table.
 |---|---|---|---|---|---|---|
 | 10-instance | 10 | $11.48 | 62 | 3 | 0.30 | 10% |
 | 40-instance (quarter of oracle dead) | 40 | $48.11 | 206 | 9 | 0.23 | 5% |
-| 40-instance corrected | — | — | — | — | *pending* | *pending* |
+| 40-instance corrected | 40 | $50.96 | 204 | 0 | 0.00 | 0% |
+| **pooled** | **80** | **$99.07** | **410** | **9** | **0.113** | **2.5%** |
+
+Pooled bearing 95% CI (Clopper–Pearson): **[0.3%, 8.7%]**. Distinct onset
+trees: **2**. Pre-registered gate (λ̂ ≥ 0.30 AND bearing ≥ 25%): **FAILS**.
+
+Instrument-verification control: re-scoring pilot40's archived trees with the
+corrected instrument reproduces 8 and 6 episodes exactly, same hole counts. So
+the second pilot's zero is a property of the runs, not of the instrument.
 
 ## Test suite
 

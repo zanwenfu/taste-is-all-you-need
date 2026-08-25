@@ -222,11 +222,71 @@ on the machine we were about to spend real money on.
 
 ## 5. What the corrected instrument measures
 
-*[PENDING: corrected 40-instance pilot. Do not write until the numbers land.]*
+Exploratory throughout. These runs use a development slice declared in advance
+and excluded permanently from any confirmatory frame, because the instrument
+was debugged against them. No contrast between recovery policies is claimed.
 
-Reported as exploratory throughout. These runs use a development slice
-declared in advance and excluded permanently from any confirmatory frame,
-because the instrument was debugged against them.
+**Pooled over 80 runs on SWE-bench Verified** — 410 observations, 330 adjacent
+pairs, $99 of model spend:
+
+| | observed | pre-registered gate |
+|---|---|---|
+| λ̂, declared unit | **0.113 / run** | ≥ 0.30 |
+| bearing runs | **2 / 80 = 2.5%** | ≥ 25% |
+| 95% CI on bearing (Clopper–Pearson) | **[0.3%, 8.7%]** | — |
+| distinct onset trees | **2** | — |
+
+Both criteria fail, and bearing fails decisively: the gate's 25% lies outside
+the exact interval. The gate and the event unit were both fixed before this
+data existed.
+
+### 5.1 Why the null is a null
+
+The two pilots disagreed sharply — 14 test-level episodes in the first, zero
+in the second — and the change between them touched the measurement path. So
+"the agent behaved differently" and "the instrument stopped detecting" both
+explained the data, and §4 is a long argument for not guessing which.
+
+Because observations are *committed* rather than computed in flight, they can
+be measured again. Re-scoring the first pilot's archived trees with the
+second's instrument — same trajectory, same shadow timeline, no model calls,
+only the instrument varying — reproduces **8 and 6 episodes exactly**, with
+identical hole counts. Detection did not regress. The zero is a property of
+those runs.
+
+This is the practical payoff of a git-native substrate that we did not
+anticipate when we chose it: **an instrument that stores its own history can be
+re-run against a fixed trajectory, which is what lets a null result be reported
+as a null result rather than as a suspected pipeline failure.** Every other
+number in this paper would have been unfalsifiable without it.
+
+### 5.2 The events are tree-wide, and there are two of them
+
+Both bearing runs show a single tree-wide event rather than scattered
+regressions: within a run every episode shares an onset commit, breaks at
+observation 3, and is passing again at observation 4 — where the recovery *is*
+the harness's own rollback. Fourteen test-level episodes are two independent
+events; the declared unit collapses them to nine, which still over-counts two
+clusters. **The bearing-run fraction is the honest statistic** and we lead with
+it.
+
+Both events are also the case that motivates the whole apparatus: a regression
+introduced and erased inside a run, invisible to any final-state measurement.
+
+### 5.3 The substrate is the binding constraint, not the harness
+
+28 of 40 runs reached 0 of ≥1 steps — our Monitor is stricter than the
+benchmark's grading, and a run that never completes a step rarely leaves a
+regression to observe. Combined with a median |PASS_TO_PASS| of 50.5, SWE-bench
+Verified does not present enough opportunity per run to power the contrast at
+any affordable sample size. SWE-bench-Live's median |P2P| is 1,872.5 — roughly
+37× the oracle per instance.
+
+We therefore trigger the pre-registered switch of substrate. It is worth being
+explicit that this is the *cheap* failure: a benchmark that cannot support the
+measurement was identified for $99 by an instrument that could prove it was
+alive while reporting nothing. The expensive version of this mistake is the
+one where the same $99 buys a clean-looking zero and it gets written up.
 
 ---
 
