@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from taste.attempts import harvest_by_instance
 from taste.benchmarks import swebench
 from taste.benchmarks.swebench_run import (
     make_execute,
@@ -62,6 +63,10 @@ def main() -> int:
     ap.add_argument("--only", default="", help="Comma-separated instance ids.")
     ap.add_argument("--observe-tools", action="store_true",
                     help="Observe after every tool call, not only at step boundaries.")
+    ap.add_argument("--match-retries-from", default="",
+                    help="Root of a completed paired sweep. Each cell is capped at the "
+                         "retries its paired run actually used, making this an "
+                         "attempt-matched arm (A3'). Coverage is reported, never assumed.")
     ap.add_argument("--offline", action="store_true",
                     help="No model calls: exercise materialize + replay only.")
     args = ap.parse_args()
@@ -114,6 +119,20 @@ def main() -> int:
         print(f"  [cell] {record.task:30s} {record.status:9s} "
               f"${record.billed_usd:6.4f} {record.error or ''}", flush=True)
 
+    allowance: dict[str, int] = {}
+    if args.match_retries_from:
+        allowance = harvest_by_instance(Path(args.match_retries_from))
+        wanted = {i.instance_id for i in chosen}
+        matched = wanted & allowance.keys()
+        # Printed, not silently tolerated. A partially matched sweep is a
+        # different experiment from a matched one, and the difference is
+        # invisible in the ledger -- an unmatched cell simply runs on the
+        # arm's own ceiling and looks exactly like a matched one.
+        print(f"  retry allowance: {len(matched)}/{len(wanted)} instances matched "
+              f"from {args.match_retries_from}")
+        if missing := sorted(wanted - allowance.keys()):
+            print(f"  UNMATCHED (running on the arm's own ceiling): {', '.join(missing)}")
+
     started = time.time()
     report = run_sweep(
         tasks=[i.instance_id for i in chosen],
@@ -123,7 +142,7 @@ def main() -> int:
             budget_usd=args.budget, provider=provider,
             repo_cache=root / "mirrors", observe_tools=args.observe_tools,
         ),
-        execute=make_execute(llm_factory=llm_factory),
+        execute=make_execute(llm_factory=llm_factory, retry_allowance=allowance),
         score=make_score(ledger_dir=ledger),
         on_cell=announce,
     )

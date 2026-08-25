@@ -292,3 +292,81 @@ def test_harvest_by_instance_omits_missing_logs_rather_than_zeroing(tmp_path: Pa
 def test_negative_pool_is_rejected() -> None:
     with pytest.raises(ValueError):
         RetryPool(total=-1)
+
+# ================================================ the allowance reaches a run
+
+
+def _sweep(tmp_path: Path, *, allowance: dict[str, int] | None):
+    """One scripted cell through the real sweep path, no model and no Docker.
+
+    Runs `make_prepare`/`make_execute`/`make_score` exactly as a benchmark run
+    does, because the question is whether the allowance survives the trip from
+    the driver into a kernel -- not whether RetryPool works, which is already
+    covered above.
+    """
+    from taste.benchmarks import swebench
+    from taste.benchmarks.swebench_run import make_execute, make_prepare, make_score
+    from taste.evalrun import run_sweep
+    from taste.replay import SuiteProbe
+
+    src = tmp_path / "source" / "toy__toy-1"
+    src.mkdir(parents=True)
+    (src / "lib.py").write_text("def rate():\n    return 1\n")
+
+    instance = swebench.SWEInstance(
+        instance_id="toy__toy-1", repo="pytest-dev/pytest", base_commit="0" * 40,
+        problem_statement="rate() must stay 1.", test_patch="", version="7.0",
+        fail_to_pass=(), pass_to_pass=("t::rate",),
+    )
+
+    def suite(_i):
+        return SuiteProbe(name="p", command="true", members=("t::rate",), timeout=30)
+
+    def scripted(_cell, ctx):
+        plan = Plan(task="toy", steps=[
+            Step(id="step-01", description="never satisfies its check",
+                 verification=Verification(kind="shell", command="test -f never.txt")),
+        ])
+
+        def worker(step, _p):
+            return WorkerResult("noop", 0, "end_turn")
+
+        return {"plan_override": plan, "worker_override": worker}
+
+    ledger = tmp_path / "ledger"
+    report = run_sweep(
+        tasks=["toy__toy-1"], arms=["A3prime"], trials=1, ledger_dir=ledger,
+        prepare=make_prepare(instances={"toy__toy-1": instance}, root=tmp_path / "runs",
+                             source_root=tmp_path / "source", provider=None),
+        execute=make_execute(run_overrides=scripted, retry_allowance=allowance),
+        score=make_score(ledger_dir=ledger, suite_factory=suite),
+    )
+    cell = report.results[0]
+    assert cell.status not in ("error", "infra"), f"{cell.status}: {cell.error}"
+    return cell
+
+
+def test_allowance_travels_from_the_driver_into_the_kernel(tmp_path: Path) -> None:
+    """The wiring, end to end.
+
+    `harvest_by_instance` and `RetryPool` can both be correct while nothing
+    connects them to a running kernel -- which is precisely the state A3' was
+    in before this work: an arm whose docstring promised attempt matching and
+    whose code contained no mechanism for it. Comparing against the unmatched
+    cell is what makes this an assertion rather than a smoke test.
+    """
+    unmatched = _sweep(tmp_path / "free", allowance=None)
+    matched = _sweep(tmp_path / "capped", allowance={"toy__toy-1": 1})
+
+    assert unmatched.attempts > matched.attempts, (
+        f"the allowance did not bind: {unmatched.attempts} vs {matched.attempts}"
+    )
+    assert matched.attempts == 2, "one structural attempt plus the single allowed retry"
+
+
+def test_an_instance_absent_from_the_allowance_runs_unmatched(tmp_path: Path) -> None:
+    """Missing is not zero. A paired run that failed to record is a different
+    fact from one that never retried, and defaulting it to zero would strangle
+    the control on exactly the instances where the pairing broke."""
+    absent = _sweep(tmp_path, allowance={"some__other-1": 0})
+    assert absent.attempts > 1, "an unlisted instance must fall back to the arm's ceiling"

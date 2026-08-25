@@ -29,11 +29,13 @@ JSON written next to the ledger entry.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from taste.agent import AgentSpec
+from taste.attempts import RetryPool
 from taste.attribution import (
     CoverageMap,
     attribution_map,
@@ -165,6 +167,7 @@ def make_execute(
     llm_factory=None,
     spec: AgentSpec | None = None,
     run_overrides=None,
+    retry_allowance: Mapping[str, int] | None = None,
 ):
     """Build the ``execute`` callable.
 
@@ -177,6 +180,14 @@ def make_execute(
     ``worker_override`` hooks. That is what makes the whole pipeline testable
     without a model: the measurement path is identical, only the thing
     producing edits is scripted.
+
+    ``retry_allowance`` maps instance id -> retries, and is what makes A3' an
+    attempt-matched control rather than a differently-budgeted arm. An
+    instance absent from the mapping runs unmatched on the arm's own ceiling:
+    a missing paired run is not the same fact as a paired run that never
+    retried, and defaulting it to zero would silently strangle the control on
+    exactly the instances where the pairing failed. A caller that wants every
+    cell matched should check the mapping's coverage, not rely on this.
     """
 
     def execute(cell: Cell, ctx: CellContext) -> RunResult:
@@ -187,9 +198,11 @@ def make_execute(
         # records prepare's config_hash, so the manifest would describe a run
         # that never happened. A reproducibility claim rests on those being
         # the same object.
+        allowance = (retry_allowance or {}).get(ctx.instance.instance_id)
         kernel = Kernel(
             workspace=ctx.workspace, llm=llm,
             **kernel_kwargs(ctx.config), config=ctx.config,
+            retry_pool=RetryPool(total=allowance) if allowance is not None else None,
         )
         agent = spec or AgentSpec(
             name="swe",
