@@ -42,6 +42,17 @@ in place of test names.
 Separately, `network_disabled=True` (removing loopback) vs `network_mode=none`
 (keeping it) on matplotlib-26113: `{'error': 812}` → `{'pass': 812}`.
 
+## Clean-host defects (found by first contact with a fresh cloud box)
+
+| defect | effect on a clean host | effect on the dev machine |
+|---|---|---|
+| gate 0 probe: bare `python` | negative control `dead` ×5 | passes |
+| shadow chain: no git identity | timeline silently empty | passes |
+| unpinned `anthropic` | every model call TypeErrors | passes |
+| test verification: bare `pytest` | **15 tests fail as harness defects** | passes |
+| `commit0` scorer: bare `python` | `fractional_score` → 0.0 | passes |
+| git handles never closed | sweep dies after ~400 cells | passes (short runs) |
+
 ## Gate 0
 
 Passes 5/5 on the experiment host. Failed 3/5 on first contact with a clean

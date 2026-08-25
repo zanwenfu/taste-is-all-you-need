@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
+from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Event, Kernel
@@ -69,7 +71,7 @@ def _spec() -> AgentSpec:
 
 
 def _plan() -> Plan:
-    check = Verification(kind="shell", command="pytest -q")
+    check = Verification(kind="shell", command=PYTEST_CMD)
     return Plan(
         task="refactor legacy_math.py while keeping tests green",
         steps=[
@@ -121,7 +123,7 @@ def test_monitor_catches_step2_regression_and_recovers(refactor_workspace: Path)
     assert rollbacks[0].payload["id"] == "step-02"
 
     # The final working tree passes pytest — ground truth.
-    proc = subprocess.run(["pytest", "-q"], cwd=ws, capture_output=True, text=True)
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=ws, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
     # The git log tells a clean story: one commit per step (+ plan commit), no
@@ -167,7 +169,7 @@ def test_halts_when_retries_exhausted(refactor_workspace: Path) -> None:
 
     # The workspace was left at the last-good state (end of step-01), so the
     # tests pass — garbage from the broken attempts didn't survive.
-    proc = subprocess.run(["pytest", "-q"], cwd=ws, capture_output=True, text=True)
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=ws, capture_output=True, text=True)
     assert proc.returncode == 0
 
 

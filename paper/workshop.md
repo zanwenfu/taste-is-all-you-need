@@ -146,8 +146,53 @@ while it was present.
 | 13 | Gate 0's probe invoked a bare `python` | every probe exit 127 on a clean machine | ✗ | ✓ |
 | 14 | Unpinned SDK resolved a different major version | every model call failed; two machines ran different code | ✗ | ✓ |
 | 15 | Isolation removed loopback, not just the internet | 23.5% of the oracle dead; one instance 812 tests | ✓ | ✓ |
+| 16 | Verification commands invoked a bare `pytest` | **15 tests fail on a clean host, as harness defects** | ✗ | — |
+| 17 | Benchmark scorer invoked a bare `python` | `fractional_score` returns 0.0 — a score from a missing interpreter | ✓ | ✓ |
+| 18 | Git handles never released | sweeps die of `Too many open files` **after ~400 cells** | ✓ | ✓ |
 
-Twelve of fifteen were silent. Twelve were present while the suite was green.
+Fourteen of eighteen were silent. Fifteen were present while the suite was
+green — and #16 is the suite itself.
+
+### 4.2 Three that arrived together, and what connects them
+
+The last three were found in one sitting and share a mechanism worth naming.
+
+**#16 is the measuring stick.** Our fixtures verified agent work by running
+`pytest -q`. Bare, that resolves against `PATH`, which does not contain the
+virtualenv's `bin` when the suite runs as `python -m pytest` — the normal way
+anywhere nobody typed `activate`. On the machine this was written on, an
+ambient pytest happened to be installed, and the suite was green. On a clean
+host **fifteen tests failed, including every test of the rollback thesis** —
+and they failed *reading as harness defects*: "rollback did not recover", "the
+merge gate rejected independent work". The suite that certified every other
+fix was certifying nothing on any machine but one.
+
+**#17 is the same defect in the path that produces reported numbers.** The
+Commit0 scorer shelled out to `python -m pytest`; a clean Ubuntu ships
+`python3` and no `python`. The command exits 127 and the scorer returns
+`0.0` — a benchmark score of zero manufactured by a missing interpreter and
+arithmetically indistinguishable from an agent that implemented nothing.
+
+**#18 was invisible until an assertion was added.** A GitPython `Repo` holds
+a `cat-file --batch` process pair and mmaps every pack it touches, and nothing
+closed them. One leak is unnoticeable; at the default 1024-descriptor limit,
+the four-hundredth cell of a sweep starts dying of `Too many open files`. The
+sweep driver records those cells as `error` and drops them from the
+denominator — so the loss lands **entirely on the back half of a sweep**,
+ordered rather than random. A confirmatory run over 485 instances would have
+silently measured a biased prefix of its own frame.
+
+It surfaced only because of a change to a *test fixture*: the fixture used a
+sweep's output without first asserting the sweep succeeded, so the failure
+presented as an unrelated `IsADirectoryError` inside `pathlib` while the
+actual traceback sat unread in the cell's `error` field. Adding two lines —
+assert the status, assert the sidecar exists — turned a mystery into the
+message `OSError: [Errno 24] Too many open files`.
+
+That is the generalisable rule, and it is cheap: **never consume a
+measurement's output without first asserting the measurement succeeded.** Every
+silent failure in this table is an instance of some component doing exactly
+that.
 
 **Four were unfindable on a developer machine.** #12, #13 and #14 depend on
 the *absence* of ambient configuration — a git identity, a `python` alias, a

@@ -316,7 +316,12 @@ class Kernel:
         if self._runtime_dir_cache is None:
             from git import Repo
 
-            self._runtime_dir_cache = Path(Repo(self.workspace).git_dir) / "taste"
+            # `with`, because a Repo holds a `cat-file --batch` process pair
+            # and mmap'd pack files. Built here only to resolve one path and
+            # then dropped, an unclosed one leaks descriptors per kernel --
+            # invisible in any single run and fatal across a long sweep.
+            with Repo(self.workspace) as repo:
+                self._runtime_dir_cache = Path(repo.git_dir) / "taste"
         return self._runtime_dir_cache
 
     # ------------------------------------------------------------ public
@@ -341,124 +346,132 @@ class Kernel:
         session_id = session_id or uuid.uuid4().hex[:8]
         self._session_id = session_id
         memory = Memory.open_session(self.workspace, session_id, base_ref=base_ref)
-        self._open_event_log()
-        self._emit(
-            "run.start",
-            task=task,
-            session=session_id,
-            branch=memory.branch,
-            agent=spec.name,
-        )
-        self._write_manifest(task=task, session_id=session_id, spec=spec, memory=memory)
-        self._shadow = (
-            ShadowLog(
-                memory,
-                gitdir=self._runtime_dir,
+        try:
+            self._open_event_log()
+            self._emit(
+                "run.start",
+                task=task,
                 session=session_id,
-                cost_pair_reader=(
-                    (lambda: (self.llm.stats.total_cost_usd, self.llm.stats.total_work_usd))
-                    if self.llm
-                    else None
-                ),
+                branch=memory.branch,
+                agent=spec.name,
             )
-            if self.shadow_enabled
-            else None
-        )
-        self._observe(step_id="run", attempt=0, trigger="run")
-
-        # Fail fast on unpriced models (before any money is spent), then plan.
-        # PlannerError = the model refused or emitted a malformed plan.
-        try:
-            if self.llm is not None:
-                self._validate_models(spec)
-            plan = plan_override or self._plan(task, spec, memory)
-        except (PlannerError, *_HARNESS_FAILURES) as exc:
-            kind = _failure_kind_of(exc)
-            self._emit("plan.error", reason=str(exc), failure_kind=kind)
-            return self._halted_result(
-                task=task,
-                session_id=session_id,
-                memory=memory,
-                plan=Plan(task=task, steps=[]),
-                outcomes=[],
-                started=started,
-                reason=f"planner: {exc}",
-                failure_kind=kind,
-            )
-
-        self._persist_plan(memory, plan)
-
-        try:
-            waves = plan.waves()
-        except ValueError as exc:
-            self._emit("plan.error", reason=str(exc))
-            return self._halted_result(
-                task=task,
-                session_id=session_id,
-                memory=memory,
-                plan=plan,
-                outcomes=[],
-                started=started,
-                reason=f"plan graph: {exc}",
-            )
-
-        parallel_waves = sum(1 for w in waves if len(w) > 1)
-        self._emit("plan.ready", steps=len(plan.steps), waves=len(waves), parallel_waves=parallel_waves)
-
-        outcomes: list[StepOutcome] = []
-        status: Literal["completed", "failed"] = "completed"
-        failure_reason: str | None = None
-        failure_kind: Literal["task", "infra", "budget"] | None = None
-
-        try:
-            for wave in waves:
-                wave_outcomes, ok, fail_reason, wave_exc = self._run_wave(
-                    wave=wave,
-                    plan=plan,
-                    spec=spec,
-                    memory=memory,
-                    worker_override=worker_override,
+            self._write_manifest(task=task, session_id=session_id, spec=spec, memory=memory)
+            self._shadow = (
+                ShadowLog(
+                    memory,
+                    gitdir=self._runtime_dir,
+                    session=session_id,
+                    cost_pair_reader=(
+                        (lambda: (self.llm.stats.total_cost_usd, self.llm.stats.total_work_usd))
+                        if self.llm
+                        else None
+                    ),
                 )
-                # Extend BEFORE re-raising a typed failure so completed sibling
-                # steps of an interrupted parallel wave stay in the record.
-                outcomes.extend(wave_outcomes)
-                if wave_exc is not None:
-                    raise wave_exc
-                if not ok:
-                    status = "failed"
-                    failure_reason = fail_reason
-                    failure_kind = "task"
-                    failing = next(
-                        (o for o in wave_outcomes if not o.verdict.passed), wave_outcomes[0]
-                    )
-                    self._emit(
-                        "run.halt",
-                        step=failing.step.id,
-                        reason=fail_reason or failing.verdict.reason,
-                    )
-                    break
-        except _HARNESS_FAILURES as exc:
-            status = "failed"
-            failure_reason = str(exc)
-            failure_kind = _failure_kind_of(exc)
-            self._emit("run.halt", reason=failure_reason, failure_kind=failure_kind)
+                if self.shadow_enabled
+                else None
+            )
+            self._observe(step_id="run", attempt=0, trigger="run")
 
-        head = memory.head()
-        result = RunResult(
-            task=task,
-            session_id=session_id,
-            branch=memory.branch,
-            status=status,
-            plan=plan,
-            outcomes=outcomes,
-            final_sha=head.sha,
-            elapsed_seconds=round(time.time() - started, 2),
-            failure_reason=failure_reason,
-            stats=self.llm.stats if self.llm else None,
-            failure_kind=failure_kind,
-        )
-        self._emit_run_done(result)
-        return result
+            # Fail fast on unpriced models (before any money is spent), then plan.
+            # PlannerError = the model refused or emitted a malformed plan.
+            try:
+                if self.llm is not None:
+                    self._validate_models(spec)
+                plan = plan_override or self._plan(task, spec, memory)
+            except (PlannerError, *_HARNESS_FAILURES) as exc:
+                kind = _failure_kind_of(exc)
+                self._emit("plan.error", reason=str(exc), failure_kind=kind)
+                return self._halted_result(
+                    task=task,
+                    session_id=session_id,
+                    memory=memory,
+                    plan=Plan(task=task, steps=[]),
+                    outcomes=[],
+                    started=started,
+                    reason=f"planner: {exc}",
+                    failure_kind=kind,
+                )
+
+            self._persist_plan(memory, plan)
+
+            try:
+                waves = plan.waves()
+            except ValueError as exc:
+                self._emit("plan.error", reason=str(exc))
+                return self._halted_result(
+                    task=task,
+                    session_id=session_id,
+                    memory=memory,
+                    plan=plan,
+                    outcomes=[],
+                    started=started,
+                    reason=f"plan graph: {exc}",
+                )
+
+            parallel_waves = sum(1 for w in waves if len(w) > 1)
+            self._emit("plan.ready", steps=len(plan.steps), waves=len(waves), parallel_waves=parallel_waves)
+
+            outcomes: list[StepOutcome] = []
+            status: Literal["completed", "failed"] = "completed"
+            failure_reason: str | None = None
+            failure_kind: Literal["task", "infra", "budget"] | None = None
+
+            try:
+                for wave in waves:
+                    wave_outcomes, ok, fail_reason, wave_exc = self._run_wave(
+                        wave=wave,
+                        plan=plan,
+                        spec=spec,
+                        memory=memory,
+                        worker_override=worker_override,
+                    )
+                    # Extend BEFORE re-raising a typed failure so completed sibling
+                    # steps of an interrupted parallel wave stay in the record.
+                    outcomes.extend(wave_outcomes)
+                    if wave_exc is not None:
+                        raise wave_exc
+                    if not ok:
+                        status = "failed"
+                        failure_reason = fail_reason
+                        failure_kind = "task"
+                        failing = next(
+                            (o for o in wave_outcomes if not o.verdict.passed), wave_outcomes[0]
+                        )
+                        self._emit(
+                            "run.halt",
+                            step=failing.step.id,
+                            reason=fail_reason or failing.verdict.reason,
+                        )
+                        break
+            except _HARNESS_FAILURES as exc:
+                status = "failed"
+                failure_reason = str(exc)
+                failure_kind = _failure_kind_of(exc)
+                self._emit("run.halt", reason=failure_reason, failure_kind=failure_kind)
+
+            head = memory.head()
+            result = RunResult(
+                task=task,
+                session_id=session_id,
+                branch=memory.branch,
+                status=status,
+                plan=plan,
+                outcomes=outcomes,
+                final_sha=head.sha,
+                elapsed_seconds=round(time.time() - started, 2),
+                failure_reason=failure_reason,
+                stats=self.llm.stats if self.llm else None,
+                failure_kind=failure_kind,
+            )
+            self._emit_run_done(result)
+            return result
+        finally:
+            # One Memory per run, and a sweep is one run per cell. Without
+            # this the descriptors a Repo holds outlive the run, and it is
+            # the cells late in a sweep that die of it -- recorded as
+            # errors and dropped from the denominator, a loss concentrated
+            # at the end of the run rather than spread across it.
+            memory.close()
 
     # ------------------------------------------------------------ waves
 
@@ -703,6 +716,16 @@ class Kernel:
                 reverifying = False
             else:
                 attempts += 1
+                # Charged here, beside the event that records it, and nowhere
+                # else. `harvest_retries` reconstructs a paired run's usage by
+                # counting exactly these `step.begin` events, so charging at
+                # the point a retry is *requested* instead would bill the pool
+                # for retries the loop then refuses -- matching the arm against
+                # a larger number than the harvest ever reports. The allowance
+                # and the measurement have to be the same unit, and the only
+                # way to guarantee that is to make them the same line.
+                if attempts > 1 and self.retry_pool is not None:
+                    self.retry_pool.spend()
                 attempt_started = time.time()
                 self._emit("step.begin", id=step.id, attempt=attempts)
 
@@ -830,13 +853,6 @@ class Kernel:
                 # keeps the reset and no-reset arms attempt-matched.
                 reverifying = True
                 continue
-
-            # Past ACCEPT, HALT and REVERIFY, the action is a retry. Charge it
-            # to the matched arm's allowance here rather than at the top of the
-            # next iteration, so a retry that the loop's own ceiling then
-            # refuses is still counted as spent -- the arm asked for it.
-            if self.retry_pool is not None:
-                self.retry_pool.spend()
 
             self._finish_attempt(
                 journal=journal,
@@ -1432,7 +1448,8 @@ def _harness_git_sha() -> str:
     try:
         from git import Repo
 
-        return Repo(pkg_root).head.commit.hexsha
+        with Repo(pkg_root) as repo:
+            return repo.head.commit.hexsha
     except Exception:
         return "unknown"
 

@@ -293,6 +293,7 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
 
         if executor is not None:
             executor.close()
+        memory.close()
         return None if graded is None else float(graded)
 
     return score

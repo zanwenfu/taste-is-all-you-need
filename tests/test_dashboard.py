@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.dashboard import RunArtifacts, render, write
@@ -65,7 +66,7 @@ def _run_with_rollback(ws: Path) -> None:
             math.write_text(BROKEN if n == 1 else CORRECT)
         return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
 
-    check = Verification(kind="shell", command="pytest -q")
+    check = Verification(kind="shell", command=PYTEST_CMD)
     plan = Plan(
         task="dashboard fixture",
         steps=[

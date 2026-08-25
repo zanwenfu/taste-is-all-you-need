@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import (
     MODEL_PLANNER,
@@ -45,7 +46,7 @@ def _plan_one_step() -> Plan:
             Step(
                 id="step-01",
                 description="noop",
-                verification=Verification(kind="shell", command="pytest -q"),
+                verification=Verification(kind="shell", command=PYTEST_CMD),
             )
         ],
     )

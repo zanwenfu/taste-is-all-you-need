@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from examples.refactor_demo.bootstrap import bootstrap
+
+#: The verification command every fixture that actually *runs* a check must use.
+#:
+#: A bare ``pytest`` resolves against PATH, and PATH does not include the
+#: venv's ``bin`` when the suite runs as ``python -m pytest`` -- which is how
+#: it runs anywhere nobody typed ``activate`` first, CI included. On the
+#: machine this was written on an ambient pytest happened to be on PATH and
+#: all of these passed. On a clean host fifteen failed, and they failed
+#: reading as *harness* defects -- "rollback did not recover", "the merge gate
+#: rejected independent work" -- rather than as a command that does not exist.
+#: A green suite on one machine was certifying nothing on any other.
+#:
+#: Same defect class as gate 0's bare ``python``, and the same fix: name the
+#: interpreter running this process instead of asking the environment.
+PYTEST_CMD = f"{shlex.quote(sys.executable)} -m pytest -q"
 
 
 @pytest.fixture

@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.integrate import (
@@ -169,8 +170,8 @@ def test_union_gate_catches_a_semantic_conflict(refactor_workspace: Path) -> Non
     )
     b_sha = b_wt.checkpoint("step-b", "add consumer").sha
 
-    a = Proposal("step-a", "sem-a", a_sha, ("helper.py",), "pytest -q")
-    b = Proposal("step-b", "sem-b", b_sha, ("consumer.py",), "pytest -q")
+    a = Proposal("step-a", "sem-a", a_sha, ("helper.py",), PYTEST_CMD)
+    b = Proposal("step-b", "sem-b", b_sha, ("consumer.py",), PYTEST_CMD)
 
     tree, conflicts = accumulate(memory, memory.head().sha, [a, b])
     assert conflicts == [], "git considers these disjoint — that is the point"
@@ -200,8 +201,8 @@ def test_gate_failure_stops_the_merge(refactor_workspace: Path) -> None:
     result = integrate(
         memory,
         [
-            Proposal("step-a", "gs-a", a_sha, ("helper.py",), "pytest -q"),
-            Proposal("step-b", "gs-b", b_sha, ("test_uses_old.py",), "pytest -q"),
+            Proposal("step-a", "gs-a", a_sha, ("helper.py",), PYTEST_CMD),
+            Proposal("step-b", "gs-b", b_sha, ("test_uses_old.py",), PYTEST_CMD),
         ],
         gate=True,
     )
@@ -216,8 +217,8 @@ def test_gate_passes_for_genuinely_independent_work(refactor_workspace: Path) ->
     memory = Memory.open_session(ws, "gateok")
     a = _branch_with(memory, "ok-a", "alpha.py", "alpha = 1\n")
     b = _branch_with(memory, "ok-b", "beta.py", "beta = 2\n")
-    a = Proposal(a.step_id, a.branch, a.sha, a.files, "pytest -q")
-    b = Proposal(b.step_id, b.branch, b.sha, b.files, "pytest -q")
+    a = Proposal(a.step_id, a.branch, a.sha, a.files, PYTEST_CMD)
+    b = Proposal(b.step_id, b.branch, b.sha, b.files, PYTEST_CMD)
 
     result = integrate(memory, [a, b], gate=True)
     assert result.gate_passed is True

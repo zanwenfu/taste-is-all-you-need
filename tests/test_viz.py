@@ -82,6 +82,13 @@ def run_workspace(tmp_path: Path) -> Path:
         score=make_score(ledger_dir=ledger, suite_factory=suite),
     )
     cell = report.results[0]
+    # Assert the sweep worked before using anything it produced. run_sweep
+    # records a crash as status="error" with empty paths, so without this the
+    # next line dies inside pathlib on Path("") -- an IsADirectoryError that
+    # names neither the cell nor the reason, while `cell.error` holds the
+    # actual traceback and is never read.
+    assert cell.status not in ("error", "infra"), f"{cell.status}: {cell.error}\n{cell.failure_reason}"
+    assert cell.report_path, "scoring finished without writing an evidence sidecar"
     ws = Path(cell.workspace)
     (ws / ".taste" / "evidence.json").write_text(Path(cell.report_path).read_text())
     return ws

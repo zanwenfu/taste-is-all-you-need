@@ -18,6 +18,7 @@ model. The output is what the CI-stable test asserts on.
 
 from __future__ import annotations
 
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -89,7 +90,7 @@ def main() -> None:
             math.write_text(math.read_text().rstrip() + "\n")
         return WorkerResult(summary=f"{step.id} attempt {n}", tool_calls=0, stopped_reason="end_turn")
 
-    check = Verification(kind="shell", command="pytest -q")
+    check = Verification(kind="shell", command=f"{shlex.quote(sys.executable)} -m pytest -q")
     plan = Plan(
         task="refactor legacy_math.py preserving behavior",
         steps=[

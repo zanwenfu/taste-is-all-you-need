@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import PYTEST_CMD
 from taste import recovery
 from taste.agent import AgentSpec
 from taste.attempts import RetryPool, harvest_by_instance, harvest_retries, retries_in
@@ -61,7 +62,7 @@ def _spec() -> AgentSpec:
 
 
 def _plan() -> Plan:
-    check = Verification(kind="shell", command="pytest -q")
+    check = Verification(kind="shell", command=PYTEST_CMD)
     return Plan(
         task="two steps, both of which fail at least once",
         steps=[
@@ -213,6 +214,28 @@ def test_reverify_costs_an_action_but_not_a_retry(refactor_workspace: Path) -> N
         task="reverify", spec=_spec(), plan_override=_plan(), worker_override=_worker_for(ws)
     )
     assert pool.spent == 0, "re-verification consumed the sampling allowance"
+
+
+def test_spend_equals_what_harvest_would_report(refactor_workspace: Path) -> None:
+    """The allowance and the measurement must be the same unit.
+
+    A3' is matched by harvesting A3's retries from its event log and handing
+    that number back as a pool. If the pool were charged for retries the loop
+    refuses, or the harvest counted something the pool does not, the control
+    would be matched against a number no run ever produced -- and it would
+    still report itself as matched. This is the assertion that makes the two
+    definitions impossible to drift apart.
+    """
+    ws = refactor_workspace
+    events: list[Event] = []
+    pool = RetryPool(total=99)
+    kernel = Kernel(workspace=ws, max_retries=2, retry_pool=pool, on_event=events.append)
+    result = kernel.run(
+        task="unit", spec=_spec(), plan_override=_plan(), worker_override=_worker_for(ws)
+    )
+    as_dicts = [{"type": e.kind, **e.payload} for e in events]
+    assert retries_in(as_dicts) == pool.spent
+    assert pool.spent == _retries(result)
 
 
 # ================================================================ harvesting

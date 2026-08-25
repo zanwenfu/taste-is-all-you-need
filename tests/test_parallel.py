@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import PYTEST_CMD
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Event, Kernel, current_step
@@ -22,7 +23,7 @@ from taste.kernel import Event, Kernel, current_step
 
 def _parallel_plan() -> Plan:
     """Wave-1 (shared bootstrap) → Wave-2 (3 parallel per-module steps)."""
-    ck = Verification(kind="shell", command="pytest -q")
+    ck = Verification(kind="shell", command=PYTEST_CMD)
     return Plan(
         task="add type hints to three independent modules",
         steps=[

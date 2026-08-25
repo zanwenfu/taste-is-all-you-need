@@ -29,7 +29,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,7 +46,15 @@ LITE = (
 
 # Their own pytest config injects coverage plugins we neither have nor want;
 # addopts="" ignores it so a run measures the library, not the toolchain.
-PYTEST_BASE = 'python -m pytest -q -p no:cacheprovider -o addopts=""'
+#
+# `sys.executable`, never a bare `python`: a clean Ubuntu host ships `python3`
+# and no `python` at all, so this command exited 127 and `fractional_score`
+# returned 0.0 -- a benchmark score of zero manufactured by a missing
+# interpreter and indistinguishable from an agent that implemented nothing.
+# Same defect as gate 0's probe, in the path that produces reported numbers.
+PYTEST_BASE = (
+    f'{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider -o addopts=""'
+)
 
 _TEST_DEF = re.compile(r"^\s*def (test_\w+)", re.MULTILINE)
 

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import PYTEST_CMD
 from taste.cores import MonitorResult, Plan, Step, Verification, WorkerResult
 from taste.kernel import Kernel
 from taste.recovery import (
@@ -492,7 +493,7 @@ def test_probe_detects_a_verification_that_was_already_failing(refactor_workspac
 
     plan = Plan(
         task="probe",
-        steps=[Step("step-01", "unrelated edit", Verification(kind="shell", command="pytest -q"))],
+        steps=[Step("step-01", "unrelated edit", Verification(kind="shell", command=PYTEST_CMD))],
     )
 
     def worker(step, plan_):

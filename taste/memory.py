@@ -61,6 +61,28 @@ class Memory:
             raise ValueError(f"{self.repo_path} is a bare repository; need a working tree.")
         self._ensure_identity()
 
+    def close(self) -> None:
+        """Release the underlying git handles.
+
+        A ``Repo`` keeps a long-running ``cat-file --batch`` process and mmaps
+        every pack it touches. One leaked Memory is unnoticeable; a sweep
+        opens one per cell, and at the default 1024-descriptor limit the runs
+        late in a sweep die of ``Too many open files`` while the early ones
+        pass. Those cells are then recorded as errors and drop out of the
+        denominator -- a loss concentrated at the end of the run rather than
+        spread across it, which is the shape most likely to be mistaken for a
+        result.
+        """
+        repo = getattr(self, "repo", None)
+        if repo is not None:
+            repo.close()
+
+    def __enter__(self) -> Memory:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
     def _ensure_identity(self) -> None:
         """Guarantee `git commit` can run here, without overriding a real one.
 
@@ -104,13 +126,15 @@ class Memory:
         parallel workers each produce their own copies.
         """
         repo_path = Path(repo_path).resolve()
-        repo = Repo(repo_path)
         branch = f"taste/session-{session_id}"
 
-        if branch in [h.name for h in repo.heads]:
-            repo.git.checkout(branch)
-        else:
-            repo.git.checkout("-b", branch, base_ref)
+        # Closed before the Memory's own Repo is built, so opening a session
+        # costs one handle rather than two. A sweep opens a session per cell.
+        with Repo(repo_path) as repo:
+            if branch in [h.name for h in repo.heads]:
+                repo.git.checkout(branch)
+            else:
+                repo.git.checkout("-b", branch, base_ref)
 
         _install_local_excludes(repo_path)
         return cls(repo_path, branch)
