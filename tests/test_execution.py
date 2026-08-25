@@ -190,7 +190,11 @@ def test_the_container_is_pinned_to_x86_and_severed_from_the_network() -> None:
 
     kwargs = client.containers.run_kwargs
     assert kwargs["platform"] == "linux/amd64"
-    assert kwargs["network_disabled"] is True
+    assert kwargs["network_mode"] == "none", (
+        "network_disabled removes loopback too, which kills any test plugin "
+        "that binds a localhost socket -- 23.5% of the dev-slice oracle"
+    )
+    assert "network_disabled" not in kwargs
     assert kwargs["command"] == "sleep infinity"
     assert kwargs["detach"] is True
 

@@ -304,10 +304,26 @@ class DockerSandbox:
             name=name,
             detach=True,
             platform=platform,
-            # The measured property is what the benchmark's own tests report;
-            # a probe reaching the network could import a different dependency
-            # set than the image pinned, so it is severed.
-            network_disabled=True,
+            # `network_mode="none"`, NOT `network_disabled=True`.
+            #
+            # Both sever external access, which is the property the
+            # measurement needs: a probe reaching a third-party host fails
+            # intermittently for reasons unrelated to the agent, and an
+            # intermittent pass->fail is indistinguishable by this instrument
+            # from a silent regression.
+            #
+            # But `network_disabled` removes the network namespace outright,
+            # including loopback. Measured consequence: matplotlib and sphinx
+            # images ship `pytest_rerunfailures`, which binds a localhost
+            # socket at pytest_configure time. With no `lo` that raises
+            # `socket.gaierror` and pytest dies with INTERNALERROR before
+            # collecting a single test -- 812 graded tests reported as holes
+            # on one instance alone, and 23.5% of the entire dev-slice oracle
+            # across six instances.
+            #
+            # `none` keeps a loopback interface and still resolves nothing
+            # external. Verified both directions in the image.
+            network_mode="none",
             auto_remove=False,
         )
         self._assert_workdir()

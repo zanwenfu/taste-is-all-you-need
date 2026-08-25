@@ -44,7 +44,7 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from taste.replay import RegressionEpisode
 from taste.shadow import ShadowCommit
@@ -552,4 +552,124 @@ def summarise_silence(
         silent_unattributed=sum(1 for e in episodes if e.silent_unattributed),
         unknown_attribution_rate=result.unknown_rate,
         method=method,
+    )
+
+
+# ------------------------------------------------------------------ building
+
+
+COVERAGE_RC = """\
+[run]
+branch = False
+dynamic_context = test_function
+relative_files = True
+
+[report]
+ignore_errors = True
+"""
+"""coverage.py's own per-test context, not pytest-cov's.
+
+``--cov-context=test`` is a pytest plugin and only works under pytest, while
+django and sympy — 306 of the 500 Verified instances — run their suites
+through their own runners. ``dynamic_context = test_function`` is implemented
+inside coverage.py's tracer, so it names the context after whatever test
+function is executing no matter who invoked it.
+"""
+
+
+def build_coverage_map(
+    sandbox: Any,
+    instance: Any,
+    *,
+    tests: Sequence[str],
+    test_command: str,
+    workdir: str = "/testbed",
+    timeout: int = 2400,
+) -> CoverageMap:
+    """Which source files each graded test exercises, measured in the image.
+
+    Run **once per instance at base_commit, before any arm runs**, so the map
+    is identical across arms by construction and cannot be a function of an
+    outcome. That is what makes it admissible as evidence: there is no way to
+    tune it toward a treatment, because it does not know which treatment ran.
+
+    **This step needs the network and the measurement runs do not.** The
+    published images do not ship coverage.py, so it is installed here. That is
+    a deliberate asymmetry, and it is safe for the reason the isolation exists:
+    the network is severed during *replay* so that a flaky third-party host
+    cannot masquerade as a regression. Nothing is being measured here — the
+    map records which files a test touches at the base commit, identically for
+    every arm — so an install cannot bias a contrast. The measurement
+    containers stay severed.
+
+    The database comes back base64-encoded rather than through a binary
+    channel: it is a few megabytes, and adding a bytes path to the Sandbox
+    protocol for one caller would be a worse trade than the encoding.
+    """
+    sandbox.put_text(f"{workdir}/.coveragerc", COVERAGE_RC)
+
+    setup = sandbox.exec(
+        "source /opt/miniconda3/bin/activate && conda activate testbed && "
+        "python -m pip install --quiet 'coverage>=7,<8'",
+        timeout=600,
+    )
+    if not setup.ok:
+        return CoverageMap(
+            instance_id=instance.instance_id,
+            built_at_commit=instance.base_commit,
+            method="none",
+            uninstrumented=frozenset(tests),
+        )
+
+    # The suite's own exit code is ignored on purpose: a failing test at
+    # base_commit is a fact about the instance, and the map records what each
+    # test *touched* either way. What matters is whether a database appeared.
+    sandbox.exec(
+        "exec 2>&1\n"
+        "source /opt/miniconda3/bin/activate && conda activate testbed\n"
+        f"cd {workdir}\n"
+        f"python -m coverage run --rcfile={workdir}/.coveragerc -m {test_command}\n"
+        "true",
+        timeout=timeout,
+    )
+    encoded = sandbox.exec(
+        f"cd {workdir} && base64 -w0 .coverage 2>/dev/null || true", timeout=300
+    )
+    blob = encoded.stdout.strip()
+    if not blob:
+        # The suite produced no database: nothing was traced, so every test is
+        # UNKNOWN. Reporting an empty map instead would say "these tests cover
+        # nothing", which reads as measured and is how a pipeline fabricates
+        # silence.
+        return CoverageMap(
+            instance_id=instance.instance_id,
+            built_at_commit=instance.base_commit,
+            method="none",
+            uninstrumented=frozenset(tests),
+            covers={},
+        )
+
+    import base64
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / ".coverage"
+        db.write_bytes(base64.b64decode(blob))
+        raw = read_coverage_sqlite(
+            db,
+            instance_id=instance.instance_id,
+            built_at_commit=instance.base_commit,
+            root=workdir,
+        )
+
+    reconciled = reconcile_contexts(raw.covers.keys(), tests)
+    covers = {
+        member: raw.covers[context] for member, context in reconciled.matched.items()
+    }
+    return CoverageMap(
+        instance_id=instance.instance_id,
+        built_at_commit=instance.base_commit,
+        method="coverage_dynamic_context",
+        covers=covers,
+        uninstrumented=frozenset(reconciled.unresolved),
     )

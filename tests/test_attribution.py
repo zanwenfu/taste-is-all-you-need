@@ -412,3 +412,92 @@ def test_the_coarse_grid_still_joins_the_same_way() -> None:
     timeline = [_commit(1, "step-01", 1, trigger="worker"), _commit(2, "step-02", 1)]
     failures = harness_failures([_verdict("step-01", 1, passed=False)], timeline)
     assert [f.seq for f in failures] == [1]
+
+
+# ------------------------------------------------------------------ building
+
+
+def test_a_failed_coverage_install_yields_unknown_not_an_empty_map() -> None:
+    """The distinction this module exists to protect.
+
+    An empty map says "these tests cover nothing", which reads as measured.
+    A failed instrumentation must say UNKNOWN, or every graded test looks
+    unattributable-because-it-touches-nothing and silence is fabricated.
+    """
+    from taste.attribution import build_coverage_map
+    from taste.execution import ExecResult, ScriptedSandbox
+
+    sandbox = ScriptedSandbox().on("pip install", ExecResult(1, "", "no network"))
+    instance = type("I", (), {"instance_id": "i", "base_commit": "c"})()
+
+    got = build_coverage_map(
+        sandbox, instance, tests=["t::a", "t::b"], test_command="pytest",
+    )
+    assert got.method == "none"
+    assert got.files_for("t::a") is None
+    assert got.files_for("t::b") is None
+
+
+def test_a_suite_that_traced_nothing_is_also_unknown() -> None:
+    """Coverage installed, suite ran, no database produced."""
+    from taste.attribution import build_coverage_map
+    from taste.execution import ExecResult, ScriptedSandbox
+
+    sandbox = ScriptedSandbox()
+    sandbox.on("pip install", ExecResult(0, "", ""))
+    sandbox.on("base64", ExecResult(0, "", ""))          # empty db
+    instance = type("I", (), {"instance_id": "i", "base_commit": "c"})()
+
+    got = build_coverage_map(sandbox, instance, tests=["t::a"], test_command="pytest")
+    assert got.files_for("t::a") is None
+
+
+def test_the_dynamic_context_is_coverages_own_not_pytest_covs() -> None:
+    """pytest-cov's --cov-context only works under pytest, and django and
+    sympy -- 306 of 500 Verified instances -- do not run under pytest."""
+    from taste.attribution import COVERAGE_RC
+
+    assert "dynamic_context = test_function" in COVERAGE_RC
+    assert "cov-context" not in COVERAGE_RC
+
+
+def test_the_map_is_keyed_by_graded_test_id_not_coverage_context() -> None:
+    """Contexts come back in the runner's naming scheme; the study speaks
+    PASS_TO_PASS ids. An unreconciled map cannot be looked up at all."""
+    import base64
+    import sqlite3
+    import tempfile
+    from pathlib import Path as P
+
+    from taste.attribution import build_coverage_map
+    from taste.execution import ExecResult, ScriptedSandbox
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = P(tmp) / ".coverage"
+        conn = sqlite3.connect(str(db))
+        conn.executescript(
+            """
+            CREATE TABLE file (id INTEGER PRIMARY KEY, path TEXT);
+            CREATE TABLE context (id INTEGER PRIMARY KEY, context TEXT);
+            CREATE TABLE line_bits (file_id INTEGER, context_id INTEGER, numbits BLOB);
+            INSERT INTO file VALUES (1, 'pkg/core.py');
+            INSERT INTO context VALUES (1, 'pkg.tests.CoreTests.test_alpha|call');
+            INSERT INTO line_bits VALUES (1, 1, x'00');
+            """
+        )
+        conn.commit()
+        conn.close()
+        blob = base64.b64encode(db.read_bytes()).decode()
+
+    sandbox = ScriptedSandbox()
+    sandbox.on("pip install", ExecResult(0, "", ""))
+    sandbox.on("base64", ExecResult(0, blob, ""))
+    instance = type("I", (), {"instance_id": "i", "base_commit": "c"})()
+
+    # The graded id is a unittest label; the context is a dotted path.
+    got = build_coverage_map(
+        sandbox, instance,
+        tests=["test_alpha (pkg.tests.CoreTests)"], test_command="pytest",
+    )
+    assert got.method == "coverage_dynamic_context"
+    assert got.files_for("test_alpha (pkg.tests.CoreTests)") == frozenset({"pkg/core.py"})
