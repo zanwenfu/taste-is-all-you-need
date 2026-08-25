@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -80,6 +81,7 @@ class Discovery:
     runs: dict[str, RunHandle] = field(default_factory=dict)
 
     def scan(self) -> list[RunHandle]:
+        index = _ledger_index(self.root)
         found: dict[str, RunHandle] = {}
         for events in sorted(self.root.rglob(".git/taste/events.jsonl")):
             workspace = events.parent.parent.parent
@@ -90,7 +92,7 @@ class Discovery:
                 events=events,
                 started=events.stat().st_mtime,
             )
-            _enrich(handle, self.root)
+            _enrich(handle, self.root, index)
             found[run_id] = handle
         self.runs = found
         return sorted(found.values(), key=lambda h: -h.started)
@@ -101,7 +103,41 @@ class Discovery:
         return self.runs.get(run_id)
 
 
-def _enrich(handle: RunHandle, root: Path) -> None:
+#: Directories that cannot contain a ledger row and hold almost all the files.
+#: A sweep root carries a full source checkout and a git object store per cell,
+#: so skipping these is the difference between thousands of paths and hundreds
+#: of thousands.
+_PRUNE = frozenset(
+    {".git", "node_modules", "__pycache__", ".venv", ".tox", ".mypy_cache", ".pytest_cache"}
+)
+
+
+def _ledger_index(root: Path) -> dict[str, dict[str, Path]]:
+    """Every ledger row and evidence sidecar under ``root``, from one walk.
+
+    Built once per scan and shared across runs. Resolving each run separately
+    meant an ``rglob`` across the entire sweep root *per run*, and a sweep root
+    holds a checkout plus a git object store for every cell -- 330k paths,
+    walked once for each of forty runs, 36 seconds to answer one request.
+
+    The failure that produced was worse than slowness. The console answered
+    its first request from a warm cache and then exceeded every client timeout
+    after, so it presented as a server that had died rather than one that was
+    working. A frontend nobody can load is indistinguishable from a harness
+    with nothing to show.
+    """
+    index: dict[str, dict[str, Path]] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _PRUNE]
+        here = Path(dirpath)
+        kind = "evidence" if "evidence" in here.parts else "row"
+        for name in filenames:
+            if name.endswith(".json"):
+                index.setdefault(name[:-5], {})[kind] = here / name
+    return index
+
+
+def _enrich(handle: RunHandle, root: Path, index: dict[str, dict[str, Path]]) -> None:
     """Fill in what the ledger knows, when a sweep wrote one."""
     parts = handle.workspace.relative_to(root).parts
     if len(parts) >= 3:
@@ -109,13 +145,14 @@ def _enrich(handle: RunHandle, root: Path) -> None:
         trial = parts[-1].lstrip("t")
         handle.trial = int(trial) if trial.isdigit() else 0
 
-    for ledger in root.rglob(f"{handle.instance}__{handle.arm}__t{handle.trial}.json"):
+    entry = index.get(f"{handle.instance}__{handle.arm}__t{handle.trial}", {})
+    if evidence := entry.get("evidence"):
+        handle.evidence = evidence
+    if row := entry.get("row"):
         try:
-            raw = json.loads(ledger.read_text())
+            raw = json.loads(row.read_text())
         except (OSError, json.JSONDecodeError):
-            continue
-        if "evidence" in ledger.parts:
-            handle.evidence = ledger
+            pass
         else:
             handle.status = str(raw.get("status", handle.status))
     if handle.status == "unknown":

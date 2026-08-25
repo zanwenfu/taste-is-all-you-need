@@ -16,12 +16,20 @@ Hermetic: no server started except on an ephemeral port, no network.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from taste.server import Discovery, RunHandle, _status_from_events, read_events, run_payload
+from taste import server as server_mod
+from taste.server import (
+    Discovery,
+    RunHandle,
+    _status_from_events,
+    read_events,
+    run_payload,
+)
 
 
 def _events(path: Path, rows: list[dict]) -> None:
@@ -200,3 +208,83 @@ def test_the_server_answers_its_own_endpoints(tmp_path: Path) -> None:
         assert caught.value.code == 404
     finally:
         httpd.shutdown()
+
+
+# ============================================ the scan must not scale per run
+
+
+def _sweep_root(tmp_path: Path, runs: int) -> Path:
+    """A sweep root shaped like a real one: a ledger, and a checkout per cell.
+
+    The decoy files matter. The defect this guards was invisible on a handful
+    of empty directories and crippling on a real root, because the cost was
+    (number of runs) x (number of files), and a real root carries a source
+    tree and a git object store for every cell.
+    """
+    root = tmp_path / "sweep"
+    ledger = root / "ledger" / "evidence"
+    ledger.mkdir(parents=True)
+    for i in range(runs):
+        ws = root / "runs" / f"inst-{i}" / "A3" / "t1"
+        taste_dir = ws / ".git" / "taste"
+        taste_dir.mkdir(parents=True)
+        (taste_dir / "events.jsonl").write_text(
+            json.dumps({"kind": "run.done", "payload": {"status": "completed"}}) + "\n"
+        )
+        objects = ws / ".git" / "objects" / "ab"
+        objects.mkdir(parents=True)
+        for j in range(40):  # stand-in for a git object store
+            (objects / f"{j:038x}").write_text("x")
+        (root / "ledger" / f"inst-{i}__A3__t1.json").write_text(
+            json.dumps({"status": "completed", "task": f"inst-{i}", "arm": "A3"})
+        )
+        (ledger / f"inst-{i}__A3__t1.json").write_text(json.dumps({"observations": 3}))
+    return root
+
+
+def test_scan_walks_the_tree_a_bounded_number_of_times(tmp_path: Path, monkeypatch) -> None:
+    """One walk per scan, not one per run.
+
+    Asserted by counting walks rather than by timing, so it states the
+    invariant instead of measuring the machine. Before the fix this was one
+    full-tree ``rglob`` per run: forty runs over a real sweep root took 36
+    seconds to answer a single request, and the console -- which re-scans on
+    every request -- exceeded every client timeout after its first response.
+    """
+    root = _sweep_root(tmp_path, runs=8)
+    traversals = {"n": 0}
+    real_walk, real_rglob = os.walk, Path.rglob
+
+    # Both primitives are counted. An earlier version of this test counted
+    # only `os.walk` and passed with the defect restored, because `rglob` does
+    # not route through it -- a test that measured nothing and said so
+    # confidently, which is the failure this whole project is about.
+    def counting_walk(*args, **kwargs):
+        traversals["n"] += 1
+        return real_walk(*args, **kwargs)
+
+    def counting_rglob(self, *args, **kwargs):
+        traversals["n"] += 1
+        return real_rglob(self, *args, **kwargs)
+
+    monkeypatch.setattr(server_mod.os, "walk", counting_walk)
+    monkeypatch.setattr(Path, "rglob", counting_rglob)
+    handles = server_mod.Discovery(root=root).scan()
+
+    assert len(handles) == 8
+    assert traversals["n"] <= 2, (
+        f"scan traversed the tree {traversals['n']} times for 8 runs; "
+        "it must not scale with the number of runs"
+    )
+
+
+def test_scan_still_reads_status_and_evidence_from_the_ledger(tmp_path: Path) -> None:
+    """The speed-up must not cost the enrichment it replaced."""
+    root = _sweep_root(tmp_path, runs=3)
+    handles = server_mod.Discovery(root=root).scan()
+
+    assert {h.status for h in handles} == {"completed"}
+    assert all(h.evidence is not None for h in handles)
+    assert all(h.evidence.parent.name == "evidence" for h in handles)
+    assert {h.instance for h in handles} == {"inst-0", "inst-1", "inst-2"}
+    assert {h.arm for h in handles} == {"A3"}
