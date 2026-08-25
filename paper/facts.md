@@ -66,6 +66,11 @@ machine, correctly, because of the bare-`python` defect — see the bug table.
 | 40-instance (quarter of oracle dead) | 40 | $48.11 | 206 | 9 | 0.23 | 5% |
 | 40-instance corrected | — | — | — | — | *pending* | *pending* |
 
+## Test suite
+
+547 tests, lint clean, **on the experiment host** — not only on the machine
+they were written on. Before the bare-`pytest` fix, 15 of them failed there.
+
 ## Observation grid
 
 | grid | observations | adjacent pairs | source |
