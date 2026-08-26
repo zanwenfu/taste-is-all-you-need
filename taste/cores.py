@@ -15,6 +15,7 @@ import json
 import subprocess
 import time
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -592,6 +593,7 @@ def evaluate(
     llm: LLM | None = None,
     monitor_model: str = MODEL_MONITOR,
     before: Checkpoint | None = None,
+    shell_runner: Callable[..., Any] | None = None,
 ) -> MonitorResult:
     """Evaluate the current step's verification.
 
@@ -608,7 +610,7 @@ def evaluate(
     """
     v = step.verification
     if v.kind == "shell":
-        return _run_shell_check(v.command or "true", workspace)
+        return _run_shell_check(v.command or "true", workspace, runner=shell_runner)
     if v.kind == "llm":
         if llm is None:
             raise ValueError("LLM verification requested but no LLM provided.")
@@ -616,7 +618,40 @@ def evaluate(
     raise ValueError(f"unknown verification kind: {v.kind}")
 
 
-def _run_shell_check(command: str, workspace: Path) -> MonitorResult:
+#: Ceiling for one deterministic Monitor check. 180s was enough for the
+#: host-side module probes the Planner writes; a routed check that runs a
+#: real slice of an instance's suite inside the image can legitimately take
+#: longer, and a timeout here renders as the step failing — a verdict, not a
+#: hole — so the ceiling errs generous.
+MONITOR_CHECK_TIMEOUT = 600
+
+
+def _run_shell_check(
+    command: str, workspace: Path, *, runner: Callable[..., Any] | None = None
+) -> MonitorResult:
+    """Run the step's deterministic check and turn its exit into a verdict.
+
+    ``runner`` is the one-environment seam. When present the check executes
+    wherever the agent's own commands execute — the task's pinned container —
+    instead of on the host. The Monitor grading a different environment than
+    the Worker worked in is bug 20: on a bare host checkout the project
+    imports as an uncompiled namespace package, every real check fails, and
+    the failure is indistinguishable from the agent's work being wrong.
+    26 of 28 zero-step pilot runs traced here.
+    """
+    if runner is not None:
+        result = runner(command, timeout=MONITOR_CHECK_TIMEOUT)
+        if result.timed_out:
+            return MonitorResult(passed=False, reason=f"check timed out: {command}")
+        passed = result.exit_code == 0
+        reason = (
+            f"`{command}` exited 0" if passed
+            else f"`{command}` exited {result.exit_code}"
+        )
+        evidence = _tail(result.stdout, 40) + (
+            "\n[stderr]\n" + _tail(result.stderr, 40) if result.stderr else ""
+        )
+        return MonitorResult(passed=passed, reason=reason, evidence=evidence)
     try:
         proc = subprocess.run(
             command,
@@ -624,7 +659,7 @@ def _run_shell_check(command: str, workspace: Path) -> MonitorResult:
             cwd=workspace,
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=MONITOR_CHECK_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
         return MonitorResult(passed=False, reason=f"check timed out: {command}")

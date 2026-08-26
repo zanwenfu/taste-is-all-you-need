@@ -175,13 +175,27 @@ class LocalSandbox:
             duration_s=time.monotonic() - started,
         )
 
+    def exec_in_env(
+        self, command: str, *, timeout: int = 600, env: dict[str, str] | None = None
+    ) -> ExecResult:
+        # A local directory has no buried environment to activate; the plain
+        # exec IS the environment. Present so the router can treat every
+        # sandbox uniformly.
+        return self.exec(command, timeout=timeout, env=env)
+
     def put_text(self, path: str, text: str) -> None:
+        self.put_bytes(path, text.encode("utf-8"))
+
+    def put_bytes(self, path: str, payload: bytes) -> None:
         target = self._resolve(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        target.write_bytes(payload)
 
     def get_text(self, path: str) -> str:
         return self._resolve(path).read_text(encoding="utf-8")
+
+    def get_bytes(self, path: str) -> bytes:
+        return self._resolve(path).read_bytes()
 
     def _resolve(self, path: str) -> Path:
         candidate = Path(path)
@@ -245,11 +259,22 @@ class ScriptedSandbox:
                 return result
         return self.default
 
+    def exec_in_env(
+        self, command: str, *, timeout: int = 600, env: dict[str, str] | None = None
+    ) -> ExecResult:
+        return self.exec(command, timeout=timeout, env=env)
+
     def put_text(self, path: str, text: str) -> None:
         self.files[path] = text
 
+    def put_bytes(self, path: str, payload: bytes) -> None:
+        self.files[path] = payload.decode("utf-8", errors="replace")
+
     def get_text(self, path: str) -> str:
         return self.files[path]
+
+    def get_bytes(self, path: str) -> bytes:
+        return self.files[path].encode("utf-8")
 
     def close(self) -> None:
         self.closed = True
@@ -306,6 +331,16 @@ class DockerSandbox:
         # each throw as a hole, and the cell scores as CLEAN. See
         # DockerProvider for the run this cost.
         self._on_close = on_close
+        # The conda activation the images bury in .bashrc, which only
+        # interactive shells read. Every SWE-bench image installs the project
+        # into the `testbed` env; a command that does not activate it runs
+        # against conda base, where the project does not exist -- and the
+        # failure is indistinguishable from the agent's work being wrong.
+        # This is bug 20 relocated into the container, and it is why routed
+        # agent commands must go through exec_in_env, never bare exec.
+        self.env_prefix = (
+            "source /opt/miniconda3/bin/activate && conda activate testbed"
+        )
         self.container = client.containers.run(
             image,
             command="sleep infinity",
@@ -377,6 +412,21 @@ class DockerSandbox:
             duration_s=duration,
         )
 
+    def exec_in_env(
+        self, command: str, *, timeout: int = 600, env: dict[str, str] | None = None
+    ) -> ExecResult:
+        """Run a command the way the agent must run: activated, in the tree.
+
+        ``exec`` is the raw primitive the eval scripts use (they carry their
+        own activation). This is the routed-agent entry point: it prefixes
+        the conda activation and anchors in the workdir, so a Worker's
+        ``pytest`` or a Monitor check hits the environment the benchmark
+        grades. One place, not per caller -- a caller that forgets the prefix
+        reproduces bug 20 inside the container.
+        """
+        prefixed = f"{self.env_prefix} && cd {shlex.quote(self.workdir)} && ({command})"
+        return self.exec(prefixed, timeout=timeout, env=env)
+
     def put_text(self, path: str, text: str) -> None:
         """Ship a file in via the archive API.
 
@@ -385,18 +435,28 @@ class DockerSandbox:
         shell would require quoting that is impossible to get right for every
         instance in the dataset.
         """
+        self.put_bytes(path, text.encode("utf-8"))
+
+    def put_bytes(self, path: str, payload: bytes) -> None:
         directory, _, filename = path.rpartition("/")
-        payload = text.encode("utf-8")
+        if directory:
+            # put_archive 404s on a missing parent. The host-side write_file
+            # does mkdir(parents=True); a transport that cannot target a new
+            # subdirectory would silently diverge the two trees.
+            self.exec(f"mkdir -p {shlex.quote(directory)}", timeout=30)
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as archive:
             info = tarfile.TarInfo(name=filename)
             info.size = len(payload)
-            info.mtime = 0
+            # A real mtime, not 0: build tooling compares source stamps to
+            # build products, and a file from 1970 looks older than every
+            # compiled artifact in the image.
+            info.mtime = int(time.time())
             archive.addfile(info, io.BytesIO(payload))
         buffer.seek(0)
         self.container.put_archive(directory or "/", buffer.getvalue())
 
-    def get_text(self, path: str) -> str:
+    def get_bytes(self, path: str) -> bytes:
         stream, _ = self.container.get_archive(path)
         buffer = io.BytesIO(b"".join(stream))
         buffer.seek(0)
@@ -407,7 +467,10 @@ class DockerSandbox:
             extracted = archive.extractfile(member)
             if extracted is None:
                 raise FileNotFoundError(path)
-            return extracted.read().decode("utf-8", errors="replace")
+            return extracted.read()
+
+    def get_text(self, path: str) -> str:
+        return self.get_bytes(path).decode("utf-8", errors="replace")
 
     def close(self) -> None:
         with contextlib.suppress(Exception):  # teardown must not mask a result

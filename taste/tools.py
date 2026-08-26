@@ -104,12 +104,19 @@ def tool(
 # -------------------------------------------------------------- built-ins
 
 
-def make_builtin_tools(workspace: Path) -> list[Tool]:
+def make_builtin_tools(workspace: Path, *, router: Any | None = None) -> list[Tool]:
     """Return the three tools every worker needs, scoped to a workspace.
 
     Scoping is enforced by resolving every path under ``workspace`` — a worker
     cannot read or write outside its assigned branch's working tree, and
     cannot reach into git's own metadata.
+
+    ``router`` is the one-environment seam (taste/routing.py). With it,
+    ``run_shell`` executes inside the task's pinned container — the
+    environment the benchmark grades — instead of on the host, and
+    ``write_file`` marks its path for the pre-exec push. Without it the
+    tools behave exactly as before; the host path stays byte-identical
+    because synthetic trajectories and Gate 0 depend on it.
     """
     workspace = Path(workspace).resolve()
 
@@ -139,9 +146,23 @@ def make_builtin_tools(workspace: Path) -> list[Tool]:
         p = _resolve(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
+        if router is not None:
+            # The host tree is the source of truth; the container learns of
+            # this write on the next routed exec. Marked here, at the only
+            # host-side mutation site the agent has, so no command ever runs
+            # against a tree missing the agent's own latest edit.
+            router.mark_dirty(str(p.relative_to(workspace)))
         return f"wrote {len(content)} bytes to {path}"
 
     def run_shell(command: str, timeout: int = 60) -> str:
+        if router is not None:
+            result = router.exec(command, timeout=timeout)
+            if result.timed_out:
+                return f"ERROR: timeout after {timeout}s\n$ {command}"
+            body = (result.stdout or "") + (
+                f"\n[stderr]\n{result.stderr}" if result.stderr else ""
+            )
+            return f"$ {command}\n(exit {result.exit_code})\n{body}"
         try:
             proc = subprocess.run(
                 command,

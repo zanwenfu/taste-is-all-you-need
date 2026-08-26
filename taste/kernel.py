@@ -244,6 +244,7 @@ class Kernel:
         observe_tools: bool = False,
         config: HarnessConfig | None = None,
         retry_pool: attempts_mod.RetryPool | None = None,
+        router: Any | None = None,
     ) -> None:
         # A HarnessConfig names an entire arm in one object and one hash. When
         # given it wins outright, so a run's identity cannot be half-specified
@@ -267,6 +268,15 @@ class Kernel:
         # instance, and folding it into HarnessConfig would give one arm a
         # different config_hash per instance. See taste/attempts.py.
         self.retry_pool = retry_pool
+        # The one-environment seam (taste/routing.py). Runtime, never config:
+        # like the retry pool it varies per cell (each cell owns a container)
+        # and folding it into HarnessConfig would splinter the arm's hash.
+        # With a router, execution is forced sequential: there is exactly one
+        # /testbed, and two worktree workers syncing into it would interleave
+        # their trees — the cross-arm contamination rule, within one run.
+        self.router = router
+        if router is not None:
+            max_parallel = 1
         self.workspace = Path(workspace).resolve()
         self.llm = llm
         self.max_retries = max_retries
@@ -648,7 +658,7 @@ class Kernel:
         path, the same loop drives a parallel worker in isolation.
         """
         tools = ToolRegistry()
-        tools.extend(make_builtin_tools(workspace))
+        tools.extend(make_builtin_tools(workspace, router=self.router))
 
         before = memory.head()
 
@@ -675,8 +685,10 @@ class Kernel:
             # contamination. Commit the debris (making untracked files
             # tracked), then hard-reset back to the pre-step checkpoint so the
             # branch is clean and the abort leaves no trace.
-            memory.checkpoint(step.id, f"{step.id}: aborted mid-step", allow_empty=True)
+            debris = memory.checkpoint(step.id, f"{step.id}: aborted mid-step", allow_empty=True)
             memory.rollback_to(before)
+            if self.router is not None:
+                self.router.mark_reset(memory.repo, debris.sha, before.sha)
             self._emit("step.abort", id=step.id, to=before.short_sha)
             raise
         finally:
@@ -756,6 +768,9 @@ class Kernel:
                 workspace=workspace,
                 llm=self.llm,
                 before=before,
+                # The Monitor grades in the same environment the Worker's
+                # commands ran in, or it grades nothing real — bug 20.
+                shell_runner=self.router.exec if self.router is not None else None,
             )
             # Read the change set BEFORE committing: after the checkpoint the
             # working tree is clean and there is nothing pending to measure.
@@ -919,6 +934,12 @@ class Kernel:
 
         if action.resets:
             memory.rollback_to(before)
+            if self.router is not None:
+                # The reset moved the host tree; the container must not keep
+                # executing against the discarded attempt. The delta is the
+                # diff between the attempt's checkpoint and the anchor — the
+                # only files the reset touched.
+                self.router.mark_reset(memory.repo, checkpoint.sha, before.sha)
             self._emit(
                 "step.rollback",
                 id=step.id,
@@ -1005,6 +1026,13 @@ class Kernel:
             self.recovery_config.baseline_probe
             and step.verification.kind == "shell"
             and history.last() is None
+            # The probe materialises the pre-step tree in a HOST worktree and
+            # runs the check there. Under routing that is the wrong
+            # environment by definition — the answer would be bug 20's — and
+            # /testbed cannot host it without thrashing the synced tree. The
+            # arms under study do not use the probe; `tiered` loses it until
+            # the probe learns to run routed.
+            and self.router is None
         ):
             probe, probe_seconds = recovery.run_baseline_probe(
                 memory=memory,
