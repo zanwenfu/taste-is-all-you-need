@@ -86,3 +86,15 @@ they were written on. Before the bare-`pytest` fix, 15 of them failed there.
 | per-attempt, 5 local runs | 10 | 5 | measured |
 | per-tool, same shape | 22 | 17 | measured |
 | per-tool, 40 instances | 206 | 166 | pilot |
+
+## The one-environment seam (built 2026-08-26)
+
+| fact | value | source |
+|---|---|---|
+| test suite | 592 passing, lint clean, on the experiment host | box run |
+| catalogue | 26 defects (20 found by use + 6 by the 20-agent audit) | review doc |
+| golden check, psf__requests-5414 | gold → resolved=True (F2P 1/1, P2P 130/130); null → False | goldencheck run |
+| golden check runtime | 34 s, $0 model spend | same |
+| grade network stance | grade containers bridge (official conditions); measurement containers severed | code + first golden run (126/130 under `none`) |
+| official pass semantics | PASSED\|XFAIL pass; SKIPPED fails | fetched upstream grading.py |
+| defects caught by the gate itself, pre-spend | 3 (router workdir default; stale-ledger skip; grade network isolation) | goldencheck sessions |
