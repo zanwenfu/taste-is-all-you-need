@@ -29,6 +29,7 @@ JSON written next to the ledger entry.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -81,6 +82,9 @@ class CellContext:
     hand the second arm the first arm's tree (the dead-container lesson, one
     level up)."""
     routed: bool = False
+    grade_report: Any = None
+    """The official per-test grade, when a grader ran. The sidecar keeps the
+    counts; the scalar keeps only resolved."""
     session: str = ""
     llm_stats: Any = None
     """The run's RunStats, written by ``execute`` the moment the kernel hands
@@ -113,6 +117,7 @@ class CellEvidence:
     dropped: they are real detections at points the timeline cannot index."""
     silence: dict[str, Any] = field(default_factory=dict)
     resolved: bool | None = None
+    grade: dict[str, str] = field(default_factory=dict)
     routed: bool = False
     """Whether the agent executed inside the pinned image. A number from an
     unrouted run of a real instance is a number about bug 20, and the sidecar
@@ -298,6 +303,46 @@ def make_execute(
     return execute
 
 
+def make_grade(*, timeout: int = 1800):
+    """Build the ``grade`` callable for make_score: the official resolve verdict.
+
+    This is the number that was never wired: every pilot recorded
+    ``resolved=None`` on every cell because make_score's ``grade`` parameter
+    had zero call sites. "Completed 8/40" was the Monitor's opinion of
+    itself; this is the benchmark's opinion of the patch.
+    """
+
+    def grade(ctx: CellContext, result) -> bool | None:
+        if ctx.provider is None:
+            return None
+        root = subprocess.run(
+            ["git", "rev-list", "--max-parents=0", "HEAD"],
+            cwd=ctx.workspace, capture_output=True, text=True,
+        ).stdout.split()
+        if not root:
+            return None
+        # The workspace's own root commit, never instance.base_commit: the
+        # upstream sha is deliberately unresolvable here, and diffing against
+        # it yields an empty patch — a grader that would have scored every
+        # run "unresolved, empty prediction" while looking perfectly healthy.
+        patch = swebench.patch_for(ctx.workspace, root[0])
+        sandbox = ctx.provider.open(
+            key=f"grade:{ctx.instance.instance_id}", image=ctx.instance.image
+        )
+        try:
+            report = swebench.grade_in_sandbox(
+                sandbox, ctx.instance, patch, timeout=timeout
+            )
+        finally:
+            sandbox.close()
+        if report is None:
+            return None
+        ctx.grade_report = report
+        return report.resolved
+
+    return grade
+
+
 def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
     """Build the ``score`` callable: replay, attribute, and write the sidecar.
 
@@ -375,6 +420,10 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
             monitor_failures_unindexed=sum(1 for f in failures if f.seq is None),
             silence=asdict(silence),
             resolved=graded,
+            grade={
+                "fail_to_pass": f"{ctx.grade_report.fail_to_pass_passed}/{ctx.grade_report.fail_to_pass_total}",
+                "pass_to_pass": f"{ctx.grade_report.pass_to_pass_passed}/{ctx.grade_report.pass_to_pass_total}",
+            } if ctx.grade_report is not None else {},
         )
         ctx.report_path = str(
             evidence.write(Path(ledger_dir) / "evidence" / f"{cell.key}.json")

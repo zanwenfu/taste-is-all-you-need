@@ -451,10 +451,86 @@ class GradeReport:
 
     @property
     def regressed_tests(self) -> tuple[str, ...]:
-        """PASS_TO_PASS tests not passing — the contamination signal."""
+        """PASS_TO_PASS tests not passing — the contamination signal.
+
+        Passing means the official grader's ``test_passed``: PASSED or XFAIL.
+        The previous version counted XFAIL as a regression and SKIPPED as a
+        pass — both inverted against upstream. A SKIPPED graded test is NOT
+        passing there: a patch that skips its way around the oracle would
+        otherwise grade as resolved.
+        """
         return tuple(
-            sorted(t for t, status in self.per_test.items() if status not in ("PASSED", "SKIPPED"))
+            sorted(t for t, status in self.per_test.items() if status not in PASSING_STATUSES)
         )
+
+
+#: The official grader's ``test_passed``: a test counts as passing iff its
+#: status is PASSED or XFAIL. SKIPPED is not passing — see
+#: :meth:`GradeReport.regressed_tests`.
+PASSING_STATUSES = ("PASSED", "XFAIL")
+
+
+def grade_in_sandbox(
+    sandbox, instance: SWEInstance, model_patch: str, *, timeout: int = 1800
+) -> GradeReport | None:
+    """The official resolve verdict for one final patch, in the pinned image.
+
+    Returns ``None`` when the verdict could not be produced — a tree that
+    would not reset, a log with no markers. That is a missing measurement,
+    and the caller records it as one; folding it into ``resolved=False``
+    would let infrastructure manufacture failure, the mirror image of the
+    bug-B invariant.
+
+    A model patch that does not APPLY, by contrast, is a real verdict:
+    ``resolved=False`` with the reason recorded, exactly as the official
+    harness scores it. The empty patch runs the evaluation at the base tree
+    -- FAIL_TO_PASS fails by definition and the verdict is honest.
+    """
+    from taste.routing import prepare_container_tree
+
+    workdir = sandbox.workdir
+    target = prepare_container_tree(sandbox, workdir=workdir, hide_upstream=False)
+    reset = sandbox.exec(
+        f"cd {workdir} && git checkout -q {target} -- . && git clean -qfd", timeout=300
+    )
+    if reset.exit_code != 0:
+        return None
+
+    apply_error = ""
+    if model_patch.strip():
+        sandbox.put_text("/tmp/taste_pred.diff", model_patch + "\n")
+        applied = sandbox.exec(
+            f"cd {workdir} && git apply -v /tmp/taste_pred.diff", timeout=300
+        )
+        if applied.exit_code != 0:
+            apply_error = (applied.stderr or applied.stdout)[-400:]
+
+    per_test: dict[str, str] = {}
+    if not apply_error:
+        result = sandbox.exec(build_eval_script(instance, workdir=workdir), timeout=timeout)
+        per_test = parse_eval_output(instance, result.stdout)
+        if not per_test:
+            # The script died before the markers: infrastructure, not a verdict.
+            return None
+
+    def passed(test: str) -> bool:
+        return per_test.get(test) in PASSING_STATUSES
+
+    f2p_passed = sum(1 for t in instance.fail_to_pass if passed(t))
+    p2p_passed = sum(1 for t in instance.pass_to_pass if passed(t))
+    return GradeReport(
+        instance_id=instance.instance_id,
+        resolved=(
+            not apply_error
+            and f2p_passed == len(instance.fail_to_pass)
+            and p2p_passed == len(instance.pass_to_pass)
+        ),
+        fail_to_pass_passed=f2p_passed,
+        fail_to_pass_total=len(instance.fail_to_pass),
+        pass_to_pass_passed=p2p_passed,
+        pass_to_pass_total=len(instance.pass_to_pass),
+        per_test=per_test,
+    )
 
 
 def parse_report(raw: dict, instance: SWEInstance) -> GradeReport:

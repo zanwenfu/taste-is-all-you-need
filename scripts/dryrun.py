@@ -31,6 +31,7 @@ from taste.attempts import harvest_by_instance
 from taste.benchmarks import swebench
 from taste.benchmarks.swebench_run import (
     make_execute,
+    make_grade,
     make_prepare,
     make_score,
 )
@@ -150,9 +151,13 @@ def main() -> int:
             instances=instances, root=root / "runs",
             budget_usd=args.budget, provider=provider,
             repo_cache=root / "mirrors", observe_tools=args.observe_tools,
+            # Routing is not optional for a real instance. The unrouted mode
+            # runs the agent on the host against an uninstalled checkout —
+            # bug 20 — and exists only for synthetic tasks and Gate 0.
+            route_execution=True,
         ),
         execute=make_execute(llm_factory=llm_factory, retry_allowance=allowance),
-        score=make_score(ledger_dir=ledger),
+        score=make_score(ledger_dir=ledger, grade=make_grade()),
         on_cell=announce,
         max_consecutive_failures=args.max_consecutive_failures or None,
         sweep_budget_usd=args.sweep_budget,

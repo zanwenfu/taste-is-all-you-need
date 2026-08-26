@@ -33,6 +33,7 @@ from taste.benchmarks.swebench import (
     stratified_sample,
     task_text,
 )
+from taste.execution import ExecResult
 
 TEST_PATCH = """diff --git a/tests/test_core.py b/tests/test_core.py
 --- a/tests/test_core.py
@@ -327,16 +328,19 @@ def test_per_test_status_is_what_makes_a_timeline_possible(dataset: Path) -> Non
     assert report.regressed_tests == ("t::b",)
 
 
-def test_skipped_is_not_counted_as_regressed() -> None:
-    """The official grader treats SKIPPED as maintained; we inherit that for
-    the official verdict."""
+def test_skipped_counts_as_regressed_and_xfail_does_not() -> None:
+    """Verified against upstream grading.py, not remembered: ``test_passed``
+    is PASSED-or-XFAIL, and ``test_failed`` explicitly lists SKIPPED. This
+    test used to assert the opposite ("SKIPPED is maintained") on a claimed
+    official semantics that was never checked — a patch that skips its way
+    around the oracle would have graded as resolved."""
     report = GradeReport(
-        instance_id="x", resolved=True,
+        instance_id="x", resolved=False,
         fail_to_pass_passed=1, fail_to_pass_total=1,
         pass_to_pass_passed=1, pass_to_pass_total=2,
-        per_test={"t::a": "PASSED", "t::b": "SKIPPED"},
+        per_test={"t::a": "XFAIL", "t::b": "SKIPPED"},
     )
-    assert report.regressed_tests == ()
+    assert report.regressed_tests == ("t::b",)
 
 
 def test_a_fully_clean_report_shows_no_regression(dataset: Path) -> None:
@@ -473,3 +477,108 @@ def test_published_image_uses_upstreams_tag_separator() -> None:
         "swebench/sweb.eval.x86_64.psf_1776_requests-5414:latest"
     )
     assert "__" not in instance.published_image.split(":")[0].split(".")[-1]
+
+
+# ------------------------------------------------------------------ grading
+
+
+def _grade_instance() -> SWEInstance:
+    return SWEInstance(
+        instance_id="pytest-dev__pytest-1000", repo="pytest-dev/pytest",
+        base_commit="0" * 40, problem_statement="", test_patch="diff", version="7.2",
+        fail_to_pass=("testing/test_a.py::test_fixed",),
+        pass_to_pass=("testing/test_a.py::test_old",),
+    )
+
+
+def _eval_log(*lines: str) -> str:
+    return "\n".join([START_MARKER, *lines, END_MARKER])
+
+
+def test_official_pass_semantics_xfail_passes_and_skipped_does_not() -> None:
+    """The official grader's test_passed is PASSED-or-XFAIL. The previous
+    implementation had both inversions: XFAIL counted as a regression and
+    SKIPPED as a pass — the latter meaning a patch that skips its way around
+    the oracle would grade as resolved."""
+    report = GradeReport(
+        instance_id="x", resolved=False,
+        fail_to_pass_passed=0, fail_to_pass_total=0,
+        pass_to_pass_passed=0, pass_to_pass_total=0,
+        per_test={"a": "XFAIL", "b": "SKIPPED", "c": "PASSED", "d": "FAILED"},
+    )
+    assert report.regressed_tests == ("b", "d")
+
+
+def test_grade_resolved_when_both_sets_pass(tmp_path: Path) -> None:
+    from taste.benchmarks.swebench import grade_in_sandbox
+    from taste.execution import ScriptedSandbox
+
+    instance = _grade_instance()
+    log = _eval_log(
+        "PASSED testing/test_a.py::test_fixed",
+        "PASSED testing/test_a.py::test_old",
+    )
+    sandbox = ScriptedSandbox().on("TASTE_START_TEST_OUTPUT", ExecResult(0, log, ""))
+    report = grade_in_sandbox(sandbox, instance, "diff --git a/x b/x\n")
+    assert report is not None and report.resolved is True
+    assert report.fail_to_pass_passed == 1 and report.pass_to_pass_passed == 1
+
+
+def test_grade_unresolved_when_a_graded_test_fails(tmp_path: Path) -> None:
+    from taste.benchmarks.swebench import grade_in_sandbox
+    from taste.execution import ScriptedSandbox
+
+    instance = _grade_instance()
+    log = _eval_log(
+        "FAILED testing/test_a.py::test_fixed",
+        "PASSED testing/test_a.py::test_old",
+    )
+    sandbox = ScriptedSandbox().on("TASTE_START_TEST_OUTPUT", ExecResult(1, log, ""))
+    report = grade_in_sandbox(sandbox, instance, "diff --git a/x b/x\n")
+    assert report is not None and report.resolved is False
+
+
+def test_grade_with_no_markers_is_ungradable_not_unresolved(tmp_path: Path) -> None:
+    """The script died before the markers: that is a missing measurement.
+    Scoring it resolved=False would let infrastructure manufacture failure —
+    the mirror image of the fabricated-regressions invariant."""
+    from taste.benchmarks.swebench import grade_in_sandbox
+    from taste.execution import ScriptedSandbox
+
+    instance = _grade_instance()
+    sandbox = ScriptedSandbox().on(
+        "TASTE_START_TEST_OUTPUT", ExecResult(127, "conda: not found", "")
+    )
+    assert grade_in_sandbox(sandbox, instance, "diff --git a/x b/x\n") is None
+
+
+def test_grade_scores_an_unappliable_patch_as_unresolved(tmp_path: Path) -> None:
+    from taste.benchmarks.swebench import grade_in_sandbox
+    from taste.execution import ExecResult as ER
+    from taste.execution import ScriptedSandbox
+
+    instance = _grade_instance()
+    sandbox = ScriptedSandbox().on("git apply -v /tmp/taste_pred.diff", ER(1, "", "corrupt patch"))
+    report = grade_in_sandbox(sandbox, instance, "diff --git a/x b/x\n")
+    assert report is not None and report.resolved is False
+    assert report.per_test == {}, "nothing ran; the verdict is about the patch"
+
+
+def test_grade_of_the_empty_patch_runs_the_eval_and_fails_f2p(tmp_path: Path) -> None:
+    """An agent that produced nothing still gets a real verdict: the base
+    tree fails FAIL_TO_PASS by definition. None here would hide every
+    do-nothing run from the resolve rate."""
+    from taste.benchmarks.swebench import grade_in_sandbox
+    from taste.execution import ScriptedSandbox
+
+    instance = _grade_instance()
+    log = _eval_log(
+        "FAILED testing/test_a.py::test_fixed",
+        "PASSED testing/test_a.py::test_old",
+    )
+    sandbox = ScriptedSandbox().on("TASTE_START_TEST_OUTPUT", ExecResult(1, log, ""))
+    report = grade_in_sandbox(sandbox, instance, "")
+    assert report is not None and report.resolved is False
+    assert not any("taste_pred" in c for c in sandbox.commands), (
+        "an empty patch must not be applied"
+    )
