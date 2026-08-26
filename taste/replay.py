@@ -416,6 +416,14 @@ class SandboxProbeExecutor:
         self.memory = memory
         self.base_commit = base_commit
         self.local_base = local_base or self._root_commit()
+        # The reset target is the image's ACTUAL state, snapshotted once as a
+        # commit, not the upstream base sha. Six repo families apply
+        # tracked-file edits at image build time (sphinx's pre_install, for
+        # one); `git checkout <base_commit> -- .` reverts those edits before
+        # every probe run, the suite dies on the un-edited source, and a
+        # whole family's oracle reads as flake. The official harness restores
+        # only the graded test files for exactly this reason. Bug B8.
+        self._reset_target: str | None = None
 
     def _root_commit(self) -> str:
         try:
@@ -438,9 +446,18 @@ class SandboxProbeExecutor:
 
         workdir = self.sandbox.workdir
         try:
+            if self._reset_target is None:
+                from taste.routing import prepare_container_tree
+
+                # hide_upstream=False: the probe container exposes no shell
+                # to the agent, and the upstream objects are what make the
+                # snapshot cheap.
+                self._reset_target = prepare_container_tree(
+                    self.sandbox, workdir=workdir, hide_upstream=False
+                )
             self.sandbox.put_text("/tmp/taste.diff", (patch or "") + "\n")
             reset = self.sandbox.exec(
-                f"cd {workdir} && git checkout -q {self.base_commit} -- . "
+                f"cd {workdir} && git checkout -q {self._reset_target} -- . "
                 f"&& git clean -qfd",
                 timeout=180,
             )

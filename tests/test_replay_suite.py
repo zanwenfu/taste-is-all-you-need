@@ -432,10 +432,13 @@ def test_the_upstream_sha_is_never_used_for_the_local_diff(tmp_path: Path) -> No
     assert run.infra_error is None, f"diff should succeed locally, got {run.infra_error}"
 
 
-def test_the_container_still_resets_to_the_upstream_commit(tmp_path: Path) -> None:
-    """The two bases are for different machines and must not be merged: the
-    image's /testbed carries the real history and is reset to the upstream
-    sha, while the diff is computed against the local root."""
+def test_the_container_resets_to_the_image_snapshot_not_the_upstream_sha(tmp_path: Path) -> None:
+    """This test used to assert the opposite — that the reset uses the
+    benchmark's upstream sha — and the behaviour it certified was bug B8:
+    images apply tracked-file edits after checking out base_commit, and a
+    reset to the upstream sha reverts them before every probe. The contract
+    now is: reset to the snapshot baseline of the tree the image ships;
+    the upstream sha appears in no reset command."""
     _ws, memory, _base = _repo(tmp_path)
     upstream = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     sandbox = ScriptedSandbox()
@@ -444,8 +447,12 @@ def test_the_container_still_resets_to_the_upstream_commit(tmp_path: Path) -> No
         "HEAD", SuiteProbe(name="s", command="run-tests", members=("t",))
     )
 
-    assert any(upstream in c for c in sandbox.commands), (
-        "the container reset must use the benchmark's own commit"
+    resets = [c for c in sandbox.commands if "git checkout -q" in c]
+    assert resets, "the executor no longer resets the tree at all"
+    assert all("scriptedbaseline" in c for c in resets), resets
+    assert not any(upstream in c for c in resets), (
+        "the reset went back to the upstream sha, reverting the image's own "
+        "build-time edits — bug B8"
     )
 
 
@@ -466,3 +473,57 @@ def test_no_resolvable_local_base_yields_a_hole_not_a_crash(tmp_path: Path) -> N
     assert run.infra_error is None or "t" in run.statuses
     assert degenerate.statuses["t"] == "error"
     assert "no local base" in (degenerate.infra_error or "")
+
+
+def test_the_reset_target_is_the_image_state_not_the_upstream_base(tmp_path: Path) -> None:
+    """Bug B8. Images apply tracked-file edits AFTER checking out base_commit
+    (sphinx's pre_install rewrites source in place). A per-observation reset
+    of `git checkout <base_commit> -- .` reverts those edits, the suite dies
+    on the un-edited source at every observation, and the whole family's
+    oracle reads as flake. The reset target must be a snapshot of the tree
+    the image actually ships."""
+    import subprocess as sp
+
+    from taste.execution import LocalSandbox
+    from taste.replay import SandboxProbeExecutor
+
+    # The "image": a repo at base_commit, then a pre_install edit on top,
+    # deliberately uncommitted — exactly how the image build leaves it.
+    bed = tmp_path / "bed"
+    bed.mkdir()
+    (bed / "lib.py").write_text("PATCHED = False\n")
+    def bedgit(*args: str) -> str:
+        return sp.run(["git", "-C", str(bed), "-c", "user.name=t", "-c", "user.email=t@l", *args],
+                      capture_output=True, text=True).stdout
+    bedgit("init", "-q")
+    bedgit("add", "-A")
+    bedgit("commit", "-qm", "upstream base")
+    upstream_base = bedgit("rev-parse", "HEAD").strip()
+    (bed / "lib.py").write_text("PATCHED = True\n")  # the pre_install edit
+
+    # The host workspace: independent single-commit repo, as materialize builds.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "lib.py").write_text("PATCHED = False\n")
+    sp.run(["git", "-C", str(ws), "init", "-q"], check=True)
+    sp.run(["git", "-C", str(ws), "-c", "user.name=t", "-c", "user.email=t@l",
+            "add", "-A"], check=True)
+    sp.run(["git", "-C", str(ws), "-c", "user.name=t", "-c", "user.email=t@l",
+            "commit", "-qm", "root"], check=True)
+    memory = Memory(ws, "main")
+    head = memory.repo.head.commit.hexsha
+
+    executor = SandboxProbeExecutor(LocalSandbox(bed), memory, upstream_base)
+    suite = Probe(name="pre_install_survives",
+                  command="grep -q 'PATCHED = True' lib.py", timeout=30).as_suite()
+    first = executor.run(head, suite)
+    second = executor.run(head, suite)  # after one reset cycle — the moment B8 bit
+    memory.close()
+
+    assert first.infra_error is None, first.infra_error
+    assert second.infra_error is None, second.infra_error
+    assert set(first.statuses.values()) == {"pass"}
+    assert set(second.statuses.values()) == {"pass"}, (
+        "the second observation saw the pre_install edit reverted: the reset "
+        "target is the upstream base, not the image state"
+    )

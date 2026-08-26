@@ -257,6 +257,13 @@ class ScriptedSandbox:
         for pattern, result in self.responses:
             if pattern in command:
                 return result
+        # The sync-baseline handshake (routing.prepare_container_tree) asks
+        # for the taste-baseline ref before anything else. A scripted test
+        # that doesn't care gets a fixed sha immediately, so the handshake
+        # costs zero extra scripted commands; a test that does care scripts
+        # its own response above, which wins.
+        if "rev-parse --verify -q refs/heads/taste-baseline" in command:
+            return ExecResult(0, "scriptedbaseline\n", "")
         return self.default
 
     def exec_in_env(
