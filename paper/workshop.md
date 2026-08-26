@@ -269,6 +269,29 @@ environment. **A validation gate certifies only the paths it exercises.**
 The seam that fixes this is architectural, and it is the same seam the
 instrument already uses: the agent must execute where it is measured.
 
+### 5.1 The seam, built and checked the way the catalogue teaches
+
+We built that seam — agent tools and Monitor checks execute inside the
+pinned image, with bidirectional file coherence between the host tree the
+instrument observes and the container tree the commands run in — and
+validated it with the test the catalogue's hindsight demands: a *golden
+check* that drives the benchmark's own gold patch through the real tool
+path at $0 of model spend, and requires the official grader to return
+``resolved=True``; a null run must return ``False``. On a real instance the
+routed pipeline grades the gold patch resolved, all graded tests passing.
+
+The check caught three more defects before they could cost anything —
+a router aimed at a default path its sandbox did not use (which silently
+created a real ``/testbed`` on the development host), a stale ledger that
+skipped both halves of the check while the summary read as if they ran, and
+a grading container that inherited the measurement's network isolation:
+four of the instance's graded timeout tests need a network stack to time
+out on, the official harness grades with the network up, and every resolve
+rate would have read a few points low, forever, under conditions nobody had
+chosen on purpose. Each was found by an assertion written before the run,
+not by a person reading output — which is the paper's method reduced to
+practice.
+
 ---
 
 ## 6. What this means for an agent OS
@@ -328,9 +351,10 @@ held-out oracle observes roughly the gold test-patch's blast radius (97.5%
 of it in one file for this benchmark), so "silent regression" here means
 silent *within the tests adjacent to the edit* — a declared lower bound.
 The catalogue is a census of one team's instrument, organised into a
-taxonomy whose external instances are evidence of reach, not a survey. And
-the fix for A6, though designed, was not yet validated at submission — by
-our own rules, we do not report numbers from a path no gate has exercised.
+taxonomy whose external instances are evidence of reach, not a survey. The
+fix for A6 is built and golden-checked on real images (§5.1), but no
+benchmark measurement produced through it is reported here — the first
+valid numbers postdate this submission by design.
 
 ---
 
