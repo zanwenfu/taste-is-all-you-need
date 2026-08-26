@@ -127,7 +127,13 @@ def test_timeline_survives_to_disk(refactor_workspace: Path) -> None:
 def test_a_broken_shadow_never_fails_the_run(refactor_workspace: Path, monkeypatch) -> None:
     ws = refactor_workspace
     monkeypatch.setattr(
-        ShadowLog, "_write_tree_commit", lambda self: (_ for _ in ()).throw(RuntimeError("nope"))
+        ShadowLog,
+        "_write_tree_commit",
+        # **kwargs, so the stub keeps raising its own error rather than a
+        # TypeError when the real signature grows a keyword (it grew `dedupe`
+        # once, and this test kept passing by exercising the fail-open path
+        # by accident instead of on purpose).
+        lambda self, **kwargs: (_ for _ in ()).throw(RuntimeError("nope")),
     )
     sig = rollback_scenario(ws).run(ws, shadow=True)
     assert sig.status == "completed"
