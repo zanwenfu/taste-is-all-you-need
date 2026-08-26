@@ -101,9 +101,14 @@ def main() -> int:
             continue
 
         evidence = json.loads(Path(ctx.report_path).read_text())
+        # Both units, side by side: `episodes` is one per raw test id, and
+        # `declared` is the pre-declared (test function, onset) unit with
+        # parametrised variants collapsed. The gap between them is exactly
+        # what parametrisation inflates, and it must stay visible.
         print(
             f"  {row['task']:32s} obs={evidence['observations']:2d} "
             f"episodes={len(evidence['episodes']):2d} "
+            f"declared={evidence['contamination_events_declared']:2d} "
             f"holes={len(evidence['never_passed']):4d} "
             f"replays={evidence['replays']:3d}"
         )

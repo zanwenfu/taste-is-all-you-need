@@ -88,6 +88,11 @@ class CellEvidence:
     session: str
     observations: int
     episodes: list[dict[str, Any]] = field(default_factory=list)
+    contamination_events_declared: int = 0
+    """``len(episodes)`` counts one event per raw test id; the pre-declared
+    unit is (test function, onset) with parametrised variants collapsed, and
+    this is the count in that unit. Both are always written — a reader is
+    entitled to see how much the collapse moved the number."""
     never_passed: list[str] = field(default_factory=list)
     unknown_transitions: int = 0
     replays: int = 0
@@ -292,6 +297,7 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
             session=session,
             observations=report.observations,
             episodes=[asdict(e) for e in report.episodes],
+            contamination_events_declared=report.contamination_events_declared,
             never_passed=list(report.never_passed),
             unknown_transitions=report.unknown_transitions,
             replays=report.replays,

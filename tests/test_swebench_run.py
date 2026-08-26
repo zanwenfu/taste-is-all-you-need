@@ -196,6 +196,9 @@ def test_one_cell_runs_end_to_end_and_leaves_evidence(
     # step-01's verification only checks that helper.py exists, so the Monitor
     # passed and the harness noticed nothing -- which is the phenomenon.
     assert len(evidence["episodes"]) == 1, evidence["episodes"]
+    # Both units travel in the sidecar. With one unparametrised probe the
+    # counts coincide; what matters is that the declared count is written.
+    assert evidence["contamination_events_declared"] == 1
     episode = evidence["episodes"][0]
     assert episode["probe"] == "tests/test_core.py::test_old"
     assert episode["onset_seq"] == 2, "onset must land on the observation that broke it"
