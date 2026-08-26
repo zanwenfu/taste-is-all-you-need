@@ -95,7 +95,9 @@ class ShadowCommit:
     attempt: int
     trigger: str
     """What produced this observation: ``tool`` (a mutating tool call),
-    ``step`` (a step boundary), ``run`` (start or end)."""
+    ``worker`` (a step boundary), ``run`` (start), ``rollback`` (a reset that
+    discarded an attempt), ``final`` (run end — always recorded, see
+    :meth:`ShadowLog.observe`)."""
     tool: str | None = None
     files: tuple[str, ...] = ()
     cost_billed_usd: float = 0.0
@@ -153,17 +155,25 @@ class ShadowLog:
         attempt: int,
         trigger: str,
         tool: str | None = None,
+        dedupe: bool = True,
     ) -> ShadowCommit | None:
         """Record the working tree as it stands right now.
 
         Returns None when disabled, when nothing changed since the last
         observation, or when the write failed — none of which is an error the
         caller needs to handle.
+
+        ``dedupe=False`` records the observation even when the tree is
+        byte-identical to the previous one. The run-end observation needs it:
+        "this is the tree the run ended on" is a claim about the *timeline's
+        shape*, and a timeline whose last entry is whichever mutation
+        happened to come last cannot state it. Everything mid-run keeps the
+        default — an unchanged tree mid-run genuinely is noise.
         """
         if not self.enabled:
             return None
         try:
-            sha, files = self._write_tree_commit()
+            sha, files = self._write_tree_commit(dedupe=dedupe)
         except Exception:
             self.errors += 1
             return None
@@ -188,7 +198,7 @@ class ShadowLog:
         self._persist(commit)
         return commit
 
-    def _write_tree_commit(self) -> tuple[str | None, tuple[str, ...]]:
+    def _write_tree_commit(self, *, dedupe: bool = True) -> tuple[str | None, tuple[str, ...]]:
         """Commit the current tree onto the shadow ref, touching nothing else.
 
         Built from ``write-tree`` / ``commit-tree`` / ``update-ref`` rather
@@ -218,7 +228,7 @@ class ShadowLog:
             tree = repo.git.write_tree().strip()
 
         parent = self._current_head()
-        if parent is not None:
+        if parent is not None and dedupe:
             parent_tree = repo.git.rev_parse(f"{parent}^{{tree}}").strip()
             if parent_tree == tree:
                 return None, ()

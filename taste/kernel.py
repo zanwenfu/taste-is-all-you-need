@@ -466,6 +466,14 @@ class Kernel:
             self._emit_run_done(result)
             return result
         finally:
+            # The last state is always observed, however the run ended —
+            # completed, halted, or thrown out of. A final rollback leaves
+            # the end-of-run tree unobserved otherwise, and a timeline that
+            # stops before the run does scores whatever happened after its
+            # last entry as if it never happened. Forced past the dedupe
+            # (fail-open, like every observation) so the timeline's shape
+            # says "this is where it ended" even when nothing changed.
+            self._observe(step_id="run", attempt=0, trigger="final", dedupe=False)
             # One Memory per run, and a sweep is one run per cell. Without
             # this the descriptors a Repo holds outlive the run, and it is
             # the cells late in a sweep that die of it -- recorded as
@@ -917,6 +925,13 @@ class Kernel:
                 to=before.short_sha,
                 remaining_retries=self.max_retries - attempt + 1,
             )
+            # The reset is a tree mutation like any other and must be
+            # observed like any other. Without this the recovering arm's
+            # recoveries were invisible to the timeline that scores it — the
+            # tree went back to good between two observations that never saw
+            # it — under-counting the treatment effect in the treatment arm
+            # specifically.
+            self._observe(step_id=step.id, attempt=attempt, trigger="rollback")
 
     def _attempt_ceiling(self, attempts_used: int) -> int:
         """The ``max_attempts`` the policy is shown for this step.
@@ -1075,12 +1090,20 @@ class Kernel:
 
     # ------------------------------------------------------------ shadow
 
-    def _observe(self, *, step_id: str, attempt: int, trigger: str, tool: str | None = None) -> None:
+    def _observe(
+        self,
+        *,
+        step_id: str,
+        attempt: int,
+        trigger: str,
+        tool: str | None = None,
+        dedupe: bool = True,
+    ) -> None:
         """Record an observation point. Never fatal, never agent-visible."""
         if self._shadow is None:
             return
         commit = self._shadow.observe(
-            step_id=step_id, attempt=attempt, trigger=trigger, tool=tool
+            step_id=step_id, attempt=attempt, trigger=trigger, tool=tool, dedupe=dedupe
         )
         if commit is not None:
             self._emit(
