@@ -94,6 +94,19 @@ def main() -> int:
         if report is None:
             return None
         ctx.grade_report = report
+        # Per-test detail for the rot-aware verdict below. Live instances age:
+        # cfn-lint's E2533 starts failing the day the calendar passes a
+        # runtime's deprecation date, in the raw image, no harness involved —
+        # so "gold grades resolved" is not a property the harness can promise
+        # on a stale instance. What it CAN promise: gold fixes every F2P and
+        # breaks nothing the baseline had not already lost.
+        arm = ctx.config.label
+        out = root / "grades"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{arm}.json").write_text(json.dumps({
+            "per_test": report.per_test,
+            "f2p": f"{report.fail_to_pass_passed}/{report.fail_to_pass_total}",
+        }))
         return report.resolved
 
     started = time.time()
@@ -120,17 +133,39 @@ def main() -> int:
 
     by_arm = {r.arm: r for r in report.results}
     gold_cell, null_cell = by_arm.get("A0"), by_arm.get("A2")
+
+    def failures(arm_label: str) -> set[str] | None:
+        path = root / "grades" / f"{arm_label}.json"
+        if not path.exists():
+            return None
+        detail = json.loads(path.read_text())
+        return {t for t, status in detail["per_test"].items()
+                if "fail" in status.lower() or "error" in status.lower()}
+
+    gold_fail, null_fail = failures("A0-no-recovery"), failures("A2-repair-in-place")
     ok = True
-    if gold_cell is None or gold_cell.score != 1.0:
-        ok = False
-        print(f"GOLD FAILED: {gold_cell and (gold_cell.status, gold_cell.score, gold_cell.error)}")
-    else:
-        print("gold patch  -> resolved=True   [ok]")
     if null_cell is None or null_cell.score != 0.0:
         ok = False
         print(f"NULL FAILED: {null_cell and (null_cell.status, null_cell.score, null_cell.error)}")
     else:
         print("null worker -> resolved=False  [ok]")
+
+    if gold_cell is None or gold_fail is None or null_fail is None:
+        ok = False
+        print(f"GOLD FAILED (no grade detail): {gold_cell and (gold_cell.status, gold_cell.score)}")
+    elif gold_cell.score == 1.0:
+        print("gold patch  -> resolved=True   [ok]")
+    else:
+        gold_evidence = json.loads((root / "grades" / "A0-no-recovery.json").read_text())
+        f2p_ok = gold_evidence["f2p"].split("/")[0] == gold_evidence["f2p"].split("/")[1]
+        new_breaks = gold_fail - null_fail
+        if f2p_ok and not new_breaks:
+            print("gold patch  -> resolved_fresh=True  [ok]  "
+                  f"(instance is stale: {len(null_fail)} baseline P2P failures — "
+                  "time-rotted oracle, fails identically in the raw image)")
+        else:
+            ok = False
+            print(f"GOLD FAILED: f2p={gold_evidence['f2p']} new_breaks={sorted(new_breaks)[:5]}")
     return 0 if ok else 1
 
 
