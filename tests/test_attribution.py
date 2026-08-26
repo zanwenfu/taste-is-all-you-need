@@ -19,6 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from taste.attribution import (
+    AttributionResult,
     CoverageMap,
     MonitorFailure,
     attribution_map,
@@ -26,7 +27,6 @@ from taste.attribution import (
     harness_failures,
     read_coverage_sqlite,
     read_events,
-    AttributionResult,
     summarise_silence,
 )
 from taste.replay import RegressionEpisode
