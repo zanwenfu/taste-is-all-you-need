@@ -325,6 +325,7 @@ class DockerSandbox:
         client: Any | None = None,
         on_close: Callable[[DockerSandbox], None] | None = None,
         network_mode: str = "none",
+        env_prefix: str | None = None,
     ) -> None:
         if client is None:
             import docker
@@ -346,8 +347,15 @@ class DockerSandbox:
         # failure is indistinguishable from the agent's work being wrong.
         # This is bug 20 relocated into the container, and it is why routed
         # agent commands must go through exec_in_env, never bare exec.
+        # None means the SWE-bench default; "" means the image's own PATH is
+        # already correct (SWE-bench-Live's RepoLaunch images put python and
+        # pytest at /usr/local/bin — sourcing a conda that does not exist
+        # would fail every routed command on a substrate where nothing is
+        # wrong).
         self.env_prefix = (
             "source /opt/miniconda3/bin/activate && conda activate testbed"
+            if env_prefix is None
+            else env_prefix
         )
         self.container = client.containers.run(
             image,
@@ -441,7 +449,8 @@ class DockerSandbox:
         grades. One place, not per caller -- a caller that forgets the prefix
         reproduces bug 20 inside the container.
         """
-        prefixed = f"{self.env_prefix} && cd {shlex.quote(self.workdir)} && ({command})"
+        prefix = f"{self.env_prefix} && " if self.env_prefix else ""
+        prefixed = f"{prefix}cd {shlex.quote(self.workdir)} && ({command})"
         return self.exec(prefixed, timeout=timeout, env=env)
 
     def put_text(self, path: str, text: str) -> None:
@@ -529,6 +538,7 @@ class DockerProvider:
         prefix: str = "taste",
         platform: str = "linux/amd64",
         client: Any | None = None,
+        env_prefix: str | None = None,
     ) -> None:
         if client is None:
             import docker
@@ -537,6 +547,7 @@ class DockerProvider:
         self._client = client
         self.prefix = prefix
         self.platform = platform
+        self.env_prefix = env_prefix
         self._open: dict[str, DockerSandbox] = {}
 
     def open(
@@ -560,6 +571,7 @@ class DockerProvider:
             client=self._client,
             on_close=lambda closing: self._evict(key, closing),
             network_mode=network_mode,
+            env_prefix=self.env_prefix,
         )
         self._open[key] = sandbox
         return sandbox

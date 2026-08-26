@@ -146,6 +146,7 @@ def make_prepare(
     observe_tools: bool = False,
     route_execution: bool = False,
     planner_model: str | None = None,
+    parity_check=None,
 ):
     """Build the ``prepare`` callable for a sweep over these instances.
 
@@ -175,7 +176,8 @@ def make_prepare(
         if route_execution:
             agent_sandbox = provider.open(key=f"agent:{cell.key}", image=instance.image)
             swebench.materialize_from_image(agent_sandbox, instance, workspace)
-            reason = swebench.environment_parity_check(agent_sandbox, instance)
+            check = parity_check or swebench.environment_parity_check
+            reason = check(agent_sandbox, instance)
             if reason is not None:
                 # Refused at $0. The alternative is paying for a full agent
                 # run whose every command fails somewhere the benchmark never
