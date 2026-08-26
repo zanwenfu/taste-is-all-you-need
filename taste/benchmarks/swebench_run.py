@@ -75,6 +75,12 @@ class CellContext:
     probe_coverage: CoverageMap | None = None
     monitor_coverage: CoverageMap | None = None
     provider: SandboxProvider | None = None
+    agent_sandbox: Any = None
+    """The cell's own container, when execution is routed. Per cell, never
+    per instance: arms interleave within a task, and a shared container would
+    hand the second arm the first arm's tree (the dead-container lesson, one
+    level up)."""
+    routed: bool = False
     session: str = ""
     llm_stats: Any = None
     """The run's RunStats, written by ``execute`` the moment the kernel hands
@@ -107,6 +113,10 @@ class CellEvidence:
     dropped: they are real detections at points the timeline cannot index."""
     silence: dict[str, Any] = field(default_factory=dict)
     resolved: bool | None = None
+    routed: bool = False
+    """Whether the agent executed inside the pinned image. A number from an
+    unrouted run of a real instance is a number about bug 20, and the sidecar
+    must say so rather than leave the reader to guess from dates."""
 
     def write(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +134,7 @@ def make_prepare(
     coverage: dict[str, tuple[CoverageMap, CoverageMap]] | None = None,
     provider: SandboxProvider | None = None,
     observe_tools: bool = False,
+    route_execution: bool = False,
 ):
     """Build the ``prepare`` callable for a sweep over these instances.
 
@@ -131,13 +142,36 @@ def make_prepare(
     ``base_commit``, cloned once per repo and reused. ``source_root`` is the
     fixture path, for tests. Neither means an empty workspace, which is only
     ever right for a synthetic task.
+
+    ``route_execution`` is the one-environment mode: the cell gets its own
+    container, the workspace is materialised FROM that container's tree, and
+    the parity check must pass before a single model call is paid for. This
+    is the only mode in which a real benchmark run is valid — the host path
+    exists for synthetic tasks and Gate 0.
     """
+    if route_execution and provider is None:
+        raise ValueError(
+            "route_execution requires a sandbox provider: routing the agent "
+            "into no container would silently fall back to the host — bug 20 "
+            "with a flag claiming otherwise"
+        )
 
     def prepare(cell: Cell) -> CellContext:
         instance = instances[cell.task]
         # Fresh per cell — see the module docstring; this is not reusable.
         workspace = Path(root) / cell.task / cell.arm / f"t{cell.trial}"
-        if repo_cache is not None:
+        agent_sandbox = None
+        if route_execution:
+            agent_sandbox = provider.open(key=f"agent:{cell.key}", image=instance.image)
+            swebench.materialize_from_image(agent_sandbox, instance, workspace)
+            reason = swebench.environment_parity_check(agent_sandbox, instance)
+            if reason is not None:
+                # Refused at $0. The alternative is paying for a full agent
+                # run whose every command fails somewhere the benchmark never
+                # grades, then reading that as the agent's incompetence.
+                agent_sandbox.close()
+                raise RuntimeError(f"environment parity: {reason}")
+        elif repo_cache is not None:
             swebench.materialize_from_repo(instance, workspace, cache=Path(repo_cache))
         else:
             source = Path(source_root) / instance.instance_id if source_root else None
@@ -167,6 +201,8 @@ def make_prepare(
             # run rather than as a broken one. Absent means "replay in a
             # worktree"; the image must be passed deliberately.
             provider=provider,
+            agent_sandbox=agent_sandbox,
+            routed=agent_sandbox is not None,
         )
 
     return prepare
@@ -209,10 +245,23 @@ def make_execute(
         # that never happened. A reproducibility claim rests on those being
         # the same object.
         allowance = (retry_allowance or {}).get(ctx.instance.instance_id)
+        router = None
+        if ctx.agent_sandbox is not None:
+            from taste.routing import SandboxRouter
+
+            # The sandbox's own workdir, never the default: a router aimed
+            # at a path the sandbox does not use syncs into nowhere while the
+            # commands run somewhere else — and the very first dry run of
+            # this wiring proved it, by silently creating a real /testbed on
+            # the development host.
+            router = SandboxRouter(
+                ctx.agent_sandbox, ctx.workspace, workdir=ctx.agent_sandbox.workdir
+            )
         kernel = Kernel(
             workspace=ctx.workspace, llm=llm,
             **kernel_kwargs(ctx.config), config=ctx.config,
             retry_pool=RetryPool(total=allowance) if allowance is not None else None,
+            router=router,
         )
         agent = spec or AgentSpec(
             name="swe",
@@ -235,6 +284,13 @@ def make_execute(
             # phase already paid, and the sweep driver's error row reads the
             # spend from here so it cannot vanish from the ledger.
             ctx.llm_stats = llm.stats if llm is not None else None
+            if ctx.agent_sandbox is not None:
+                # The cell's container dies with the cell. Scoring opens its
+                # own probe container under a different key; keeping this one
+                # alive would only offer the next cell a stale tree to
+                # inherit.
+                ctx.agent_sandbox.close()
+                ctx.agent_sandbox = None
         ctx.session = result.session_id
         ctx.shadow_ref = f"{SHADOW_HEAD}_{result.session_id.upper().replace('-', '_')}"
         return result
@@ -306,6 +362,7 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
         evidence = CellEvidence(
             instance_id=ctx.instance.instance_id,
             arm=cell.arm,
+            routed=ctx.routed,
             trial=cell.trial,
             session=session,
             observations=report.observations,

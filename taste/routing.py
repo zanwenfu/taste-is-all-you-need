@@ -81,6 +81,13 @@ def prepare_container_tree(
     path never exposes a shell to the agent).
     """
     q = shlex.quote(workdir)
+    probe = sandbox.exec(f"test -d {q}", timeout=30)
+    if probe.exit_code != 0:
+        # Refuse loudly. Continuing "works": git and the transport happily
+        # create the directory piecemeal wherever the commands land — the
+        # first misconfigured run of this code built a real /testbed on the
+        # development host as a side effect and reported nothing.
+        raise RuntimeError(f"sync workdir {workdir!r} does not exist in this sandbox")
     marker = sandbox.exec(f"git -C {q} rev-parse --verify -q refs/heads/taste-baseline", timeout=60)
     if marker.exit_code == 0 and marker.stdout.strip():
         return marker.stdout.strip()

@@ -446,3 +446,137 @@ def _paid_stats():
         ),
     )
     return stats
+
+
+# ---------------------------------------------------------- routed execution
+
+
+class _BedProvider:
+    """A provider whose 'containers' are LocalSandboxes over per-key dirs,
+    each seeded like an image: a source tree plus a build artifact that only
+    the image has. Existence of that artifact after materialisation is the
+    proof the workspace came from the image and not from a mirror."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.opened: list[str] = []
+        self.closed: list[str] = []
+
+    def open(self, *, key: str, image: str):
+        from taste.execution import LocalSandbox
+
+        bed = self.root / key.replace(":", "_").replace("/", "_")
+        if not bed.exists():
+            bed.mkdir(parents=True)
+            (bed / "lib.py").write_text("def rate():\n    return 1\n")
+            (bed / "built_extension.so").write_bytes(b"\x7fELF-fake")
+        box = LocalSandbox(bed)
+        provider = self
+
+        class _Tracked:
+            workdir = str(bed)
+
+            def __getattr__(self, name):  # delegate everything else
+                return getattr(box, name)
+
+            def close(self):
+                provider.closed.append(key)
+                box.close()
+
+        self.opened.append(key)
+        return _Tracked()
+
+
+def _routed_sweep(tmp_path: Path, *, parity_ok: bool = True):
+    from taste.benchmarks.swebench_run import make_execute, make_prepare, make_score
+    from taste.evalrun import run_sweep
+    from taste.replay import SuiteProbe
+
+    instance = swebench.SWEInstance(
+        instance_id="psf__requests-9999", repo="psf/requests", base_commit="0" * 40,
+        problem_statement="rate() must stay 1.", test_patch="", version="2.0",
+        fail_to_pass=(), pass_to_pass=("t::rate",),
+    )
+    if not parity_ok:
+        # An unmapped repo forces the parity check to refuse the cell.
+        object.__setattr__(instance, "repo", "nobody/unknown-project")
+
+    provider = _BedProvider(tmp_path / "beds")
+
+    def scripted(_cell, ctx):
+        ws = ctx.workspace
+        plan = Plan(task="toy", steps=[
+            # lib.py comes from the image baseline, so the routed Monitor
+            # (which runs in the container) can pass it. note.txt is written
+            # host-side by the scripted worker and is asserted on the host —
+            # the environment distinction itself is pinned in test_routing.
+            Step(id="step-01", description="edit",
+                 verification=Verification(kind="shell", command="test -f lib.py")),
+        ])
+
+        def worker(step, _p):
+            (ws / "note.txt").write_text("note\n")
+            return WorkerResult("note", 1, "end_turn")
+
+        return {"plan_override": plan, "worker_override": worker}
+
+    def suite(_i):
+        return SuiteProbe(name="p", command="true", members=("t::rate",), timeout=30)
+
+    ledger = tmp_path / "ledger"
+    report = run_sweep(
+        tasks=[instance.instance_id], arms=["A0"], trials=1, ledger_dir=ledger,
+        prepare=make_prepare(
+            instances={instance.instance_id: instance}, root=tmp_path / "runs",
+            provider=provider, route_execution=True,
+        ),
+        execute=make_execute(run_overrides=scripted),
+        score=make_score(ledger_dir=ledger, suite_factory=suite),
+    )
+    return report.results[0], provider, tmp_path
+
+
+def test_routed_prepare_materialises_from_the_image(tmp_path: Path, monkeypatch) -> None:
+    """The workspace must carry the image's build artifacts. A mirror gives
+    tracked source only; the first sync would then overwrite the container's
+    compiled extensions with clean checkouts — bug 20's ghost."""
+    monkeypatch.setattr(
+        swebench, "environment_parity_check", lambda sandbox, instance: None
+    )
+    cell, provider, root = _routed_sweep(tmp_path)
+    assert cell.status == "completed", (
+        f"{cell.status}: {cell.error}\n{cell.failure_reason}"
+    )
+    ws = Path(cell.workspace)
+    assert (ws / "built_extension.so").exists(), (
+        "the workspace was not materialised from the image"
+    )
+    assert (ws / "note.txt").exists()
+    agent_keys = [k for k in provider.opened if k.startswith("agent:")]
+    assert agent_keys, "no per-cell agent container was opened"
+    assert agent_keys[0] in provider.closed, "the agent container leaked past the cell"
+
+    import json
+    evidence = json.loads(Path(cell.report_path).read_text())
+    assert evidence["routed"] is True, "the sidecar must say the run was routed"
+
+
+def test_parity_failure_refuses_the_cell_before_any_model_call(tmp_path: Path) -> None:
+    """A cell whose environment cannot be verified is infrastructure, refused
+    at $0 — not an agent run whose every command fails somewhere the
+    benchmark never grades."""
+    cell, provider, _ = _routed_sweep(tmp_path, parity_ok=False)
+    assert cell.status == "error"
+    assert "parity" in (cell.error or ""), cell.error
+    assert cell.billed_usd == 0.0
+    agent_keys = [k for k in provider.opened if k.startswith("agent:")]
+    assert agent_keys and agent_keys[0] in provider.closed, (
+        "the refused cell's container must still be closed"
+    )
+
+
+def test_route_execution_without_a_provider_is_refused_loudly() -> None:
+    from taste.benchmarks.swebench_run import make_prepare
+
+    with pytest.raises(ValueError, match="provider"):
+        make_prepare(instances={}, root=Path("/tmp/x"), route_execution=True)

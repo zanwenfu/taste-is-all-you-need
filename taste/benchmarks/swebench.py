@@ -619,6 +619,100 @@ def materialize(instance: SWEInstance, dest: Path, *, source: Path | None = None
     return _init_workspace(instance, workspace)
 
 
+#: Top-level module each benchmark repository imports as. The parity check
+#: needs the name to prove the agent's environment resolves the INSTALLED
+#: project: on a bare host checkout `import matplotlib` "succeeds" as an
+#: uncompiled namespace package with a garbage version, which is exactly the
+#: silent form of bug 20 the check exists to refuse.
+REPO_MODULES = {
+    "astropy/astropy": "astropy",
+    "django/django": "django",
+    "matplotlib/matplotlib": "matplotlib",
+    "mwaskom/seaborn": "seaborn",
+    "pallets/flask": "flask",
+    "psf/requests": "requests",
+    "pydata/xarray": "xarray",
+    "pylint-dev/pylint": "pylint",
+    "pytest-dev/pytest": "pytest",
+    "scikit-learn/scikit-learn": "sklearn",
+    "sphinx-doc/sphinx": "sphinx",
+    "sympy/sympy": "sympy",
+}
+
+
+def materialize_from_image(
+    sandbox, instance: SWEInstance, workspace: Path
+) -> Path:
+    """Materialise the workspace FROM the container's /testbed.
+
+    Not from a git mirror. The mirror gives tracked files only; the image's
+    tree additionally holds everything the build produced -- compiled
+    extensions, generated parsers, pre_install edits. An agent container
+    synced against a mirror-materialised workspace would have the host
+    overwrite those artifacts with clean checkouts on the first push, and
+    imports die exactly as they did on the host (bug 20's ghost).
+
+    Ordering is load-bearing: ``prepare_container_tree`` first (it moves the
+    upstream ``.git`` out and commits the sync baseline), the archive second,
+    so host and container start from the identical tree and the container's
+    fresh ``.git`` never reaches the host (the host repo is the instrument's;
+    a nested container .git inside it would be bug D3 with git metadata).
+    """
+    from taste.routing import prepare_container_tree
+
+    prepare_container_tree(sandbox, workdir=sandbox.workdir, hide_upstream=True)
+    workspace = Path(workspace)
+    if workspace.exists() and any(workspace.iterdir()):
+        raise FileExistsError(f"workspace {workspace} already exists; refusing to overwrite")
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    tar_path = "/tmp/taste_ws.tar"
+    packed = sandbox.exec(
+        f"tar -C {sandbox.workdir} --exclude=.git -cf {tar_path} .", timeout=600
+    )
+    if packed.exit_code != 0:
+        raise RuntimeError(f"could not pack /testbed: {packed.stderr or packed.stdout}")
+    payload = sandbox.get_bytes(tar_path)
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
+        archive.extractall(workspace, filter="data")
+    return _init_workspace(instance, workspace)
+
+
+def environment_parity_check(sandbox, instance: SWEInstance) -> str | None:
+    """Prove the agent's environment is the one the benchmark grades. $0.
+
+    Returns None when sound, else a reason string. Run per cell BEFORE any
+    model call: a cell that fails here is infrastructure, and the difference
+    between catching it now and catching it after the run is the entire cost
+    of the run. This is the check whose absence let 26 zero-step runs read
+    as the agent failing.
+    """
+    module = REPO_MODULES.get(instance.repo)
+    if module is None:
+        return f"no module mapping for {instance.repo}; cannot verify the environment"
+    probe = (
+        f"python -c \"import {module} as m; import sys; "
+        f"assert m.__file__, 'namespace package'; "
+        f"print(getattr(m, '__version__', '?')); print(m.__file__)\""
+    )
+    run = getattr(sandbox, "exec_in_env", sandbox.exec)
+    result = run(probe, timeout=120)
+    if result.exit_code != 0:
+        return f"import {module} failed in the agent environment: {(result.stderr or result.stdout)[-300:]}"
+    lines = result.stdout.strip().splitlines()
+    version = lines[0] if lines else "?"
+    location = lines[-1] if len(lines) > 1 else ""
+    if "unknown" in version:
+        # The signature of a source tree shadowing the installed package.
+        return f"{module} resolves to an uninstalled tree (version {version!r} at {location!r})"
+    if "/testbed" not in location and "site-packages" not in location:
+        return f"{module} resolves outside the graded environment: {location!r}"
+    return None
+
+
 def _init_workspace(instance: SWEInstance, workspace: Path) -> Path:
     """A fresh single-commit repository over whatever is already in the tree."""
 
