@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from taste.agent import AgentSpec
 from taste.attempts import harvest_by_instance
 from taste.benchmarks import swebench
 from taste.benchmarks.swebench_run import (
@@ -127,6 +128,11 @@ def main() -> int:
     ap.add_argument("--only", default="", help="Comma-separated instance ids.")
     ap.add_argument("--observe-tools", action="store_true",
                     help="Observe after every tool call, not only at step boundaries.")
+    ap.add_argument("--models", choices=["claude", "openai"], default="claude",
+                    help="Which model family drives the cores. openai: planner "
+                         "gpt-5.6-sol, worker gpt-5.6-terra. The harness, the "
+                         "instrument, and the budgets are identical either way — "
+                         "that is the point of the seam.")
     ap.add_argument("--no-coverage", action="store_true",
                     help="Skip per-instance coverage maps. Attribution then reports "
                          "UNKNOWN — fine for a smoke run, not for a silence claim.")
@@ -227,12 +233,25 @@ def main() -> int:
             budget_usd=args.budget, provider=provider,
             repo_cache=root / "mirrors", observe_tools=args.observe_tools,
             coverage=coverage,
+            planner_model="gpt-5.6-sol" if args.models == "openai" else None,
             # Routing is not optional for a real instance. The unrouted mode
             # runs the agent on the host against an uninstalled checkout —
             # bug 20 — and exists only for synthetic tasks and Gate 0.
             route_execution=True,
         ),
-        execute=make_execute(llm_factory=llm_factory, retry_allowance=allowance),
+        execute=make_execute(
+            llm_factory=llm_factory, retry_allowance=allowance,
+            spec=AgentSpec(
+                name="swe",
+                description="Resolve the reported issue.",
+                model="gpt-5.6-terra",
+                system_prompt=(
+                    "You are fixing a bug in an existing repository. Make the "
+                    "smallest change that resolves the report without breaking "
+                    "behaviour that already works."
+                ),
+            ) if args.models == "openai" else None,
+        ),
         score=make_score(ledger_dir=ledger, grade=make_grade()),
         on_cell=announce,
         max_consecutive_failures=args.max_consecutive_failures or None,

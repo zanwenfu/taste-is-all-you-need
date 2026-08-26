@@ -145,6 +145,7 @@ def make_prepare(
     provider: SandboxProvider | None = None,
     observe_tools: bool = False,
     route_execution: bool = False,
+    planner_model: str | None = None,
 ):
     """Build the ``prepare`` callable for a sweep over these instances.
 
@@ -192,9 +193,13 @@ def make_prepare(
         # visible to the observation stamped with that worker's step -- which
         # would make the recorded file set wrong exactly where attribution
         # reads it.
-        config = HarnessConfig.arm(
-            cell.arm, max_parallel=1, observe_tools=observe_tools
-        )
+        overrides: dict = {"max_parallel": 1, "observe_tools": observe_tools}
+        if planner_model is not None:
+            # A different planner is a different harness configuration, and
+            # the config hash says so — two model families must never share
+            # an identity in the ledger.
+            overrides["planner_model"] = planner_model
+        config = HarnessConfig.arm(cell.arm, **overrides)
         probe_cov, monitor_cov = (coverage or {}).get(instance.instance_id, (None, None))
         return CellContext(
             instance=instance,
