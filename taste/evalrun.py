@@ -292,23 +292,36 @@ def run_sweep(
         attempt_number = (previous.attempts_made + 1) if previous else 1
 
         started = time.time()
+        context: Any = None
+        phase = "prepare"
         try:
             context = prepare(cell)
+            phase = "execute"
             result = execute(cell, context)
+            phase = "score"
             value = score(cell, context, result) if score else None
             record = _record_from(cell, result, value, context)
             record.attempts_made = attempt_number
         except Exception as exc:
             # A crash is data too — recorded so the cell is not silently
-            # retried forever, and excluded from success rates.
+            # retried forever, and excluded from success rates. The spend is
+            # read off the context rather than zeroed: a crash in score()
+            # arrives AFTER the agent phase was paid for, and writing
+            # billed_usd=0 made that money vanish from the ledger — with the
+            # cell recorded as retryable, so a resume re-executed the paid
+            # phase. The phase prefix is what lets a human tell "the agent
+            # run is intact, only the measurement failed" from "nothing ran".
+            stats = getattr(context, "llm_stats", None)
             record = CellResult(
                 task=cell.task,
                 arm=cell.arm,
                 trial=cell.trial,
                 status="error",
                 config_hash="",
+                billed_usd=round(getattr(stats, "total_cost_usd", 0.0) or 0.0, 6),
+                work_usd=round(getattr(stats, "total_work_usd", 0.0) or 0.0, 6),
                 elapsed_s=round(time.time() - started, 2),
-                error=f"{type(exc).__name__}: {exc}",
+                error=f"{phase}: {type(exc).__name__}: {exc}",
                 attempts_made=attempt_number,
             )
             record.failure_reason = traceback.format_exc(limit=3)

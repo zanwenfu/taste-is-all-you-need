@@ -393,3 +393,56 @@ def ctx_hash(_workspace: Path, *, observe_tools: bool) -> str:
     from taste.config import HarnessConfig
 
     return HarnessConfig.arm("A0", max_parallel=1, observe_tools=observe_tools).hash()
+
+
+def test_a_score_crash_leaves_the_paid_agent_phase_on_the_ledger(
+    instance: swebench.SWEInstance, source: Path, tmp_path: Path
+) -> None:
+    """End to end through the real seam: the kernel runs and spends, score()
+    blows up, and the ledger row must still carry the spend — read from the
+    stats ``execute`` stashed on the context the moment the kernel finished —
+    with an error naming the phase. Without that the money vanished and a
+    resume re-executed the paid agent phase."""
+    from types import SimpleNamespace
+
+    ledger = tmp_path / "ledger"
+    fake_llm = SimpleNamespace(stats=_paid_stats())
+
+    def exploding_score(cell, ctx, result):
+        raise RuntimeError("evidence write failed")
+
+    report = run_sweep(
+        tasks=[instance.instance_id], arms=["A0"], trials=1, ledger_dir=ledger,
+        prepare=make_prepare(
+            instances={instance.instance_id: instance}, root=tmp_path / "runs",
+            source_root=source, provider=None,
+        ),
+        execute=make_execute(
+            llm_factory=lambda _ctx: fake_llm,
+            run_overrides=lambda _c, ctx: _breaking_run(ctx.workspace),
+        ),
+        score=exploding_score,
+    )
+    record = report.results[0]
+    assert record.status == "error"
+    assert (record.error or "").startswith("score:"), record.error
+    assert record.billed_usd > 0, "the agent phase was paid; the ledger must say so"
+    assert record.work_usd > 0
+
+
+def _paid_stats():
+    """RunStats carrying real spend, so billed and work are both nonzero."""
+    from taste.llm import RunStats
+    from taste.providers.base import Completion, Usage
+
+    stats = RunStats()
+    stats.record(
+        "claude-sonnet-4-6",
+        Completion(
+            text_blocks=(), tool_calls=(), stop_reason="end_turn",
+            model="claude-sonnet-4-6", provider="fake",
+            usage=Usage(input_tokens=1000, cache_read_tokens=99_000),
+            transcript_blocks=(),
+        ),
+    )
+    return stats

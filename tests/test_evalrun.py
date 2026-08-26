@@ -257,6 +257,46 @@ def test_the_score_is_carried_through(tmp_path: Path) -> None:
     assert report.results[0].score == 0.42
 
 
+def test_a_score_crash_keeps_the_execute_phase_spend(tmp_path: Path) -> None:
+    """A crash in score() lands AFTER the agent phase was paid for. The old
+    except path wrote billed_usd=0, so the money vanished from the ledger —
+    and, the row being retryable, a resume re-executed the PAID agent phase.
+    The spend must be read off the context, and the error must say which
+    phase died so a human can tell "only the measurement failed" apart from
+    "nothing ran"."""
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(
+        llm_stats=SimpleNamespace(total_cost_usd=1.23, total_work_usd=2.34)
+    )
+
+    def exploding_score(cell, ctx, result):
+        raise RuntimeError("sidecar write failed")
+
+    report = run_sweep(
+        tasks=["lib"], arms=["A3"], trials=1, ledger_dir=tmp_path,
+        prepare=lambda c: context,
+        execute=lambda c, x: _run_result(),
+        score=exploding_score,
+    )
+    record = report.results[0]
+    assert record.status == "error"
+    assert (record.error or "").startswith("score:"), record.error
+    assert record.billed_usd == 1.23, "paid spend must never vanish from the ledger"
+    assert record.work_usd == 2.34
+
+
+def test_the_error_row_names_the_phase_that_crashed(tmp_path: Path) -> None:
+    def boom(cell, ctx):
+        raise RuntimeError("adapter exploded")
+
+    report = run_sweep(
+        tasks=["lib"], arms=["A3"], trials=1, ledger_dir=tmp_path,
+        prepare=lambda c: None, execute=boom,
+    )
+    assert (report.results[0].error or "").startswith("execute:")
+
+
 # ------------------------------------------------------------------ breakers
 
 
