@@ -54,6 +54,69 @@ def local_images() -> set[str]:
     return set(out.stdout.split())
 
 
+def build_instance_coverage(provider, instances, *, cache_dir: Path):
+    """One coverage map per instance, cached by (instance, base_commit).
+
+    The same map serves as probe AND monitor coverage for now: it is built
+    over the graded test files, so probe tests are fully mapped while a
+    Monitor check that runs elsewhere joins as typed UNKNOWN — an honest
+    partial, biased only toward reporting more unknowns, never more silence.
+
+    django's runtests.py and sympy's bin/test cannot host `coverage run -m`;
+    those instances get a typed-none map (everything UNKNOWN) rather than a
+    fabricated empty one. The build container runs with the network up — the
+    published images do not ship coverage.py — which is the one sanctioned
+    exception, argued in build_coverage_map's docstring: nothing here is a
+    measurement, and the map cannot know which treatment will run.
+    """
+    import json as _json
+
+    from taste.attribution import CoverageMap as _Map
+    from taste.attribution import (
+        build_coverage_map,
+        coverage_from_json,
+        coverage_to_json,
+    )
+    from taste.benchmarks.swebench_specs import spec_for, test_directives
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for inst in instances:
+        cached = cache_dir / f"{inst.instance_id}.json"
+        if cached.exists():
+            raw = _json.loads(cached.read_text())
+            if raw.get("built_at_commit") == inst.base_commit:
+                cov = coverage_from_json(raw)
+                out[inst.instance_id] = (cov, cov)
+                continue
+        spec = spec_for(inst.repo, inst.version)
+        if "pytest" not in spec.test_cmd:
+            cov = _Map(
+                instance_id=inst.instance_id,
+                built_at_commit=inst.base_commit,
+                method="none",
+                uninstrumented=frozenset(inst.pass_to_pass),
+            )
+        else:
+            directives = " ".join(test_directives(inst.repo, inst.test_patch))
+            sandbox = provider.open(
+                key=f"cov:{inst.instance_id}", image=inst.image, network_mode="bridge"
+            )
+            try:
+                cov = build_coverage_map(
+                    sandbox, inst,
+                    tests=list(inst.pass_to_pass),
+                    test_command=f"pytest {directives}".strip(),
+                )
+            finally:
+                sandbox.close()
+        cached.write_text(_json.dumps(coverage_to_json(cov)))
+        print(f"  [coverage] {inst.instance_id:32s} method={cov.method} "
+              f"mapped={len(cov.covers)}", flush=True)
+        out[inst.instance_id] = (cov, cov)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", type=int, default=5)
@@ -64,6 +127,9 @@ def main() -> int:
     ap.add_argument("--only", default="", help="Comma-separated instance ids.")
     ap.add_argument("--observe-tools", action="store_true",
                     help="Observe after every tool call, not only at step boundaries.")
+    ap.add_argument("--no-coverage", action="store_true",
+                    help="Skip per-instance coverage maps. Attribution then reports "
+                         "UNKNOWN — fine for a smoke run, not for a silence claim.")
     ap.add_argument("--match-retries-from", default="",
                     help="Root of a completed paired sweep. Each cell is capped at the "
                          "retries its paired run actually used, making this an "
@@ -129,6 +195,15 @@ def main() -> int:
         print(f"  [cell] {record.task:30s} {record.status:9s} "
               f"${record.billed_usd:6.4f} {record.error or ''}", flush=True)
 
+    coverage: dict[str, tuple] = {}
+    if not args.no_coverage:
+        coverage = build_instance_coverage(
+            provider, chosen, cache_dir=root / "coverage"
+        )
+        known = sum(1 for probe_cov, _ in coverage.values() if probe_cov.method != "none")
+        print(f"  coverage maps: {known}/{len(chosen)} instrumented "
+              f"(others typed UNKNOWN — runner families coverage cannot host)")
+
     allowance: dict[str, int] = {}
     if args.match_retries_from:
         allowance = harvest_by_instance(Path(args.match_retries_from))
@@ -151,6 +226,7 @@ def main() -> int:
             instances=instances, root=root / "runs",
             budget_usd=args.budget, provider=provider,
             repo_cache=root / "mirrors", observe_tools=args.observe_tools,
+            coverage=coverage,
             # Routing is not optional for a real instance. The unrouted mode
             # runs the agent on the host against an uninstalled checkout —
             # bug 20 — and exists only for synthetic tasks and Gate 0.

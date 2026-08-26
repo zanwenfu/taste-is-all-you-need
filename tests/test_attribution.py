@@ -543,3 +543,22 @@ def test_no_coverage_and_no_episodes_is_a_clean_zero() -> None:
     report = summarise_silence([], AttributionResult(), method="none")
     assert report.unknown_attribution_rate == 0.0
     assert report.episodes == 0
+
+
+def test_coverage_maps_survive_the_cache_round_trip() -> None:
+    """The pilot must not pay a suite's runtime twice to learn the same map —
+    and the round trip must preserve the UNKNOWN/measured-nothing distinction,
+    which is the entire honesty property of files_for."""
+    from taste.attribution import coverage_from_json, coverage_to_json
+
+    original = CoverageMap(
+        instance_id="i", built_at_commit="c", method="pytest_cov_context",
+        covers={"t::a": frozenset({"src/x.py"}), "t::empty": frozenset()},
+        uninstrumented=frozenset({"t::dead"}),
+    )
+    restored = coverage_from_json(coverage_to_json(original))
+    assert restored.files_for("t::a") == frozenset({"src/x.py"})
+    assert restored.files_for("t::empty") == frozenset(), "measured-covers-nothing"
+    assert restored.files_for("t::dead") is None, "uninstrumented stays UNKNOWN"
+    assert restored.files_for("t::never-seen") is None
+    assert restored.method == original.method

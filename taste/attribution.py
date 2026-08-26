@@ -603,6 +603,30 @@ function is executing no matter who invoked it.
 """
 
 
+def coverage_to_json(cov: CoverageMap) -> dict:
+    """A cacheable form. Coverage is built once per instance at base_commit
+    and is identical across arms by construction — which also makes it
+    identical across *sweeps*, so a pilot re-run must not pay the suite's
+    runtime again to learn the same map."""
+    return {
+        "instance_id": cov.instance_id,
+        "built_at_commit": cov.built_at_commit,
+        "method": cov.method,
+        "covers": {t: sorted(files) for t, files in cov.covers.items()},
+        "uninstrumented": sorted(cov.uninstrumented),
+    }
+
+
+def coverage_from_json(raw: dict) -> CoverageMap:
+    return CoverageMap(
+        instance_id=raw["instance_id"],
+        built_at_commit=raw["built_at_commit"],
+        method=raw["method"],
+        covers={t: frozenset(files) for t, files in raw["covers"].items()},
+        uninstrumented=frozenset(raw["uninstrumented"]),
+    )
+
+
 def build_coverage_map(
     sandbox: Any,
     instance: Any,
