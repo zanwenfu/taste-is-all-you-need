@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 
-from taste import cores
 from taste.agent import AgentSpec
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.execution import LocalSandbox
@@ -161,7 +160,8 @@ def test_mark_reset_pushes_exactly_the_rollback_delta(tmp_path: Path) -> None:
     bed = tmp_path / "bed"
     bed.mkdir()
     router = _router(bed, ws)
-    router.mark_dirty("a.py"); router.mark_dirty("b.py")
+    router.mark_dirty("a.py")
+    router.mark_dirty("b.py")
     router.exec("true")  # container now has A=2
 
     repo.git.reset("--hard", good)  # the rollback

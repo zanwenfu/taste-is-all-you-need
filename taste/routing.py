@@ -38,7 +38,7 @@ from typing import Any
 
 from taste.execution import ExecResult
 
-__all__ = ["SandboxRouter", "prepare_container_tree", "CONTAINER_EXCLUDES"]
+__all__ = ["CONTAINER_EXCLUDES", "SandboxRouter", "prepare_container_tree"]
 
 #: Junk a test run generates that must never cross the sync boundary: pulled
 #: into the host tree it would pollute every shadow observation (the npm
