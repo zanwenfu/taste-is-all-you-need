@@ -529,6 +529,14 @@ class SilenceReport:
 
     @property
     def silence_rate(self) -> float | None:
+        # With no coverage there is no attribution, and "no attribution"
+        # must not render as "attributed silent". The first routed canary
+        # produced exactly that reading: 8 episodes, method "none",
+        # silent_attributed=8, unknown_rate 0.0 — the maximal claim about
+        # the paper's central quantity, from zero evidence. The silence rate
+        # under method "none" is UNKNOWN, and so is the unknown rate's zero.
+        if self.method == "none":
+            return None
         return self.silent_attributed / self.episodes if self.episodes else None
 
     @property
@@ -552,6 +560,18 @@ def summarise_silence(
     *,
     method: CoverageMethod = "none",
 ) -> SilenceReport:
+    if method == "none":
+        # Nothing was measured about attribution: every episode's detection
+        # status is unknown, not silent. silent_attributed stays 0 so no
+        # downstream sum can quietly absorb a fabricated count, and the
+        # unknown rate says exactly how much is unknown — all of it.
+        return SilenceReport(
+            episodes=len(episodes),
+            silent_attributed=0,
+            silent_unattributed=sum(1 for e in episodes if e.silent_unattributed),
+            unknown_attribution_rate=1.0 if episodes else 0.0,
+            method=method,
+        )
     return SilenceReport(
         episodes=len(episodes),
         silent_attributed=sum(1 for e in episodes if e.silent),

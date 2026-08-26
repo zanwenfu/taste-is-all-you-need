@@ -26,6 +26,7 @@ from taste.attribution import (
     harness_failures,
     read_coverage_sqlite,
     read_events,
+    AttributionResult,
     summarise_silence,
 )
 from taste.replay import RegressionEpisode
@@ -514,3 +515,31 @@ def test_the_map_is_keyed_by_graded_test_id_not_coverage_context() -> None:
     )
     assert got.method == "coverage_dynamic_context"
     assert got.files_for("test_alpha (pkg.tests.CoreTests)") == frozenset({"pkg/core.py"})
+
+
+def test_no_coverage_means_unknown_not_silent() -> None:
+    """The first routed canary rendered 8 episodes with no coverage maps as
+    silent_attributed=8, unknown_attribution_rate=0.0 — the maximal claim
+    about the paper's central quantity from zero evidence. Method "none"
+    must report all-unknown: zero attributed silence, unknown rate 1.0, and
+    a silence_rate of None rather than 100%."""
+    episodes = [
+        RegressionEpisode(probe=f"t::{i}", onset_seq=5, onset_sha="s", recovered_seq=6)
+        for i in range(3)
+    ]
+    report = summarise_silence(
+        episodes, AttributionResult(), method="none"
+    )
+    assert report.silent_attributed == 0
+    assert report.unknown_attribution_rate == 1.0
+    assert report.silence_rate is None
+    assert report.episodes == 3
+
+
+def test_no_coverage_and_no_episodes_is_a_clean_zero() -> None:
+    """An empty run with no coverage is still a real zero-episode fact; only
+    the attribution axis is unknown, and with nothing to attribute the
+    unknown rate is honestly zero."""
+    report = summarise_silence([], AttributionResult(), method="none")
+    assert report.unknown_attribution_rate == 0.0
+    assert report.episodes == 0
