@@ -62,8 +62,10 @@ twenty-six-defect catalogue with the mechanism for each, collapsed into a
 four-class taxonomy whose classes we show operating in public harnesses, not
 only ours; and (iii) two design rules and one working practice that caught
 most of them, cheap enough to adopt wholesale. We claim no result about
-recovery policy: the experiment this instrument was built for had not run
-validly at submission time, and §5 explains precisely why we know that.
+recovery policy; what §5 reports instead is the corrected pipeline's first
+valid exploratory measurements — a 32.5% resolve rate, and a zero event
+rate whose zero is *demonstrated* to belong to the runs rather than the
+instrument — and the pre-declared decision they trigger.
 
 ---
 
@@ -273,7 +275,41 @@ environment. **A validation gate certifies only the paths it exercises.**
 The seam that fixes this is architectural, and it is the same seam the
 instrument already uses: the agent must execute where it is measured.
 
-### 5.1 The seam, built and checked the way the catalogue teaches
+### 5.1 What the corrected pipeline measures
+
+With the seam built, we re-ran the exploratory pilot: 40 development-slice
+instances, the rollback arm, every cell executing and verified inside its
+pinned image, every final patch graded by the official semantics, coverage
+maps built per instance for attribution. Three numbers, all firsts for this
+instrument:
+
+**The harness resolves 32.5% of instances** (13/40, exact CI [18.6%, 49.1%])
+— the first resolve rate measured here, inside the credible band for a
+minimal scaffold under tight budgets, and reported so that no claim rests on
+unmeasured competence.
+
+**The event rate, measured validly, is zero.** 227 observations, exhaustive
+replay confirmed on every cell, an oracle with 21 typed holes out of ~3,300
+graded members, and **no silent-regression event in any of 40 runs**
+(declared unit; bearing fraction CI [0%, 8.8%]). Both pre-declared gates for
+proceeding on this substrate fail, and this time the inference survives the
+data's provenance: the re-scoring control, run under the *identical*
+instrument, still reproduces the earlier bearing run's 8 raw / 3 declared
+episodes from its archived timeline, exactly. Detection did not regress;
+these runs did not break adjacent behaviour.
+
+**The phenomenon exists; its base rate here is low.** A single earlier run
+on the same pipeline broke eight adjacent assertions mid-run, recovered them
+by rollback two observations later, and ended at a perfect final state — the
+event final-state measurement cannot see. What the 40-run pilot adds is the
+denominator: under a verifier-gated harness at this resolve level, such
+events occur in at most ~9% of runs against an oracle that watches only the
+gold test-patch's blast radius. The pre-registered decision rule takes the
+substrate to the rolling benchmark whose median held-out oracle is ~37×
+larger [7]; the confirmatory experiment moves there, and the null reported
+here is the pre-declared, honestly-measured reason why.
+
+### 5.2 The seam, built and checked the way the catalogue teaches
 
 We built that seam — agent tools and Monitor checks execute inside the
 pinned image, with bidirectional file coherence between the host tree the
