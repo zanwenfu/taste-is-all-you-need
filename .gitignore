@@ -26,3 +26,4 @@ docs/eval_protocol.md
 
 # Dataset snapshots: 8MB of JSONL, pinned by digest in data/*.sha256
 data/*.jsonl
+.claude/worktrees/
