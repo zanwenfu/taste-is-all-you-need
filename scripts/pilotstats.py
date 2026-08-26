@@ -25,7 +25,9 @@ def clopper_pearson(k: int, n: int, alpha: float = 0.05) -> tuple[float, float]:
     def binom_cdf(x: int, n: int, p: float) -> float:
         return sum(math.comb(n, i) * p**i * (1 - p) ** (n - i) for i in range(x + 1))
 
-    def solve(target, lo, hi, f):
+    def bisect_decreasing(f, target):
+        # f monotone decreasing in p; find p with f(p) = target.
+        lo, hi = 0.0, 1.0
         for _ in range(200):
             mid = (lo + hi) / 2
             if f(mid) > target:
@@ -34,8 +36,17 @@ def clopper_pearson(k: int, n: int, alpha: float = 0.05) -> tuple[float, float]:
                 hi = mid
         return (lo + hi) / 2
 
-    lower = 0.0 if k == 0 else solve(1 - alpha / 2, 0.0, 1.0, lambda p: 1 - binom_cdf(k - 1, n, p))
-    upper = 1.0 if k == n else solve(alpha / 2, 0.0, 1.0, lambda p: 1 - binom_cdf(k, n, p))
+    # Exact CP: lower solves P(X >= k | p) = alpha/2 (increasing in p, so
+    # bisect its complement); upper solves P(X <= k | p) = alpha/2
+    # (decreasing in p). The first version got the k=0 upper wrong and
+    # printed [0%, 100%] for 0/40 — an interval so obviously broken it was
+    # caught on sight, which is the lucky kind of wrong.
+    lower = 0.0 if k == 0 else bisect_decreasing(
+        lambda p: binom_cdf(k - 1, n, p), 1 - alpha / 2
+    )
+    upper = 1.0 if k == n else bisect_decreasing(
+        lambda p: binom_cdf(k, n, p), alpha / 2
+    )
     return (lower, upper)
 
 
