@@ -392,9 +392,10 @@ of it in one file for this benchmark), so "silent regression" here means
 silent *within the tests adjacent to the edit* — a declared lower bound.
 The catalogue is a census of one team's instrument, organised into a
 taxonomy whose external instances are evidence of reach, not a survey. The
-fix for A6 is built and golden-checked on real images (§5.1), but no
-benchmark measurement produced through it is reported here — the first
-valid numbers postdate this submission by design.
+fix for A6 is built and golden-checked on real images (§5.2); the §5.1
+numbers are exploratory, from a development slice permanently excluded from
+any confirmatory frame, and no contrast between recovery policies is
+claimed.
 
 ---
 

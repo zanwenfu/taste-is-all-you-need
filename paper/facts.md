@@ -98,3 +98,19 @@ they were written on. Before the bare-`pytest` fix, 15 of them failed there.
 | grade network stance | grade containers bridge (official conditions); measurement containers severed | code + first golden run (126/130 under `none`) |
 | official pass semantics | PASSED\|XFAIL pass; SKIPPED fails | fetched upstream grading.py |
 | defects caught by the gate itself, pre-spend | 3 (router workdir default; stale-ledger skip; grade network isolation) | goldencheck sessions |
+
+## Pilot 40c — the first valid measurement (2026-08-26, exploratory, dev slice)
+
+| fact | value | source |
+|---|---|---|
+| cells | 40, all routed + graded | ledger |
+| spend | $34.24 | ledger |
+| resolve rate | 13/40 = 32.5%, CI95 [18.6%, 49.1%] | official grader per cell |
+| completed (Monitor) | 22/40; step progress 25/40 | ledger |
+| observations / replays | 227, replays == observations on every cell | evidence |
+| episodes (declared unit) | 0; bearing 0/40, CI95 [0%, 8.8%] | evidence |
+| gates (λ̂ ≥ 0.30, bearing ≥ 25%) | both FAIL → pre-declared SWITCH to SWE-bench-Live | prereg rule |
+| rescore control | canary bearing run reproduces 8 raw / 3 declared exactly under this instrument | rescore run |
+| oracle holes | 21 / ~3,300 graded members, 3 instances, all explained | evidence |
+| rollback exercise | 22/40 runs rolled back at least once | ledger |
+| decoupling | flask-5014 resolved=True while Monitor scored the run failed | ledger+evidence |
