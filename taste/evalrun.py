@@ -38,7 +38,7 @@ from typing import Any
 from taste.config import HarnessConfig, kernel_kwargs
 from taste.kernel import Kernel, RunResult
 
-CellStatus = str  # "completed" | "failed" | "infra" | "budget" | "error"
+CellStatus = str  # "completed" | "failed" | "infra" | "budget" | "error" | "aborted"
 
 
 @dataclass(frozen=True)
@@ -232,6 +232,8 @@ def run_sweep(
     score: Callable[[Cell, Any, RunResult], float | None] | None = None,
     on_cell: Callable[[CellResult], None] | None = None,
     retry_budget: int = 0,
+    max_consecutive_failures: int | None = None,
+    sweep_budget_usd: float | None = None,
 ) -> SweepReport:
     """Run the grid, skipping cells already on disk.
 
@@ -239,36 +241,87 @@ def run_sweep(
     whatever ``execute`` and ``score`` need. Splitting it out keeps the
     per-trial isolation guarantee in one place rather than scattered through
     the driver.
+
+    ``max_consecutive_failures`` and ``sweep_budget_usd`` are the sweep's own
+    circuit breakers, and they exist because per-cell caps compose into no
+    sweep-level protection at all: a grid whose cells all fail for one
+    systematic reason — a broken image, a revoked key, a bug in the harness
+    itself — runs to the end at full price. That is exactly how $99 went to
+    measuring a broken environment. A failure only feeds the breaker when the
+    cell also made zero step progress, because a run that passed steps before
+    failing is evidence about the arm, not about the environment; any other
+    outcome resets the count. The budget is a running total of billed
+    dollars, checked before a cell starts — this is a stop-loss on real
+    spend, so it counts what was paid, including cells resumed from disk.
+    Both trip into a single ``status="aborted"`` marker row naming the rule,
+    so a resumed sweep can see it stopped deliberately, not crashed.
     """
     ledger = Ledger(ledger_dir)
     report = SweepReport()
     notify = on_cell or (lambda _r: None)
 
+    streak = 0
+    billed_total = 0.0
+
+    def aborted(reason: str) -> None:
+        marker = CellResult(
+            task="__sweep__",
+            arm="__abort__",
+            trial=0,
+            status="aborted",
+            config_hash="",
+            failure_reason=reason,
+        )
+        ledger.write(marker)
+        report.results.append(marker)
+        notify(marker)
+
     for cell in cells(tasks, arms, trials):
         if ledger.done(cell, retry_budget=retry_budget):
             report.skipped += 1
+            prior = ledger.read(cell)
+            billed_total += prior.billed_usd if prior else 0.0
             continue
+        if sweep_budget_usd is not None and billed_total >= sweep_budget_usd:
+            aborted(
+                f"sweep budget exhausted: ${billed_total:.2f} billed of "
+                f"${sweep_budget_usd:.2f} allowed"
+            )
+            break
         previous = ledger.read(cell)
         attempt_number = (previous.attempts_made + 1) if previous else 1
 
         started = time.time()
+        context: Any = None
+        phase = "prepare"
         try:
             context = prepare(cell)
+            phase = "execute"
             result = execute(cell, context)
+            phase = "score"
             value = score(cell, context, result) if score else None
             record = _record_from(cell, result, value, context)
             record.attempts_made = attempt_number
         except Exception as exc:
             # A crash is data too — recorded so the cell is not silently
-            # retried forever, and excluded from success rates.
+            # retried forever, and excluded from success rates. The spend is
+            # read off the context rather than zeroed: a crash in score()
+            # arrives AFTER the agent phase was paid for, and writing
+            # billed_usd=0 made that money vanish from the ledger — with the
+            # cell recorded as retryable, so a resume re-executed the paid
+            # phase. The phase prefix is what lets a human tell "the agent
+            # run is intact, only the measurement failed" from "nothing ran".
+            stats = getattr(context, "llm_stats", None)
             record = CellResult(
                 task=cell.task,
                 arm=cell.arm,
                 trial=cell.trial,
                 status="error",
                 config_hash="",
+                billed_usd=round(getattr(stats, "total_cost_usd", 0.0) or 0.0, 6),
+                work_usd=round(getattr(stats, "total_work_usd", 0.0) or 0.0, 6),
                 elapsed_s=round(time.time() - started, 2),
-                error=f"{type(exc).__name__}: {exc}",
+                error=f"{phase}: {type(exc).__name__}: {exc}",
                 attempts_made=attempt_number,
             )
             record.failure_reason = traceback.format_exc(limit=3)
@@ -276,6 +329,17 @@ def run_sweep(
         ledger.write(record)
         report.results.append(record)
         notify(record)
+
+        billed_total += record.billed_usd
+        if record.status in ("failed", "error", "infra") and record.steps_passed == 0:
+            streak += 1
+        else:
+            streak = 0
+        if max_consecutive_failures is not None and streak >= max_consecutive_failures:
+            aborted(
+                f"circuit breaker: {streak} consecutive zero-progress failures"
+            )
+            break
 
     return report
 

@@ -16,8 +16,10 @@ import sys
 from pathlib import Path
 
 from taste.agent import AgentSpec
+from taste.attribution import harness_failures
 from taste.cores import Plan, Step, Verification, WorkerResult
 from taste.kernel import Event, Kernel
+from taste.shadow import load_timeline
 from tests.conftest import PYTEST_CMD
 
 LEGACY_MATH = "legacy_math.py"
@@ -271,6 +273,54 @@ def test_event_log_survives_rollback(refactor_workspace: Path) -> None:
     rollbacks = [e for e in lines if e["kind"] == "step.rollback"]
     assert len(rollbacks) == 1
     assert rollbacks[0]["payload"]["id"] == "step-02"
+
+
+def test_the_verdict_event_carries_the_failing_test_ids(refactor_workspace: Path) -> None:
+    """attribution.harness_failures reads ``payload["failing_tests"]`` off the
+    monitor.verdict event, and the only production emitter used to send
+    id/attempt/passed/reason/sha — so on every real run each failure
+    classified as "reported no test identities" and the attributed
+    silent-vs-detected split (the study's dependent variable) was
+    structurally dead. The ids must travel on the event itself, extracted
+    from the verification's own output.
+    """
+    ws = refactor_workspace
+    # A verification that fails the way pytest fails: named nodes, a tally.
+    fail_cmd = (
+        "printf 'FAILED tests/test_math.py::test_total - assert 4 == 8\\n"
+        "1 failed, 2 passed in 0.03s\\n'; exit 1"
+    )
+    plan = Plan(
+        task="carry the ids",
+        steps=[
+            Step(id="step-01", description="break the total",
+                 verification=Verification(kind="shell", command=fail_cmd)),
+        ],
+    )
+
+    def worker(step: Step, _plan: Plan) -> WorkerResult:
+        math = ws / LEGACY_MATH
+        math.write_text(math.read_text() + "\n# edited\n")
+        return WorkerResult(summary="", tool_calls=0, stopped_reason="end_turn")
+
+    events: list[Event] = []
+    kernel = Kernel(workspace=ws, max_retries=0, on_event=events.append, shadow=True)
+    result = kernel.run(
+        task=plan.task, spec=_spec(), session_id="ids",
+        plan_override=plan, worker_override=worker,
+    )
+
+    verdicts = [e for e in events if e.kind == "monitor.verdict"]
+    assert verdicts, "the scenario must produce a verdict"
+    assert verdicts[0].payload["failing_tests"] == ["tests/test_math.py::test_total"]
+
+    # And the consumer the field exists for actually receives it.
+    timeline = load_timeline(ws / ".git" / "taste", result.session_id)
+    failures = harness_failures(
+        [e.to_json() for e in events], timeline, session=result.session_id
+    )
+    assert failures, "a FAIL verdict must surface as a MonitorFailure"
+    assert failures[0].failing_tests == ("tests/test_math.py::test_total",)
 
 
 def test_planner_error_halts_cleanly(refactor_workspace: Path) -> None:

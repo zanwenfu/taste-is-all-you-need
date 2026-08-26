@@ -41,6 +41,7 @@ import shlex
 import subprocess
 import tarfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -290,6 +291,7 @@ class DockerSandbox:
         workdir: str = "/testbed",
         platform: str = "linux/amd64",
         client: Any | None = None,
+        on_close: Callable[[DockerSandbox], None] | None = None,
     ) -> None:
         if client is None:
             import docker
@@ -298,6 +300,12 @@ class DockerSandbox:
         self._client = client
         self.image = image
         self.workdir = workdir
+        # Whoever caches this sandbox must learn when it dies. close() removes
+        # the container, so a cache entry that outlives close() is a handle to
+        # nothing: every exec throws, the probe's fail-open wrapper renders
+        # each throw as a hole, and the cell scores as CLEAN. See
+        # DockerProvider for the run this cost.
+        self._on_close = on_close
         self.container = client.containers.run(
             image,
             command="sleep infinity",
@@ -404,6 +412,10 @@ class DockerSandbox:
     def close(self) -> None:
         with contextlib.suppress(Exception):  # teardown must not mask a result
             self.container.remove(force=True)
+        callback, self._on_close = self._on_close, None  # close() may run twice
+        if callback is not None:
+            with contextlib.suppress(Exception):  # eviction must not either
+                callback(self)
 
     def __enter__(self) -> DockerSandbox:
         return self
@@ -418,6 +430,17 @@ class DockerProvider:
     ``prune`` exists because nothing upstream removes evaluation images and
     they run to several gigabytes each; a sweep over a few dozen instances
     fills a disk without it.
+
+    **The cache never outlives what it caches.** Arms interleave per task in
+    one process, so the same key is opened once per cell — and the scorer
+    closes its sandbox when a cell ends. The cache used to keep the entry
+    anyway, so the next cell of the same instance was handed a sandbox whose
+    container had been force-removed: every exec threw, the probe executor's
+    fail-open wrapper turned each throw into a hole, and the cell scored as
+    CLEAN with the agent phase already paid. Ownership is explicit now — a
+    closing sandbox evicts its own entry — and a cached entry is served only
+    after its container is confirmed live, because a container can also die
+    without anyone calling ``close`` (daemon restart, OOM kill).
     """
 
     def __init__(
@@ -439,15 +462,43 @@ class DockerProvider:
     def open(self, *, key: str, image: str = "") -> DockerSandbox:
         if not image:
             raise ValueError(f"no image pinned for {key!r}")
-        if key in self._open:
-            return self._open[key]
+        cached = self._open.get(key)
+        if cached is not None:
+            if self._alive(cached):
+                return cached
+            # Dead without a close() — evict, then fall through to reopen.
+            self._open.pop(key, None)
+            cached.close()
         name = f"{self.prefix}-{key}".replace("/", "_").replace(":", "_")[:200]
         self._remove_stale(name)
         sandbox = DockerSandbox(
-            image=image, name=name, platform=self.platform, client=self._client
+            image=image,
+            name=name,
+            platform=self.platform,
+            client=self._client,
+            on_close=lambda closing: self._evict(key, closing),
         )
         self._open[key] = sandbox
         return sandbox
+
+    def _alive(self, sandbox: DockerSandbox) -> bool:
+        """Whether a cached sandbox's container still exists and runs.
+
+        Asked of the daemon, not the cached handle: a removed container's
+        Python object answers exec_run happily and every call throws
+        downstream, where the probe's fail-open wrapper renders it as a hole.
+        """
+        try:
+            current = self._client.containers.get(sandbox.container.id)
+            return getattr(current, "status", "") == "running"
+        except Exception:
+            return False
+
+    def _evict(self, key: str, sandbox: DockerSandbox) -> None:
+        """Drop the cache entry when *this* sandbox closes — never a successor
+        that has since taken the key."""
+        if self._open.get(key) is sandbox:
+            del self._open[key]
 
     def _remove_stale(self, name: str) -> None:
         """A crashed sweep leaves containers behind; the name would collide."""

@@ -140,7 +140,10 @@ def test_scripted_satisfies_the_protocol() -> None:
 
 
 class _FakeContainer:
-    def __init__(self) -> None:
+    def __init__(self, name: str = "", id: str = "cid-0") -> None:
+        self.name = name
+        self.id = id
+        self.status = "running"
         self.execs: list[dict[str, object]] = []
         self.archives: list[tuple[str, bytes]] = []
         self.removed = False
@@ -171,10 +174,15 @@ class _FakeContainers:
 
     def run(self, image, **kwargs):
         self.run_kwargs = {"image": image, **kwargs}
+        self.container.name = kwargs.get("name", "")
         return self.container
 
-    def get(self, name):
-        raise KeyError(name)
+    def get(self, ref):
+        # Like the daemon: resolve by name or id, and a removed container is
+        # gone — the provider's liveness check depends on that distinction.
+        if not self.container.removed and ref in (self.container.name, self.container.id):
+            return self.container
+        raise KeyError(ref)
 
 
 class _FakeClient:
@@ -255,6 +263,63 @@ def test_the_provider_reuses_one_container_per_key() -> None:
 def test_the_provider_refuses_an_unpinned_image() -> None:
     with pytest.raises(ValueError, match="no image pinned"):
         DockerProvider(client=_FakeClient()).open(key="x")
+
+
+class _RespawningContainers:
+    """A daemon-shaped fake: ``run`` spawns a fresh container every call, and
+    ``get`` resolves only containers that still exist. The single-container
+    fake above cannot express "the old one died and a new one started", which
+    is the exact history the eviction tests replay."""
+
+    def __init__(self) -> None:
+        self.spawned: list[_FakeContainer] = []
+
+    def run(self, image, **kwargs):
+        container = _FakeContainer(
+            name=kwargs.get("name", ""), id=f"cid-{len(self.spawned)}"
+        )
+        self.spawned.append(container)
+        return container
+
+    def get(self, ref):
+        for container in self.spawned:
+            if not container.removed and ref in (container.name, container.id):
+                return container
+        raise KeyError(ref)
+
+
+def _respawning_client():
+    client = _FakeClient()
+    client.containers = _RespawningContainers()
+    return client
+
+
+def test_a_closed_sandbox_is_never_served_again() -> None:
+    """The scorer closes its sandbox at the end of a cell, and arms interleave
+    per task in one process — so the next cell of the same instance asks the
+    provider for the same key. Serving the cached, closed sandbox made every
+    probe exec throw, every observation a hole, and the cell score as CLEAN
+    with the agent phase already paid."""
+    provider = DockerProvider(client=_respawning_client())
+    first = provider.open(key="django__django-1", image="img")
+    first.close()
+
+    second = provider.open(key="django__django-1", image="img")
+    assert second is not first, "a closed sandbox must be evicted, not re-served"
+    assert not second.container.removed, "the replacement must be live"
+
+
+def test_a_container_that_died_without_close_is_evicted_and_reopened() -> None:
+    """close() is not the only way a container dies: a daemon restart or an
+    OOM kill removes it with no one on this side the wiser. The cache entry
+    is verified against the daemon before it is served."""
+    provider = DockerProvider(client=_respawning_client())
+    first = provider.open(key="k", image="img")
+    first.container.removed = True  # died out-of-band; nothing called close()
+
+    second = provider.open(key="k", image="img")
+    assert second is not first
+    assert not second.container.removed
 
 
 def test_importing_this_module_does_not_require_docker() -> None:

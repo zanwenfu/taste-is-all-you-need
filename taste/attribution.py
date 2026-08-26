@@ -99,6 +99,12 @@ def harness_failures(
     for commit in timeline:
         if session and commit.session != session:
             continue
+        if commit.trigger == "rollback":
+            # A reset is observed under the failing attempt's own key, but it
+            # happens AFTER the verdict: letting it win the last-wins rule
+            # below would pin the Monitor's failure to the pre-step anchor —
+            # a tree that does not contain the break it detected.
+            continue
         # The Monitor evaluates *after* the worker finishes, so the tree it
         # graded is the LAST observation of that (step_id, attempt) —
         # whatever produced it.

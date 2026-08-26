@@ -466,6 +466,14 @@ class Kernel:
             self._emit_run_done(result)
             return result
         finally:
+            # The last state is always observed, however the run ended —
+            # completed, halted, or thrown out of. A final rollback leaves
+            # the end-of-run tree unobserved otherwise, and a timeline that
+            # stops before the run does scores whatever happened after its
+            # last entry as if it never happened. Forced past the dedupe
+            # (fail-open, like every observation) so the timeline's shape
+            # says "this is where it ended" even when nothing changed.
+            self._observe(step_id="run", attempt=0, trigger="final", dedupe=False)
             # One Memory per run, and a sweep is one run per cell. Without
             # this the descriptors a Repo holds outlive the run, and it is
             # the cells late in a sweep that die of it -- recorded as
@@ -769,6 +777,7 @@ class Kernel:
                 passed=verdict.passed,
                 reason=verdict.reason,
                 sha=checkpoint.short_sha,
+                failing_tests=_failing_tests_of(verdict),
             )
             if journal:
                 cost_now = self.llm.stats.total_cost_usd if self.llm else None
@@ -916,6 +925,13 @@ class Kernel:
                 to=before.short_sha,
                 remaining_retries=self.max_retries - attempt + 1,
             )
+            # The reset is a tree mutation like any other and must be
+            # observed like any other. Without this the recovering arm's
+            # recoveries were invisible to the timeline that scores it — the
+            # tree went back to good between two observations that never saw
+            # it — under-counting the treatment effect in the treatment arm
+            # specifically.
+            self._observe(step_id=step.id, attempt=attempt, trigger="rollback")
 
     def _attempt_ceiling(self, attempts_used: int) -> int:
         """The ``max_attempts`` the policy is shown for this step.
@@ -1031,6 +1047,10 @@ class Kernel:
             failure_class=diagnosis.failure_class.value,
             rule=diagnosis.top.rule_id,
             confidence=diagnosis.confidence,
+            # The same ids the verdict event carries — signals parsed them
+            # from the same output — so a diagnosis can be read against the
+            # failure it answered without re-joining event streams.
+            failing_tests=list(signals.failing_tests),
         )
 
         budget = recovery.Budget(
@@ -1070,12 +1090,20 @@ class Kernel:
 
     # ------------------------------------------------------------ shadow
 
-    def _observe(self, *, step_id: str, attempt: int, trigger: str, tool: str | None = None) -> None:
+    def _observe(
+        self,
+        *,
+        step_id: str,
+        attempt: int,
+        trigger: str,
+        tool: str | None = None,
+        dedupe: bool = True,
+    ) -> None:
         """Record an observation point. Never fatal, never agent-visible."""
         if self._shadow is None:
             return
         commit = self._shadow.observe(
-            step_id=step_id, attempt=attempt, trigger=trigger, tool=tool
+            step_id=step_id, attempt=attempt, trigger=trigger, tool=tool, dedupe=dedupe
         )
         if commit is not None:
             self._emit(
@@ -1492,3 +1520,22 @@ def _build_feedback(step: Step, verdict: MonitorResult) -> str:
     if verdict.evidence:
         lines.append("Evidence:\n" + verdict.evidence)
     return "\n".join(lines)
+
+
+def _failing_tests_of(verdict: MonitorResult) -> list[str]:
+    """Test ids the verification's own output names; ``[]`` when it names none.
+
+    Attribution's coverage rule starts from ``payload["failing_tests"]`` on
+    the ``monitor.verdict`` event, and for months the only production emitter
+    sent id/attempt/passed/reason/sha — so every real failure classified as
+    "reported no test identities", and the attributed silent-vs-detected
+    split, the study's dependent variable, was structurally dead while the
+    hermetic suite (which builds its own events) stayed green.
+
+    The extraction is recovery's own (:func:`taste.recovery.parse_output`,
+    the fault frame's signals path), including the same ``[stderr]`` seam the
+    Monitor writes — so the event and the diagnosis can never name different
+    tests for the same failure.
+    """
+    stdout, _, stderr = (verdict.evidence or "").partition("\n[stderr]\n")
+    return list(recovery.parse_output(stdout, stderr)["failing_tests"])

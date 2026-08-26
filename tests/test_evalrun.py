@@ -215,8 +215,8 @@ def test_a_crash_is_recorded_rather_than_retried_forever(tmp_path: Path) -> None
     ).skipped == 1
 
 
-def test_both_currencies_are_recorded(tmp_path: Path) -> None:
-    """work is what the cap is enforced on; billed is what was actually paid."""
+def _paid_stats():
+    """RunStats with real spend on it — billed and work both nonzero."""
     from taste.llm import RunStats
     from taste.providers.base import Completion, Usage
 
@@ -230,8 +230,13 @@ def test_both_currencies_are_recorded(tmp_path: Path) -> None:
             transcript_blocks=(),
         ),
     )
+    return stats
+
+
+def test_both_currencies_are_recorded(tmp_path: Path) -> None:
+    """work is what the cap is enforced on; billed is what was actually paid."""
     result = _run_result()
-    result.stats = stats
+    result.stats = _paid_stats()
 
     report = run_sweep(
         tasks=["lib"], arms=["A3"], trials=1, ledger_dir=tmp_path,
@@ -250,6 +255,114 @@ def test_the_score_is_carried_through(tmp_path: Path) -> None:
         score=lambda c, x, r: 0.42,
     )
     assert report.results[0].score == 0.42
+
+
+def test_a_score_crash_keeps_the_execute_phase_spend(tmp_path: Path) -> None:
+    """A crash in score() lands AFTER the agent phase was paid for. The old
+    except path wrote billed_usd=0, so the money vanished from the ledger —
+    and, the row being retryable, a resume re-executed the PAID agent phase.
+    The spend must be read off the context, and the error must say which
+    phase died so a human can tell "only the measurement failed" apart from
+    "nothing ran"."""
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(
+        llm_stats=SimpleNamespace(total_cost_usd=1.23, total_work_usd=2.34)
+    )
+
+    def exploding_score(cell, ctx, result):
+        raise RuntimeError("sidecar write failed")
+
+    report = run_sweep(
+        tasks=["lib"], arms=["A3"], trials=1, ledger_dir=tmp_path,
+        prepare=lambda c: context,
+        execute=lambda c, x: _run_result(),
+        score=exploding_score,
+    )
+    record = report.results[0]
+    assert record.status == "error"
+    assert (record.error or "").startswith("score:"), record.error
+    assert record.billed_usd == 1.23, "paid spend must never vanish from the ledger"
+    assert record.work_usd == 2.34
+
+
+def test_the_error_row_names_the_phase_that_crashed(tmp_path: Path) -> None:
+    def boom(cell, ctx):
+        raise RuntimeError("adapter exploded")
+
+    report = run_sweep(
+        tasks=["lib"], arms=["A3"], trials=1, ledger_dir=tmp_path,
+        prepare=lambda c: None, execute=boom,
+    )
+    assert (report.results[0].error or "").startswith("execute:")
+
+
+# ------------------------------------------------------------------ breakers
+
+
+def test_consecutive_zero_progress_failures_trip_the_breaker(tmp_path: Path) -> None:
+    """A grid whose cells all fail for one systematic reason — a broken
+    image, a revoked key — used to run to the end at full price. That is how
+    $99 went to measuring a broken environment."""
+    executed: list[str] = []
+
+    def execute(cell, ctx):
+        executed.append(cell.key)
+        return _run_result(status="failed")
+
+    report = run_sweep(
+        tasks=["a", "b", "c"], arms=["A3"], trials=2, ledger_dir=tmp_path,
+        prepare=lambda c: None, execute=execute,
+        max_consecutive_failures=3,
+    )
+    assert len(executed) == 3, "the rest of the grid must not run"
+
+    marker = report.results[-1]
+    assert marker.status == "aborted"
+    assert "circuit breaker" in (marker.failure_reason or "")
+    assert not marker.counts_toward_success and not marker.retryable
+    # The marker is on disk too, so a resumed sweep sees the stop was
+    # deliberate — and exactly one marker, not one per remaining cell.
+    assert sum(1 for r in report.results if r.status == "aborted") == 1
+
+
+def test_any_other_outcome_resets_the_failure_streak(tmp_path: Path) -> None:
+    outcomes = iter(["fail", "fail", "ok", "fail", "fail", "ok"])
+
+    def execute(cell, ctx):
+        return _run_result() if next(outcomes) == "ok" else _run_result(status="failed")
+
+    report = run_sweep(
+        tasks=["a", "b", "c"], arms=["A3"], trials=2, ledger_dir=tmp_path,
+        prepare=lambda c: None, execute=execute,
+        max_consecutive_failures=3,
+    )
+    assert len(report.results) == 6
+    assert not any(r.status == "aborted" for r in report.results)
+
+
+def test_the_sweep_budget_stops_before_the_next_paid_cell(tmp_path: Path) -> None:
+    """A stop-loss on real spend: once the running billed total crosses the
+    cap, no further cell may start — stopping mid-grid loses nothing, since
+    every finished cell is already on disk."""
+    executed: list[str] = []
+
+    def execute(cell, ctx):
+        executed.append(cell.key)
+        result = _run_result()
+        result.stats = _paid_stats()  # bills ~$0.033 per cell
+        return result
+
+    report = run_sweep(
+        tasks=["a", "b", "c"], arms=["A3"], trials=1, ledger_dir=tmp_path,
+        prepare=lambda c: None, execute=execute,
+        sweep_budget_usd=0.03,
+    )
+    assert len(executed) == 1, "spend crossed the cap; no further cell may start"
+
+    marker = report.results[-1]
+    assert marker.status == "aborted"
+    assert "budget" in (marker.failure_reason or "")
 
 
 # ------------------------------------------------------------------ isolation

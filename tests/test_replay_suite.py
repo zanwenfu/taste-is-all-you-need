@@ -23,10 +23,14 @@ from taste.memory import Memory
 from taste.replay import (
     LocalWorktreeExecutor,
     Probe,
+    RegressionEpisode,
     Replayer,
+    ReplayReport,
     SandboxProbeExecutor,
     SuiteProbe,
     SuiteRun,
+    base_test_id,
+    collapse_episodes,
     reconstruct,
     verdicts_from,
 )
@@ -281,6 +285,75 @@ def test_holes_do_not_open_or_close_an_episode(tmp_path: Path) -> None:
         memory, timeline, [suite], session="scan", executor=_RecordingExecutor(series)
     )
     assert report.contamination_events == 0
+
+
+# ------------------------------------------------------------------ the declared unit
+
+
+def _episode(probe: str, onset: int) -> RegressionEpisode:
+    return RegressionEpisode(probe=probe, onset_seq=onset, onset_sha=f"sha{onset:04d}")
+
+
+def test_parametrised_variants_of_one_function_are_one_declared_event() -> None:
+    """The pre-declared unit is (instance, test function, onset). Counting
+    raw ids instead multiplies the primary endpoint by however many
+    parameters a suite happens to sweep — one broken function on a
+    parametrised suite would report as dozens of events, differentially by
+    instance."""
+    collapsed = collapse_episodes(
+        [
+            _episode("tests/test_x.py::test_foo[a]", 3),
+            _episode("tests/test_x.py::test_foo[b]", 3),
+        ]
+    )
+    assert len(collapsed) == 1
+    assert collapsed[0].members == 2, "the fold must be recorded, not silent"
+    assert collapsed[0].probe == "tests/test_x.py::test_foo"
+
+
+def test_the_same_function_breaking_at_two_onsets_is_two_events() -> None:
+    """A regress-recover-regress pattern is two events in every unit; the
+    collapse folds parameters, never time."""
+    collapsed = collapse_episodes(
+        [
+            _episode("tests/test_x.py::test_foo[a]", 3),
+            _episode("tests/test_x.py::test_foo[b]", 7),
+        ]
+    )
+    assert len(collapsed) == 2
+    assert all(c.members == 1 for c in collapsed)
+
+
+def test_two_functions_breaking_at_one_onset_are_two_events() -> None:
+    collapsed = collapse_episodes(
+        [
+            _episode("tests/test_x.py::test_foo", 3),
+            _episode("tests/test_x.py::test_bar", 3),
+        ]
+    )
+    assert len(collapsed) == 2
+
+
+def test_a_unittest_style_id_is_already_its_own_function() -> None:
+    assert base_test_id("test_total (app.tests.MathTests)") == (
+        "test_total (app.tests.MathTests)"
+    )
+    assert base_test_id("tests/test_x.py::test_foo[1-2]") == "tests/test_x.py::test_foo"
+
+
+def test_the_report_exposes_both_units_and_leaves_the_raw_list_alone() -> None:
+    """Attribution joins on raw ids and the verdict matrix is measured per
+    raw id, so the collapse must be a view, never a rewrite."""
+    raw = [
+        _episode("t::test_foo[a]", 2),
+        _episode("t::test_foo[b]", 2),
+        _episode("t::test_bar", 2),
+    ]
+    report = ReplayReport(session="s", observations=4, episodes=list(raw))
+
+    assert report.contamination_events == 3
+    assert report.contamination_events_declared == 2
+    assert report.episodes == raw
 
 
 def test_the_executor_is_injectable_so_replay_never_forces_a_worktree(

@@ -76,6 +76,11 @@ class CellContext:
     monitor_coverage: CoverageMap | None = None
     provider: SandboxProvider | None = None
     session: str = ""
+    llm_stats: Any = None
+    """The run's RunStats, written by ``execute`` the moment the kernel hands
+    back control. The sweep driver's crash path reads it: a crash in score()
+    lands after the agent phase was paid for, and a ledger row with
+    billed_usd=0 at that point erases real spend."""
 
 
 @dataclass
@@ -88,6 +93,11 @@ class CellEvidence:
     session: str
     observations: int
     episodes: list[dict[str, Any]] = field(default_factory=list)
+    contamination_events_declared: int = 0
+    """``len(episodes)`` counts one event per raw test id; the pre-declared
+    unit is (test function, onset) with parametrised variants collapsed, and
+    this is the count in that unit. Both are always written — a reader is
+    entitled to see how much the collapse moved the number."""
     never_passed: list[str] = field(default_factory=list)
     unknown_transitions: int = 0
     replays: int = 0
@@ -214,9 +224,17 @@ def make_execute(
             ),
         )
         extra = run_overrides(cell, ctx) if run_overrides else {}
-        result = kernel.run(
-            task=swebench.task_text(ctx.instance), spec=agent, base_ref="HEAD", **extra
-        )
+        try:
+            result = kernel.run(
+                task=swebench.task_text(ctx.instance), spec=agent, base_ref="HEAD", **extra
+            )
+        finally:
+            # Onto the context the moment the kernel is done — including a
+            # crash mid-run. Anything that throws after this point (score,
+            # the sidecar write, a dead container) happens with the agent
+            # phase already paid, and the sweep driver's error row reads the
+            # spend from here so it cannot vanish from the ledger.
+            ctx.llm_stats = llm.stats if llm is not None else None
         ctx.session = result.session_id
         ctx.shadow_ref = f"{SHADOW_HEAD}_{result.session_id.upper().replace('-', '_')}"
         return result
@@ -292,6 +310,7 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
             session=session,
             observations=report.observations,
             episodes=[asdict(e) for e in report.episodes],
+            contamination_events_declared=report.contamination_events_declared,
             never_passed=list(report.never_passed),
             unknown_transitions=report.unknown_transitions,
             replays=report.replays,

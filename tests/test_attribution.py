@@ -70,6 +70,19 @@ def test_a_failure_lands_on_the_tree_the_monitor_actually_graded() -> None:
     ]
 
 
+def test_a_rollback_observation_does_not_steal_the_graded_tree() -> None:
+    """The reset is observed under the failing attempt's own key, but it
+    happens after the verdict — joining the failure to it would pin the
+    detection to the pre-step anchor, a tree that does not contain the break
+    the Monitor caught."""
+    timeline = [
+        _commit(1, "step-01", 1),
+        _commit(2, "step-01", 1, trigger="rollback"),
+    ]
+    failures = harness_failures([_verdict("step-01", 1, passed=False)], timeline)
+    assert failures[0].seq == 1
+
+
 def test_passing_verdicts_are_not_failures() -> None:
     failures = harness_failures([_verdict("s", 1, passed=True)], [_commit(1, "s", 1)])
     assert failures == []

@@ -32,7 +32,8 @@ episodes rather than a single verdict.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -215,6 +216,66 @@ class RegressionEpisode:
         return self.recovered_seq is not None
 
 
+# A pytest parametrisation suffix: `test_foo[a-b]`. Anchored at the end so a
+# bracket inside a unittest label (there are none in Verified, but the grammar
+# does not forbid one) cannot eat half the id.
+_PARAM_SUFFIX = re.compile(r"\[.*\]$")
+
+
+def base_test_id(test_id: str) -> str:
+    """The test *function* behind an id: parametrised variants share one.
+
+    ``test_foo[a]`` and ``test_foo[b]`` -> ``test_foo``; a unittest-style id
+    has no parametrisation grammar and is already its own function, so it
+    passes through unchanged.
+    """
+    return _PARAM_SUFFIX.sub("", test_id)
+
+
+@dataclass(frozen=True)
+class CollapsedEpisode:
+    """One event in the pre-declared unit: (test function, onset).
+
+    ``episode`` is the first raw episode of the group, kept whole so the
+    detection/recovery annotations stay readable; ``members`` is how many raw
+    episodes the group absorbed. ``members == 1`` for every unparametrised
+    test, so on most instances the two counts coincide.
+    """
+
+    episode: RegressionEpisode
+    members: int
+
+    @property
+    def probe(self) -> str:
+        return base_test_id(self.episode.probe)
+
+
+def collapse_episodes(episodes: Sequence[RegressionEpisode]) -> list[CollapsedEpisode]:
+    """Fold raw episodes into the pre-declared event unit.
+
+    The protocol declares the primary unit as *(instance, test function,
+    onset)* with parametrised variants collapsed — one broken function is one
+    event, however many ``test_foo[...]`` ids the runner reports it under.
+    ``episodes_from`` deliberately stays per raw id (the verdict matrix is
+    measured per id, and coverage attribution joins on raw ids), so counting
+    ``len(episodes)`` silently substituted a different, larger unit than the
+    one pre-declared: sympy's parametrised suites would report one broken
+    function as dozens of events, differentially by instance.
+
+    Pure, order-preserving, and non-destructive: the raw list is the input to
+    everything else and is never modified.
+    """
+    groups: dict[tuple[str, int], list[RegressionEpisode]] = {}
+    for episode in episodes:
+        groups.setdefault((base_test_id(episode.probe), episode.onset_seq), []).append(
+            episode
+        )
+    return [
+        CollapsedEpisode(episode=members[0], members=len(members))
+        for members in groups.values()
+    ]
+
+
 @dataclass
 class ReplayReport:
     """Ground truth for one run."""
@@ -236,7 +297,20 @@ class ReplayReport:
 
     @property
     def contamination_events(self) -> int:
+        """Raw count, one per (raw test id, onset). Reported alongside the
+        declared unit, never instead of it."""
         return len(self.episodes)
+
+    @property
+    def episodes_collapsed(self) -> list[CollapsedEpisode]:
+        return collapse_episodes(self.episodes)
+
+    @property
+    def contamination_events_declared(self) -> int:
+        """The count in the pre-declared unit: (test function, onset), with
+        parametrised variants collapsed. This is the primary endpoint; the
+        raw count above is the per-id measurement it is computed from."""
+        return len(self.episodes_collapsed)
 
     @property
     def contaminated(self) -> bool:
@@ -263,7 +337,9 @@ class ReplayReport:
         rate_text = "n/a" if rate is None else f"{rate:.0%}"
         return (
             f"session={self.session} observations={self.observations} "
-            f"events={self.contamination_events} silent={len(self.silent_episodes)} "
+            f"events={self.contamination_events} "
+            f"declared={self.contamination_events_declared} "
+            f"silent={len(self.silent_episodes)} "
             f"recovery={rate_text} wasted=${self.wasted_work_usd:.4f} "
             f"replays={self.replays}"
         )

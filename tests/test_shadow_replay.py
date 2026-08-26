@@ -223,6 +223,59 @@ def test_a_no_recovery_arm_still_yields_a_timeline(refactor_workspace: Path) -> 
     assert len(timeline) >= 2, "even a no-checkpoint arm gets observation points"
 
 
+def test_a_rollback_is_observed_and_lands_on_the_pre_step_anchor(
+    refactor_workspace: Path,
+) -> None:
+    """A3's entire treatment is ``git reset --hard``, and the reset used to
+    produce no observation: the tree went back to good between two points the
+    timeline never saw, so the recovering arm's recoveries were invisible to
+    the instrument scoring it — under-counting the treatment effect in the
+    treatment arm specifically."""
+    ws = refactor_workspace
+    scenario = rollback_scenario(ws)
+    scenario.run(ws, shadow=True)
+
+    memory = Memory(ws, "taste/session-golden")
+    timeline = load_timeline(Path(memory.repo.git_dir) / "taste", "golden")
+    rollbacks = [c for c in timeline if c.trigger == "rollback"]
+    assert len(rollbacks) == 1, "one reset, one observation of it"
+
+    # The observation must record the tree the reset produced — the pre-step
+    # anchor — not the tree the failed attempt left behind.
+    anchor = next(e.payload["to"] for e in scenario.events if e.kind == "step.rollback")
+    observed = memory.repo.git.rev_parse(f"{rollbacks[0].sha}^{{tree}}").strip()
+    expected = memory.repo.git.rev_parse(f"{anchor}^{{tree}}").strip()
+    assert observed == expected
+
+
+def test_every_timeline_ends_with_a_final_observation(refactor_workspace: Path) -> None:
+    """Whatever mutation happens to come last is not the same claim as "this
+    is the tree the run ended on". A run whose last act is a rollback would
+    otherwise end its timeline mid-story, and everything after the last entry
+    scores as if it never happened."""
+    ws = refactor_workspace
+    rollback_scenario(ws).run(ws, shadow=True)
+
+    timeline = load_timeline(ws / ".git" / "taste", "golden")
+    assert timeline, "a shadowed run must have a timeline"
+    assert timeline[-1].trigger == "final"
+
+
+def test_the_final_observation_survives_an_unchanged_tree(refactor_workspace: Path) -> None:
+    """Mid-run, an unchanged tree is noise and is deduped away. The run-end
+    observation is the one exception: it states where the run ended, which is
+    a fact about the timeline's shape, not about a mutation."""
+    ws = refactor_workspace
+    _memory, log = _shadow(ws)
+    log.observe(step_id="s", attempt=1, trigger="worker")
+
+    assert log.observe(step_id="run", attempt=0, trigger="final") is None, (
+        "deduped by default, like any other observation"
+    )
+    final = log.observe(step_id="run", attempt=0, trigger="final", dedupe=False)
+    assert final is not None, "the run's end state must reach the timeline"
+
+
 # ------------------------------------------------------------------ episodes
 
 

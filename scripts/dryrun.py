@@ -69,6 +69,15 @@ def main() -> int:
                          "attempt-matched arm (A3'). Coverage is reported, never assumed.")
     ap.add_argument("--offline", action="store_true",
                     help="No model calls: exercise materialize + replay only.")
+    # Both breakers default ON here, unlike run_sweep itself: a dry run is
+    # exactly the setting where everything fails for one systematic reason,
+    # and it once ran the whole grid at full price anyway.
+    ap.add_argument("--max-consecutive-failures", type=int, default=5,
+                    help="Abort the sweep after this many zero-progress failures "
+                         "in a row (0 disables).")
+    ap.add_argument("--sweep-budget", type=float, default=None,
+                    help="Stop-loss in billed dollars across the whole sweep; "
+                         "no new cell starts once it is crossed.")
     args = ap.parse_args()
 
     root = Path(args.root)
@@ -145,6 +154,8 @@ def main() -> int:
         execute=make_execute(llm_factory=llm_factory, retry_allowance=allowance),
         score=make_score(ledger_dir=ledger),
         on_cell=announce,
+        max_consecutive_failures=args.max_consecutive_failures or None,
+        sweep_budget_usd=args.sweep_budget,
     )
 
     print(f"\n=== {len(report.results)} cells in {time.time()-started:.0f}s ===")
