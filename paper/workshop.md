@@ -1,4 +1,4 @@
-# Twenty-Six Ways to Measure Nothing: A Failure Catalogue from Instrumenting an Agent Harness
+# Twenty-Seven Ways to Measure Nothing: A Failure Catalogue from Instrumenting an Agent Harness
 
 *AgenticOS @ NeurIPS 2026 — regular paper draft v2. ANONYMISED — no author, repo, or host names before submission.*
 
@@ -14,9 +14,9 @@ repairing in place — and built the instrument it requires: an observational
 timeline committed to git, exhaustive replay of held-out tests at every
 observation, and detection attributed by coverage rather than co-occurrence.
 
-What we report is the instrument's failure record. **Twenty-six defects, of
-which twenty-one produced a plausible number rather than an error, and all
-but one were present while a green test suite watched.** Six were invisible
+What we report is the instrument's failure record. **Twenty-seven defects,
+of which twenty-two produced a plausible number rather than an error, and
+all but one were present while a green test suite watched.** Six were invisible
 on any developer machine *by construction*, because they depend on the
 absence of ambient configuration a developer machine has. The defects
 collapse into four mechanisms — ambient-environment dependence,
@@ -133,7 +133,7 @@ control can and cannot certify.
 
 ---
 
-## 4. Twenty-six ways to measure nothing
+## 4. Twenty-seven ways to measure nothing
 
 Every row is a real defect from this work. **S** = silent: it produced a
 plausible number rather than an error. **G** = present while the project's
@@ -191,10 +191,14 @@ consumer trusted; no producer verified.
 | D6 | Git handles never released | sweeps die of fd exhaustion after ~400 cells — loss concentrated on the back half, dropped from the denominator | ✓ | ✓ | |
 | D7 | Console re-walked the full tree per run | answers first request, times out on all others: presents as a dead server | ✗ | ✓ | |
 | D8 | Detection events never carried failing-test ids while attribution joined on them | "silent vs detected" — the title construct — structurally UNKNOWN on every real run | ✓ | ✓ | |
+| D9 | Absent coverage rendered as measured silence | 8 unmeasured episodes reported as `silent_attributed: 8, unknown_rate: 0.0` — the maximal claim from zero evidence, in the first valid run's own sidecar | ✓ | ✓ | |
 
-Totals, computed from the tables: **21 of 26 silent; 25 of 26 present under
-a green suite (the 26th being the suite itself); 6 of 26 findable only on a
-clean host.**
+Totals, computed from the tables: **22 of 27 silent; 26 of 27 present under
+a green suite (the 27th being the suite itself); 6 of 27 findable only on a
+clean host.** D9 is worth a sentence of humility: it was found *in the
+output of the first valid canary run*, after the audit had predicted it,
+after twenty-six fixes, in a codebase whose entire subject is this failure
+mode. The class does not exhaust.
 
 ### 4.2 The two design rules that caught most of them
 
