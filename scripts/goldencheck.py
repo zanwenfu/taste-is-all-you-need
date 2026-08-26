@@ -26,18 +26,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dryrun import image_for  # noqa: E402
+from dryrun import image_for
 
-from taste.benchmarks import swebench  # noqa: E402
-from taste.benchmarks.swebench_run import (  # noqa: E402
+from taste.benchmarks import swebench
+from taste.benchmarks.swebench_run import (
     make_execute,
     make_grade,
     make_prepare,
     make_score,
 )
-from taste.cores import Plan, Step, Verification, WorkerResult  # noqa: E402
-from taste.evalrun import run_sweep  # noqa: E402
-from taste.execution import DockerProvider  # noqa: E402
+from taste.cores import Plan, Step, Verification, WorkerResult
+from taste.evalrun import run_sweep
+from taste.execution import DockerProvider
 
 
 def gold_patch_of(dataset: Path, instance_id: str) -> str:
