@@ -14,8 +14,8 @@ import contextlib
 import json
 import subprocess
 import time
-from dataclasses import dataclass, field
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
