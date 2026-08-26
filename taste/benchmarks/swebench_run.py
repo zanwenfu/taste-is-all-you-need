@@ -82,6 +82,11 @@ class CellContext:
     hand the second arm the first arm's tree (the dead-container lesson, one
     level up)."""
     routed: bool = False
+    router: Any = None
+    """The live SandboxRouter for this cell, set by execute before any
+    override runs. Scripted workers use it to drive the REAL tool path
+    (write_file -> push -> in-container exec -> pull) instead of silently
+    bypassing the seam under test."""
     grade_report: Any = None
     """The official per-test grade, when a grader ran. The sidecar keeps the
     counts; the scalar keeps only resolved."""
@@ -262,6 +267,7 @@ def make_execute(
             router = SandboxRouter(
                 ctx.agent_sandbox, ctx.workspace, workdir=ctx.agent_sandbox.workdir
             )
+            ctx.router = router
         kernel = Kernel(
             workspace=ctx.workspace, llm=llm,
             **kernel_kwargs(ctx.config), config=ctx.config,
@@ -327,7 +333,13 @@ def make_grade(*, timeout: int = 1800):
         # run "unresolved, empty prediction" while looking perfectly healthy.
         patch = swebench.patch_for(ctx.workspace, root[0])
         sandbox = ctx.provider.open(
-            key=f"grade:{ctx.instance.instance_id}", image=ctx.instance.image
+            key=f"grade:{ctx.instance.instance_id}", image=ctx.instance.image,
+            # The official harness grades with the network up; four of
+            # psf/requests' graded connect-timeout tests literally need a
+            # stack to time out on. The MEASUREMENT containers stay severed —
+            # this exception is for comparability with the leaderboard, and
+            # for nothing else.
+            network_mode="bridge",
         )
         try:
             report = swebench.grade_in_sandbox(

@@ -217,7 +217,7 @@ class LocalProvider:
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
 
-    def open(self, *, key: str, image: str = "") -> LocalSandbox:
+    def open(self, *, key: str, image: str = "", **_kwargs: Any) -> LocalSandbox:
         path = self.root / key
         path.mkdir(parents=True, exist_ok=True)
         return LocalSandbox(path)
@@ -324,6 +324,7 @@ class DockerSandbox:
         platform: str = "linux/amd64",
         client: Any | None = None,
         on_close: Callable[[DockerSandbox], None] | None = None,
+        network_mode: str = "none",
     ) -> None:
         if client is None:
             import docker
@@ -373,7 +374,16 @@ class DockerSandbox:
             #
             # `none` keeps a loopback interface and still resolves nothing
             # external. Verified both directions in the image.
-            network_mode="none",
+            #
+            # The default is the MEASUREMENT stance. The one caller that may
+            # override it is the official grader (network_mode="bridge"):
+            # the benchmark's own harness evaluates with the network up, and
+            # four of psf/requests' graded connect-timeout tests need a
+            # network stack to time out on — under `none` they fail at the
+            # base commit and every resolve rate reads ~3% low. A grade
+            # produced under different conditions than the leaderboard's is
+            # not comparable to it, which defeats the number's only purpose.
+            network_mode=network_mode,
             auto_remove=False,
         )
         self._assert_workdir()
@@ -529,7 +539,9 @@ class DockerProvider:
         self.platform = platform
         self._open: dict[str, DockerSandbox] = {}
 
-    def open(self, *, key: str, image: str = "") -> DockerSandbox:
+    def open(
+        self, *, key: str, image: str = "", network_mode: str = "none"
+    ) -> DockerSandbox:
         if not image:
             raise ValueError(f"no image pinned for {key!r}")
         cached = self._open.get(key)
@@ -547,6 +559,7 @@ class DockerProvider:
             platform=self.platform,
             client=self._client,
             on_close=lambda closing: self._evict(key, closing),
+            network_mode=network_mode,
         )
         self._open[key] = sandbox
         return sandbox
