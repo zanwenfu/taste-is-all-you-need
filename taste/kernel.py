@@ -769,6 +769,7 @@ class Kernel:
                 passed=verdict.passed,
                 reason=verdict.reason,
                 sha=checkpoint.short_sha,
+                failing_tests=_failing_tests_of(verdict),
             )
             if journal:
                 cost_now = self.llm.stats.total_cost_usd if self.llm else None
@@ -1031,6 +1032,10 @@ class Kernel:
             failure_class=diagnosis.failure_class.value,
             rule=diagnosis.top.rule_id,
             confidence=diagnosis.confidence,
+            # The same ids the verdict event carries — signals parsed them
+            # from the same output — so a diagnosis can be read against the
+            # failure it answered without re-joining event streams.
+            failing_tests=list(signals.failing_tests),
         )
 
         budget = recovery.Budget(
@@ -1492,3 +1497,22 @@ def _build_feedback(step: Step, verdict: MonitorResult) -> str:
     if verdict.evidence:
         lines.append("Evidence:\n" + verdict.evidence)
     return "\n".join(lines)
+
+
+def _failing_tests_of(verdict: MonitorResult) -> list[str]:
+    """Test ids the verification's own output names; ``[]`` when it names none.
+
+    Attribution's coverage rule starts from ``payload["failing_tests"]`` on
+    the ``monitor.verdict`` event, and for months the only production emitter
+    sent id/attempt/passed/reason/sha — so every real failure classified as
+    "reported no test identities", and the attributed silent-vs-detected
+    split, the study's dependent variable, was structurally dead while the
+    hermetic suite (which builds its own events) stayed green.
+
+    The extraction is recovery's own (:func:`taste.recovery.parse_output`,
+    the fault frame's signals path), including the same ``[stderr]`` seam the
+    Monitor writes — so the event and the diagnosis can never name different
+    tests for the same failure.
+    """
+    stdout, _, stderr = (verdict.evidence or "").partition("\n[stderr]\n")
+    return list(recovery.parse_output(stdout, stderr)["failing_tests"])
