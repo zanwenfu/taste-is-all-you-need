@@ -205,7 +205,13 @@ def test_one_cell_runs_end_to_end_and_leaves_evidence(
     assert episode["recovered_seq"] is None, "A0 does not recover"
     assert episode["detected_seq_attributed"] is None
     assert episode["detected_seq_any"] is None, "nothing failed, so nothing co-occurred"
-    assert evidence["silence"]["silent_attributed"] == 1
+    # No coverage maps in this fixture, so the attribution axis is UNKNOWN:
+    # zero attributed silence and an unknown rate of 1.0 — never a fabricated
+    # "silent" count. The co-occurrence bound still carries the episode.
+    assert evidence["silence"]["method"] == "none"
+    assert evidence["silence"]["silent_attributed"] == 0
+    assert evidence["silence"]["unknown_attribution_rate"] == 1.0
+    assert evidence["silence"]["silent_unattributed"] == 1
 
     # One preparation per observation, not one per member: the cost property
     # that makes an exhaustive scan affordable instead of bisecting.
