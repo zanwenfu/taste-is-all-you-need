@@ -543,7 +543,7 @@ def test_routed_prepare_materialises_from_the_image(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(
         swebench, "environment_parity_check", lambda sandbox, instance: None
     )
-    cell, provider, root = _routed_sweep(tmp_path)
+    cell, provider, _root = _routed_sweep(tmp_path)
     assert cell.status == "completed", (
         f"{cell.status}: {cell.error}\n{cell.failure_reason}"
     )
