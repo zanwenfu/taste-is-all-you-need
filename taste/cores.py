@@ -365,6 +365,26 @@ class WorkerResult:
     turns: int = 0
 
 
+#: Output ceiling for one worker turn. 4096 was the original cap, and a
+#: whole-file `write_file` sails through it: the provider truncates the tool
+#: call's JSON arguments at the ceiling, and the failure forks on a coin —
+#: invalid JSON dies as a ProtocolFailure, while VALID-but-truncated JSON
+#: writes half a file into the tree. The second fork was measured: a
+#: truncated write produced a 78-event regression storm in one calibration
+#: run. The ceiling is generous AND the truncation guard below still refuses
+#: to execute any capped turn, because no ceiling is unreachable.
+WORKER_MAX_TOKENS = 32_000
+
+TRUNCATION_FEEDBACK = (
+    "Your previous response exceeded the output limit and was discarded — "
+    "none of its tool calls were executed, because their contents may have "
+    "been cut off mid-way. Re-issue the work in smaller pieces: write large "
+    "files in sections (write the file with the first section, then use "
+    "read_file and write_file to append the rest), and keep each tool call "
+    "well under the limit."
+)
+
+
 def execute(
     llm: LLM,
     *,
@@ -433,11 +453,20 @@ def execute(
             system=system,
             messages=messages,
             tools=tools.to_anthropic(),
-            max_tokens=4096,
+            max_tokens=WORKER_MAX_TOKENS,
             role="worker",
         )
         stop_reason = completion.stop_reason
         messages.append({"role": "assistant", "content": list(completion.transcript_blocks)})
+
+        if stop_reason == "max_tokens":
+            # A capped turn is discarded wholesale, tool calls unexecuted. A
+            # call that arrived complete before the cap would be safe, but
+            # the last one may be truncated-yet-parseable, and executing it
+            # writes a mangled artifact the Monitor then diagnoses as the
+            # agent's incompetence. The model is told, and the turn retries.
+            messages.append({"role": "user", "content": TRUNCATION_FEEDBACK})
+            continue
 
         tool_uses = completion.tool_calls
         if completion.text_blocks:

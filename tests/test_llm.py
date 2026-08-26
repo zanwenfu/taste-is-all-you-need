@@ -209,3 +209,74 @@ def test_string_system_is_normalized_to_a_block() -> None:
     provider = FakeProvider([FakeTurn(text="x")])
     _call(_llm(provider), system="plain string")
     assert provider.calls[0].system == [cached("plain string")]
+
+
+# ---------------------------------------------------- openai truncation
+
+
+class _FakeItem:
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class _FakeResponse:
+    def __init__(self, status, output):
+        self.status = status
+        self.output = output
+        self.model = "gpt-5.6-terra"
+        self.usage = _FakeItem(input_tokens=10, output_tokens=5,
+                               input_tokens_details=_FakeItem(cached_tokens=0),
+                               output_tokens_details=_FakeItem(reasoning_tokens=0))
+
+
+def _parse_openai(response):
+    from taste.providers._openai import OpenAIProvider
+
+    provider = OpenAIProvider.__new__(OpenAIProvider)
+    return provider._to_completion(response, _request_stub(), [])
+
+
+def _request_stub():
+    from taste.providers.base import CompletionRequest, SamplingConfig
+
+    return CompletionRequest(
+        model="gpt-5.6-terra", system=[], messages=[], tools=None,
+        max_tokens=100, sampling=SamplingConfig(), role="worker",
+    )
+
+
+def test_a_truncated_tool_call_is_dropped_not_fatal() -> None:
+    """The output ceiling cuts a function_call's JSON mid-string. That is a
+    retryable event the cores handle via stop_reason=max_tokens — raising
+    killed three of nine calibration cells as typed errors."""
+    response = _FakeResponse("incomplete", [
+        _FakeItem(type="function_call", name="write_file", call_id="c1",
+                  arguments='{"path": "x.py", "content": "def f('),
+    ])
+    completion = _parse_openai(response)
+    assert completion.stop_reason == "max_tokens"
+    assert completion.tool_calls == ()
+
+
+def test_malformed_arguments_on_a_complete_response_still_raise() -> None:
+    from taste.providers.base import ProtocolFailure
+
+    response = _FakeResponse("completed", [
+        _FakeItem(type="function_call", name="write_file", call_id="c1",
+                  arguments='{"path": broken'),
+    ])
+    with pytest.raises(ProtocolFailure, match="unparseable"):
+        _parse_openai(response)
+
+
+def test_a_capped_turn_with_calls_reports_max_tokens_not_tool_use() -> None:
+    """The adapter used to remap max_tokens->tool_use when calls existed —
+    'the call is still actionable' — which is exactly how a truncated-but-
+    parseable write executes. The stop reason must tell the truth."""
+    response = _FakeResponse("incomplete", [
+        _FakeItem(type="function_call", name="run_shell", call_id="c1",
+                  arguments='{"command": "ls"}'),
+    ])
+    completion = _parse_openai(response)
+    assert completion.stop_reason == "max_tokens"

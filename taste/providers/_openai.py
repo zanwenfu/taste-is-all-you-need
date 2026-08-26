@@ -181,8 +181,17 @@ class OpenAIProvider:
                 try:
                     arguments = json.loads(raw_arguments)
                 except json.JSONDecodeError as exc:
-                    # The cores index into these; a string would fail far from
-                    # here with a confusing error.
+                    if _STOP_REASONS.get(getattr(response, "status", "") or "", "") == "max_tokens":
+                        # The output ceiling cut this call's JSON mid-string.
+                        # Drop the fragment and let stop_reason=max_tokens
+                        # reach the cores, whose truncation guard discards
+                        # the whole turn and reprompts — a retryable event,
+                        # not a protocol violation. Raising here killed three
+                        # of nine calibration cells as typed errors.
+                        continue
+                    # A complete response with malformed arguments is a real
+                    # protocol violation. The cores index into these; a string
+                    # would fail far from here with a confusing error.
                     raise ProtocolFailure(
                         f"tool call {getattr(item, 'name', '?')!r} had unparseable "
                         f"arguments: {raw_arguments[:200]!r}"
@@ -210,10 +219,7 @@ class OpenAIProvider:
                 transcript.append({"type": _NATIVE, "item": native})
 
         stop = _STOP_REASONS.get(getattr(response, "status", "") or "", "other")
-        if stop == "max_tokens" and calls:
-            # Truncated after a usable tool call: the call is still actionable.
-            stop = "tool_use"
-        elif calls and stop == "end_turn":
+        if calls and stop == "end_turn":
             stop = "tool_use"
 
         sampling: dict[str, Any] = {"temperature": None, "effort": request.sampling.effort}

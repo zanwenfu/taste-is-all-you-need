@@ -318,3 +318,44 @@ def test_a_planner_that_never_complies_still_fails() -> None:
     with pytest.raises(PlannerError, match="malformed plan payload"):
         plan(llm, "task", AgentSpec(name="a", description="", system_prompt="p"), "s")
     assert len(llm.calls) == 3, "bounded, not infinite"
+
+
+# ------------------------------------------------------------ truncation
+
+
+def test_a_capped_turn_is_discarded_and_its_tool_calls_never_execute(tmp_path: Path) -> None:
+    """A turn that hit the output ceiling may carry a tool call whose JSON is
+    valid but whose CONTENT was cut mid-file. Executing it writes the mangled
+    artifact into the tree, the Monitor fails it, and the whole thing reads
+    as the agent's incompetence — measured once as a 78-event regression
+    storm. The turn is discarded wholesale and the model told to split."""
+    llm = FakeLLM([
+        FakeTurn(
+            tool_calls=[("write_file", {"path": "half.py", "content": "def f(:"})],
+            stop_reason="max_tokens",
+        ),
+        FakeTurn(
+            tool_calls=[("write_file", {"path": "whole.py", "content": "def f():\n    return 1\n"})],
+        ),
+        FakeTurn(text="done", stop_reason="end_turn"),
+    ])
+    result = _run(llm, tmp_path)
+
+    assert not (tmp_path / "half.py").exists(), (
+        "the truncated turn's write executed — the mangled file is in the tree"
+    )
+    assert (tmp_path / "whole.py").exists()
+    assert result.tool_calls == 1, "only the intact turn's call may count"
+    feedback = llm.calls[1]["messages"][-1]
+    assert feedback["role"] == "user"
+    assert "output limit" in str(feedback["content"]), (
+        "the model was not told why its turn vanished"
+    )
+
+
+def test_worker_turns_request_a_ceiling_far_above_a_whole_file(tmp_path: Path) -> None:
+    """4096 was the original cap and a single write_file of a real module
+    exceeds it routinely; the request must carry the raised ceiling."""
+    llm = FakeLLM([FakeTurn(text="done", stop_reason="end_turn")])
+    _run(llm, tmp_path)
+    assert llm.calls[0]["max_tokens"] >= 32_000
