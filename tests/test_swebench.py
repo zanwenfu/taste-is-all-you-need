@@ -582,3 +582,46 @@ def test_grade_of_the_empty_patch_runs_the_eval_and_fails_f2p(tmp_path: Path) ->
     assert not any("taste_pred" in c for c in sandbox.commands), (
         "an empty patch must not be applied"
     )
+
+
+def test_a_patch_that_kills_the_suite_is_a_failed_verdict_not_a_hole(tmp_path: Path) -> None:
+    """Seven no-recovery cells vanished from the contrast's primary endpoint as
+    'ungradable' because their patches made the suite uncollectable and no
+    result appeared between the markers. The official grader scores that as
+    every test failed. The baseline run disambiguates: results without the
+    patch mean the environment is alive and the patch is what killed it."""
+    from taste.benchmarks.swebench import grade_in_sandbox
+    from taste.execution import ScriptedSandbox
+
+    instance = _grade_instance()
+    alive_baseline = _eval_log(
+        "FAILED testing/test_a.py::test_fixed",
+        "PASSED testing/test_a.py::test_old",
+    )
+    calls = {"n": 0}
+
+    class _Box(ScriptedSandbox):
+        def exec(self, command, *, timeout=600, env=None):
+            if "TASTE_START_TEST_OUTPUT" in command:
+                calls["n"] += 1
+                # First eval (patched): the suite died before any result.
+                # Second eval (baseline, after reset): alive.
+                return ExecResult(2, "INTERNALERROR> SyntaxError in conftest" if calls["n"] == 1 else alive_baseline, "")
+            return super().exec(command, timeout=timeout, env=env)
+
+    report = grade_in_sandbox(_Box(), instance, "diff --git a/x b/x\n")
+    assert report is not None, "a patch-killed suite must be a verdict, not a hole"
+    assert report.resolved is False
+    assert report.pass_to_pass_passed == 0 and report.fail_to_pass_passed == 0
+    assert set(report.per_test.values()) == {"MISSING"}
+    assert calls["n"] == 2, "the baseline disambiguation must actually run"
+
+
+def test_a_dead_environment_is_still_a_hole(tmp_path: Path) -> None:
+    """The mirror case: no results with OR without the patch is infrastructure."""
+    from taste.benchmarks.swebench import grade_in_sandbox
+    from taste.execution import ScriptedSandbox
+
+    instance = _grade_instance()
+    sandbox = ScriptedSandbox().on("TASTE_START_TEST_OUTPUT", ExecResult(127, "conda: not found", ""))
+    assert grade_in_sandbox(sandbox, instance, "diff --git a/x b/x\n") is None

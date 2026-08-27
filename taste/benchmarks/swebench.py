@@ -506,22 +506,49 @@ def grade_in_sandbox(
             apply_error = (applied.stderr or applied.stdout)[-400:]
 
     per_test: dict[str, str] = {}
+    suite_killed = False
     if not apply_error:
         result = sandbox.exec(build_eval_script(instance, workdir=workdir), timeout=timeout)
         per_test = parse_eval_output(instance, result.stdout)
         if not per_test:
-            # The script died before the markers: infrastructure, not a verdict.
-            return None
+            # No result between the markers. Two very different causes share
+            # this shape, and the contrast's primary endpoint sits exactly on
+            # the difference: the environment died (infrastructure — a hole,
+            # never a verdict), or the PATCH made the suite uncollectable (a
+            # syntax error in the package, a broken conftest), which the
+            # official grader scores as every test failed. Seven no-recovery
+            # cells were silently dropped from the first unblinding as
+            # "ungradable" — the most catastrophic patches in the sweep,
+            # vanishing from the very endpoint they were the strongest
+            # evidence for. Disambiguate by asking the baseline: reset the
+            # tree, run the same script with no patch. Results there mean the
+            # environment is alive and the patch is what killed the suite.
+            reset = sandbox.exec(
+                f"cd {workdir} && git checkout -q {target} -- . && git clean -qfd", timeout=300
+            )
+            if reset.exit_code != 0:
+                return None
+            baseline = sandbox.exec(build_eval_script(instance, workdir=workdir), timeout=timeout)
+            if not parse_eval_output(instance, baseline.stdout):
+                return None
+            suite_killed = True
 
     def passed(test: str) -> bool:
         return per_test.get(test) in PASSING_STATUSES
 
+    if suite_killed:
+        # Official semantics: a graded test the run never reported is a
+        # failure. Recorded per test so the sidecar shows what the patch did.
+        per_test = dict.fromkeys(
+            (*instance.fail_to_pass, *instance.pass_to_pass), "MISSING"
+        )
     f2p_passed = sum(1 for t in instance.fail_to_pass if passed(t))
     p2p_passed = sum(1 for t in instance.pass_to_pass if passed(t))
     return GradeReport(
         instance_id=instance.instance_id,
         resolved=(
             not apply_error
+            and not suite_killed
             and f2p_passed == len(instance.fail_to_pass)
             and p2p_passed == len(instance.pass_to_pass)
         ),
