@@ -82,6 +82,7 @@ def convert(md: str) -> str:
         i += 1
     title_tex = inline(title).replace(": ", r":\\", 1)
     refs = []
+    in_appendix = False
     while i < len(lines):
         ln = lines[i]
         if ln.startswith("### References"):
@@ -104,12 +105,18 @@ def convert(md: str) -> str:
         if ln.startswith("## "):
             title = re.sub(r"^\d+\.\s*", "", ln[3:]).strip()
             if title.lower().startswith("appendix"):
-                out.append(r"\appendix" + "\n" + r"\section{" + inline(re.sub(r"^Appendix[:.\s]*", "", title, flags=re.I)) + "}")
+                # "Appendix A: Title" -> \section{Title}; LaTeX letters it.
+                clean = re.sub(r"^Appendix\s+[A-Z][:.]?\s*", "", title, flags=re.I)
+                marker = "" if in_appendix else r"\appendix" + "\n"
+                in_appendix = True
+                out.append(marker + r"\section{" + inline(clean) + "}")
             else:
                 out.append(r"\section{" + inline(title) + "}")
             i += 1; continue
         if ln.startswith("### "):
             title = re.sub(r"^\d+\.\d+\s*", "", ln[4:]).strip()
+            if in_appendix:
+                title = re.sub(r"^[A-Z]\.\d+\s*", "", title)
             out.append(r"\subsection{" + inline(title) + "}"); i += 1; continue
         m_img = re.match(r"!\[(.*?)\]\((.*?)\)\s*$", ln.strip())
         if m_img:

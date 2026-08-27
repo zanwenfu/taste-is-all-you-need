@@ -163,9 +163,9 @@ Final-state evaluation of coding agents is blind to regressions that the agent's
 \end{thebibliography}
 
 \appendix
-\section{A: The measurement defect catalogue}
+\section{The measurement defect catalogue}
 
-\subsection{A.1 The catalogue by mechanism}
+\subsection{The catalogue by mechanism}
 
 Each row is a defect found while building the instrument. \textbf{S}: it produced a plausible number rather than an error. \textbf{G}: it was present while the test suite passed (A4 is the suite). \textbf{H}: it was findable only on a clean host. Class A rows depend on the machine the code runs on; class B rows render an infrastructure failure as a measurement; class C rows measure a state where an event was defined; class D rows consume a producer's output without checking the producer.
 
@@ -206,16 +206,15 @@ D10 & Output-capped turns executed & half-written file; a 78-event storm & \cmar
 
 Totals: 23 of 28 silent; 27 of 28 present under a passing suite; 6 of 28 findable only on a clean host. Four further defects found after this census closed are described where they arose (Section 5.4 and the repository log).
 
-\subsection{A.2 The defect that invalidated a conclusion}
+\subsection{The defect that invalidated a conclusion}
 
 After nineteen fixes, every validation gate passed, the re-scoring control reproduced archived episode counts exactly, and three pilots (80 runs) measured an event rate far below the pre-declared gate. We drafted the conclusion the rule directed: the benchmark offered too little opportunity, so switch benchmarks. The conclusion was wrong. The harness ran the agent on the host in a bare source checkout, while every probe and every gate ran inside the pinned container. On the host, \texttt{import matplotlib} in that checkout succeeds by importing the uncompiled source tree as a namespace package, and everything downstream fails in ways indistinguishable from an incompetent agent. Twenty-six of 28 zero-step runs traced to this. The gates had validated the measurement path and never the agent's execution path. The fix was to route the agent's tools and checks through the same container as the replay, and to add a per-cell environment parity check that runs before any model call.
 
-\subsection{A.3 Mechanisms in public infrastructure}
+\subsection{Mechanisms in public infrastructure}
 
 Class A: OpenHands issues \#4235 and \#7044 \cite{ref31}, environment construction failures against SWE-bench images. Class B: UTBoost's finding that the held-out oracle is insufficient at leaderboard scale \cite{ref7}, and, on SWE-bench Live, baseline tests that fail in the unmodified image because the calendar passed a deprecation date encoded in the instance. Class C: final-state regression measurement \cite{ref8}. Class D: the SWE-bench grader accepting forged test output on stdout \cite{ref30}.
 
-\appendix
-\section{B: Pre-declaration and analysis}
+\section{Pre-declaration and analysis}
 
 The event unit is one (test function, onset observation) pair with parametrised variants collapsed. The gates for proceeding on a substrate were an event rate of at least 0.30 per run and a bearing fraction of at least 25\%; after the cross-stack result they were re-declared per (substrate, model stack) before the contrast was unblinded. The contrast's primary endpoint is final-state contamination, paired by instance, exact two-sided sign test; the co-primary is incident exposure. The analysis script was committed before either comparison arm finished. Budget exhaustion is scored as failure. Instances whose baseline oracle records failures in the unmodified image are excluded from resolve-rate comparability claims, and their dead tests are typed as missing observations for event counting.
 \end{document}
