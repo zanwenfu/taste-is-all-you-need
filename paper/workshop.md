@@ -89,11 +89,9 @@ and an empty timeline produce. §4 is twenty-eight instances of this.
 
 **Detection must be attributed, not co-located.** "The harness failed
 something while the regression was open" credits whichever policy fails
-most often with the best detection. Attribution needs a causal join: a
-failing harness check and the broken held-out test must exercise a file the
-agent changed. We report three levels — attributed detection, co-occurrence
-(an over-count of detection), and unknown — and never let "could not
-measure" render as any of them.
+most often with the best detection. Attribution needs a causal join through
+a file the agent changed; we report attributed, co-occurring, and unknown
+separately, and never let "could not measure" render as any of them.
 
 ---
 
@@ -219,23 +217,19 @@ forged stdout [5].
 
 ## 5. The capstone: every gate passed, and the number was still wrong
 
-Three early pilots on SWE-bench Verified (80 runs, $99.07, development
-slice) measured an event rate far below the pre-declared gate. The gates
-had been fixed in advance; re-scoring confirmed detection had not
-regressed; we drafted the pre-declared conclusion — switch substrates.
-
-The conclusion was wrong. The harness materialised each task as a bare
-checkout on the host and ran the agent there, while every probe, verdict,
-and validation gate ran inside the task's pinned image. On the host,
-`import matplotlib` in that checkout *succeeds* — the working directory
-shadows the installed package as an uncompiled namespace package — and
-everything downstream fails in ways indistinguishable from agent
-incompetence. 26 of 28 zero-step runs traced here. We withdrew the
-substrate claim: the pre-declared rule behaved correctly on the data it was
-given; the *inference* did not survive the data's provenance. No gate had
+Three early pilots (80 runs, $99.07, development slice) measured an event
+rate far below the pre-declared gate. The gates had been fixed in advance;
+re-scoring confirmed detection had not regressed; we drafted the
+pre-declared conclusion — switch substrates. It was wrong. The harness ran
+the agent in a bare checkout on the host while every probe, verdict, and
+gate ran inside the pinned image; on the host `import matplotlib` in that
+checkout *succeeds* as an uncompiled namespace package, and everything
+downstream fails in ways indistinguishable from agent incompetence — 26 of
+28 zero-step runs traced here. The rule behaved correctly on its data; the
+*inference* did not survive the data's provenance, because no gate had
 exercised the agent's execution path. **A validation gate certifies only
-the paths it exercises**, and the fix is the architecture the instrument
-already used for its probes: the agent must execute where it is measured.
+the paths it exercises**; the fix is the seam the instrument already used
+for its probes: the agent must execute where it is measured.
 
 ### 5.1 What the corrected pipeline measures
 
@@ -255,28 +249,24 @@ zero. The zero is demonstrated to belong to the runs: re-scoring that
 canary's archived timeline under this identical instrument reproduces its
 events exactly (§3).
 
-**Stack two — GPT-5.6 planner/worker, the 10-instance prefix of the same
-slice, same harness, policy, and budgets:** resolve 5/10 at a fifth of the
-cost, and **57 events across 4 incidents, concentrated in 2 of 10 runs**
-(bearing CI [2.5%, 55.6%]). Claude's runs on the same 10 instances: 6/10
-resolve, zero events. At n=10 the run-level bearing contrast is not by
-itself significant (Fisher exact p ≈ 0.24, 0/10 vs 2/10); the finding is
-the event-level record, and the equal-N forty-instance run and the
-recovery-policy contrast were executing, pre-declared, at submission time.
-Exposure does not explain the contrast: the stacks' observation densities
-differ by 1.4× (8.2 vs 5.7 per run) while the event totals differ by
-57-to-0 — per observation, 0.70 versus 0.00.
+**Stack two — GPT-5.6 planner/worker, the same 40 instances, harness,
+policy, and budgets:** resolve 37.1% (13/35 graded) at a quarter of the
+cost, and **140 declared events across 11 distinct incidents in 6 of 38
+attempted runs** (bearing CI [6.0%, 31.3%]; the sweep's circuit breaker
+stopped the last two cells after six consecutive zero-progress failures in
+one repo family, and two cells died to a sync defect — all counted, none
+hidden). Against stack one's 0 of 40, the equal-N run-level contrast is
+significant: Fisher exact one-sided p = 0.011. Exposure does not explain
+it: observation densities differ by ~1.4×, event totals by 140-to-0.
 
-Two disclosures. This calibration is a re-run: the first attempt was
-destroyed by defect D10 (a truncated write produced a 78-event storm; the
-sweep's circuit breaker stopped it at $1.12) and is excluded as
-infrastructure, with the guard's revert-verified test as the evidence the
-re-run is sound — no capped turns appear in its event logs. And the
-pre-declared gate for proceeding on this substrate still *fails* under
-stack two — λ̂ clears its threshold but bearing 20% < 25% — so what these
-numbers license is not a confirmatory pass but the regime-conditional
-re-declaration of the gates, filed as a pre-registration amendment before
-the contrast arms are unblinded.
+Two disclosures. Stack two's first calibration was destroyed by defect
+D10 (a truncated write produced a 78-event storm; the circuit breaker
+stopped it at $1.12) and is excluded as infrastructure; the runs reported
+here show no capped turns in their event logs. And the pre-declared gate
+for this substrate still *fails* under stack two — λ̂ clears its threshold,
+bearing 15.8% < 25% does not — so these numbers license not a confirmatory
+pass but the regime-conditional re-declaration of the gates, filed as an
+amendment before the contrast arms were unblinded.
 
 **What the events were.** Every one of the 57 was erased by the harness's
 own rollback before the run ended; every final tree grades clean
@@ -376,13 +366,11 @@ submission: twenty-eight in the census, and this one after it.
 The taxonomy is the argument these rules generalise: the mechanisms are
 properties of subprocess-and-PATH, containers, parsers, and git — not of
 our code. Class A is OpenHands' issues #4235/#7044 [6]; class D is the
-SWE-bench grader consuming forgeable stdout [5]; the oracle insufficiency
-UTBoost documents at leaderboard scale [4] is class B one level up, and the
-time-rotted oracles of §5.2 are its temporal form. And §5.1's measurements
-give the rules a stake: the regressions that matter were *created and
-erased between* the states existing evaluation looks at. An OS layer that
-standardises recovery without standardising timeline observability will
-make agent runs look cleaner while hiding exactly this.
+SWE-bench grader consuming forgeable stdout [5]; UTBoost's oracle
+insufficiency [4] and §5.2's time-rotted oracles are class B one level up.
+And §5 gives the rules a stake: an OS layer that standardises recovery
+without standardising timeline observability will make agent runs look
+cleaner while hiding exactly what §5.3 measures.
 
 ---
 
@@ -407,16 +395,14 @@ Everything is exploratory and dev-slice: the contrast is one sweep per arm
 on the development slice, and the confirmatory held-out frame is registered
 but not run. Each cross-stack comparison is a single sweep per stack — sampling variability across re-runs of the
 same regime is unmeasured until the seeded replications in the
-confirmatory plan. The regime boundary includes the provider adapter — the
-two stacks traverse different wire paths, which near-par resolve rates
-bound but cannot eliminate. The oracle observes roughly the gold
-test-patch's blast radius, so "regression" here means regression in the
-tests adjacent to the edit; the observation hook fails open, so a missed
-observation thins the timeline symmetrically across stacks (its error
-counter is reported per cell). Binomial CIs treat the fixed dev slice as
-the population and ignore repository clustering (46% of the frame is one
-repo). The catalogue is a census of one team's instrument; its external
-instances are evidence of reach, not a survey.
+confirmatory plan. The regime boundary includes the provider adapter, which near-par resolve
+rates bound but cannot eliminate. The oracle observes the gold test-patch's
+blast radius, so "regression" means regression adjacent to the edit; the
+observation hook fails open (its error counter is reported per cell).
+Binomial CIs treat the fixed dev slice as the population and ignore
+repository clustering (46% one repo). The catalogue is a census of one
+team's instrument; its external instances are evidence of reach, not a
+survey.
 
 ---
 
