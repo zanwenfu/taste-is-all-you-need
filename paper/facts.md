@@ -109,3 +109,11 @@ committed before unblinding (scripts/contrast.py).
 Sync pull died on symlinked test fixtures (sphinx); two paid cells lost as
 typed errors. Fixed with visible-skip semantics (`router.skipped`),
 revert-verified test. Outside the 28-row census, which closed at submission.
+
+## The undercount (all bearing runs, both valid GPT sweeps; $0, from sidecars)
+
+184 declared events across 8 bearing runs; **1** visible as a final-state
+P2P failure (net of typed oracle holes). Final-state capture rate: 0.5%.
+Per-run rows: flask-5014 41→0, pytest-6197 3→0 (twice), django-11276 2→0,
+django-15128 48→0, matplotlib-26291 7→0, seaborn-3069 73→0,
+pylint-6386 7→1. Source: /tmp/undercount.py over evidence sidecars.
