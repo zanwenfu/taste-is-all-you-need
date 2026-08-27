@@ -121,13 +121,11 @@ A fourth arm, added after the contrast was unblinded and therefore exploratory, 
 
 \textbf{On the measurement defects.} Building the instrument produced 28 defects (Appendix A); 23 produced a plausible number rather than an error. Two rules would have prevented most of them: record infrastructure failures as missing observations, and require a positive liveness signal, since an empty result is otherwise indistinguishable from a broken measurement.
 
+\textbf{Summary.} Final-state evaluation of coding agents misses the regressions that the agent's own process repairs, and in our measurements that is nearly all of them. Measuring the timeline is feasible, validates against controls, and separates recovery policies the final patch cannot distinguish; it also locates rollback's cost in verifier precision, and a verifier built from the same tests resolved more tasks than any other policy while keeping every final tree clean.
+
 \section{Limitations}
 
 All measurements come from a 40-instance development slice, one sweep per arm plus a 10-instance calibration for the GPT-5.6 stack; run-to-run variability is unmeasured, and the confirmatory design specifies seeded replications on held-out instances. The cross-stack comparison is a single pairwise test on six bearing runs, confounded with the provider adapter. The gated arm is post hoc. The held-out tests observe roughly the gold test patch's blast radius, so event counts are lower bounds. Confidence intervals ignore repository clustering (16 of 40 instances are django). The instrument has not yet been applied to a public scaffold.
-
-\section{Conclusion}
-
-Final-state evaluation of coding agents misses the regressions that the agent's own process repairs, and in our measurements that is nearly all of them. Measuring the timeline is feasible, validates against controls, and separates recovery policies the final patch cannot distinguish; it also locates rollback's cost in verifier precision, and a verifier built from the same tests resolved more tasks than any other policy while keeping every final tree clean.
 
 \begin{thebibliography}{99}
 \bibitem{ref1} C. Jimenez et al. SWE-bench: Can language models resolve real-world GitHub issues? ICLR 2024. arXiv:2310.06770.
