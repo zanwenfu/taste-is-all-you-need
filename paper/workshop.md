@@ -292,6 +292,16 @@ noticed at all.** One stack's destructive edit broke 54 test functions at
 a single observation and left a perfect final state; a leaderboard cannot
 distinguish that run from one that never broke anything.
 
+The undercount, measured across every bearing run in both sweeps:
+
+| | event-level record | visible in the final state |
+|---|---|---|
+| 8 bearing runs, both sweeps | **184 declared events** | **1** |
+
+Final-state measurement — the instrument all published regression auditing
+uses [3] — captures 0.5% of what the timeline records here. The other
+99.5% was created and repaired between the two states it examines.
+
 ### 5.2 The golden gate
 
 The seam that closes A6 is validated by a *golden check*: the benchmark's
@@ -341,8 +351,8 @@ make agent runs look cleaner while hiding exactly this.
 
 SWE-bench [1] and Verified [2] are the substrate. TDAD [3] measures
 regressions from the final patch — the design §2 argues undercounts
-recovered events by construction; §5.1 measures the undercount at 57-of-57
-in our data. UTBoost [4] audits the oracle itself. The grader's
+recovered events by construction; §5.1 measures the undercount directly:
+184 events, 1 final-state-visible, across every bearing run in our data. UTBoost [4] audits the oracle itself. The grader's
 stdout-trust defect [5] and OpenHands' environment issues [6] are our
 classes D and A in the wild. SWE-bench-Live [7] addresses contamination
 with rolling instances (median held-out oracle ~34× Verified's) and
