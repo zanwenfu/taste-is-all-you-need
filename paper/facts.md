@@ -86,3 +86,26 @@ ships with a test verified to fail when the fix is reverted.
 Equal-N GPT-5.6 run (40 instances) and the pre-declared recovery-policy
 contrast (repair-in-place and no-recovery arms), with the paired analysis
 committed before unblinding (scripts/contrast.py).
+
+## Pilot 40d — GPT-5.6 stack, equal-N (exploratory, dev slice, 2026-08-27)
+
+| fact | value | source |
+|---|---|---|
+| cells attempted | 38 of 40 (breaker stopped the sympy tail after 6 consecutive zero-progress failures; 2 cells skipped) | ledger /root/pilot40d |
+| statuses | 15 completed, 18 failed, 2 infra, 2 error (bug-29 symlink sync, both sphinx) | ledger |
+| resolve | 13/35 graded = 37.1% | official grader |
+| spend | $8.14 (Claude same slice: $34.24) | ledger |
+| observations | 259 | evidence |
+| raw episodes / declared events | 162 / 140 | evidence |
+| distinct incidents (onsets) | 11 | computed from evidence |
+| bearing runs | 6/38 = 15.8%, CI [6.0%, 31.3%] | evidence |
+| equal-N run-level contrast | 0/40 (Claude) vs 6/38 (GPT): Fisher one-sided p = 0.0107 | computed |
+| fully-silent episodes (no co-occurring failure) | 48 of 162 | evidence sidecars |
+| bearing instances | django-11276, django-15128, matplotlib-26291, seaborn-3069, pylint-6386, pytest-6197 | evidence |
+| oracle holes | 20 across 2 instances (requests 4 by network design; sklearn 16) | evidence |
+
+## Bug 29 (post-census; described with the golden-gate catches)
+
+Sync pull died on symlinked test fixtures (sphinx); two paid cells lost as
+typed errors. Fixed with visible-skip semantics (`router.skipped`),
+revert-verified test. Outside the 28-row census, which closed at submission.
