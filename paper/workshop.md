@@ -18,9 +18,7 @@ This convention has a blind spot. A regression that an agent introduces and late
 
 We answer both by measuring the timeline rather than the endpoint. Our contributions are:
 
-1. **An instrument for event-level regression measurement.** Every mutating tool call is recorded as a commit on a git reference the agent cannot see. After the run, the instance's held-out passing tests are replayed at every recorded state inside the benchmark's pinned container. Detection is attributed by test coverage rather than by co-occurrence in time. The instrument's validity is established by positive and negative controls, a baseline liveness gate, a golden check that drives the benchmark's own gold patch through the agent's execution path, and a re-scoring control that re-measures archived runs under a changed instrument with no model calls (Section 3).
-2. **Measurements on SWE-bench Verified.** Across the runs that produced any regression, the timeline recorded 184 events and the final state exposed one (Section 5.2). Event frequency was a property of the model stack, not the benchmark: identical instances and harness gave 0 events under one frontier stack and 140 under another (Section 5.3).
-3. **A pre-registered comparison of recovery policies, and a fix.** With the analysis committed before unblinding, rollback to a verified checkpoint left fewer contaminated final trees than no recovery (p = 0.022) but resolved fewer tasks; we trace the loss to verifier precision, and a regression-gated verifier built from the instrument's own oracle removes it, reaching 65% resolve with no contaminated tree (Sections 5.4 to 5.6).
+1. **An instrument for event-level regression measurement.** Every mutating tool call is recorded as a commit on a git reference the agent cannot see; after the run, the instance's held-out passing tests are replayed at every recorded state inside the benchmark's pinned container, and detection is attributed by coverage. Validity is established by negative and positive controls, a liveness gate, a golden check that drives the gold patch through the agent's execution path, and a re-scoring control that re-measures archived runs with no model calls (Section 3).
 
 All measurements are exploratory and were made on a development slice of the benchmark that is excluded from any confirmatory frame. No claim is made about the population of instances beyond that slice.
 
@@ -44,7 +42,7 @@ All measurements are exploratory and were made on a development slice of the ben
 
 **Attribution.** A regression is attributed to a harness check if a failing check and the broken held-out test both exercise a file the agent changed at that observation, using a per-instance coverage map built at the base commit. We report attributed detection, co-occurrence (any harness failure while the regression was open, an over-count), and unknown separately.
 
-**Execution environment.** The agent's tools and the harness's verification checks execute inside the same pinned container as the replay, with file changes synchronised between the container and the host tree that the timeline records. Section A.2 describes why this was not initially the case and what it cost.
+**Execution environment.** The agent's tools and the harness's checks execute inside the same pinned container as the replay, with file changes synchronised to the host tree the timeline records (Appendix A.2 describes what it cost to learn this).
 
 **Validation.** Five gates run before any paid experiment: a negative control, a positive control with injected regressions including recovered ones, a flake screen, an unknown-rate ceiling, and a baseline liveness check that the probes return passes. A golden check drives the benchmark's gold patch through the agent's real tool path and requires the grader to return "resolved" (and a null run "unresolved"); it passed on the three repository families with the most distinctive runners. A re-scoring control re-measures an archived run's committed timeline under a changed instrument with no model calls; run twice, it reproduced the archived episode counts exactly.
 
@@ -82,13 +80,13 @@ Across the full GPT-5.6 sweep, 48 of 162 raw episodes had no co-occurring harnes
 
 On the same 40 instances, under the same harness and rollback policy, the Claude stack produced no regression events in 40 runs (227 observations, all replayed). The GPT-5.6 stack produced 140 declared events in 11 incidents across 6 of 37 attempted runs (bearing fraction 16.2%, exact CI 6.2% to 32.0%). A one-sided Fisher exact test on the bearing fractions gives p = 0.010. Observation density differs by a factor of 1.4 between the stacks, which does not account for a difference of 140 to 0.
 
-The Claude zero is a measured zero. The same stack's earlier two-instance canary run did produce three events, and re-scoring that run's archived timeline under the instrument used for the 40-run sweep reproduces them exactly, so detection did not fail; these 40 runs did not break adjacent behaviour.
+The Claude zero is a measured zero: the same stack's earlier canary run did produce three events, and re-scoring its archived timeline under the instrument used for the 40-run sweep reproduces them exactly.
 
 We had first read the low event rate as a property of the benchmark, and a pre-declared rule directed a switch to one with a larger held-out set; the second stack falsified that on the same instances. Regression frequency is a property of the agent regime, and any gate on it must be declared per regime.
 
 ### 5.4 Recovery policy: rollback keeps the final tree clean
 
-![The four recovery arms under the GPT-5.6 stack on the same 40 instances. Resolve rate is over graded cells; contamination counts cells whose final patch fails a previously-passing test, net of baseline-dead tests.](fig_contrast.pdf)
+![The four recovery arms under the GPT-5.6 stack on the same 40 instances. Contamination counts cells whose final patch fails a previously-passing test.](fig_contrast.pdf)
 
 Figure 4 summarises the pre-declared contrast. The primary endpoint, final-state contamination, is paired by instance: no recovery was worse than rollback on 9 instances, better on 1, and tied on 25 (exact sign test, p = 0.022). Repair-in-place was worse on 5, better on 1, and tied on 29 (p = 0.22). The co-primary endpoint, incident exposure, did not differ between policies (p = 0.45): regressions occur under every policy at similar rates, and the policy determines whether they persist.
 
@@ -98,9 +96,7 @@ One no-recovery run illustrates the mechanism: its final tree begins with the li
 
 ### 5.5 Rollback loses resolution to verifier precision
 
-Rollback resolved fewer tasks than either alternative (Figure 4, left): 37% against 60% for repair-in-place and 55% for no recovery. Paired by instance, rollback won one discordant pair and lost nine against repair-in-place (McNemar exact p = 0.022), and won three and lost nine against no recovery (p = 0.15).
-
-The loss is attributable to the verifier. Of the 18 rollback runs that failed, 15 failed at the first step, and 9 of the 18 instances were resolved under a policy that kept the rejected work. In those cases the monitor's check, a shell command written by the planner, rejected a patch that the official grader accepted, and rollback discarded it. Rollback's advantage on the primary endpoint and its disadvantage on resolution therefore have the same cause: it acts on the verifier's verdict, and the verifier's precision sets the exchange rate between a clean final tree and a solved task.
+Rollback resolved fewer tasks than either alternative (Figure 4, left): 37% against 60% for repair-in-place and 55% for no recovery; paired by instance it won one discordant pair and lost nine against repair-in-place (McNemar exact p = 0.022) and won three and lost nine against no recovery (p = 0.15). The loss is attributable to the verifier: of the 18 rollback runs that failed, 15 failed at the first step, and 9 of those instances were resolved under a policy that kept the rejected work. The monitor's planner-written check had rejected a patch the grader accepted, and rollback discarded it. Rollback's advantage on contamination and its disadvantage on resolution therefore have one cause: it acts on the verifier's verdict, and the verifier's precision sets the exchange rate between a clean tree and a solved task.
 
 This suggests replacing the planner-written check with the repository's own tests, selected as the instrument selects its oracle, and triggering rollback only on a genuine regression. Section 5.6 evaluates it.
 
