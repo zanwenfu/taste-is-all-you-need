@@ -54,7 +54,7 @@ def inline(t: str) -> str:
             e = esc(p)
             e = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", e, flags=re.S)
             e = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\\emph{\1}", e, flags=re.S)
-            e = re.sub(r"\[(\d+)\]", r"\\cite{ref\1}", e)
+            e = re.sub(r"\[(\d+(?:,\s*\d+)*)\]", lambda m: "\\cite{" + ",".join("ref" + x.strip() for x in m.group(1).split(",")) + "}", e)
             out.append(e)
     return "".join(out)
 
@@ -142,6 +142,11 @@ def convert(md: str) -> str:
             continue
         if ln.strip() == "---":
             i += 1; continue
+        if re.match(r"^\d+\.\s", ln):
+            buf = []
+            while i < len(lines) and re.match(r"^\d+\.\s", lines[i]):
+                buf.append(r"\item " + inline(re.sub(r"^\d+\.\s+", "", lines[i]).strip())); i += 1
+            out.append(r"\begin{enumerate}" + "\n" + "\n".join(buf) + "\n" + r"\end{enumerate}"); continue
         if ln.startswith("- "):
             buf = []
             while i < len(lines) and lines[i].startswith("- "):
@@ -157,6 +162,11 @@ def convert(md: str) -> str:
             i += 1
     bib = [r"\begin{thebibliography}{99}"] + [r"\bibitem{ref" + n + "} " + inline(t) for n, t in refs] + [r"\end{thebibliography}"]
     body = "\n\n".join(out)
+    labels = re.findall(r"\\label\{(fig:[^}]+)\}", "\n".join(out))
+    def figref(m):
+        n = int(m.group(1))
+        return ("Figure~\\ref{" + labels[n-1] + "}") if 0 < n <= len(labels) else m.group(0)
+    out = [re.sub(r"Figure (\d)(?!\d)", figref, o) if not o.startswith("\\begin{figure}") else o for o in out]
     pre = PREAMBLE.replace("TITLE_PLACEHOLDER", title_tex)
     if "\\appendix" in body:
         head, _, tail = body.partition("\\appendix")

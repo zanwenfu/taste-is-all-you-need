@@ -179,3 +179,21 @@ Anonymised (converter drops the draft header; sweep clean).
 | paired contamination vs plain rollback | gated better on 1, worse on 0, ties 34 | scripts/contrast.py |
 | co-primary onset exposure | more 3 / fewer 5 / ties 27 → p = 0.73 | scripts/contrast.py |
 | the three gated failures | genuine regressions refused: 8 tests, 2 tests, suite killed | ledger failure_reason |
+
+## Corrections from the second fresh referee (2026-08-27)
+
+| item | value | source |
+|---|---|---|
+| 40d cells | 37 attempted of 40 (3 skipped by breaker; the 38th ledger row is the abort marker); 35 graded (2 errors) | ledger |
+| resolve on the common denominator | rollback 13/40; gated 26/40; repair 24/40; no recovery 22/40 | grades |
+| observation density, 40-run sweeps | Claude 227/40 = 5.7; GPT 259/37 = 7.0 per run; ratio 1.2 (1.4 was the calibration) | evidence |
+| pooled undercount denominator | 47 GPT rollback runs (10 calibration + 37 sweep); 8 bearing; run-weighted 7 of 8 clean at the end | evidence |
+| storms | seaborn 73, django-15128 48, flask 41 = 162 of 184 events (88%) | evidence |
+| gate status, both stacks | bearing 0% (Claude) and 20%/16.2% (GPT) < 25%: conjunction FAILED for both; no confirmatory arm | prereg + evidence |
+| repair-vs-rollback co-primary | onset exposure more 4 / fewer 5 / ties 26 → p = 1.0 | scripts/contrast.py |
+| per-cell cap | $4 work-cost | driver flags |
+| A4 | 15 tests failed on the clean host | log, session 12 |
+| the 7 ungraded cells | 5 no-recovery + 2 repair | regrade log |
+| pytest-6197 onsets | 3, 5, 7 | evidence |
+| django share | of Verified 46.2%; of the 40-slice: see draft (computed from the slice) | ledger |
+| provenance pointers | golden-check facts now cited in §3; the unblinding disclosure in §5.4 | this file |
