@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from taste.benchmarks import swebench
-from taste.benchmarks.swebench_run import CellContext, make_score
+from taste.benchmarks.swebench_run import CellContext, make_grade, make_score
 from taste.config import HarnessConfig
 from taste.evalrun import Cell
 from taste.execution import DockerProvider
@@ -71,7 +71,7 @@ def main() -> int:
         return 1
 
     provider = DockerProvider()
-    score = make_score(ledger_dir=out)
+    score = make_score(ledger_dir=out, grade=make_grade())
     print(f"re-scoring {len(rows)} cell(s) from {root} with the current instrument\n")
 
     for row in rows:

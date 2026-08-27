@@ -589,7 +589,12 @@ def patch_for(repo_root: Path, base_commit: str) -> str:
     prediction that does not match the thing scored is a debugging trap.
     """
     result = subprocess.run(
-        ["git", "diff", base_commit, "--", ".", ":(exclude)*test_*.py", ":(exclude)*tests/*"],
+        # The harness's own artifacts (.taste/plan.json, monitor verdicts) live
+        # in the tree and were leaking into the prediction. They apply cleanly
+        # and grade harmlessly, which is exactly why nobody noticed; but a
+        # prediction is the agent's source change and nothing else.
+        ["git", "diff", base_commit, "--", ".", ":(exclude)*test_*.py", ":(exclude)*tests/*",
+         ":(exclude).taste/*"],
         cwd=repo_root,
         capture_output=True,
         text=True,
