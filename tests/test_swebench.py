@@ -625,3 +625,39 @@ def test_a_dead_environment_is_still_a_hole(tmp_path: Path) -> None:
     instance = _grade_instance()
     sandbox = ScriptedSandbox().on("TASTE_START_TEST_OUTPUT", ExecResult(127, "conda: not found", ""))
     assert grade_in_sandbox(sandbox, instance, "diff --git a/x b/x\n") is None
+
+
+def test_the_prediction_excludes_the_harness_s_own_artifacts(tmp_path: Path) -> None:
+    """Bug 32. .taste/plan.json and the monitor verdicts live in the tree and
+    were leaking into the prediction diff — applied cleanly, graded
+    harmlessly, which is exactly why nobody noticed. A prediction is the
+    agent's source change and nothing else."""
+    import subprocess as sp
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "lib.py").write_text("x = 1\n")
+    sp.run(["git", "-C", str(ws), "init", "-q"], check=True)
+    git = ["git", "-C", str(ws), "-c", "user.name=t", "-c", "user.email=t@l"]
+    sp.run([*git, "add", "-A"], check=True)
+    sp.run([*git, "commit", "-qm", "root"], check=True)
+    root = sp.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    (ws / "lib.py").write_text("x = 2\n")
+    (ws / ".taste").mkdir()
+    (ws / ".taste" / "plan.json").write_text("{}\n")
+    (ws / ".taste" / "monitor").mkdir()
+    (ws / ".taste" / "monitor" / "step-01.json").write_text("{}\n")
+    sp.run([*git, "add", "-A"], check=True)
+
+    patch = patch_for(ws, root)
+    assert "lib.py" in patch
+    assert ".taste" not in patch, "harness artifacts leaked into the prediction"
+
+
+def test_rescore_wires_the_grader() -> None:
+    """Bug 31. rescore.py predated make_grade and never passed it, so a
+    'regrade' of seven dropped cells was a no-op that reported the same
+    missing verdicts while the grader fix sat unused. A wiring guard: the
+    re-scorer must construct its scorer with a grader."""
+    src = (Path(__file__).resolve().parent.parent / "scripts" / "rescore.py").read_text()
+    assert "grade=make_grade()" in src
