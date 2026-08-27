@@ -117,3 +117,20 @@ P2P failure (net of typed oracle holes). Final-state capture rate: 0.5%.
 Per-run rows: flask-5014 41→0, pytest-6197 3→0 (twice), django-11276 2→0,
 django-15128 48→0, matplotlib-26291 7→0, seaborn-3069 73→0,
 pylint-6386 7→1. Source: /tmp/undercount.py over evidence sidecars.
+
+## The recovery-policy contrast (dev slice, GPT-5.6 stack, 2026-08-27; analysis committed before unblinding)
+
+| fact | value | source |
+|---|---|---|
+| arms | rollback (pilot40d), repair-in-place (contrast40_A2), no recovery (contrast40_A0); 40 instances each | ledgers |
+| resolve | rollback 13/35 = 37.1%; repair 24/40 = 60.0%; no recovery 22/40 = 55.0% (after re-grading the 7 patch-killed cells) | official grader + rescore |
+| spend | $8.14 / $14.73 / $4.40 | ledgers |
+| cells with final-state contamination | rollback 1; repair 5; no recovery 9 | grades net of typed holes |
+| PRIMARY, no recovery vs rollback (paired sign) | worse 9 / better 1 / ties 25 → exact p = 0.0215 | scripts/contrast.py |
+| repair vs rollback (paired sign) | worse 5 / better 1 / ties 29 → p = 0.2188 | scripts/contrast.py |
+| CO-PRIMARY onset exposure, no recovery vs rollback | more 2 / fewer 5 / ties 28 → p = 0.4531 | scripts/contrast.py |
+| paired resolve, McNemar exact | vs repair: rollback-only 1, repair-only 9 → p = 0.0215; vs no recovery: 3 vs 9 → p = 0.1460 | /tmp/mcnemar2.py on rescored sidecars |
+| first unblinding (pre-fix) | primary p = 0.375 — 7 cells dropped as ungradable (bug 30); disclosed in §5.3 | log |
+| exhibit | django-13012 no-recovery final tree: `$(cat django/db/models/expressions.py)` as line 1; 137 graded tests missing; rollback arm graded 137/137 | direct container diagnostic |
+
+## Bugs after the census (all fixed, revert-verified): 29 sync symlinks; 30 patch-killed suite scored as hole; 31 rescore never graded; 32 harness artifacts leaked into the prediction.
