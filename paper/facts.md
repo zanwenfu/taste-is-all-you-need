@@ -78,7 +78,7 @@ contrast arms were unblinded).
 
 ## Test suite
 
-604 tests passing, lint clean, on the experiment host. Every catalogue fix
+614 tests passing, lint clean, on the experiment host (counted, not remembered, at this revision). Every catalogue fix
 ships with a test verified to fail when the fix is reverted.
 
 ## In flight at submission time
