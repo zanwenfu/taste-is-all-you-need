@@ -268,18 +268,17 @@ bearing 15.8% < 25% does not — so these numbers license not a confirmatory
 pass but the regime-conditional re-declaration of the gates, filed as an
 amendment before the contrast arms were unblinded.
 
-**What the events were.** Every one of the 57 was erased by the harness's
-own rollback before the run ended; every final tree grades clean
-(59/59 and 145/145 on the bearing instances). So all 57 are invisible to
-final-state evaluation — the population prior work measures [3]. Within
-them, the harness's own view splits three ways: 39 were *detected and
-erased* (a failing check attributable to the regression, then rollback);
-16 more co-occurred with some failure without an attributable link; and —
-on the run that matters most — **an officially-resolved patch (all graded
-tests green) carried three regressions, two of which the harness never
-noticed at all.** One stack's destructive edit broke 54 test functions at
-a single observation and left a perfect final state; a leaderboard cannot
-distinguish that run from one that never broke anything.
+**What the events were.** Every recovered event is invisible to
+final-state evaluation — the population prior work measures [3]. The
+harness's own view splits three ways: *detected and erased* (a failing
+check attributable to the regression, then rollback), co-occurring without
+an attributable link, and fully silent — 48 of the sweep's 162 raw
+episodes had no co-occurring harness failure of any kind. On the run that
+matters most, **an officially-resolved patch (all graded tests green)
+carried three regressions, two of which the harness never noticed.** One
+destructive edit broke 54 test functions at a single observation and left
+a perfect final state; a leaderboard cannot distinguish that run from one
+that never broke anything.
 
 The undercount, measured across every bearing run in both sweeps:
 
