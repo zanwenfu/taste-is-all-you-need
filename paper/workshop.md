@@ -27,10 +27,10 @@ certifies only the paths it exercises.
 
 Second, what the corrected instrument measures. On the same benchmark
 instances, under the same harness and recovery policy, one frontier model
-stack produced **zero regression events in a 40-run pilot** while another
-produced **57 — four distinct breakage incidents, concentrated in two of
-ten runs** — every one erased by the harness's own rollback and invisible
-in the final tree. One officially-*resolved* patch carried three of them,
+stack produced **zero regression events across 40 runs** while another
+produced **140, in 11 distinct breakage incidents across 6 bearing runs**
+(equal-N Fisher p = 0.011) — every recovered event erased by the harness's
+own rollback and invisible in the final tree. One officially-*resolved* patch carried three of them,
 two undetected even by the harness that produced it. Regressions during
 agent runs are a property of the agent regime, not the benchmark; the
 final state, which is all existing evaluation examines, is where the
@@ -355,9 +355,10 @@ measurements on this benchmark.
 ## 8. Limitations
 
 Everything is exploratory and dev-slice; no recovery-policy claim is made
-until the pre-declared contrast lands. The cross-stack comparison is
-n=10-vs-40 with the equal-N run in flight; run-level significance is
-conceded above. The regime boundary includes the provider adapter — the
+until the pre-declared contrast lands. The equal-N cross-stack comparison
+is a single sweep per stack — sampling variability across re-runs of the
+same regime is unmeasured until the seeded replications in the
+confirmatory plan. The regime boundary includes the provider adapter — the
 two stacks traverse different wire paths, which near-par resolve rates
 bound but cannot eliminate. The oracle observes roughly the gold
 test-patch's blast radius, so "regression" here means regression in the
