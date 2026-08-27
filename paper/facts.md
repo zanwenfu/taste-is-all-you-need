@@ -165,3 +165,17 @@ Anonymised (converter drops the draft header; sweep clean).
 | rejecting check kinds | 8 pytest/runtests, 3 `python -c`, 7 other — all planner-written | ledger failure_reason |
 | false rejections | 9 of 18 instances resolved under no-recovery or repair-in-place | evidence, three arms |
 | spend on failed rollback runs | $5.22 | ledger |
+
+## Regression-gated rollback (arm A3reg; dev slice; GPT-5.6; 2026-08-27)
+
+| fact | value | source |
+|---|---|---|
+| cells | 40: 35 completed, 3 failed, 1 infra (xarray-3305, provider 400 in every arm), 1 budget | ledger /root/contrast40_A3reg |
+| resolve | 26/40 = 65.0% | official grader |
+| spend | $10.51 (+$2.37 over plain rollback) | ledger |
+| contaminated final trees | 0 | grades net of holes |
+| events / bearing | 70 declared, 5/40 bearing, CI [4.2%, 26.8%] | evidence |
+| paired resolve vs plain rollback | both 12, neither 12, rollback-only 1, gated-only 10 → McNemar p = 0.0117 | /tmp/mcnemar3.py |
+| paired contamination vs plain rollback | gated better on 1, worse on 0, ties 34 | scripts/contrast.py |
+| co-primary onset exposure | more 3 / fewer 5 / ties 27 → p = 0.73 | scripts/contrast.py |
+| the three gated failures | genuine regressions refused: 8 tests, 2 tests, suite killed | ledger failure_reason |
