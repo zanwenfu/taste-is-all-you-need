@@ -153,14 +153,14 @@ Anonymised (converter drops the draft header; sweep clean).
 | D3 "3,640 of 3,641 changed files" | npm install counted as agent work on a Harbor task | log, session 11 (bug 8) |
 | D6 "after ~400 cells" | GitPython descriptor leak against the default 1024 limit | log, session 12 (bug 18) |
 | D10 "78-event storm" | first GPT-5.6 calibration, seaborn, breaker-stopped at $1.12 | log, session 15 (bug 28) |
-| §5.2 "~3 points forever" | grade under `none` network: requests 126/130 vs 130/130 under bridge | log, session 14 |
-| §5.2 "three hardest repo families" | golden checks: requests (pytest), django (runtests), matplotlib (compiled ext.) | log, session 14 |
+| §3 (golden gate) "~3 points forever" | grade under `none` network: requests 126/130 vs 130/130 under bridge | log, session 14 |
+| §3 (golden gate) "three hardest repo families" | golden checks: requests (pytest), django (runtests), matplotlib (compiled ext.) | log, session 14 |
 
 ## Why rollback runs failed (pilot 40d, rollback arm; 2026-08-27)
 
 | fact | value | source |
 |---|---|---|
-| failed runs | 18 of 38 attempted | ledger |
+| failed runs | 18 of 37 attempted (the 38th ledger row is the abort marker) | ledger |
 | failed at the first step | 15 of 18 | ledger steps_passed |
 | rejecting check kinds | 8 pytest/runtests, 3 `python -c`, 7 other — all planner-written | ledger failure_reason |
 | false rejections | 9 of 18 instances resolved under no-recovery or repair-in-place | evidence, three arms |
