@@ -107,7 +107,8 @@ def main() -> int:
     print(f"CO-PRIMARY  onset exposure {args.label_b} vs {args.label_a}: "
           f"{args.label_b} more on {pos}, fewer on {neg}, ties {len(on_diffs)-pos-neg}; "
           f"exact sign test p = {p:.4f}")
-    ra = sum(1 for r in rows if r[5]) ; rb = sum(1 for r in rows if r[6])
+    ra = sum(1 for r in rows if r[5])
+    rb = sum(1 for r in rows if r[6])
     print(f"resolve: {args.label_a} {ra}/{len(rows)}  {args.label_b} {rb}/{len(rows)}")
     return 0
 

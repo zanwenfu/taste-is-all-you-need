@@ -69,10 +69,10 @@ def main() -> int:
     # after the measurement that produced them was corrected.
     rescored = root / "rescored" / "evidence"
     for f in sorted(rescored.glob("*.json")) if rescored.exists() else []:
-        d = json.load(open(f))
+        d = json.loads(f.read_text())
         evidence[d["instance_id"]] = d
     for f in sorted((root / "ledger" / "evidence").glob("*.json")):
-        if json.load(open(f))["instance_id"] in evidence:
+        if json.loads(f.read_text())["instance_id"] in evidence:
             continue
         d = json.loads(f.read_text())
         evidence[d["instance_id"]] = d

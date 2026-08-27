@@ -70,6 +70,9 @@ ignore = ["E501"]
 # destroys the line-for-line correspondence a reviewer needs to check them.
 "taste/benchmarks/swebench_log.py" = ["UP", "SIM", "B", "RUF", "E"]
 "taste/benchmarks/swebench_specs.py" = ["UP", "SIM", "B", "RUF", "E"]
+# Paper tooling: a one-file markdown-to-LaTeX converter, deliberately
+# written as dense string surgery. Not library code; not held to its style.
+"paper/latex/*.py" = ["E", "SIM", "B", "RUF", "UP", "C4", "PLR"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
