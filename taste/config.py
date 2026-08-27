@@ -64,6 +64,10 @@ class HarnessConfig:
     two_phase_merge: bool = False
     union_gate: bool = True
     shadow: bool = False
+    regression_gate: bool = False
+    """Replace the planner-written verification with the repository's own
+    tests (taste/regression_gate.py). A different verifier is a different
+    harness, so this is configuration and changes the hash."""
     observe_tools: bool = False
     """Observe after every tool call, not only at step boundaries.
 
@@ -151,6 +155,10 @@ class HarnessConfig:
             "A0": cls(label="A0-no-recovery", journal=True, shadow=True, recovery=RecoveryConfig.arm("A0")),
             "A2": cls(label="A2-repair-in-place", journal=True, shadow=True, recovery=RecoveryConfig.arm("A2")),
             "A3": cls(label="A3-rollback", journal=True, shadow=True, recovery=RecoveryConfig.arm("A3")),
+            "A3reg": cls(
+                label="A3reg-rollback-regression-gated", journal=True, shadow=True,
+                recovery=RecoveryConfig.arm("A3"), regression_gate=True,
+            ),
             "A3prime": cls(
                 label="A3prime-no-reset", journal=True, shadow=True, recovery=RecoveryConfig.arm("A3prime")
             ),
@@ -170,7 +178,7 @@ class HarnessConfig:
 
     @classmethod
     def arm_names(cls) -> list[str]:
-        return ["A0", "A2", "A3", "A3prime", "tiered", "full"]
+        return ["A0", "A2", "A3", "A3reg", "A3prime", "tiered", "full"]
 
 
 def kernel_kwargs(config: HarnessConfig) -> dict:

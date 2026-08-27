@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -283,6 +284,65 @@ def monitor_scope(repo_root: Path, graded_files: set[str]) -> list[str]:
             continue
         found.append(relative)
     return found
+
+
+_UNITTEST_ID = re.compile(r"^\S+ \(([\w.]+)\)$")
+
+
+def member_test_files(instance: SWEInstance) -> set[str]:
+    """The files that hold the instance's previously-passing tests.
+
+    Derived from the ids themselves and unioned with the gold test patch's
+    files: pytest node ids carry their path; django's unittest labels carry a
+    dotted module that maps back under ``tests/``; sympy's bare function
+    names carry nothing and rely on the patch's files. A gate that ran only
+    the patch's files would miss every passing test the patch did not touch.
+    """
+    files = set(graded_test_files(instance))
+    for member in instance.pass_to_pass:
+        if "::" in member:
+            files.add(member.split("::", 1)[0])
+            continue
+        m = _UNITTEST_ID.match(member.strip())
+        if m and instance.repo == "django/django":
+            module = m.group(1).rsplit(".", 1)[0]  # drop the TestCase class
+            files.add("tests/" + module.replace(".", "/") + ".py")
+    return files
+
+
+def directives_for(repo: str, test_files) -> list[str]:
+    """The runner arguments for a set of test files, with the same per-repo
+    transform the official harness applies (django wants dotted module paths
+    relative to tests/). Mirrors ``test_directives`` but takes paths rather
+    than a patch, so a caller can run any subset of the repository's tests."""
+    directives = sorted(set(test_files))
+    if repo == "django/django":
+        out = []
+        for d in directives:
+            d = d[: -len(".py")] if d.endswith(".py") else d
+            d = d[len("tests/"):] if d.startswith("tests/") else d
+            out.append(d.replace("/", "."))
+        directives = out
+    return directives
+
+
+def plain_suite_command(instance: SWEInstance, test_files) -> str:
+    """Run the given test files as they exist in the CURRENT tree.
+
+    Unlike :func:`build_eval_script` this restores nothing and applies no
+    test patch: it is what a harness may legitimately run inside the agent's
+    own environment — the repository's visible tests, unmodified — without
+    leaking the benchmark's hidden fail-to-pass tests. Activation and the
+    working directory are supplied by the routed executor.
+    """
+    spec = spec_for(instance.repo, instance.version)
+    directives = " ".join(directives_for(instance.repo, test_files))
+    return "\n".join((
+        "exec 2>&1",
+        f"echo '{START_MARKER}'",
+        f"{spec.test_cmd} {directives}".strip(),
+        f"echo '{END_MARKER}'",
+    ))
 
 
 def graded_test_files(instance: SWEInstance) -> set[str]:

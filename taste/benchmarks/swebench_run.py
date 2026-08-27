@@ -275,11 +275,24 @@ def make_execute(
                 ctx.agent_sandbox, ctx.workspace, workdir=ctx.agent_sandbox.workdir
             )
             ctx.router = router
+        gate = None
+        if getattr(ctx.config, "regression_gate", False):
+            if router is None:
+                # An arm that claims the gate must not quietly run the
+                # planner's check instead: that is the verifier being
+                # compared against, under the label of the one being tested.
+                raise RuntimeError(
+                    "regression_gate requires routed execution (a container to run the suite in)"
+                )
+            from taste.regression_gate import RegressionGate
+
+            gate = RegressionGate(instance=ctx.instance, run=router.exec)
         kernel = Kernel(
             workspace=ctx.workspace, llm=llm,
             **kernel_kwargs(ctx.config), config=ctx.config,
             retry_pool=RetryPool(total=allowance) if allowance is not None else None,
             router=router,
+            regression_gate=gate,
         )
         agent = spec or AgentSpec(
             name="swe",

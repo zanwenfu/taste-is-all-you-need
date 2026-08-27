@@ -245,6 +245,7 @@ class Kernel:
         config: HarnessConfig | None = None,
         retry_pool: attempts_mod.RetryPool | None = None,
         router: Any | None = None,
+        regression_gate: Any | None = None,
     ) -> None:
         # A HarnessConfig names an entire arm in one object and one hash. When
         # given it wins outright, so a run's identity cannot be half-specified
@@ -277,6 +278,10 @@ class Kernel:
         self.router = router
         if router is not None:
             max_parallel = 1
+        # Runtime like the router: it carries an instance and an executor.
+        # When present it REPLACES the step's own verification — the planner's
+        # check is what produced the false rejections it exists to remove.
+        self.regression_gate = regression_gate
         self.workspace = Path(workspace).resolve()
         self.llm = llm
         self.max_retries = max_retries
@@ -387,6 +392,15 @@ class Kernel:
             try:
                 if self.llm is not None:
                     self._validate_models(spec)
+                if self.regression_gate is not None:
+                    # Before any model call: a suite that cannot run at
+                    # baseline is infrastructure, and the typed failure below
+                    # halts the run as such instead of paying for it.
+                    self.regression_gate.establish_baseline()
+                    self._emit(
+                        "gate.baseline",
+                        passing=len(self.regression_gate.baseline_pass),
+                    )
                 plan = plan_override or self._plan(task, spec, memory)
             except (PlannerError, *_HARNESS_FAILURES) as exc:
                 kind = _failure_kind_of(exc)
@@ -762,16 +776,26 @@ class Kernel:
                 # judges it and before any checkpoint or reset moves it.
                 self._observe(step_id=step.id, attempt=attempts, trigger="worker")
 
-            verdict = cores.evaluate(
-                step=step,
-                memory=memory,
-                workspace=workspace,
-                llm=self.llm,
-                before=before,
-                # The Monitor grades in the same environment the Worker's
-                # commands ran in, or it grades nothing real — bug 20.
-                shell_runner=self.router.exec if self.router is not None else None,
-            )
+            if self.regression_gate is not None:
+                verdict = self.regression_gate.check()
+                self._emit(
+                    "gate.check",
+                    id=step.id,
+                    attempt=attempts,
+                    passed=verdict.passed,
+                    reason=verdict.reason,
+                )
+            else:
+                verdict = cores.evaluate(
+                    step=step,
+                    memory=memory,
+                    workspace=workspace,
+                    llm=self.llm,
+                    before=before,
+                    # The Monitor grades in the same environment the Worker's
+                    # commands ran in, or it grades nothing real — bug 20.
+                    shell_runner=self.router.exec if self.router is not None else None,
+                )
             # Read the change set BEFORE committing: after the checkpoint the
             # working tree is clean and there is nothing pending to measure.
             # Needed by the journal AND by diagnosis — gating it on the

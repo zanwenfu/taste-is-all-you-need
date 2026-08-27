@@ -1,0 +1,98 @@
+"""Regression-gated verification: roll back on what actually broke.
+
+The Monitor's checks were written by the planner — a `python -c` probe, a
+guessed pytest invocation — and in the rollback arm they rejected patches the
+official grader accepted on 9 of 18 failed instances. Rollback then destroyed
+good work on a false verdict. The precision of the verifier set the exchange
+rate between a clean final tree and a solved task, and the verifier was the
+weakest part of the harness.
+
+This gate replaces the planner's check with the repository's own tests, run
+in the agent's environment against the agent's tree: the same held-out
+passing set the instrument replays afterwards, used *during* the run. A step
+is rejected if and only if a test that passed at the start of the run fails
+now. It does not judge whether the task is solved — that is the grader's job
+and the model's — only whether the step broke something that worked. The
+observation layer becomes the harness's monitor, which is what an OS-level
+recovery primitive should be built on.
+
+What it deliberately does not do: apply the benchmark's hidden test patch
+(that would leak the graded target into the agent's environment) or restore
+test files the agent edited (the instrument's replay does that; a gate that
+runs whatever the tree holds can be gamed by deleting tests, and the
+disagreement between gate and instrument is then a measurable quantity
+rather than a silent one).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from taste.benchmarks import swebench
+from taste.benchmarks.swebench import PASSING_STATUSES
+from taste.cores import MonitorResult
+from taste.llm import InfraFailure
+
+
+@dataclass
+class RegressionGate:
+    instance: swebench.SWEInstance
+    run: Callable[..., Any]
+    """``run(command, timeout=...) -> ExecResult`` in the agent's environment
+    (the router's exec)."""
+    timeout: int = 1200
+    baseline_pass: frozenset[str] = frozenset()
+    established: bool = False
+    checks: int = 0
+    history: list[dict[str, Any]] = field(default_factory=list)
+
+    def _suite(self) -> dict[str, str]:
+        command = swebench.plain_suite_command(
+            self.instance, swebench.member_test_files(self.instance)
+        )
+        result = self.run(command, timeout=self.timeout)
+        if getattr(result, "timed_out", False):
+            raise TimeoutError("regression gate suite timed out")
+        return swebench.parse_eval_output(self.instance, result.stdout)
+
+    def establish_baseline(self) -> None:
+        """Run the suite once before the agent acts. No results at all means
+        the environment cannot run the repository's tests — infrastructure,
+        refused before a model call is paid for, never a silent all-pass."""
+        statuses = self._suite()
+        if not statuses:
+            raise InfraFailure(
+                "regression gate: the repository's tests produced no results at baseline",
+                attempts=1,
+                last_error="no parseable test results at baseline",
+            )
+        self.baseline_pass = frozenset(t for t, s in statuses.items() if s in PASSING_STATUSES)
+        self.established = True
+
+    def check(self) -> MonitorResult:
+        if not self.established:
+            raise RuntimeError("regression gate used before its baseline was established")
+        self.checks += 1
+        try:
+            now = self._suite()
+        except TimeoutError:
+            # Conservative: an unfinished suite is not evidence the tree is
+            # sound, and the reset costs one attempt rather than a run.
+            self.history.append({"check": self.checks, "outcome": "timeout"})
+            return MonitorResult(passed=False, reason="regression gate: suite timed out")
+        if not now:
+            # The suite could not even run: the step broke collection or an
+            # import. The grader would score every test failed; so do we.
+            regressed = sorted(self.baseline_pass)
+            reason = "regression gate: the test suite no longer runs"
+        else:
+            regressed = sorted(t for t in self.baseline_pass if now.get(t) not in PASSING_STATUSES)
+            reason = (
+                f"regression gate: {len(regressed)} previously-passing test(s) now fail"
+                if regressed else "regression gate: no previously-passing test regressed"
+            )
+        self.history.append({"check": self.checks, "regressed": len(regressed)})
+        evidence = "\n".join(regressed[:40])
+        return MonitorResult(passed=not regressed, reason=reason, evidence=evidence)
