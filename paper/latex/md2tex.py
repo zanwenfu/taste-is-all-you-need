@@ -23,6 +23,7 @@ PREAMBLE = r"""\documentclass{article}
 \usepackage{microtype}
 \usepackage{xcolor}
 \usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=black}
 \usepackage{array}
 \usepackage{pifont}
 \usepackage{graphicx}
