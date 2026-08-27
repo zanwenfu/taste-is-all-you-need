@@ -118,7 +118,7 @@ def convert(md: str) -> str:
             if in_appendix:
                 title = re.sub(r"^[A-Z]\.\d+\s*", "", title)
             out.append(r"\subsection{" + inline(title) + "}"); i += 1; continue
-        m_img = re.match(r"!\[(.*?)\]\((.*?)\)\s*$", ln.strip())
+        m_img = re.match(r"!\[(.*?)\]\((.*?)\)(?:\{width=([0-9.]+)\})?\s*$", ln.strip())
         if m_img:
             cap, path = m_img.group(1), m_img.group(2)
             label = re.sub(r"[^a-z0-9]+", "-", Path(path).stem.lower())
@@ -162,11 +162,11 @@ def convert(md: str) -> str:
             i += 1
     bib = [r"\begin{thebibliography}{99}"] + [r"\bibitem{ref" + n + "} " + inline(t) for n, t in refs] + [r"\end{thebibliography}"]
     body = "\n\n".join(out)
+    body = re.sub(r"Figure (\d)(?!\d)", figref, body)
     labels = re.findall(r"\\label\{(fig:[^}]+)\}", "\n".join(out))
     def figref(m):
         n = int(m.group(1))
         return ("Figure~\\ref{" + labels[n-1] + "}") if 0 < n <= len(labels) else m.group(0)
-    out = [re.sub(r"Figure (\d)(?!\d)", figref, o) if not o.startswith("\\begin{figure}") else o for o in out]
     pre = PREAMBLE.replace("TITLE_PLACEHOLDER", title_tex)
     if "\\appendix" in body:
         head, _, tail = body.partition("\\appendix")
