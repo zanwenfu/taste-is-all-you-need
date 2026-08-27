@@ -384,11 +384,9 @@ measurements on this benchmark.
 
 ## 8. Limitations
 
-Everything is exploratory and dev-slice: the contrast is one sweep per arm
-on the development slice, and the confirmatory held-out frame is registered
-but not run. Each cross-stack comparison is a single sweep per stack — sampling variability across re-runs of the
-same regime is unmeasured until the seeded replications in the
-confirmatory plan. The regime boundary includes the provider adapter, which near-par resolve
+Everything is exploratory and dev-slice: one sweep per arm and per
+stack, so re-run variability within a regime is unmeasured until the
+registered confirmatory frame's seeded replications. The regime boundary includes the provider adapter, which near-par resolve
 rates bound but cannot eliminate. The oracle observes the gold test-patch's
 blast radius, so "regression" means regression adjacent to the edit; the
 observation hook fails open (its error counter is reported per cell).
