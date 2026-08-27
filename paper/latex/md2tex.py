@@ -28,7 +28,7 @@ PREAMBLE = r"""\documentclass{article}
 \usepackage{graphicx}
 \newcommand{\cmark}{\ding{51}}
 \newcommand{\xmark}{\ding{55}}
-\title{Twenty-Eight Ways to Measure Nothing:\\A Failure Catalogue from Instrumenting an Agent Harness}
+\title{TITLE_PLACEHOLDER}
 \author{Anonymous Authors\\AgenticOS Workshop Submission}
 \begin{document}
 \maketitle
@@ -75,18 +75,25 @@ def convert(md: str) -> str:
     out, i = [], 0
     lines = md.splitlines()
     # drop the H1 title and the italic header line; title is in the preamble
-    while i < len(lines) and (lines[i].startswith("# ") or lines[i].startswith("*Agentic") or lines[i].strip() in ("", "---")):
+    title = "Untitled"
+    while i < len(lines) and (lines[i].startswith("# ") or lines[i].startswith("*") or lines[i].strip() in ("", "---")):
+        if lines[i].startswith("# "):
+            title = lines[i][2:].strip()
         i += 1
+    title_tex = inline(title).replace(": ", r":\\", 1)
     refs = []
     while i < len(lines):
         ln = lines[i]
         if ln.startswith("### References"):
+            # Collect references until the next section heading and keep
+            # going: the appendix follows the references in the markdown,
+            # and a `break` here silently dropped it from the submission.
             i += 1
-            while i < len(lines):
+            while i < len(lines) and not lines[i].startswith("## "):
                 m = re.match(r"\[(\d+)\]\s+(.*)", lines[i].strip())
                 if m: refs.append((m.group(1), m.group(2)))
                 i += 1
-            break
+            continue
         if ln.startswith("## Abstract"):
             i += 1; buf = []
             while i < len(lines) and not lines[i].startswith("## "):
@@ -141,8 +148,14 @@ def convert(md: str) -> str:
             out.append(inline(" ".join(b.strip() for b in buf)))
         else:
             i += 1
-    bib = [r"\begin{thebibliography}{9}"] + [r"\bibitem{ref" + n + "} " + inline(t) for n, t in refs] + [r"\end{thebibliography}"]
-    return PREAMBLE + "\n\n".join(out) + "\n\n" + "\n".join(bib) + "\n\\end{document}\n"
+    bib = [r"\begin{thebibliography}{99}"] + [r"\bibitem{ref" + n + "} " + inline(t) for n, t in refs] + [r"\end{thebibliography}"]
+    body = "\n\n".join(out)
+    pre = PREAMBLE.replace("TITLE_PLACEHOLDER", title_tex)
+    if "\\appendix" in body:
+        head, _, tail = body.partition("\\appendix")
+        body = head + "\n".join(bib) + "\n\n\\appendix" + tail
+        return pre + body + "\n\\end{document}\n"
+    return pre + body + "\n\n" + "\n".join(bib) + "\n\\end{document}\n"
 
 if __name__ == "__main__":
     OUT.write_text(convert(SRC.read_text()))

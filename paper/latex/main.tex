@@ -10,244 +10,212 @@
 \usepackage{hyperref}
 \usepackage{array}
 \usepackage{pifont}
+\usepackage{graphicx}
 \newcommand{\cmark}{\ding{51}}
 \newcommand{\xmark}{\ding{55}}
-\title{Twenty-Eight Ways to Measure Nothing:\\A Failure Catalogue from Instrumenting an Agent Harness}
+\title{What the Final Patch Hides:\\Event-Level Regression Measurement for Coding-Agent Harnesses}
 \author{Anonymous Authors\\AgenticOS Workshop Submission}
 \begin{document}
 \maketitle
 \begin{abstract}
-An OS layer for agentic AI will standardise checkpointing, recovery, and
-observability, and those designs can only be compared if they can be
-measured. We built the instrument such comparison requires --- an
-observational timeline committed to git, exhaustive replay of held-out
-tests at every observation, detection attributed by coverage --- and we
-report two things.
-
-First, the instrument's failure record: \textbf{twenty-eight defects, of which
-twenty-three produced a plausible number rather than an error, and all but
-one were present while a green test suite watched.} They collapse into
-four mechanisms --- ambient-environment dependence, infrastructure conflated
-with measurement, final-state measurement of event-shaped quantities, and
-output consumed without asserting its producer --- and we show each mechanism
-operating in public infrastructure, including the official SWE-bench
-grader. The capstone: after nineteen fixes, every validation gate we had
-passed, and the headline number was still wrong, because the agent executed
-on the host while every check validated the measurement path. A gate
-certifies only the paths it exercises.
-
-Second, what the corrected instrument measures. On the same benchmark
-instances, under the same harness and recovery policy, one frontier model
-stack produced \textbf{zero regression events across 40 runs} while another
-produced \textbf{140, in 11 distinct breakage incidents across 6 bearing runs}
-(0 of 40 vs 6 of 37, Fisher p = 0.010) --- 183 of the 184 events across both
-sweeps erased by the harness's own rollback and invisible in the final
-tree. One officially-\emph{resolved} patch carried three of them,
-two undetected even by the harness that produced it. With the pre-declared
-recovery-policy contrast unblinded: no recovery leaves more of this damage
-in the final tree than rollback (paired sign p = 0.022) --- and rollback
-resolves fewer tasks, because the verifier that gates it rejects good
-patches. Regressions during agent runs are a property of the agent regime,
-not the benchmark, and the final state --- all existing evaluation examines ---
-is where the evidence is not.
+Coding agents are evaluated on the patch they leave behind. We show that this final state hides most of what happens during a run. We built an instrument that records every mutating action of an agent as a git commit on a hidden reference, replays each benchmark instance's held-out tests at every recorded state inside the benchmark's own container image, and attributes each detected regression to the harness check that could have caught it. Applied to SWE-bench Verified, the instrument recorded 184 regression events across the runs that produced any; the final patch exposed one of them. Regression frequency depended on the model stack rather than the benchmark: on the same 40 instances under the same harness, one frontier stack produced no events in 40 runs and another produced 140 events in 11 incidents (Fisher p = 0.010). A pre-registered comparison of recovery policies, analysed with code committed before unblinding, found that rollback to a verified checkpoint left contamination in one final tree where no recovery left it in nine (paired sign test, p = 0.022), but rollback also resolved fewer tasks, because the verifier that triggers it rejected patches the official grader accepted. We release the instrument, its validation protocol, and a catalogue of 28 measurement defects encountered while building it, 23 of which produced plausible numbers rather than errors.
 \end{abstract}
 
 \section{Introduction}
 
-The agentic-systems community is converging on an OS layer: shared abstractions for memory, scheduling, checkpointing, recovery. Choosing between abstractions requires evidence, and this paper is about how much harder producing that evidence is than it looks --- not in the statistics, but in the plumbing that produces the numbers the statistics consume.
+Benchmarks for coding agents grade the final patch. SWE-bench \cite{ref1} and its Verified subset \cite{ref2} run the repository's tests against the patch an agent submits and report whether the target tests now pass and the previously passing tests still pass. Work on regressions introduced by agents follows the same convention: it examines the submitted patch and counts the previously passing tests it breaks \cite{ref8}.
 
-Our motivating question is narrow. When a step in a long-horizon agent run fails verification, deployed harnesses either \textbf{repair in place} (hand the model its own broken tree) or \textbf{roll back and retry} (reset to the last verified checkpoint). The second discards work and repays cold-cache token prices; its defence is that it leaves less collateral damage. That claim is testable --- if you can say, for every run, \emph{when} previously-working behaviour stopped working.
+This convention has a blind spot. A regression that an agent introduces and later repairs leaves no trace in the final patch. Any harness with a recovery mechanism (a retry, a rollback to a checkpoint, or a repair step) produces exactly this pattern by design, and current evaluation cannot tell a run that never broke anything from a run that broke a great deal and repaired it. Whether this matters depends on two empirical questions that have not been answered: how often regressions occur during a run, and how much of that activity survives to the final state.
 
-\textbf{Contributions.} (i) The instrument: observational checkpointing on a hidden git ref, exhaustive replay, coverage-based attribution, and a validation regime whose controls include re-measuring archived runs. (ii) A twenty-eight-defect catalogue with the mechanism for each, in a four-class taxonomy whose classes we show operating in public harnesses. (iii) First measurements from the corrected pipeline: across the same 40 instances, two frontier stacks at equal budget caps give a 0-versus-140-event contrast in which final-state evaluation sees one event in 184; and the pre-declared recovery-policy contrast, unblinded with its committed analysis, shows rollback keeps final trees clean at a measurable cost in resolution.
+We answer both by measuring the timeline rather than the endpoint. Our contributions are:
 
-\section{What has to be measured}
+1. \textbf{An instrument for event-level regression measurement.} Every mutating tool call is recorded as a commit on a git reference the agent cannot see. After the run, the instance's held-out passing tests are replayed at every recorded state inside the benchmark's pinned container. Detection is attributed by test coverage rather than by co-occurrence in time. The instrument's validity is established by positive and negative controls, a baseline liveness gate, a golden check that drives the benchmark's own gold patch through the agent's execution path, and a re-scoring control that re-measures archived runs under a changed instrument with no model calls (Section 3). 2. \textbf{Measurements on SWE-bench Verified.} Across the runs that produced any regression, the timeline recorded 184 events and the final state exposed one (Section 5.2). Event frequency was a property of the model stack, not the benchmark: identical instances and harness gave 0 events under one frontier stack and 140 under another (Section 5.3). 3. \textbf{A pre-registered comparison of recovery policies.} With the analysis committed before unblinding, rollback to a verified checkpoint left fewer contaminated final trees than no recovery (p = 0.022) but resolved fewer tasks, and we trace the loss to verifier precision rather than to rollback itself (Sections 5.4 and 5.5). 4. \textbf{A catalogue of 28 measurement defects} found while building the instrument, classified by mechanism, with the design rules that caught most of them (Appendix A). Twenty-three of the 28 produced a plausible number rather than an error.
 
-A \textbf{regression event} is a held-out test that passed at some observation of a run and fails at a later one. Three properties make it hard to measure honestly.
+All measurements are exploratory and were made on a development slice of the benchmark that is excluded from any confirmatory frame. No claim is made about the population of instances beyond that slice.
 
-\textbf{It is an event, not a state.} A regression introduced and then repaired leaves no trace at the end of the run --- and repair is what a recovery policy does. Final-artifact measurement, how regressions on this benchmark are measured in published work \cite{ref3}, records zero by construction for every recovered event; \S5.1 measures the miss.
+\section{Background and related work}
 
-\textbf{Its absence and the instrument's death are the same observation.} Zero is what a clean run produces --- and what a dead probe, an unmatched parser, and an empty timeline produce. \S4 is twenty-eight instances of this.
+\textbf{Benchmarks and their validity.} SWE-bench \cite{ref1} grades a patch by two test sets: tests that must go from failing to passing, and tests that must keep passing. Verified \cite{ref2} is the human-screened 500-instance subset. Concerns about the static subset have accumulated: contamination and memorisation \cite{ref6}, leaked solutions and flawed tests [6, 7], and the response of rolling benchmarks that draw fresh instances [3, 5] or private repositories \cite{ref4}. UTBoost \cite{ref7} showed that the held-out tests themselves are often insufficient, changing the verdict on 24\% of Verified leaderboard entries. TDAD \cite{ref8} measured regressions in submitted patches on Verified and found them in about 30\% of resolved instances. Our measurement is complementary to TDAD's: we measure the same quantity on the timeline rather than the endpoint, and Section 5.2 reports how the two compare on the same runs.
 
-\textbf{Detection must be attributed, not co-located.} "The harness failed something while the regression was open" credits whichever policy fails most often with the best detection. Attribution needs a causal join through a file the agent changed; we report attributed, co-occurring, and unknown separately, and never let "could not measure" render as any of them.
+\textbf{Agent scaffolds and recovery.} SWE-agent \cite{ref9}, OpenHands \cite{ref10}, and Agentless \cite{ref11} established the design space of coding-agent scaffolds; mini-swe-agent \cite{ref12} reduced it to a bash-only loop. CodeAct \cite{ref13} and ReAct \cite{ref14} are the underlying action formalisms. Within-episode recovery has been studied as verbal self-reflection [15, 16], progress-gated recovery \cite{ref17}, checkpoint repair for program-of-thought \cite{ref18}, and provenance-based rollback \cite{ref19}. Operating-system framings for agents \cite{ref20} treat checkpointing and scheduling as shared primitives. Process reward models and rubric verifiers for software agents [24, 25] address the verifier-precision problem we encounter in Section 5.5 from the training side.
 
-\section{The instrument, and how it is validated}
+\textbf{Evaluation infrastructure.} Trajectory-level diagnostics \cite{ref22} and holistic leaderboards \cite{ref21} argue that resolve rate alone is uninformative; long-horizon benchmarks \cite{ref23} make the same point with harder tasks. Our instrument is a specific, validated trajectory-level measure of one quantity.
 
-\textbf{Observational checkpointing.} Every mutating tool call commits the tree to a git ref the agent cannot enumerate, from a private index, so the agent's own \texttt{git status} and \texttt{git diff} are byte-identical with the instrument on or off. Rollbacks and run-end are observed too.
+\textbf{Automated program repair.} The regression problem is the plausible-versus-correct patch problem of automated program repair [26, 28, 29]. A study of two million patches \cite{ref27} showed that regression tests are the primary defence against overfitting patches; our results concern what happens to regressions that the agent's own process repairs before the patch is ever tested.
 
-\textbf{Exhaustive replay.} Held-out tests are replayed at \emph{every} observation inside the instance's pinned container. Bisection would assume monotone verdicts; non-monotonicity is the treatment (row C1).
+\section{Instrument}
 
-\textbf{Attribution by coverage,} built once per instance at the base commit, identical across arms by construction.
+\textbf{Observational timeline.} The harness wraps every mutating tool call. After each call, the working tree is committed to a git reference outside the agent's view, using a private index so that the agent's own \texttt{git status} and \texttt{git diff} are unchanged. Rollbacks and the end of the run are recorded as observations too. Because observations are commits, an archived run can be re-measured later without re-running the agent.
 
-\textbf{Validation.} Five pre-set gates (negative control, positive control including \emph{recovered} injections, flake screen, unknown-rate ceiling, baseline liveness), plus the control the git substrate makes possible: \textbf{re-scoring} --- an archived run's committed timeline re-measured under a changed instrument, no model calls, only the instrument varying. This control, exercised twice on different archived runs, reproduced their episode counts exactly each time --- once localising a disagreement to the runs rather than the detector, once proving that forty fresh runs' zero (\S5.1) belonged to the runs.
+\textbf{Exhaustive replay.} For each observation, the instance's passing-test set is run inside the benchmark's pinned container against that observation's tree. A regression event is a test that passes at one observation and fails at a later one. We replay every observation rather than bisecting between the start and the end, because bisection assumes the verdict sequence is monotone, and a recovery policy violates that assumption by construction. Infrastructure failures during replay (a container that will not start, a patch that will not apply, a timeout, a log with no results) are recorded as missing observations, never as failures. Baseline-dead tests, which fail at the first observation, are excluded from event counting.
 
-\section{Twenty-eight ways to measure nothing}
+\textbf{Attribution.} A regression is attributed to a harness check if a failing check and the broken held-out test both exercise a file the agent changed at that observation, using a per-instance coverage map built at the base commit. We report attributed detection, co-occurrence (any harness failure while the regression was open, an over-count), and unknown separately.
 
-\textbf{S} = silent: produced a plausible number rather than an error. \textbf{G} = present while the test suite was green (A4 \emph{is} the suite, marked ---). \textbf{H} = findable only on a clean host. The census closes at submission; defects found after it --- four to date, one of which moved \S5.3's primary endpoint --- are described where found and not counted here.
+\textbf{Execution environment.} The agent's tools and the harness's verification checks execute inside the same pinned container as the replay, with file changes synchronised between the container and the host tree that the timeline records. Section A.2 describes why this was not initially the case and what it cost.
 
-\subsection{The catalogue, by mechanism}
+\textbf{Validation.} Five gates run before any paid experiment: a negative control (clean runs must measure zero), a positive control with injected regressions including recovered ones, a flake screen, an unknown-rate ceiling, and a baseline liveness check that the probes actually return passes. A golden check drives the benchmark's gold patch through the agent's real tool path and requires the official grader to return "resolved" (and a null run to return "unresolved"); it passed on the three repository families with the most distinctive test runners. A re-scoring control re-measures an archived run's committed timeline under a changed instrument with no model calls. It was run twice on different archived runs and reproduced their episode counts exactly both times.
 
-\textbf{Class A --- ambient-environment dependence.} The code asks the machine a question and gets a different answer on a different machine.
+\section{Experimental setup}
 
-\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}\begin{tabular}{lp{0.42\linewidth}p{0.36\linewidth}ccc}
-\toprule
-\# & Defect & Consequence & S & G & H \\
-\midrule
-A1 & Shadow commits inherit the machine's git identity & timeline silently empty on any clean machine & \cmark{} & \cmark{} & \cmark{} \\
-A2 & Gate probe invoked bare \texttt{python} & every probe exit 127 on clean Ubuntu & \xmark{} & \cmark{} & \cmark{} \\
-A3 & Unpinned SDK resolved a different major version & two machines ran different code & \xmark{} & \cmark{} & \cmark{} \\
-A4 & Test fixtures verified with bare \texttt{pytest} from PATH & 15 tests fail on a clean host, presenting as harness defects & \xmark{} & --- & \cmark{} \\
-A5 & A benchmark scorer invoked bare \texttt{python} & score 0.0 manufactured by a missing interpreter & \cmark{} & \cmark{} & \cmark{} \\
-A6 & \textbf{Agent executed on the host; measurement in the pinned image} & the capstone --- \S5 & \cmark{} & \cmark{} & \cmark{} \\
-\bottomrule
-\end{tabular}\end{center}
+\textbf{Benchmark and slice.} SWE-bench Verified, 500 instances. A 40-instance development slice, drawn by stratified sampling and fixed before any measurement, was used for all experiments here; it is excluded from the confirmatory frame that a later study would use.
 
-\textbf{Class B --- infrastructure failure conflated with measurement.} The instrument's zero and the defect's zero are the same number.
+\textbf{Harness.} A planner decomposes the task into steps, each with a verification command; a worker executes each step with three tools (read file, write file, run shell); a monitor runs the verification. On failure, the recovery policy acts. Three policies were compared: \textbf{rollback} (reset to the last verified checkpoint and retry with feedback), \textbf{repair-in-place} (retry from the failed tree), and \textbf{no recovery} (keep the failed step's tree and continue). Each run had a \$4 work-cost cap; budget exhaustion is scored as failure.
 
-\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}\begin{tabular}{lp{0.42\linewidth}p{0.36\linewidth}ccc}
-\toprule
-\# & Defect & Consequence & S & G & H \\
-\midrule
-B1 & Output marker used shell \texttt{:} (prints nothing) & a perfect 13/13 run scored as 13 errors & \cmark{} & \cmark{} &  \\
-B2 & Results on stderr, markers on stdout & one framework's results fell outside the parsed slice & \cmark{} & \cmark{} &  \\
-B3 & Probe diffed against a deliberately-deleted commit & every graded test a hole $\rightarrow$ "0 regressions" & \cmark{} & \cmark{} &  \\
-B4 & Interrupted mirror clone accepted with zero commits & later instances die far from the cause & \cmark{} & \cmark{} &  \\
-B5 & Container workdir unvalidated & every exec exit 127, OCI error on stdout & \cmark{} & \cmark{} &  \\
-B6 & Isolation removed loopback, not just the internet & 23.5\% of the oracle dead; one instance 812 tests & \cmark{} & \cmark{} &  \\
-B7 & Provider cache served force-removed containers & later cells of an instance replay against a corpse and \textbf{score clean} & \cmark{} & \cmark{} &  \\
-B8 & Per-observation tree reset reverted image build-time edits & a repo family's oracle dead, disguised as flake & \cmark{} & \cmark{} &  \\
-\bottomrule
-\end{tabular}\end{center}
+\textbf{Models.} Two frontier stacks were run under identical harness, policy, instances, and caps: Claude (Opus 4.7 planner, Sonnet 4.6 worker) and GPT-5.6 (sol planner, terra worker). Model identifiers are recorded in every run's manifest.
 
-\textbf{Class C --- final-state measurement of an event-shaped quantity.} The number measured is not the quantity defined.
+\textbf{Outcomes.} Resolve is the official grader's verdict on the final patch. Event counts are reported at three levels because the distribution is heavily overdispersed: distinct incidents (observations at which at least one test broke), declared events (one per test function and onset, parametrised variants collapsed), and bearing runs (runs with at least one event). Final-state contamination is the number of held-out tests failing in the graded final patch, net of baseline-dead tests.
 
-\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}\begin{tabular}{lp{0.42\linewidth}p{0.36\linewidth}ccc}
-\toprule
-\# & Defect & Consequence & S & G & H \\
-\midrule
-C1 & Bisection assumed monotone verdicts & recovered regressions invisible; recovering policy flattered & \cmark{} & \cmark{} &  \\
-C2 & The declared event unit was implemented nowhere & pipeline counted per parametrised test; $\hat\lambda$ off by up to 2.7$\times$ & \cmark{} & \cmark{} &  \\
-C3 & Rollbacks produced no observation & the recovering arm's recoveries invisible to the timeline scoring it & \cmark{} & \cmark{} &  \\
-C4 & "Persists past the step boundary" defined nowhere & one legal reading excludes the events the design exists to count & \cmark{} & \cmark{} &  \\
-\bottomrule
-\end{tabular}\end{center}
+\textbf{Pre-declaration.} The event unit, the gates, and the recovery-policy contrast were declared before the relevant data existed. The contrast's analysis (exact paired sign tests on final-state contamination as primary and on incident exposure as co-primary) was committed to the repository before either comparison arm finished. One amendment, making the gates conditional on the model stack, was filed after the cross-stack result and before the contrast was unblinded. Section B gives the wording.
 
-\textbf{Class D --- output consumed without asserting its producer.}
+\section{Results}
 
-\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}\begin{tabular}{lp{0.42\linewidth}p{0.36\linewidth}ccc}
-\toprule
-\# & Defect & Consequence & S & G & H \\
-\midrule
-D1 & Audit-trail field never populated & every checkpoint reported 0 tool errors, always & \cmark{} & \cmark{} &  \\
-D2 & Malformed planner output crashed the run & 33\% of runs lost, scored as task failures & \xmark{} & \cmark{} &  \\
-D3 & Dependency install counted as agent work & 3,640 of 3,641 changed files; attribution vacuous & \cmark{} & \cmark{} &  \\
-D4 & Join preferred the first observation over the last & failures pinned to the earliest tree under the fine grid & \cmark{} & \cmark{} &  \\
-D5 & Executed config rebuilt from a name & manifest describes a run that never happened & \cmark{} & \cmark{} &  \\
-D6 & Git handles never released & sweeps die of fd exhaustion after \textasciitilde{}400 cells, loss concentrated on the back half & \cmark{} & \cmark{} &  \\
-D7 & Console re-walked the full tree per run & answers first request, then presents as a dead server & \xmark{} & \cmark{} &  \\
-D8 & Detection events never carried failing-test ids while attribution joined on them & attributed detection structurally UNKNOWN on every real run & \cmark{} & \cmark{} &  \\
-D9 & Absent coverage rendered as measured silence & 8 unmeasured episodes reported as attributed silence with unknown-rate 0.0 & \cmark{} & \cmark{} &  \\
-D10 & Turns that hit the output ceiling were executed anyway & truncated-but-parseable JSON wrote half a file; a 78-event storm read as agent incompetence, and the adapter remapped the stop reason that said why & \cmark{} & \cmark{} &  \\
-\bottomrule
-\end{tabular}\end{center}
+\subsection{Resolve and cost}
 
-Totals, computed from the tables: \textbf{23 of 28 silent; 27 of 28 present under a green suite (the 28th being the suite itself); 6 of 28 findable only on a clean host.} D9 and D10 earn a sentence of humility: one appeared in the first valid run's own sidecar after an audit predicted it; the other on first contact with a second model family, whose longer outputs turned a latent ceiling into a mangled tree. The class does not exhaust.
+Under rollback, the Claude stack resolved 13 of 40 instances (32.5\%, exact 95\% CI 18.6\% to 49.1\%) at \$34.24; the GPT-5.6 stack resolved 13 of 35 graded instances (37.1\%) at \$8.14. The GPT-5.6 sweep's circuit breaker stopped three cells after six consecutive zero-progress failures in one repository family, and two cells failed on a file-synchronisation defect; both are counted as attempted and not resolved.
 
-\subsection{The two design rules that caught most of them}
+\subsection{The final state hides almost all regression activity}
 
-\textbf{Infrastructure failure is a missing observation, never a test failure} --- a typed \texttt{error}, never \texttt{fail}. This converted B1, B2, B3, B5 and B6 from fabricated regressions into visible holes.
+\begin{figure}[t]\centering\includegraphics[width=\linewidth]{fig_undercount.pdf}\caption{Every run that produced at least one regression event, in both GPT-5.6 sweeps. Red bars are events recorded on the timeline; grey bars are held-out test failures visible in the graded final patch.}\label{fig:fig-undercount}\end{figure}
 
-\textbf{Zero events must be distinguishable from a dead instrument.} The baseline-liveness gate exists because an instrument whose every probe errored once scored a perfect negative control; on first contact with a clean host it failed loudly on A2 --- the defect that would otherwise have been certified as a clean result.
+Figure 1 shows every run that produced a regression event, under the rollback policy with the GPT-5.6 stack. The timeline recorded 184 declared events across eight runs. The final patch exposed one. Every other event was created and then removed by the harness's rollback before the run ended, so the graded patch was clean. The same measurement made from the final patch, which is how prior work measures regressions \cite{ref8}, would report one event in eight runs.
 
-\subsection{The working practice that found the rest}
+\begin{figure}[t]\centering\includegraphics[width=\linewidth]{fig_timeline.pdf}\caption{One run that the official grader marked resolved, with all 147 graded tests passing. The timeline shows three regressions of the same test function, each repaired by rollback two observations later.}\label{fig:fig-timeline}\end{figure}
 
-\textbf{Never consume a measurement's output without first asserting the measurement succeeded.} D6 hid for weeks because a fixture consumed a sweep's output without checking the sweep's status. Nearly every row above is some component violating this rule; it is also how the official SWE-bench grader could be induced to mark unresolved patches resolved by forged stdout \cite{ref5}.
+Figure 2 shows a single run in detail. The grader marked it resolved with all graded tests passing. Its timeline contains three regressions of the same test function at observations 3, 5, and 7, each repaired by rollback. Two of the three were not detected by any harness check while they were open; the harness noticed nothing and the rollback that repaired them was triggered by an unrelated failure.
 
-\section{The capstone: every gate passed, and the number was still wrong}
+Across the full GPT-5.6 sweep, 48 of 162 raw episodes had no co-occurring harness failure of any kind.
 
-Three early pilots (80 runs, \$99.07, development slice) measured an event rate far below the pre-declared gate. The gates had been fixed in advance; re-scoring confirmed detection had not regressed; we drafted the pre-declared conclusion --- switch substrates. It was wrong. The harness ran the agent in a bare checkout on the host while every probe, verdict, and gate ran inside the pinned image; on the host \texttt{import matplotlib} in that checkout \emph{succeeds} as an uncompiled namespace package, and everything downstream fails in ways indistinguishable from agent incompetence --- 26 of 28 zero-step runs traced here. The rule behaved correctly on its data; the \emph{inference} did not survive the data's provenance, because no gate had exercised the agent's execution path. \textbf{A validation gate certifies only the paths it exercises}; the fix is the seam the instrument already used for its probes: the agent must execute where it is measured.
+\subsection{Regression frequency depends on the model stack, not the benchmark}
 
-\subsection{What the corrected pipeline measures}
+On the same 40 instances, under the same harness and rollback policy, the Claude stack produced no regression events in 40 runs (227 observations, all replayed). The GPT-5.6 stack produced 140 declared events in 11 incidents across 6 of 37 attempted runs (bearing fraction 16.2\%, exact CI 6.2\% to 32.0\%). A one-sided Fisher exact test on the bearing fractions gives p = 0.010. Observation density differs by a factor of 1.4 between the stacks, which does not account for a difference of 140 to 0.
 
-All numbers exploratory, on a pre-declared development slice, excluded from any confirmatory frame. The declared event unit is one (test function, onset observation) pair, parametrised variants collapsed; we report \textbf{incidents} (distinct onset observations), \textbf{events} (declared unit), and \textbf{bearing runs} together, because the data are overdispersed and no single rate summarises them honestly.
+The Claude zero is a measured zero. The same stack's earlier two-instance canary run did produce three events, and re-scoring that run's archived timeline under the instrument used for the 40-run sweep reproduces them exactly, so detection did not fail; these 40 runs did not break adjacent behaviour.
 
-\textbf{Stack one --- Claude planner/worker, 40 instances, rollback policy:} resolve 32.5\% (13/40, exact CI [18.6\%, 49.1\%]), and \textbf{zero events in 227 exhaustively-replayed observations} (bearing 0/40, CI [0\%, 8.8\%]). The same regime's earlier two-instance canary produced one bearing run (3 declared events), so the regime's pooled rate is near zero, not literally zero. The zero is demonstrated to belong to the runs: re-scoring that canary's archived timeline under this identical instrument reproduces its events exactly (\S3).
+We initially interpreted a low event rate as a property of the benchmark, and a pre-declared rule directed us to switch to a benchmark with a larger held-out test set. The second stack falsified that interpretation on the same instances. Regression frequency is a property of the agent regime, the combination of model stack and recovery policy, and any gate on it must be declared per regime.
 
-\textbf{Stack two --- GPT-5.6 planner/worker, the same 40 instances, harness, policy, and budgets:} resolve 37.1\% (13/35 graded) at a quarter of the cost, and \textbf{140 declared events across 11 distinct incidents in 6 of 37 attempted runs} (bearing CI [6.2\%, 32.0\%]; the sweep's circuit breaker skipped the last three cells after six consecutive zero-progress failures in one repo family, and two cells died to a sync defect --- all counted, none hidden). Against stack one's 0 of 40, the matched-slice run-level contrast is significant: Fisher exact one-sided p = 0.010. Exposure does not explain it: observation densities differ by \textasciitilde{}1.4$\times$, event totals by 140-to-0.
+\subsection{Recovery policy: rollback keeps the final tree clean}
 
-Two disclosures. Stack two's first calibration was destroyed by defect D10 (a truncated write produced a 78-event storm; the circuit breaker stopped it at \$1.12) and is excluded as infrastructure; the runs reported here show no capped turns in their event logs. And the pre-declared gate for this substrate still \emph{fails} under stack two --- $\hat\lambda$ clears its threshold, bearing 16.2\% < 25\% does not --- so these numbers license not a confirmatory pass but the regime-conditional re-declaration of the gates, filed as an amendment before the contrast arms were unblinded.
+\begin{figure}[t]\centering\includegraphics[width=\linewidth]{fig_contrast.pdf}\caption{The three recovery policies under the GPT-5.6 stack on the same 40 instances.}\label{fig:fig-contrast}\end{figure}
 
-\textbf{What the events were.} Every recovered event is invisible to final-state evaluation --- the population prior work measures \cite{ref3}. The harness's own view splits three ways: \emph{detected and erased} (a failing check attributable to the regression, then rollback), co-occurring without an attributable link, and fully silent --- 48 of the sweep's 162 raw episodes had no co-occurring harness failure of any kind. On the run that matters most, \textbf{an officially-resolved patch (all graded tests green) carried three regressions, two of which the harness never noticed.} One destructive edit broke 54 test functions at a single observation and left a perfect final state; a leaderboard cannot distinguish that run from one that never broke anything.
+Figure 3 summarises the pre-declared contrast. The primary endpoint, final-state contamination, is paired by instance: no recovery was worse than rollback on 9 instances, better on 1, and tied on 25 (exact sign test, p = 0.022). Repair-in-place was worse on 5, better on 1, and tied on 29 (p = 0.22). The co-primary endpoint, incident exposure, did not differ between policies (p = 0.45): regressions occur under every policy at similar rates, and the policy determines whether they persist.
 
-The undercount, measured across every bearing run in both sweeps:
+One no-recovery run illustrates the mechanism. Its final tree contains the literal string \texttt{\$(cat django/db/models/expressions.py)} as the first line of the module, a shell idiom the model pasted into a file write. Every one of the instance's 137 graded tests failed to run. Under rollback the same model's failed attempt on the same instance was reset, and the run's final patch passed all 137.
 
-\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}\begin{tabular}{lll}
-\toprule
- & event-level record & visible in the final state \\
-\midrule
-8 bearing runs, both sweeps & \textbf{184 declared events} & \textbf{1} \\
-\bottomrule
-\end{tabular}\end{center}
+\textbf{Disclosure.} The first unblinding of this comparison gave p = 0.375 for the primary endpoint. Seven cells (five no-recovery, two repair-in-place) had been dropped as ungradable because their final trees made the test suite uncollectable and the grader returned no result. The official grading rule scores such a patch as failing every test. These were the most severely contaminated final states in the comparison, and they had been removed from the endpoint they bore on most. The grader was corrected to distinguish an environment failure (no results with or without the patch) from a patch that kills the suite (results at baseline, none with the patch), and the seven archived trees were re-graded without re-running any agent. All statistics above use the corrected verdicts.
 
-Final-state measurement --- the method prior regression auditing uses \cite{ref3} --- captures 0.5\% of what the timeline records here. The other 99.5\% was created and repaired between the two states it examines.
+\subsection{Rollback loses resolution to verifier precision}
 
-\subsection{The golden gate}
+Rollback resolved fewer tasks than either alternative (Figure 3, left): 37\% against 60\% for repair-in-place and 55\% for no recovery. Paired by instance, rollback won one discordant pair and lost nine against repair-in-place (McNemar exact p = 0.022), and won three and lost nine against no recovery (p = 0.15).
 
-The seam that closes A6 is validated by a \emph{golden check}: the benchmark's own gold patch driven through the real routed tool path at \$0 of model spend must grade resolved; a null run must not. Across the three hardest repo families it passed, catching three more defects before they could cost anything --- one of which would have deflated every resolve rate \textasciitilde{}3 points forever. On a rolling benchmark it surfaced \textbf{time-rotted oracles}: baseline tests failing in the raw image because the calendar passed dates baked into the instance. A benchmark's instances age even as its freshness defeats contamination.
+The loss is attributable to the verifier. Of the 18 rollback runs that failed, 15 failed at the first step, and 9 of the 18 instances were resolved under a policy that kept the rejected work. In those cases the monitor's check, a shell command written by the planner, rejected a patch that the official grader accepted, and rollback discarded it. Rollback's advantage on the primary endpoint and its disadvantage on resolution therefore have the same cause: it acts on the verifier's verdict, and the verifier's precision sets the exchange rate between a clean final tree and a solved task.
 
-\subsection{The recovery-policy contrast, unblinded with its pre-committed analysis}
+This suggests a specific improvement, which we have not yet evaluated: replace the planner-written check with the repository's own tests that cover the files a step touched, selected by the same coverage map the instrument uses for attribution, and trigger rollback only on a genuine regression. The instrument's observation layer would then serve as the harness's monitor.
 
-Two more arms ran the same 40 instances under the event-producing stack: \textbf{repair-in-place} and \textbf{no recovery} (the failed step's unverified tree is kept). The paired analysis --- exact two-sided sign tests on final-state contamination (primary) and onset exposure (co-primary) --- was committed before either arm finished.
+\section{Discussion}
 
-\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}\begin{tabular}{llll}
-\toprule
-arm & resolve & cells with final-state contamination & spend \\
-\midrule
-rollback & 13/35 = 37\% & \textbf{1} & \$8.14 \\
-repair-in-place & 24/40 = 60\% & 5 & \$14.73 \\
-no recovery & 22/40 = 55\% & \textbf{9} & \$4.40 \\
-\bottomrule
-\end{tabular}\end{center}
+\textbf{Implications for agent-OS design.} If checkpointing and recovery become shared primitives, the results here argue that timeline observability must be one too. A recovery primitive without an observation primitive makes runs look cleaner while hiding the activity that distinguishes policies. The 184-to-1 ratio in Section 5.2 is not a property of one harness; it is what any final-state grader will report for any harness that repairs its own mistakes.
 
-\textbf{Primary: no recovery leaves more contamination in the final state than rollback --- worse on 9 paired instances, better on 1, ties 25; exact sign p = 0.022.} Repair-in-place sits between (worse on 5, better on 1; p = 0.22). Exposure does not differ (co-primary p = 0.45): the damage happens under every policy; the policy decides what \emph{persists}. One no-recovery tree ships with \texttt{\$(cat django/db/models/expressions.py)} as line 1 of the module --- a shell idiom pasted into a file write --- and every one of its 137 graded tests missing; under rollback the same model's failed attempt on the same instance was reset and the run graded 137/137.
-
-The tradeoff, reported because it cuts against our own founding thesis: \textbf{rollback resolves fewer tasks.} Against repair-in-place it wins 1 discordant pair and loses 9 (McNemar exact p = 0.022); against no recovery 3 and 9 (p = 0.15). The verifier gating the rollback is a planner-written check, and it rejects work the official grader accepts; rollback then destroys good patches on false rejections. Recovery policy trades resolution for cleanliness, and the exchange rate is set by verifier precision --- a quantity no leaderboard reports.
-
-One disclosure. The first unblinding reported the primary at p = 0.375: seven cells --- five no-recovery, two repair --- had been dropped as "ungradable" because their final trees made the suite uncollectable and the grader returned no verdict. Under official semantics that is every test failed; the most catastrophic outcomes in the sweep were vanishing from the endpoint they were the strongest evidence for. The grader now disambiguates (a baseline run proves the environment alive) and the archived trees were re-graded with no model calls --- one more defect, after the census.
-
-\section{What this means for an agent OS}
-
-\begin{quote}\small \textbf{What to steal}\begin{enumerate}
-\item \textbf{Type your silence} (\S4.2, rule one) --- in the schema, not in
-convention.
-\item \textbf{Prove the instrument alive, not just non-lying} (\S4.2, rule two),
-with positive controls that include \emph{recovered} events.
-\item \textbf{Never consume output without asserting the producer succeeded}
-(\S4.3) --- including your own ledger, fixtures, and event stream.
-\item \textbf{First contact with a clean host is a validation step.} Six of our
-defects could not exist on the machine that wrote them.
-\item \textbf{One environment.} The agent executes where it is measured, enforced
-by architecture. Our instrument had this seam for its probes and not
-for its agent; that asymmetry cost the most.
-\end{enumerate}\end{quote}
-
-The taxonomy is why these rules generalise: the mechanisms belong to subprocess-and-PATH, containers, parsers, and git, not to our code --- class A is OpenHands \#4235/\#7044 \cite{ref6}, class D the grader's forgeable stdout \cite{ref5}, class B UTBoost's oracle gaps \cite{ref4} and \S5.2's rotted oracles. And \S5 gives them a stake: an OS layer that standardises recovery without timeline observability makes runs look cleaner while hiding exactly what \S5.3 measures.
-
-\section{Related work}
-
-SWE-bench \cite{ref1} and Verified \cite{ref2} are the substrate. TDAD \cite{ref3} measures regressions from the final patch --- the design \S2 argues undercounts recovered events by construction; \S5.1 measures the undercount directly: 184 events, 1 final-state-visible, across every bearing run in the GPT sweeps. UTBoost \cite{ref4} audits the oracle itself. The grader's stdout-trust defect \cite{ref5} and OpenHands' environment issues \cite{ref6} are our classes D and A in the wild. SWE-bench-Live \cite{ref7} addresses contamination with rolling instances (median held-out oracle \textasciitilde{}34$\times$ Verified's) and exhibits the aging-oracle failure \S5.2 reports. Broader evaluation-infrastructure work \cite{ref8} catalogues agent-eval irreproducibility; ours is mechanistic, and adds the first event-level regression measurements on this benchmark.
+\textbf{On the measurement defects.} Building the instrument produced 28 defects, catalogued in Appendix A. Twenty-three produced a plausible number rather than an error, and 27 were present while a passing test suite watched. They fall into four mechanisms: dependence on ambient host configuration, infrastructure failure rendered as a measurement, final-state measurement of an event-shaped quantity, and consuming a producer's output without checking that the producer succeeded. Each mechanism has public instances in benchmark infrastructure (Appendix A.3). The two rules that prevented most of them are cheap: type infrastructure failure as a missing observation, never as a test verdict; and require the instrument to prove it is alive, not merely that it did not report anything.
 
 \section{Limitations}
 
-Everything is exploratory and dev-slice: one sweep per arm and per stack, so re-run variability within a regime is unmeasured until the registered confirmatory frame's seeded replications. The regime boundary includes the provider adapter, which near-par resolve rates bound but cannot eliminate. The oracle observes the gold test-patch's blast radius, so "regression" means regression adjacent to the edit; the observation hook fails open (its error counter is reported per cell). Binomial CIs treat the fixed dev slice as the population and ignore repository clustering (46\% one repo). The catalogue is a census of one team's instrument; its external instances are evidence of reach, not a survey.
+All measurements come from a 40-instance development slice, one sweep per arm and per stack. Run-to-run variability within a regime is unmeasured; the confirmatory design specifies seeded replications on held-out instances. The cross-stack comparison cannot separate the model from its provider adapter, which is part of the regime. The held-out tests observe roughly the blast radius of the gold test patch, so "regression" here means a regression adjacent to the edit, and event counts are lower bounds. Confidence intervals treat the fixed slice as the population and ignore repository clustering (46\% of instances are from one repository). The harness is our own; the instrument has not yet been applied to a public scaffold.
 
-\begin{thebibliography}{9}
-\bibitem{ref1} Jimenez et al. \emph{SWE-bench: Can Language Models Resolve Real-World GitHub Issues?} ICLR 2024. arXiv:2310.06770.
-\bibitem{ref2} OpenAI. \emph{Introducing SWE-bench Verified.} 2024.
-\bibitem{ref3} \emph{TDAD.} arXiv:2603.17973.
-\bibitem{ref4} Yu et al. \emph{UTBoost: Rigorous Evaluation of Coding Agents on SWE-Bench.} ACL 2025. arXiv:2506.09289.
-\bibitem{ref5} SWE-bench issue \#601: \emph{Test Result Hijacking via Stdout Forging in Evaluation Harness.}
-\bibitem{ref6} OpenHands issues \#4235, \#7044: environment errors in SWE-bench instance evaluation.
-\bibitem{ref7} Zhang et al. \emph{SWE-bench Goes Live!} arXiv:2505.23419.
-\bibitem{ref8} \emph{Holistic Agent Leaderboard.} arXiv:2510.11977.
+\section{Conclusion}
+
+Final-state evaluation of coding agents is blind to regressions that the agent's own process repairs, and in our measurements that is nearly all of them. Measuring the timeline is feasible, validates against controls, and separates recovery policies that the final patch cannot distinguish. It also exposes the cost of recovery: rollback keeps the final tree clean only as reliably as its verifier is precise.
+
+\begin{thebibliography}{99}
+\bibitem{ref1} C. Jimenez et al. SWE-bench: Can language models resolve real-world GitHub issues? ICLR 2024. arXiv:2310.06770.
+\bibitem{ref2} OpenAI. Introducing SWE-bench Verified. 2024.
+\bibitem{ref3} L. Zhang et al. SWE-bench Goes Live! arXiv:2505.23419, 2025.
+\bibitem{ref4} X. Deng et al. SWE-Bench Pro: Can AI agents solve long-horizon software engineering tasks? arXiv:2509.16941, 2025.
+\bibitem{ref5} I. Badertdinov et al. SWE-rebench: An automated pipeline for task collection and decontaminated evaluation of software engineering agents. arXiv:2505.20411, 2025.
+\bibitem{ref6} S. Liang et al. The SWE-Bench Illusion: When state-of-the-art LLMs remember instead of reason. arXiv:2506.12286, 2025.
+\bibitem{ref7} H. Yu et al. UTBoost: Rigorous evaluation of coding agents on SWE-Bench. ACL 2025. arXiv:2506.09289.
+\bibitem{ref8} TDAD: Regressions introduced by coding agents on SWE-bench Verified. arXiv:2603.17973, 2026.
+\bibitem{ref9} J. Yang et al. SWE-agent: Agent-computer interfaces enable automated software engineering. NeurIPS 2024. arXiv:2405.15793.
+\bibitem{ref10} X. Wang et al. OpenHands: An open platform for AI software developers as generalist agents. ICLR 2025. arXiv:2407.16741.
+\bibitem{ref11} C. Xia et al. Agentless: Demystifying LLM-based software engineering agents. arXiv:2407.01489, 2024.
+\bibitem{ref12} SWE-agent team. mini-swe-agent. Software, 2025.
+\bibitem{ref13} X. Wang et al. Executable code actions elicit better LLM agents. ICML 2024. arXiv:2402.01030.
+\bibitem{ref14} S. Yao et al. ReAct: Synergizing reasoning and acting in language models. ICLR 2023. arXiv:2210.03629.
+\bibitem{ref15} N. Shinn et al. Reflexion: Language agents with verbal reinforcement learning. NeurIPS 2023. arXiv:2303.11366.
+\bibitem{ref16} A. Madaan et al. Self-Refine: Iterative refinement with self-feedback. NeurIPS 2023. arXiv:2303.17651.
+\bibitem{ref17} ReflexGrad: Within-episode failure recovery in LLM agents via progress-gated dual-process routing. arXiv:2511.14584, 2025.
+\bibitem{ref18} REPOT: Recoverable program-of-thought via checkpoint repair. arXiv:2605.30052, 2026.
+\bibitem{ref19} From agent traces to trust: Evidence tracing and execution provenance in LLM agents. arXiv:2606.04990, 2026.
+\bibitem{ref20} K. Mei et al. AIOS: LLM agent operating system. arXiv:2403.16971, 2024.
+\bibitem{ref21} Holistic Agent Leaderboard: The missing infrastructure for AI agent evaluation. arXiv:2510.11977, 2025.
+\bibitem{ref22} What resolve rate hides: Trajectory structure diagnostics for coding agents. arXiv:2607.06184, 2026.
+\bibitem{ref23} SWE-EVO: Benchmarking coding agents in long-horizon software evolution scenarios. arXiv:2512.18470, 2025.
+\bibitem{ref24} Agentic rubrics as contextual verifiers for SWE agents. arXiv:2601.04171, 2026.
+\bibitem{ref25} SWE-Shepherd: Advancing PRMs for reinforcing code agents. arXiv:2604.10493, 2026.
+\bibitem{ref26} Patch overfitting in program repair: A survey. 2024.
+\bibitem{ref27} Y. Wang et al. When automated program repair meets regression testing: An extensive study on two million patches. ACM TOSEM, 2024. arXiv:2105.07311.
+\bibitem{ref28} Patch correctness assessment: A survey. ACM TOSEM, 2024. doi:10.1145/3702972.
+\bibitem{ref29} H. Ye et al. Automated patch assessment for program repair at scale. Empirical Software Engineering, 2021.
+\bibitem{ref30} SWE-bench issue \#601: Test result hijacking via stdout forging in the evaluation harness. github.com/SWE-bench/SWE-bench, 2025.
+\bibitem{ref31} OpenHands issues \#4235 and \#7044: Environment errors in SWE-bench instance evaluation. github.com/OpenHands/OpenHands.
+\bibitem{ref32} J. Yang et al. SWE-smith: Scaling data for software engineering agents. arXiv:2504.21798, 2025.
+\bibitem{ref33} J. Pan et al. Training software engineering agents and verifiers with SWE-Gym. arXiv:2412.21139, 2024.
+\bibitem{ref34} Context as a tool: Context management for long-horizon SWE agents. arXiv:2512.22087, 2025.
 \end{thebibliography}
+
+\appendix
+\section{A: The measurement defect catalogue}
+
+\subsection{A.1 The catalogue by mechanism}
+
+Each row is a defect found while building the instrument. \textbf{S}: it produced a plausible number rather than an error. \textbf{G}: it was present while the test suite passed (A4 is the suite). \textbf{H}: it was findable only on a clean host. Class A rows depend on the machine the code runs on; class B rows render an infrastructure failure as a measurement; class C rows measure a state where an event was defined; class D rows consume a producer's output without checking the producer.
+
+\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}\begin{tabular}{lp{0.42\linewidth}p{0.36\linewidth}ccc}
+\toprule
+\# & Defect & Consequence & S & G & H \\
+\midrule
+A1 & Shadow commits inherited the machine's git identity & timeline silently empty on any clean machine & \cmark{} & \cmark{} & \cmark{} \\
+A2 & Gate probe invoked bare \texttt{python} & every probe exit 127 on a clean host & \xmark{} & \cmark{} & \cmark{} \\
+A3 & Unpinned SDK resolved a different major version & two machines ran different code & \xmark{} & \cmark{} & \cmark{} \\
+A4 & Test fixtures verified with bare \texttt{pytest} from PATH & 15 tests fail on a clean host as harness defects & \xmark{} & --- & \cmark{} \\
+A5 & A benchmark scorer invoked bare \texttt{python} & score 0.0 from a missing interpreter & \cmark{} & \cmark{} & \cmark{} \\
+A6 & Agent executed on the host; measurement in the container & 26 of 28 zero-step runs; see A.2 & \cmark{} & \cmark{} & \cmark{} \\
+B1 & Output marker used shell \texttt{:} & a 13/13 run scored as 13 errors & \cmark{} & \cmark{} &  \\
+B2 & Results on stderr, markers on stdout & one framework's results outside the parsed slice & \cmark{} & \cmark{} &  \\
+B3 & Probe diffed against a deleted commit & every graded test a hole & \cmark{} & \cmark{} &  \\
+B4 & Interrupted mirror clone accepted with zero commits & later instances fail far from the cause & \cmark{} & \cmark{} &  \\
+B5 & Container workdir unvalidated & every exec exit 127 & \cmark{} & \cmark{} &  \\
+B6 & Isolation removed loopback, not only the internet & 23.5\% of the oracle dead & \cmark{} & \cmark{} &  \\
+B7 & Provider cache served removed containers & later cells replay against nothing and score clean & \cmark{} & \cmark{} &  \\
+B8 & Tree reset reverted image build-time edits & one repository family's oracle dead & \cmark{} & \cmark{} &  \\
+C1 & Bisection assumed monotone verdicts & recovered regressions invisible & \cmark{} & \cmark{} &  \\
+C2 & Declared event unit not implemented & rate off by up to 2.7$\times$ & \cmark{} & \cmark{} &  \\
+C3 & Rollbacks produced no observation & recoveries invisible to the timeline & \cmark{} & \cmark{} &  \\
+C4 & "Persists past the step boundary" undefined & one reading excludes the events of interest & \cmark{} & \cmark{} &  \\
+D1 & Audit field never populated & 0 tool errors reported, always & \cmark{} & \cmark{} &  \\
+D2 & Malformed planner output crashed the run & 33\% of runs lost as task failures & \xmark{} & \cmark{} &  \\
+D3 & Dependency install counted as agent work & attribution vacuous & \cmark{} & \cmark{} &  \\
+D4 & Join took the first observation, not the last & failures pinned to the wrong tree & \cmark{} & \cmark{} &  \\
+D5 & Executed config rebuilt from a name & manifest described a different run & \cmark{} & \cmark{} &  \\
+D6 & Git handles never released & sweeps die after \textasciitilde{}400 cells & \cmark{} & \cmark{} &  \\
+D7 & Console re-walked the tree per run & presented as a dead server & \xmark{} & \cmark{} &  \\
+D8 & Detection events lacked the ids attribution joined on & attributed detection always unknown & \cmark{} & \cmark{} &  \\
+D9 & Absent coverage rendered as measured silence & unmeasured episodes reported as silent & \cmark{} & \cmark{} &  \\
+D10 & Output-capped turns executed & half-written file; a 78-event storm & \cmark{} & \cmark{} &  \\
+\bottomrule
+\end{tabular}\end{center}
+
+Totals: 23 of 28 silent; 27 of 28 present under a passing suite; 6 of 28 findable only on a clean host. Four further defects found after this census closed are described where they arose (Section 5.4 and the repository log).
+
+\subsection{A.2 The defect that invalidated a conclusion}
+
+After nineteen fixes, every validation gate passed, the re-scoring control reproduced archived episode counts exactly, and three pilots (80 runs) measured an event rate far below the pre-declared gate. We drafted the conclusion the rule directed: the benchmark offered too little opportunity, so switch benchmarks. The conclusion was wrong. The harness ran the agent on the host in a bare source checkout, while every probe and every gate ran inside the pinned container. On the host, \texttt{import matplotlib} in that checkout succeeds by importing the uncompiled source tree as a namespace package, and everything downstream fails in ways indistinguishable from an incompetent agent. Twenty-six of 28 zero-step runs traced to this. The gates had validated the measurement path and never the agent's execution path. The fix was to route the agent's tools and checks through the same container as the replay, and to add a per-cell environment parity check that runs before any model call.
+
+\subsection{A.3 Mechanisms in public infrastructure}
+
+Class A: OpenHands issues \#4235 and \#7044 \cite{ref31}, environment construction failures against SWE-bench images. Class B: UTBoost's finding that the held-out oracle is insufficient at leaderboard scale \cite{ref7}, and, on SWE-bench Live, baseline tests that fail in the unmodified image because the calendar passed a deprecation date encoded in the instance. Class C: final-state regression measurement \cite{ref8}. Class D: the SWE-bench grader accepting forged test output on stdout \cite{ref30}.
+
+\appendix
+\section{B: Pre-declaration and analysis}
+
+The event unit is one (test function, onset observation) pair with parametrised variants collapsed. The gates for proceeding on a substrate were an event rate of at least 0.30 per run and a bearing fraction of at least 25\%; after the cross-stack result they were re-declared per (substrate, model stack) before the contrast was unblinded. The contrast's primary endpoint is final-state contamination, paired by instance, exact two-sided sign test; the co-primary is incident exposure. The analysis script was committed before either comparison arm finished. Budget exhaustion is scored as failure. Instances whose baseline oracle records failures in the unmodified image are excluded from resolve-rate comparability claims, and their dead tests are typed as missing observations for event counting.
 \end{document}
