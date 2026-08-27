@@ -146,6 +146,9 @@ class SandboxRouter:
         self.workdir = workdir
         self._q = shlex.quote(workdir)
         self._dirty: set[str] = set()
+        #: Paths pull could not transport (symlinks, vanished files) — counted
+        #: rather than silently dropped.
+        self.skipped: list[str] = []
         prepare_container_tree(sandbox, workdir=workdir)
 
     # ------------------------------------------------------------ marking
@@ -228,7 +231,17 @@ class SandboxRouter:
                     host.unlink()
                     pulled.append(rel)
                 continue
-            payload = self.sandbox.get_bytes(f"{self.workdir}/{rel}")
+            try:
+                payload = self.sandbox.get_bytes(f"{self.workdir}/{rel}")
+            except (FileNotFoundError, KeyError, IsADirectoryError):
+                # Symlinks and other irregular members: the tar the transport
+                # returns carries no file content for them, and sphinx's test
+                # fixtures are full of them — two paid cells died here before
+                # this except existed. Skipped, counted, and visible: a
+                # symlink in fixtures is not agent work the instrument must
+                # mirror, but a skip that vanishes would be D-class.
+                self.skipped.append(rel)
+                continue
             host.parent.mkdir(parents=True, exist_ok=True)
             host.write_bytes(payload)
             pulled.append(rel)

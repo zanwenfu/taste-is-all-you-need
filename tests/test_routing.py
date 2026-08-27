@@ -293,3 +293,19 @@ def test_rollback_delta_reaches_the_container(refactor_workspace: Path, tmp_path
         task="reset", spec=_spec(), plan_override=plan, worker_override=worker)
     assert result.status == "completed", result.failure_reason
     assert seen["step-01"] == 2
+
+
+def test_an_untransportable_path_is_skipped_and_counted_not_fatal(
+    testbed: Path, tmp_path: Path
+) -> None:
+    """Bug 29: sphinx's test fixtures are full of symlinks; the transport's
+    tar carries no content for a broken one, and the resulting
+    FileNotFoundError killed two paid cells mid-sweep. The pull must skip
+    the irregular path, record it, and still deliver everything else."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    router = _router(testbed, ws)
+    router.exec("ln -s does-not-exist broken_link && printf ok > real_file.py")
+    assert (ws / "real_file.py").exists(), "the regular file must still arrive"
+    assert not (ws / "broken_link").exists()
+    assert "broken_link" in router.skipped, "the skip must be visible, not silent"
