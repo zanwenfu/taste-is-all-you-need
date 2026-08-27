@@ -31,10 +31,13 @@ stack produced **zero regression events across 40 runs** while another
 produced **140, in 11 distinct breakage incidents across 6 bearing runs**
 (equal-N Fisher p = 0.011) — every recovered event erased by the harness's
 own rollback and invisible in the final tree. One officially-*resolved* patch carried three of them,
-two undetected even by the harness that produced it. Regressions during
-agent runs are a property of the agent regime, not the benchmark; the
-final state, which is all existing evaluation examines, is where the
-evidence is not.
+two undetected even by the harness that produced it. With the pre-declared
+recovery-policy contrast unblinded: no recovery leaves more of this damage
+in the final tree than rollback (paired sign p = 0.022) — and rollback
+resolves fewer tasks, because the verifier that gates it rejects good
+patches. Regressions during agent runs are a property of the agent regime,
+not the benchmark, and the final state — all existing evaluation examines —
+is where the evidence is not.
 
 ---
 
@@ -59,11 +62,11 @@ hidden git ref, exhaustive replay, coverage-based attribution, and a
 validation regime whose controls include re-measuring archived runs. (ii) A
 twenty-eight-defect catalogue with the mechanism for each, in a four-class
 taxonomy whose classes we show operating in public harnesses. (iii) First
-measurements from the corrected pipeline: on a 10-instance development
-prefix, matched across two frontier stacks at equal budgets, a
-zero-vs-57-event contrast in which every event was invisible to final-state
-evaluation — with the recovery-policy contrast pre-declared and running at
-submission time.
+measurements from the corrected pipeline: across the same 40 instances,
+two frontier stacks at equal budgets give a 0-versus-140-event contrast in
+which final-state evaluation sees one event in 184; and the pre-declared
+recovery-policy contrast, unblinded with its committed analysis, shows
+rollback keeps final trees clean at a measurable cost in resolution.
 
 ---
 
@@ -81,10 +84,8 @@ records zero by construction for every recovered event. §5.1 measures how
 much that misses: in our data, all of it.
 
 **Its absence and the instrument's death are the same observation.** Zero
-is what a clean run produces — and what a probe that cannot execute, a
-parser that matched nothing, and an empty timeline produce. §4 is
-twenty-eight instances of this property; the design rules in §4.2–4.3 are
-what we found sufficient to distinguish the two.
+is what a clean run produces — and what a dead probe, an unmatched parser,
+and an empty timeline produce. §4 is twenty-eight instances of this.
 
 **Detection must be attributed, not co-located.** "The harness failed
 something while the regression was open" credits whichever policy fails
@@ -117,12 +118,10 @@ including *recovered* injections, flake screen, unknown-rate ceiling,
 baseline liveness), plus the control the git substrate makes possible:
 **re-scoring** — an archived run's committed timeline re-measured under a
 changed instrument, no model calls, only the instrument varying. This
-control has been exercised twice, on different archived runs: once across
-an instrument change (reproducing 8 and 6 episodes exactly, localising a
-disagreement to the runs rather than the detector), and once across the
-final pipeline (reproducing a bearing run's 8 raw / 3 declared events
-exactly while forty fresh runs measured zero — the evidence that the zero
-in §5.1 belongs to the runs).
+control, exercised twice on different archived runs, reproduced their
+episode counts exactly each time — once localising a disagreement to the
+runs rather than the detector, once proving that forty fresh runs' zero
+(§5.1) belonged to the runs.
 
 ---
 
@@ -306,18 +305,58 @@ uses [3] — captures 0.5% of what the timeline records here. The other
 
 The seam that closes A6 is validated by a *golden check*: the benchmark's
 own gold patch driven through the real routed tool path at $0 of model
-spend must grade resolved; a null run must not. Run across the three
-hardest repo families, it passed — and caught three more defects before
-they could cost anything (a router aimed at a path its sandbox did not
-use, a stale ledger that skipped both halves while the summary read as if
-they ran, and a grading container inheriting the measurement's network
-isolation, which would have deflated every resolve rate ~3 points
-forever). On the rolling benchmark we adapted next, the same gate surfaced
-**time-rotted oracles**: baseline tests failing in the raw image because
-the calendar passed dates baked into the instance — a benchmark's
-instances age even as its freshness defeats contamination.
+spend must grade resolved; a null run must not. Across the three hardest
+repo families it passed, catching three more defects before they could
+cost anything — one of which would have deflated every resolve rate ~3
+points forever. On a rolling benchmark it surfaced **time-rotted oracles**:
+baseline tests failing in the raw image because the calendar passed dates
+baked into the instance. A benchmark's instances age even as its freshness
+defeats contamination.
 
 ---
+
+### 5.3 The recovery-policy contrast, unblinded with its pre-committed analysis
+
+Two more arms ran the same 40 instances under the event-producing stack:
+**repair-in-place** and **no recovery** (the failed step's unverified tree is
+kept). The paired analysis — exact two-sided sign tests on final-state
+contamination (primary) and onset exposure (co-primary) — was committed
+before either arm finished.
+
+| arm | resolve | cells with final-state contamination | spend |
+|---|---|---|---|
+| rollback | 13/35 = 37% | **1** | $8.14 |
+| repair-in-place | 24/40 = 60% | 5 | $14.73 |
+| no recovery | 22/40 = 55% | **9** | $4.40 |
+
+**Primary: no recovery leaves more contamination in the final state than
+rollback — worse on 9 paired instances, better on 1, ties 25; exact sign
+p = 0.022.** Repair-in-place sits between (worse on 5, better on 1;
+p = 0.22). Exposure does not differ (co-primary p = 0.45): the damage
+happens under every policy; the policy decides what *persists*. One
+no-recovery tree ships with `$(cat django/db/models/expressions.py)` as
+line 1 of the module — a shell idiom pasted into a file write — and every
+one of its 137 graded tests missing; under rollback the same model's
+failed attempt on the same instance was reset and the run graded 137/137.
+
+The tradeoff, reported because it cuts against the harness's own founding
+thesis: **rollback resolves fewer tasks.** Against repair-in-place it wins 1
+discordant pair and loses 9 (McNemar exact p = 0.022); against no recovery
+3 and 9 (p = 0.15). The verifier gating the rollback is a planner-written
+check, and it rejects work the official grader accepts; rollback then
+destroys good patches on false rejections. Recovery policy trades
+resolution for cleanliness, and the exchange rate is set by verifier
+precision — a quantity no leaderboard reports.
+
+One disclosure. The first unblinding reported the primary at p = 0.375.
+Seven cells — five no-recovery, two repair — had been dropped as
+"ungradable" because their final trees made the test suite uncollectable
+and the grader returned no verdict. Under official semantics that is every
+test failed, and those were the most catastrophic outcomes in the sweep,
+vanishing from the endpoint they were the strongest evidence for. The
+grader now disambiguates (a baseline run proves the environment alive) and
+the archived trees were re-graded with no model calls. Defect count at
+submission: twenty-eight in the census, and this one after it.
 
 ## 6. What this means for an agent OS
 
@@ -364,9 +403,9 @@ measurements on this benchmark.
 
 ## 8. Limitations
 
-Everything is exploratory and dev-slice; no recovery-policy claim is made
-until the pre-declared contrast lands. The equal-N cross-stack comparison
-is a single sweep per stack — sampling variability across re-runs of the
+Everything is exploratory and dev-slice: the contrast is one sweep per arm
+on the development slice, and the confirmatory held-out frame is registered
+but not run. Each cross-stack comparison is a single sweep per stack — sampling variability across re-runs of the
 same regime is unmeasured until the seeded replications in the
 confirmatory plan. The regime boundary includes the provider adapter — the
 two stacks traverse different wire paths, which near-par resolve rates

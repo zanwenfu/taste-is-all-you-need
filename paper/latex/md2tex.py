@@ -14,6 +14,7 @@ SRC = Path(__file__).resolve().parent.parent / "workshop.md"
 OUT = Path(__file__).resolve().parent / "main.tex"
 
 PREAMBLE = r"""\documentclass{article}
+\PassOptionsToPackage{numbers,sort&compress}{natbib}
 \usepackage{neurips_2026}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -50,8 +51,8 @@ def inline(t: str) -> str:
             out.append(r"\texttt{" + esc(p[1:-1]) + "}")
         else:
             e = esc(p)
-            e = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", e)
-            e = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\\emph{\1}", e)
+            e = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", e, flags=re.S)
+            e = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\\emph{\1}", e, flags=re.S)
             e = re.sub(r"\[(\d+)\]", r"\\cite{ref\1}", e)
             out.append(e)
     return "".join(out)
@@ -60,7 +61,7 @@ def table(rows: list[str]) -> str:
     cells = [[c.strip() for c in r.strip().strip("|").split("|")] for r in rows]
     header, body = cells[0], [r for r in cells[2:] if r]
     ncol = len(header)
-    spec = "l" + "p{0.46\\linewidth}" + "p{0.26\\linewidth}" + "c" * (ncol - 3) if ncol >= 4 and header[0] == "#" else "l" * ncol
+    spec = "l" + "p{0.40\\linewidth}" + "p{0.36\\linewidth}" + "c" * (ncol - 3) if ncol >= 4 and header[0] == "#" else "l" * ncol
     lines = [r"\begin{center}\small\begin{tabular}{" + spec + "}", r"\toprule",
              " & ".join(inline(h) for h in header) + r" \\", r"\midrule"]
     for r in body:
@@ -108,10 +109,10 @@ def convert(md: str) -> str:
             while i < len(lines) and lines[i].startswith(">"):
                 buf.append(lines[i][1:].strip()); i += 1
             body = "\n".join(buf)
-            body = re.sub(r"^\s*(\d+)\.\s+", r"\\item ", body, flags=re.M)
-            body = body.replace("\\item", "\n\\item")
-            first, _, rest = body.partition("\n\\item")
-            out.append(r"\begin{quote}\small " + inline(first.strip()) + r"\begin{enumerate}" + "\n\\item" + inline(rest) + r"\end{enumerate}\end{quote}")
+            chunks = re.split(r"^\s*\d+\.\s+", body, flags=re.M)
+            title, items = chunks[0].strip(), [c.strip() for c in chunks[1:] if c.strip()]
+            out.append(r"\begin{quote}\small " + inline(title) + r"\begin{enumerate}" + "\n"
+                       + "\n".join(r"\item " + inline(it) for it in items) + "\n" + r"\end{enumerate}\end{quote}")
             continue
         if ln.strip() == "---":
             i += 1; continue
