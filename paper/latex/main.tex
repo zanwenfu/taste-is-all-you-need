@@ -105,7 +105,7 @@ Figure~\ref{fig:fig-contrast} summarises the pre-declared contrast. The primary 
 
 One no-recovery run illustrates the mechanism: its final tree begins with the literal string \texttt{\$(cat django/db/models/expressions.py)}, a shell idiom pasted into a file write, and none of the instance's 137 graded tests ran; under rollback the same model's failed attempt was reset and the final patch passed all 137.
 
-\textbf{Disclosure.} The first unblinding gave p = 0.375: seven cells (five no-recovery, two repair-in-place) had been dropped as ungradable because their final trees made the suite uncollectable. Official grading scores such a patch as failing every test, so the most contaminated states had been dropped from the endpoint they bore on most. The grader now distinguishes an environment failure from a patch that kills the suite, and the seven archived trees were re-graded without re-running any agent.
+\textbf{Disclosure.} The first unblinding of this comparison gave p = 0.375 because seven catastrophically contaminated cells had been dropped as ungradable; Appendix B records the grading correction and the re-grade of their archived trees.
 
 \subsection{Rollback loses resolution to verifier precision}
 
@@ -219,4 +219,6 @@ Class A: OpenHands issues \#4235 and \#7044 \cite{ref31}, environment constructi
 \section{Pre-declaration and analysis}
 
 The event unit is one (test function, onset observation) pair with parametrised variants collapsed. The gates for proceeding on a substrate were an event rate of at least 0.30 per run and a bearing fraction of at least 25\%. Both stacks failed the conjunction (bearing 0\% and 16.2\%); the gates were then re-declared per (substrate, model stack) before the contrast was unblinded, and no arm reported here is confirmatory. The contrast's primary endpoint is final-state contamination, paired by instance, exact two-sided sign test; the co-primary is incident exposure. The analysis script was committed before either comparison arm finished. The regression-gated arm was added after the contrast was unblinded and is exploratory. No multiplicity adjustment was planned or applied. Budget exhaustion is scored as failure. Instances whose baseline oracle records failures in the unmodified image are excluded from resolve-rate comparability claims, and their dead tests are typed as missing observations for event counting.
+
+\textbf{Grading correction between unblindings.} The first unblinding of the recovery-policy contrast gave p = 0.375 for the primary endpoint: seven cells (five no-recovery, two repair-in-place) had been dropped as ungradable because their final trees made the suite uncollectable. Official grading scores such a patch as failing every test, so the most contaminated states had been dropped from the endpoint they bore on most. The grader now distinguishes an environment failure from a patch that kills the suite, and the seven archived trees were re-graded without re-running any agent.
 \end{document}
