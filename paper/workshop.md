@@ -67,7 +67,7 @@ Under rollback, the Claude stack resolved 13 of 40 instances (32.5%, exact 95% C
 
 ### 5.2 The final state hides almost all regression activity
 
-![Every run that produced at least one regression event, in both GPT-5.6 sweeps. Left bars (red) are events recorded on the timeline; right bars (grey) are held-out test failures visible in the graded final patch.](fig_undercount.pdf)
+![Every run that produced at least one regression event, in both GPT-5.6 sweeps. Left bars (red) are events recorded on the timeline; right bars (grey) are held-out test failures visible in the graded final patch.](fig_undercount.pdf){width=0.84}
 
 Figure 2 shows every run that produced a regression event under the GPT-5.6 stack with the rollback policy, pooling the 10-instance calibration and the 40-instance sweep (47 runs). The timeline recorded 184 declared events across eight runs; the final patch exposed one. Run-weighted, seven of the eight bearing runs ended with a clean final patch; three storms (73, 48, and 41 events) supply 88% of the event count, so the run-weighted figure is the more robust statement. Measured from the final patch, as prior work does [8], the same runs show one event.
 
@@ -85,9 +85,9 @@ We had first read the low event rate as a property of the benchmark, and a pre-d
 
 ### 5.4 Recovery policy: rollback keeps the final tree clean
 
-![The four recovery arms under the GPT-5.6 stack on the same 40 instances. Contamination counts cells whose final patch fails a previously-passing test.](fig_contrast.pdf){width=0.9}
+![The four recovery arms under the GPT-5.6 stack on the same 40 instances. Contamination counts cells whose final patch fails a previously-passing test.](fig_contrast.pdf){width=0.82}
 
-Figure 4 summarises the pre-declared contrast. The primary endpoint, final-state contamination, is paired by instance: no recovery was worse than rollback on 9 instances, better on 1, and tied on 25 (exact sign test, p = 0.022). Repair-in-place was worse on 5, better on 1, and tied on 29 (p = 0.22). The co-primary endpoint, incident exposure, did not differ detectably for either comparison (no recovery p = 0.45; repair-in-place p = 1.0): regressions occurred under every policy at similar rates, and the policy determined whether they persisted.
+Figure 4 summarises the pre-declared contrast. The primary endpoint, final-state contamination, is paired by instance: no recovery was worse than rollback on 9 instances, better on 1, and tied on 25 (exact sign test, p = 0.022). Repair-in-place was worse on 5, better on 1, and tied on 29 (p = 0.22). The co-primary endpoint, incident exposure, did not differ detectably for either comparison (no recovery p = 0.45; repair-in-place p = 1.0): regressions occurred at similar rates under every policy, and the policy determined whether they persisted.
 
 One no-recovery run illustrates the mechanism: its final tree begins with the literal string `$(cat django/db/models/expressions.py)`, a shell idiom pasted into a file write, and none of the instance's 137 graded tests ran; under rollback the same model's failed attempt was reset and the final patch passed all 137.
 
