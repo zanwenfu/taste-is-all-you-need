@@ -161,12 +161,12 @@ def convert(md: str) -> str:
         else:
             i += 1
     bib = [r"\begin{thebibliography}{99}"] + [r"\bibitem{ref" + n + "} " + inline(t) for n, t in refs] + [r"\end{thebibliography}"]
-    body = "\n\n".join(out)
-    body = re.sub(r"Figure (\d)(?!\d)", figref, body)
     labels = re.findall(r"\\label\{(fig:[^}]+)\}", "\n".join(out))
     def figref(m):
         n = int(m.group(1))
         return ("Figure~\\ref{" + labels[n-1] + "}") if 0 < n <= len(labels) else m.group(0)
+    body = "\n\n".join(out)
+    body = re.sub(r"Figure (\d)(?!\d)", figref, body)
     pre = PREAMBLE.replace("TITLE_PLACEHOLDER", title_tex)
     if "\\appendix" in body:
         head, _, tail = body.partition("\\appendix")

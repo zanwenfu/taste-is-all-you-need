@@ -75,8 +75,6 @@ Figure 2 shows every run that produced a regression event under the GPT-5.6 stac
 
 Figure 3 shows a single run in detail. The grader marked it resolved with all graded tests passing; its timeline contains three regressions of the same test function at observations 3, 5, and 7, each repaired by rollback. Two of the three were not detected by any harness check while open; the rollback that repaired them was triggered by an unrelated failure. Across the full GPT-5.6 sweep, 48 of 162 raw episodes (events before collapsing parametrised variants) had no co-occurring harness failure at all.
 
-Across the full GPT-5.6 sweep, 48 of 162 raw episodes had no co-occurring harness failure of any kind.
-
 ### 5.3 Regression frequency depends on the model stack, not the benchmark
 
 On the same 40 instances, under the same harness and rollback policy, the Claude stack produced no regression events in 40 runs (227 observations, all replayed). The GPT-5.6 stack produced 140 declared events in 11 incidents across 6 of 37 attempted runs (bearing fraction 16.2%, exact CI 6.2% to 32.0%). A one-sided Fisher exact test on the bearing fractions gives p = 0.010. Observation density differs by a factor of 1.2 between the stacks (5.7 and 7.0 per run), which does not account for a difference of 140 to 0.
