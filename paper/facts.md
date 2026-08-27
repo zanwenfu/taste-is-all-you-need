@@ -197,3 +197,17 @@ Anonymised (converter drops the draft header; sweep clean).
 | pytest-6197 onsets | 3, 5, 7 | evidence |
 | django share | of Verified 46.2%; of the 40-slice: see draft (computed from the slice) | ledger |
 | provenance pointers | golden-check facts now cited in §3; the unblinding disclosure in §5.4 | this file |
+
+
+## Replication of plain rollback (GPT-5.6, same slice; 2026-08-27)
+
+| fact | run 1 (pilot 40d) | run 2 (replicate40_A3) | source |
+|---|---|---|---|
+| cells attempted | 37 of 40 (breaker) | 36 of 40 (breaker; 37th row is the abort marker) | ledgers |
+| resolve | 13/35 graded (37.1%) | 13/36 graded (36.1%) | grades |
+| paired resolve (34 shared graded) | 13 | 13 — both 11, neither 19, run1-only 2, run2-only 2 | evidence |
+| bearing runs | 6/37 = 16.2% | 6/37 = 16.2% | evidence |
+| declared events / raw | 140 / 162 | 116 / 127 | evidence |
+| final-state contamination, paired | run 2 better on 1, worse on 0, ties 33 (p = 1.0) | | scripts/contrast.py |
+| onset exposure, paired | run 2 more on 2, fewer on 3, ties 29 (p = 1.0) | | scripts/contrast.py |
+| spend | $8.14 | $6.87 | ledgers |

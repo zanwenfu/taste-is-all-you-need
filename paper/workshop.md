@@ -49,7 +49,7 @@ Figure 1 shows the harness and the instrument. **Observational timeline.** The h
 
 ## 4. Experimental setup
 
-**Benchmark and slice.** SWE-bench Verified, 500 instances. A 40-instance development slice (16 from django), stratified and fixed before any measurement, was used throughout and is excluded from any confirmatory frame. The GPT-5.6 stack was also run on the slice's first 10 instances as a calibration; where results pool the two, the denominator is stated.
+**Benchmark and slice.** SWE-bench Verified, 500 instances. A 40-instance development slice (16 from django), stratified and fixed before any measurement, was used throughout and is excluded from any confirmatory frame. The GPT-5.6 stack was also run on the slice's first 10 instances as a calibration, and plain rollback was run twice; pooled denominators are stated where used.
 
 **Harness.** A planner decomposes the task into steps with verification commands; a worker executes each step with three tools (read file, write file, run shell); a monitor runs the verification, and on failure the recovery policy acts: **rollback** (reset to the last verified checkpoint, retry with feedback), **repair-in-place** (retry from the failed tree), or **no recovery** (keep the failed step's tree). Each run has a $4 work-cost cap; exhaustion is scored as failure.
 
@@ -73,7 +73,7 @@ Figure 2 shows every run that produced a regression event under the GPT-5.6 stac
 
 ![One run that the official grader marked resolved, with all 147 graded tests passing. The timeline shows three regressions of the same test function, each repaired by rollback two observations later.](fig_timeline.pdf){width=0.8}
 
-Figure 3 shows a single run in detail. The grader marked it resolved with all graded tests passing; its timeline contains three regressions of the same test function at observations 3, 5, and 7, each repaired by rollback. Two of the three were not detected by any harness check while open; the rollback that repaired them was triggered by an unrelated failure. Across the full GPT-5.6 sweep, 48 of 162 raw episodes (events before collapsing parametrised variants) had no co-occurring harness failure at all.
+Figure 3 shows a single run in detail. The grader marked it resolved with all graded tests passing; its timeline contains three regressions of the same test function at observations 3, 5, and 7, each repaired by rollback. Two of the three went undetected by any harness check while open; the repairing rollback was triggered by an unrelated failure. Across the full GPT-5.6 sweep, 48 of 162 raw episodes (events before collapsing parametrised variants) had no co-occurring harness failure at all.
 
 ### 5.3 Regression frequency depends on the model stack, not the benchmark
 
@@ -99,7 +99,7 @@ Rollback resolved fewer tasks than either alternative (Figure 4, left): 13 of 40
 
 ### 5.6 Regression-gated rollback removes the tradeoff
 
-A fourth arm, added after the contrast was unblinded and therefore exploratory, replaces the monitor's planner-written check with the repository's previously-passing tests, run in the agent's container at the start of the run and after every attempt; a step is rejected only if a test that passed at the start fails now. It resolved **26 of 40 instances (65.0%)**, the highest of any arm, and left **no contaminated final tree** (Figure 4). Paired against plain rollback on the 35 shared instances, it resolved 10 that plain rollback did not and lost 1 (McNemar exact p = 0.012). Paired onset exposure did not differ detectably (p = 0.73); the gated arm recorded 70 declared events against 140, a storm-dominated count we do not treat as a finding. The gate's oracle and the contamination endpoint are the same test set, so the clean trees are partly guaranteed by construction; the informative result is the resolve gain. The three gated failures were genuine regressions the gate refused (8, 2, and every test).
+A fourth arm, added after the contrast was unblinded and therefore exploratory, replaces the monitor's planner-written check with the repository's previously-passing tests, run in the agent's container at the start of the run and after every attempt; a step is rejected only if a test that passed at the start fails now. It resolved **26 of 40 instances (65.0%)**, the highest of any arm, and left **no contaminated final tree** (Figure 4). Paired against plain rollback on the 35 shared instances, it resolved 10 that plain rollback did not and lost 1 (McNemar exact p = 0.012). Paired onset exposure did not differ detectably (p = 0.73); the gated arm recorded 70 declared events against 140, a storm-dominated count we do not treat as a finding. The gate's oracle and the contamination endpoint are the same test set, so the clean trees are partly guaranteed by construction; the informative result is the resolve gain. The three gated failures were genuine regressions the gate refused (8, 2, and every test). A second full sweep of plain rollback reproduced the first (13 and 13 resolved on the 34 paired instances, 2 and 2 discordant; 6 of 37 bearing runs both times; contamination within one cell), so the gated arm's gain is well outside run-to-run variability.
 
 ## 6. Discussion
 
@@ -111,7 +111,7 @@ A fourth arm, added after the contrast was unblinded and therefore exploratory, 
 
 ## 7. Limitations
 
-All measurements come from a 40-instance development slice, one sweep per arm plus a 10-instance calibration for the GPT-5.6 stack; run-to-run variability is unmeasured, and the confirmatory design specifies seeded replications on held-out instances. The cross-stack comparison is a single pairwise test on six bearing runs, confounded with the provider adapter; the gated arm is post hoc. The held-out tests observe roughly the gold test patch's blast radius, so event counts are lower bounds; confidence intervals ignore repository clustering (16 of 40 instances are django); and the instrument has not been applied to a public scaffold.
+All measurements come from a 40-instance development slice, one sweep per arm plus a 10-instance calibration and one replication sweep of plain rollback for the GPT-5.6 stack; variability is measured for that arm only, and the confirmatory design specifies seeded replications on held-out instances. The cross-stack comparison is a single pairwise test on six bearing runs, confounded with the provider adapter; the gated arm is post hoc. The held-out tests observe roughly the gold test patch's blast radius, so event counts are lower bounds; confidence intervals ignore repository clustering (16 of 40 instances are django); and the instrument has not been applied to a public scaffold.
 
 ---
 
