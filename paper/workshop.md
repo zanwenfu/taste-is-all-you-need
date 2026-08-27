@@ -1,4 +1,4 @@
-# Twenty-Seven Ways to Measure Nothing: A Failure Catalogue from Instrumenting an Agent Harness
+# Twenty-Eight Ways to Measure Nothing: A Failure Catalogue from Instrumenting an Agent Harness
 
 *AgenticOS @ NeurIPS 2026 — regular paper draft v2. ANONYMISED — no author, repo, or host names before submission.*
 
@@ -14,8 +14,8 @@ repairing in place — and built the instrument it requires: an observational
 timeline committed to git, exhaustive replay of held-out tests at every
 observation, and detection attributed by coverage rather than co-occurrence.
 
-What we report is the instrument's failure record. **Twenty-seven defects,
-of which twenty-two produced a plausible number rather than an error, and
+What we report is the instrument's failure record. **Twenty-eight defects,
+of which twenty-three produced a plausible number rather than an error, and
 all but one were present while a green test suite watched.** Six were invisible
 on any developer machine *by construction*, because they depend on the
 absence of ambient configuration a developer machine has. The defects
@@ -62,10 +62,13 @@ twenty-six-defect catalogue with the mechanism for each, collapsed into a
 four-class taxonomy whose classes we show operating in public harnesses, not
 only ours; and (iii) two design rules and one working practice that caught
 most of them, cheap enough to adopt wholesale. We claim no result about
-recovery policy; what §5 reports instead is the corrected pipeline's first
-valid exploratory measurements — a 32.5% resolve rate, and a zero event
-rate whose zero is *demonstrated* to belong to the runs rather than the
-instrument — and the pre-declared decision they trigger.
+recovery policy yet; what §5 reports is the corrected pipeline's first
+valid measurements, and they carry a finding: on identical instances under
+an identical harness, one frontier stack produces **zero** silent-
+regression events while another produces **more than four per run** —
+including three inside a single officially-*resolved* patch. Silent
+regressions are an agent-regime property, invisible to final-state
+evaluation, and measurable only by an instrument that watches the timeline.
 
 ---
 
@@ -135,7 +138,7 @@ control can and cannot certify.
 
 ---
 
-## 4. Twenty-seven ways to measure nothing
+## 4. Twenty-eight ways to measure nothing
 
 Every row is a real defect from this work. **S** = silent: it produced a
 plausible number rather than an error. **G** = present while the project's
@@ -194,13 +197,15 @@ consumer trusted; no producer verified.
 | D7 | Console re-walked the full tree per run | answers first request, times out on all others: presents as a dead server | ✗ | ✓ | |
 | D8 | Detection events never carried failing-test ids while attribution joined on them | "silent vs detected" — the title construct — structurally UNKNOWN on every real run | ✓ | ✓ | |
 | D9 | Absent coverage rendered as measured silence | 8 unmeasured episodes reported as `silent_attributed: 8, unknown_rate: 0.0` — the maximal claim from zero evidence, in the first valid run's own sidecar | ✓ | ✓ | |
+| D10 | Turns that hit the output ceiling were executed anyway | truncated-but-parseable JSON wrote half a file into the tree; one such write produced a 78-event regression storm read as agent incompetence — and the adapter remapped the stop reason that would have said why | ✓ | ✓ | |
 
-Totals, computed from the tables: **22 of 27 silent; 26 of 27 present under
-a green suite (the 27th being the suite itself); 6 of 27 findable only on a
-clean host.** D9 is worth a sentence of humility: it was found *in the
-output of the first valid canary run*, after the audit had predicted it,
-after twenty-six fixes, in a codebase whose entire subject is this failure
-mode. The class does not exhaust.
+Totals, computed from the tables: **23 of 28 silent; 27 of 28 present under
+a green suite (the 28th being the suite itself); 6 of 28 findable only on a
+clean host.** D9 and D10 are worth a sentence of humility: one was found *in the output of the first valid canary run* after the
+audit had predicted it; the other by the first run under a second model
+family, whose different output-length habits turned a latent ceiling into a
+mangled tree. Twenty-six fixes in, in a codebase whose entire subject is
+this failure mode, the class does not exhaust.
 
 ### 4.2 The two design rules that caught most of them
 
@@ -277,37 +282,48 @@ instrument already uses: the agent must execute where it is measured.
 
 ### 5.1 What the corrected pipeline measures
 
-With the seam built, we re-ran the exploratory pilot: 40 development-slice
-instances, the rollback arm, every cell executing and verified inside its
-pinned image, every final patch graded by the official semantics, coverage
-maps built per instance for attribution. Three numbers, all firsts for this
-instrument:
+With the seam built, the same 40-instance development slice was run under
+two frontier model stacks — identical harness, identical recovery policy
+(monitor-gated rollback), identical budgets, per-cell resolve verdicts from
+the official grader, coverage-based attribution live. Everything here is
+exploratory and dev-slice by declaration; no confirmatory claim is made.
 
-**The harness resolves 32.5% of instances** (13/40, exact CI [18.6%, 49.1%])
-— the first resolve rate measured here, inside the credible band for a
-minimal scaffold under tight budgets, and reported so that no claim rests on
-unmeasured competence.
+**Stack one (Claude planner/worker): resolve 32.5% (13/40, CI [18.6%,
+49.1%]), and zero silent-regression events in 227 exhaustively-replayed
+observations** (declared unit; bearing-run CI [0%, 8.8%]). This null is
+*demonstrated* valid, not assumed: re-scoring an earlier bearing run's
+archived timeline under the identical instrument reproduces its 8 raw / 3
+declared episodes exactly, so detection did not regress — these runs simply
+did not break adjacent behaviour.
 
-**The event rate, measured validly, is zero.** 227 observations, exhaustive
-replay confirmed on every cell, an oracle with 21 typed holes out of ~3,300
-graded members, and **no silent-regression event in any of 40 runs**
-(declared unit; bearing fraction CI [0%, 8.8%]). Both pre-declared gates for
-proceeding on this substrate fail, and this time the inference survives the
-data's provenance: the re-scoring control, run under the *identical*
-instrument, still reproduces the earlier bearing run's 8 raw / 3 declared
-episodes from its archived timeline, exactly. Detection did not regress;
-these runs did not break adjacent behaviour.
+**Stack two (GPT-5.6 planner/worker), same instances: the phenomenon
+appears at scale.** On the 10-instance calibration prefix: resolve 5/10 at
+a fifth of the cost, and **λ̂ = 4.4 declared events per run** — 44 events,
+zero attributable to infrastructure (no capped turns; the D10 guard was
+active). Two runs carry the story:
 
-**The phenomenon exists; its base rate here is low.** A single earlier run
-on the same pipeline broke eight adjacent assertions mid-run, recovered them
-by rollback two observations later, and ended at a perfect final state — the
-event final-state measurement cannot see. What the 40-run pilot adds is the
-denominator: under a verifier-gated harness at this resolve level, such
-events occur in at most ~9% of runs against an oracle that watches only the
-gold test-patch's blast radius. The pre-registered decision rule takes the
-substrate to the rolling benchmark whose median held-out oracle is ~37×
-larger [7]; the confirmatory experiment moves there, and the null reported
-here is the pre-declared, honestly-measured reason why.
+- One run broke **54 adjacent tests at a single observation**; the
+  harness's rollback erased all of them one observation later, and the
+  final tree grades 59/59. No final-state measurement can see this run's
+  damage.
+- One run **resolved its task** — official grade, all fail-to-pass and all
+  pass-to-pass green — **after breaking and recovering adjacent tests three
+  separate times en route**. A leaderboard scores this patch clean. The
+  event-level record shows three silent regressions inside a *successful*
+  patch, which is precisely the population final-state auditing [3] draws
+  its conclusions from.
+
+**The earlier inference, revised by its own rules.** When stack one
+measured zero, the pre-declared gate pointed at the substrate: too little
+oracle per run, switch benchmarks. Stack two falsifies that diagnosis on
+the same substrate: the events were there to find — for an agent regime
+that produces them. Silent-regression exposure is a property of the *agent
+regime* (model family × recovery policy), not of the benchmark. The
+full-slice second-family run and the recovery-policy contrast (repair-in-
+place and no-recovery arms under the event-producing regime) were in
+flight at submission time, pre-declared as the confirmatory question:
+does rollback *cause* the clean final states — do the no-recovery arm's
+breakages persist?
 
 ### 5.2 The seam, built and checked the way the catalogue teaches
 
