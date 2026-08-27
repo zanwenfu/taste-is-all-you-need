@@ -134,3 +134,9 @@ pylint-6386 7→1. Source: /tmp/undercount.py over evidence sidecars.
 | exhibit | django-13012 no-recovery final tree: `$(cat django/db/models/expressions.py)` as line 1; 137 graded tests missing; rollback arm graded 137/137 | direct container diagnostic |
 
 ## Bugs after the census (all fixed, revert-verified): 29 sync symlinks; 30 patch-killed suite scored as hole; 31 rescore never graded; 32 harness artifacts leaked into the prediction.
+
+## Submission artifact (2026-08-27)
+
+paper/latex/main.pdf — 7 pages: 6 technical + references. Built with the
+official NeurIPS 2026 style via paper/latex/md2tex.py; 0 overfull boxes.
+Anonymised (converter drops the draft header; sweep clean).
