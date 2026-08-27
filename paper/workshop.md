@@ -77,11 +77,10 @@ of a run and fails at a later one. Three properties make it hard to measure
 honestly.
 
 **It is an event, not a state.** A regression introduced and then repaired
-leaves no trace at the end of the run — and repair is exactly what a
-recovery policy does. An instrument that inspects the final artifact, which
-is how regressions on this benchmark are measured in published work [3],
-records zero by construction for every recovered event. §5.1 measures how
-much that misses: in our data, all of it.
+leaves no trace at the end of the run — and repair is what a recovery
+policy does. Final-artifact measurement, how regressions on this benchmark
+are measured in published work [3], records zero by construction for every
+recovered event; §5.1 measures the miss.
 
 **Its absence and the instrument's death are the same observation.** Zero
 is what a clean run produces — and what a dead probe, an unmatched parser,
@@ -334,15 +333,15 @@ destroys good patches on false rejections. Recovery policy trades
 resolution for cleanliness, and the exchange rate is set by verifier
 precision — a quantity no leaderboard reports.
 
-One disclosure. The first unblinding reported the primary at p = 0.375.
-Seven cells — five no-recovery, two repair — had been dropped as
-"ungradable" because their final trees made the test suite uncollectable
-and the grader returned no verdict. Under official semantics that is every
-test failed, and those were the most catastrophic outcomes in the sweep,
-vanishing from the endpoint they were the strongest evidence for. The
-grader now disambiguates (a baseline run proves the environment alive) and
-the archived trees were re-graded with no model calls. Defect count at
-submission: twenty-eight in the census, and this one after it.
+One disclosure. The first unblinding reported the primary at p = 0.375:
+seven cells — five no-recovery, two repair — had been dropped as
+"ungradable" because their final trees made the suite uncollectable and
+the grader returned no verdict. Under official semantics that is every
+test failed; the most catastrophic outcomes in the sweep were vanishing
+from the endpoint they were the strongest evidence for. The grader now
+disambiguates (a baseline run proves the environment alive) and the
+archived trees were re-graded with no model calls — one more defect,
+after the census.
 
 ## 6. What this means for an agent OS
 
@@ -359,14 +358,13 @@ submission: twenty-eight in the census, and this one after it.
 >    by architecture. Our instrument had this seam for its probes and not
 >    for its agent; that asymmetry cost the most.
 
-The taxonomy is the argument these rules generalise: the mechanisms are
-properties of subprocess-and-PATH, containers, parsers, and git — not of
-our code. Class A is OpenHands' issues #4235/#7044 [6]; class D is the
-SWE-bench grader consuming forgeable stdout [5]; UTBoost's oracle
-insufficiency [4] and §5.2's time-rotted oracles are class B one level up.
-And §5 gives the rules a stake: an OS layer that standardises recovery
-without standardising timeline observability will make agent runs look
-cleaner while hiding exactly what §5.3 measures.
+The taxonomy is why these rules generalise: the mechanisms belong to
+subprocess-and-PATH, containers, parsers, and git, not to our code — class
+A is OpenHands #4235/#7044 [6], class D the grader's forgeable stdout [5],
+class B UTBoost's oracle gaps [4] and §5.2's rotted oracles. And §5 gives
+them a stake: an OS layer that standardises recovery without timeline
+observability makes runs look cleaner while hiding exactly what §5.3
+measures.
 
 ---
 
