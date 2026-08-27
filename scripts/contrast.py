@@ -20,10 +20,28 @@ from pathlib import Path
 
 
 def load(root: Path) -> dict[str, dict]:
+    """A sweep's evidence, preferring re-scored sidecars where they exist.
+
+    ``rescore.py`` writes corrected measurements of archived runs to
+    ``rescored/evidence`` and never overwrites the originals. Reading only
+    the originals would silently analyse the pre-fix numbers — the seven
+    "ungradable" cells would stay dropped from the primary endpoint after
+    the grader that dropped them was fixed. Which cells came from a rescore
+    is printed, so the provenance of every row is on the page.
+    """
     cells: dict[str, dict] = {}
     for f in sorted((root / "ledger" / "evidence").glob("*.json")):
         d = json.loads(f.read_text())
         cells[d["instance_id"]] = d
+    rescored = root / "rescored" / "evidence"
+    swapped = []
+    if rescored.exists():
+        for f in sorted(rescored.glob("*.json")):
+            d = json.loads(f.read_text())
+            cells[d["instance_id"]] = d
+            swapped.append(d["instance_id"])
+    if swapped:
+        print(f"  [{root.name}] using re-scored sidecars for: {', '.join(swapped)}")
     return cells
 
 
