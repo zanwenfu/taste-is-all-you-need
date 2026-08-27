@@ -128,7 +128,7 @@ pylint-6386 7→1. Source: /tmp/undercount.py over evidence sidecars.
 | repair vs rollback (paired sign) | worse 5 / better 1 / ties 29 → p = 0.2188 | scripts/contrast.py |
 | CO-PRIMARY onset exposure, no recovery vs rollback | more 2 / fewer 5 / ties 28 → p = 0.4531 | scripts/contrast.py |
 | paired resolve, McNemar exact | vs repair: rollback-only 1, repair-only 9 → p = 0.0215; vs no recovery: 3 vs 9 → p = 0.1460 | /tmp/mcnemar2.py on rescored sidecars |
-| first unblinding (pre-fix) | primary p = 0.375 — 7 cells dropped as ungradable (bug 30); disclosed in §5.3 | log |
+| first unblinding (pre-fix) | primary p = 0.375 — 7 cells dropped as ungradable (bug 30); pointer in §5.4, full disclosure in Appendix B | log |
 | exhibit | django-13012 no-recovery final tree: `$(cat django/db/models/expressions.py)` as line 1; 137 graded tests missing; rollback arm graded 137/137 | direct container diagnostic |
 
 ## Bugs after the census (all fixed, revert-verified): 29 sync symlinks; 30 patch-killed suite scored as hole; 31 rescore never graded; 32 harness artifacts leaked into the prediction.
