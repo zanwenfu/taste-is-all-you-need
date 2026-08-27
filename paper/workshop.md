@@ -29,8 +29,9 @@ Second, what the corrected instrument measures. On the same benchmark
 instances, under the same harness and recovery policy, one frontier model
 stack produced **zero regression events across 40 runs** while another
 produced **140, in 11 distinct breakage incidents across 6 bearing runs**
-(equal-N Fisher p = 0.011) — every recovered event erased by the harness's
-own rollback and invisible in the final tree. One officially-*resolved* patch carried three of them,
+(0 of 40 vs 6 of 37, Fisher p = 0.010) — 183 of the 184 events across both
+sweeps erased by the harness's own rollback and invisible in the final
+tree. One officially-*resolved* patch carried three of them,
 two undetected even by the harness that produced it. With the pre-declared
 recovery-policy contrast unblinded: no recovery leaves more of this damage
 in the final tree than rollback (paired sign p = 0.022) — and rollback
@@ -63,7 +64,7 @@ validation regime whose controls include re-measuring archived runs. (ii) A
 twenty-eight-defect catalogue with the mechanism for each, in a four-class
 taxonomy whose classes we show operating in public harnesses. (iii) First
 measurements from the corrected pipeline: across the same 40 instances,
-two frontier stacks at equal budgets give a 0-versus-140-event contrast in
+two frontier stacks at equal budget caps give a 0-versus-140-event contrast in
 which final-state evaluation sees one event in 184; and the pre-declared
 recovery-policy contrast, unblinded with its committed analysis, shows
 rollback keeps final trees clean at a measurable cost in resolution.
@@ -125,8 +126,8 @@ runs rather than the detector, once proving that forty fresh runs' zero
 **S** = silent: produced a plausible number rather than an error. **G** =
 present while the test suite was green (A4 *is* the suite, marked —).
 **H** = findable only on a clean host. The census closes at submission;
-defects caught after it are described where they were found and not
-counted here.
+defects found after it — four to date, one of which moved §5.3's primary
+endpoint — are described where found and not counted here.
 
 ### 4.1 The catalogue, by mechanism
 
@@ -247,12 +248,12 @@ events exactly (§3).
 
 **Stack two — GPT-5.6 planner/worker, the same 40 instances, harness,
 policy, and budgets:** resolve 37.1% (13/35 graded) at a quarter of the
-cost, and **140 declared events across 11 distinct incidents in 6 of 38
-attempted runs** (bearing CI [6.0%, 31.3%]; the sweep's circuit breaker
-stopped the last two cells after six consecutive zero-progress failures in
-one repo family, and two cells died to a sync defect — all counted, none
-hidden). Against stack one's 0 of 40, the equal-N run-level contrast is
-significant: Fisher exact one-sided p = 0.011. Exposure does not explain
+cost, and **140 declared events across 11 distinct incidents in 6 of 37
+attempted runs** (bearing CI [6.2%, 32.0%]; the sweep's circuit breaker
+skipped the last three cells after six consecutive zero-progress failures
+in one repo family, and two cells died to a sync defect — all counted,
+none hidden). Against stack one's 0 of 40, the matched-slice run-level
+contrast is significant: Fisher exact one-sided p = 0.010. Exposure does not explain
 it: observation densities differ by ~1.4×, event totals by 140-to-0.
 
 Two disclosures. Stack two's first calibration was destroyed by defect
@@ -260,7 +261,7 @@ D10 (a truncated write produced a 78-event storm; the circuit breaker
 stopped it at $1.12) and is excluded as infrastructure; the runs reported
 here show no capped turns in their event logs. And the pre-declared gate
 for this substrate still *fails* under stack two — λ̂ clears its threshold,
-bearing 15.8% < 25% does not — so these numbers license not a confirmatory
+bearing 16.2% < 25% does not — so these numbers license not a confirmatory
 pass but the regime-conditional re-declaration of the gates, filed as an
 amendment before the contrast arms were unblinded.
 
@@ -282,8 +283,8 @@ The undercount, measured across every bearing run in both sweeps:
 |---|---|---|
 | 8 bearing runs, both sweeps | **184 declared events** | **1** |
 
-Final-state measurement — the instrument all published regression auditing
-uses [3] — captures 0.5% of what the timeline records here. The other
+Final-state measurement — the method prior regression auditing uses [3] —
+captures 0.5% of what the timeline records here. The other
 99.5% was created and repaired between the two states it examines.
 
 ### 5.2 The golden gate
@@ -373,7 +374,7 @@ measures.
 SWE-bench [1] and Verified [2] are the substrate. TDAD [3] measures
 regressions from the final patch — the design §2 argues undercounts
 recovered events by construction; §5.1 measures the undercount directly:
-184 events, 1 final-state-visible, across every bearing run in our data. UTBoost [4] audits the oracle itself. The grader's
+184 events, 1 final-state-visible, across every bearing run in the GPT sweeps. UTBoost [4] audits the oracle itself. The grader's
 stdout-trust defect [5] and OpenHands' environment issues [6] are our
 classes D and A in the wild. SWE-bench-Live [7] addresses contamination
 with rolling instances (median held-out oracle ~34× Verified's) and

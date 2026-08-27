@@ -81,25 +81,23 @@ contrast arms were unblinded).
 614 tests passing, lint clean, on the experiment host (counted, not remembered, at this revision). Every catalogue fix
 ships with a test verified to fail when the fix is reverted.
 
-## In flight at submission time
+## Formerly in flight — now complete
 
-Equal-N GPT-5.6 run (40 instances) and the pre-declared recovery-policy
-contrast (repair-in-place and no-recovery arms), with the paired analysis
-committed before unblinding (scripts/contrast.py).
+The equal-N GPT-5.6 run (pilot 40d) and the recovery-policy contrast both landed 2026-08-27; see their sections below.
 
 ## Pilot 40d — GPT-5.6 stack, equal-N (exploratory, dev slice, 2026-08-27)
 
 | fact | value | source |
 |---|---|---|
-| cells attempted | 38 of 40 (breaker stopped the sympy tail after 6 consecutive zero-progress failures; 2 cells skipped) | ledger /root/pilot40d |
+| cells attempted | 37 of 40 (breaker stopped the sympy tail after 6 consecutive zero-progress failures; 3 cells skipped; the ledger's 38th row is the abort marker) | ledger /root/pilot40d |
 | statuses | 15 completed, 18 failed, 2 infra, 2 error (bug-29 symlink sync, both sphinx) | ledger |
 | resolve | 13/35 graded = 37.1% | official grader |
 | spend | $8.14 (Claude same slice: $34.24) | ledger |
 | observations | 259 | evidence |
 | raw episodes / declared events | 162 / 140 | evidence |
 | distinct incidents (onsets) | 11 | computed from evidence |
-| bearing runs | 6/38 = 15.8%, CI [6.0%, 31.3%] | evidence |
-| equal-N run-level contrast | 0/40 (Claude) vs 6/38 (GPT): Fisher one-sided p = 0.0107 | computed |
+| bearing runs | 6/37 = 16.2%, CI [6.2%, 32.0%] | evidence |
+| matched-slice run-level contrast | 0/40 (Claude) vs 6/37 (GPT): Fisher one-sided p = 0.0098 | computed |
 | fully-silent episodes (no co-occurring failure) | 48 of 162 | evidence sidecars |
 | bearing instances | django-11276, django-15128, matplotlib-26291, seaborn-3069, pylint-6386, pytest-6197 | evidence |
 | oracle holes | 20 across 2 instances (requests 4 by network design; sklearn 16) | evidence |
@@ -140,3 +138,20 @@ pylint-6386 7→1. Source: /tmp/undercount.py over evidence sidecars.
 paper/latex/main.pdf — 7 pages: 6 technical + references. Built with the
 official NeurIPS 2026 style via paper/latex/md2tex.py; 0 overfull boxes.
 Anonymised (converter drops the draft header; sweep clean).
+
+
+## Catalogue-row provenance (numbers cited in §4–§5 prose; all in docs/research_log.md)
+
+| figure in the draft | value | source |
+|---|---|---|
+| "after nineteen fixes" | bug 20 was found after bugs 1–19 were closed | log, session 13 |
+| re-scoring "8 and 6 episodes exactly" | pilot-10 archived trees re-scored under the pilot-40 instrument | log, session 12 |
+| B1 "13/13 run scored as 13 errors" | the `:` marker defect on a perfect pytest run | log, session 11 (bug 2) |
+| B6 "23.5% of the oracle dead; 812 tests" | network_disabled=True; matplotlib-26113 `{'error': 812}` → `{'pass': 812}` | log, session 12 (bug 15) |
+| C2 "λ̂ off by up to 2.7×" | declared-unit collapse 0.80 → 0.30 on the pilot | log, session 12 |
+| D2 "33% of runs lost" | planner JSON-string steps crashing runs | log, session 11 (bug 7) |
+| D3 "3,640 of 3,641 changed files" | npm install counted as agent work on a Harbor task | log, session 11 (bug 8) |
+| D6 "after ~400 cells" | GitPython descriptor leak against the default 1024 limit | log, session 12 (bug 18) |
+| D10 "78-event storm" | first GPT-5.6 calibration, seaborn, breaker-stopped at $1.12 | log, session 15 (bug 28) |
+| §5.2 "~3 points forever" | grade under `none` network: requests 126/130 vs 130/130 under bridge | log, session 14 |
+| §5.2 "three hardest repo families" | golden checks: requests (pytest), django (runtests), matplotlib (compiled ext.) | log, session 14 |
