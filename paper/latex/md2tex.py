@@ -25,6 +25,7 @@ PREAMBLE = r"""\documentclass{article}
 \usepackage{hyperref}
 \usepackage{array}
 \usepackage{pifont}
+\usepackage{graphicx}
 \newcommand{\cmark}{\ding{51}}
 \newcommand{\xmark}{\ding{55}}
 \title{Twenty-Eight Ways to Measure Nothing:\\A Failure Catalogue from Instrumenting an Agent Harness}
@@ -95,10 +96,21 @@ def convert(md: str) -> str:
             continue
         if ln.startswith("## "):
             title = re.sub(r"^\d+\.\s*", "", ln[3:]).strip()
-            out.append(r"\section{" + inline(title) + "}"); i += 1; continue
+            if title.lower().startswith("appendix"):
+                out.append(r"\appendix" + "\n" + r"\section{" + inline(re.sub(r"^Appendix[:.\s]*", "", title, flags=re.I)) + "}")
+            else:
+                out.append(r"\section{" + inline(title) + "}")
+            i += 1; continue
         if ln.startswith("### "):
             title = re.sub(r"^\d+\.\d+\s*", "", ln[4:]).strip()
             out.append(r"\subsection{" + inline(title) + "}"); i += 1; continue
+        m_img = re.match(r"!\[(.*?)\]\((.*?)\)\s*$", ln.strip())
+        if m_img:
+            cap, path = m_img.group(1), m_img.group(2)
+            label = re.sub(r"[^a-z0-9]+", "-", Path(path).stem.lower())
+            out.append(r"\begin{figure}[t]\centering\includegraphics[width=\linewidth]{" + path + "}"
+                       + r"\caption{" + inline(cap) + "}\label{fig:" + label + "}\end{figure}")
+            i += 1; continue
         if ln.startswith("|"):
             rows = []
             while i < len(lines) and lines[i].startswith("|"):
