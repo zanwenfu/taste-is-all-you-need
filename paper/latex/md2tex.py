@@ -61,8 +61,8 @@ def table(rows: list[str]) -> str:
     cells = [[c.strip() for c in r.strip().strip("|").split("|")] for r in rows]
     header, body = cells[0], [r for r in cells[2:] if r]
     ncol = len(header)
-    spec = "l" + "p{0.40\\linewidth}" + "p{0.36\\linewidth}" + "c" * (ncol - 3) if ncol >= 4 and header[0] == "#" else "l" * ncol
-    lines = [r"\begin{center}\small\begin{tabular}{" + spec + "}", r"\toprule",
+    spec = "l" + "p{0.42\\linewidth}" + "p{0.36\\linewidth}" + "c" * (ncol - 3) if ncol >= 4 and header[0] == "#" else "l" * ncol
+    lines = [r"\begin{center}\footnotesize\begin{tabular}{" + spec + "}", r"\toprule",
              " & ".join(inline(h) for h in header) + r" \\", r"\midrule"]
     for r in body:
         r = r + [""] * (ncol - len(r))

@@ -100,9 +100,7 @@ separately, and never let "could not measure" render as any of them.
 **Observational checkpointing.** Every mutating tool call commits the tree
 to a git ref the agent cannot enumerate, from a private index, so the
 agent's own `git status` and `git diff` are byte-identical with the
-instrument on or off. Rollbacks and run-end are observed too — the
-recovering policy's recoveries must be visible to the timeline that scores
-it.
+instrument on or off. Rollbacks and run-end are observed too.
 
 **Exhaustive replay.** Held-out tests are replayed at *every* observation
 inside the instance's pinned container. Bisection would assume monotone
@@ -125,12 +123,11 @@ runs rather than the detector, once proving that forty fresh runs' zero
 
 ## 4. Twenty-eight ways to measure nothing
 
-Every row is a real defect from this work. **S** = silent: it produced a
-plausible number rather than an error. **G** = present while the project's
-test suite was green (row A4 *is* the suite, marked —). **H** = findable
-only on a clean host, by construction. The census closes at submission;
-three further defects caught by the §5.2 golden gate before they could
-produce a number are described there and deliberately not counted here.
+**S** = silent: produced a plausible number rather than an error. **G** =
+present while the test suite was green (A4 *is* the suite, marked —).
+**H** = findable only on a clean host. The census closes at submission;
+defects caught after it are described where they were found and not
+counted here.
 
 ### 4.1 The catalogue, by mechanism
 
@@ -328,8 +325,8 @@ line 1 of the module — a shell idiom pasted into a file write — and every
 one of its 137 graded tests missing; under rollback the same model's
 failed attempt on the same instance was reset and the run graded 137/137.
 
-The tradeoff, reported because it cuts against the harness's own founding
-thesis: **rollback resolves fewer tasks.** Against repair-in-place it wins 1
+The tradeoff, reported because it cuts against our own founding thesis:
+**rollback resolves fewer tasks.** Against repair-in-place it wins 1
 discordant pair and loses 9 (McNemar exact p = 0.022); against no recovery
 3 and 9 (p = 0.15). The verifier gating the rollback is a planner-written
 check, and it rejects work the official grader accepts; rollback then
@@ -384,8 +381,7 @@ classes D and A in the wild. SWE-bench-Live [7] addresses contamination
 with rolling instances (median held-out oracle ~34× Verified's) and
 exhibits the aging-oracle failure §5.2 reports. Broader
 evaluation-infrastructure work [8] catalogues agent-eval irreproducibility;
-our contribution is mechanistic: what breaks inside one instrument, which
-invariants stop each class, and the first event-level regression
+ours is mechanistic, and adds the first event-level regression
 measurements on this benchmark.
 
 ## 8. Limitations
