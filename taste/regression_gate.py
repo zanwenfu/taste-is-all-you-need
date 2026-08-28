@@ -43,15 +43,29 @@ class RegressionGate:
     """``run(command, timeout=...) -> ExecResult`` in the agent's environment
     (the router's exec)."""
     timeout: int = 1200
+    split: str = "all"
+    """Which of the instance's test files the gate is allowed to see.
+    ``all``: every file holding a previously-passing test (the gate's oracle
+    then coincides with the grading oracle, and a clean final tree is partly
+    guaranteed by construction). ``half``: a deterministic half of those
+    files by name hash; the other half is never run by the gate, so the
+    grader's verdict on it is a genuine held-out test of whether gating
+    generalises beyond the tests it watches."""
     baseline_pass: frozenset[str] = frozenset()
     established: bool = False
     checks: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
 
+    def watched_files(self) -> list[str]:
+        files = sorted(swebench.member_test_files(self.instance))
+        if self.split == "half":
+            import hashlib
+
+            files = [f for f in files if int(hashlib.sha1(f.encode()).hexdigest(), 16) % 2 == 0]
+        return files
+
     def _suite(self) -> dict[str, str]:
-        command = swebench.plain_suite_command(
-            self.instance, swebench.member_test_files(self.instance)
-        )
+        command = swebench.plain_suite_command(self.instance, self.watched_files())
         result = self.run(command, timeout=self.timeout)
         if getattr(result, "timed_out", False):
             raise TimeoutError("regression gate suite timed out")
@@ -61,6 +75,15 @@ class RegressionGate:
         """Run the suite once before the agent acts. No results at all means
         the environment cannot run the repository's tests — infrastructure,
         refused before a model call is paid for, never a silent all-pass."""
+        if not self.watched_files():
+            # A half-split can leave a single-file instance with nothing to
+            # watch; the gate then has no oracle and must say so rather than
+            # pass everything.
+            raise InfraFailure(
+                "regression gate: no test files in the watched split",
+                attempts=1,
+                last_error="empty watched split",
+            )
         statuses = self._suite()
         if not statuses:
             raise InfraFailure(

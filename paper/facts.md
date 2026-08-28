@@ -211,3 +211,15 @@ Anonymised (converter drops the draft header; sweep clean).
 | final-state contamination, paired | run 2 better on 1, worse on 0, ties 33 (p = 1.0) | | scripts/contrast.py |
 | onset exposure, paired | run 2 more on 2, fewer on 3, ties 29 (p = 1.0) | | scripts/contrast.py |
 | spend | $8.14 | $6.87 | ledgers |
+
+## Answers to the external review (2026-08-28)
+
+| item | value | source |
+|---|---|---|
+| storm root causes | seaborn-3069: +6/−1 lines in seaborn/_core/plot.py, parses, no shell idiom (95 raw events); django-15128: +9/−4 in django/db/models/sql/query.py, parses (48); flask-5014: +46/−262 in src/flask/blueprints.py, parses (54); all worker stops end_turn (no output cap) | /tmp/reviewer_numbers.py over shadow timelines |
+| spend while a regression was open | $0.63 of $2.33 across the 8 bearing runs = 27% (range 1%–66% per run) | shadow cost stamps × episode intervals |
+| gate oracle vs P2P | baseline passing / \|PASS_TO_PASS\| median 1.00 (min 0.67, max 1.56) over 40 gated cells | gate.baseline events |
+| model API strings | claude-opus-4-7 / claude-sonnet-4-6; gpt-5.6-sol / gpt-5.6-terra | run manifests; taste/pricing.py |
+| Figure 4 denominators | resolve now shown as x/40 for every arm (13, 26, 24, 22) | figs.py |
+| Claude vs GPT trade | 13/40 resolved each; $34.24 vs $8.14; 0 vs 140 events | ledgers |
+| split-oracle gate arm (A3reg2) | gate watches a deterministic half of each instance's test files (sha1 of path, even); grader scored on the held-out half via `grade_failed` in the sidecar | code + sweep in flight |

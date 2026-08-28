@@ -65,6 +65,8 @@ class HarnessConfig:
     union_gate: bool = True
     shadow: bool = False
     regression_gate: bool = False
+    gate_split: str = "all"
+    """``all`` or ``half`` — see RegressionGate.split."""
     """Replace the planner-written verification with the repository's own
     tests (taste/regression_gate.py). A different verifier is a different
     harness, so this is configuration and changes the hash."""
@@ -159,6 +161,10 @@ class HarnessConfig:
                 label="A3reg-rollback-regression-gated", journal=True, shadow=True,
                 recovery=RecoveryConfig.arm("A3"), regression_gate=True,
             ),
+            "A3reg2": cls(
+                label="A3reg2-rollback-gated-on-half-the-tests", journal=True, shadow=True,
+                recovery=RecoveryConfig.arm("A3"), regression_gate=True, gate_split="half",
+            ),
             "A3prime": cls(
                 label="A3prime-no-reset", journal=True, shadow=True, recovery=RecoveryConfig.arm("A3prime")
             ),
@@ -178,7 +184,7 @@ class HarnessConfig:
 
     @classmethod
     def arm_names(cls) -> list[str]:
-        return ["A0", "A2", "A3", "A3reg", "A3prime", "tiered", "full"]
+        return ["A0", "A2", "A3", "A3reg", "A3reg2", "A3prime", "tiered", "full"]
 
 
 def kernel_kwargs(config: HarnessConfig) -> dict:

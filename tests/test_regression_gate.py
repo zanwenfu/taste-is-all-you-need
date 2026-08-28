@@ -195,3 +195,41 @@ def test_member_files_come_from_the_ids_not_only_the_patch() -> None:
         pass_to_pass=("test_x (expressions.tests.BasicExpressionsTests)",),
     )
     assert swebench.member_test_files(dj) == {"tests/expressions/tests.py"}
+
+
+
+def test_the_half_split_is_deterministic_and_leaves_a_held_out_half() -> None:
+    """The split-oracle arm answers the circularity objection only if the
+    gate genuinely never sees the held-out files, and only if the split is
+    reproducible across runs and arms."""
+    inst = swebench.SWEInstance(
+        instance_id="x__x-1", repo="pytest-dev/pytest", base_commit="0" * 40,
+        problem_statement="", test_patch="", version="7.2", fail_to_pass=(),
+        pass_to_pass=tuple(f"testing/test_{k}.py::test_it" for k in "abcdefgh"),
+    )
+    a = RegressionGate(inst, _Runner(), split="half").watched_files()
+    b = RegressionGate(inst, _Runner(), split="half").watched_files()
+    everything = RegressionGate(inst, _Runner(), split="all").watched_files()
+    assert a == b, "the split must be deterministic"
+    assert 0 < len(a) < len(everything), "half must hold something out and keep something"
+    assert set(a) < set(everything)
+
+
+def test_an_empty_watched_split_is_refused_not_passed() -> None:
+    inst = swebench.SWEInstance(
+        instance_id="x__x-2", repo="pytest-dev/pytest", base_commit="0" * 40,
+        problem_statement="", test_patch="", version="7.2", fail_to_pass=(),
+        pass_to_pass=("testing/test_only.py::test_it",),
+    )
+    gate = RegressionGate(inst, _Runner(_log("PASSED testing/test_only.py::test_it")), split="half")
+    if not gate.watched_files():
+        with pytest.raises(InfraFailure):
+            gate.establish_baseline()
+    else:
+        gate.establish_baseline()
+        assert gate.baseline_pass
+
+
+def test_the_split_arm_is_a_different_harness() -> None:
+    assert HarnessConfig.arm("A3reg2").gate_split == "half"
+    assert HarnessConfig.arm("A3reg2").hash() != HarnessConfig.arm("A3reg").hash()

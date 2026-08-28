@@ -88,6 +88,9 @@ class CellContext:
     (write_file -> push -> in-container exec -> pull) instead of silently
     bypassing the seam under test."""
     grade_report: Any = None
+    gate_watched: Any = None
+    """The test files the regression gate was allowed to run, when one ran;
+    the sidecar keeps them so held-out contamination can be computed."""
     """The official per-test grade, when a grader ran. The sidecar keeps the
     counts; the scalar keeps only resolved."""
     session: str = ""
@@ -123,6 +126,11 @@ class CellEvidence:
     silence: dict[str, Any] = field(default_factory=dict)
     resolved: bool | None = None
     grade: dict[str, str] = field(default_factory=dict)
+    grade_failed: list[str] = field(default_factory=list)
+    """PASS_TO_PASS ids the official grade scored as not passing — the
+    per-test detail that lets contamination be restricted to tests the
+    gate never saw."""
+    gate_watched: list[str] = field(default_factory=list)
     routed: bool = False
     """Whether the agent executed inside the pinned image. A number from an
     unrouted run of a real instance is a number about bug 20, and the sidecar
@@ -286,7 +294,11 @@ def make_execute(
                 )
             from taste.regression_gate import RegressionGate
 
-            gate = RegressionGate(instance=ctx.instance, run=router.exec)
+            gate = RegressionGate(
+                instance=ctx.instance, run=router.exec,
+                split=getattr(ctx.config, "gate_split", "all"),
+            )
+            ctx.gate_watched = gate.watched_files()
         kernel = Kernel(
             workspace=ctx.workspace, llm=llm,
             **kernel_kwargs(ctx.config), config=ctx.config,
@@ -456,6 +468,11 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
                 "fail_to_pass": f"{ctx.grade_report.fail_to_pass_passed}/{ctx.grade_report.fail_to_pass_total}",
                 "pass_to_pass": f"{ctx.grade_report.pass_to_pass_passed}/{ctx.grade_report.pass_to_pass_total}",
             } if ctx.grade_report is not None else {},
+            grade_failed=sorted(
+                t for t in ctx.instance.pass_to_pass
+                if ctx.grade_report.per_test.get(t) not in swebench.PASSING_STATUSES
+            ) if ctx.grade_report is not None else [],
+            gate_watched=list(ctx.gate_watched or []),
         )
         ctx.report_path = str(
             evidence.write(Path(ledger_dir) / "evidence" / f"{cell.key}.json")
