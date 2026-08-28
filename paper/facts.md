@@ -233,3 +233,12 @@ Anonymised (converter drops the draft header; sweep clean).
 | mwaskom__seaborn-3069 | 9 | 32.6 s | invalid — collided with the concurrent split sweep on the same instance (defect 34); all 94 tests read as holes | same |
 | 40-instance sweep projection | 259 obs × ~6 s ≈ 26 CPU-min | | computed |
 | 500 instances × 100 edits | ≈ 80 CPU-hours | | computed |
+
+## Split-oracle gate, file-level pilot (superseded; 2026-08-28)
+
+| quantity | value | source |
+|---|---|---|
+| cells completed before the arm was stopped | 12 graded (9 resolved), 8 infra (empty watched half), $1.80 | /root/contrast40_A3reg2_filesplit |
+| held-out P2P ids on unwatched files | 1741 | /tmp/heldout.py (file version) |
+| cells with a held-out failure in the final tree | 0 | same |
+| why superseded | file-level split leaves single-file instances with nothing to watch; id-level split replaces it | regression_gate.py docstring |
