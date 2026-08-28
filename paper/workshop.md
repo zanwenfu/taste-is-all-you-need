@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Coding agents are evaluated on the patch they leave behind. We show that this final state hides most of what happens during a run. We built an instrument that records every mutating action of an agent as a git commit on a hidden reference, replays each benchmark instance's held-out tests at every recorded state inside the benchmark's own container image, and attributes each detected regression to the harness check that could have caught it. Applied to SWE-bench Verified, the instrument recorded 184 regression events across the runs that produced any; the final patch exposed one. Regression frequency depended on the model stack: on the same 40 instances under the same harness, one frontier stack produced no events in 40 runs and another produced 140 events in 11 incidents (Fisher p = 0.010). A pre-registered comparison of recovery policies, analysed with code committed before unblinding, found that rollback to a verified checkpoint left contamination in one final tree where no recovery left it in nine (paired sign test, p = 0.022), but rollback also resolved fewer tasks, because the verifier that triggers it rejected patches the official grader accepted. Replacing that verifier with the repository's own tests removed the tradeoff: 65% resolved with no contaminated final tree (McNemar p = 0.012 against plain rollback), and a variant that reads only half of those tests, graded on the other half, resolved 70% with no held-out failure. We release the instrument, its validation protocol, and a catalogue of 28 measurement defects encountered while building it, 23 of which produced plausible numbers rather than errors.
+Coding agents are evaluated on the patch they leave behind. In a pilot on a 40-instance slice of SWE-bench Verified, we show that this final state can hide most of what happens during a run. We built an instrument that records every mutating action of an agent as a git commit on a hidden reference, replays each benchmark instance's held-out tests at every recorded state inside the benchmark's own container image, and attributes each detected regression to the harness check that could have caught it. Applied to SWE-bench Verified, the instrument recorded 184 regression events across the runs that produced any; the final patch exposed one. Regression frequency depended on the model stack: on the same 40 instances under the same harness, one frontier stack produced no events in 40 runs and another produced 140 events in 11 incidents (Fisher p = 0.010). A pre-registered comparison of recovery policies, analysed with code committed before unblinding, found that rollback to a verified checkpoint left contamination in one final tree where no recovery left it in nine (paired sign test, p = 0.022), but rollback also resolved fewer tasks, because the verifier that triggers it rejected patches the official grader accepted. Replacing that verifier with the repository's own tests removed the tradeoff: 65% resolved with no contaminated final tree (McNemar p = 0.012 against plain rollback), and a variant that reads only half of those tests, graded on the other half, resolved 70% with no held-out failure. We release the instrument, its validation protocol, and a catalogue of 28 measurement defects encountered while building it, 23 of which produced plausible numbers rather than errors.
 
 ---
 
@@ -16,7 +16,7 @@ Benchmarks for coding agents grade the final patch. SWE-bench [1] and its Verifi
 
 This convention has a blind spot. A regression that an agent introduces and later repairs leaves no trace in the final patch, and any harness with a recovery mechanism produces that pattern by design. Whether it matters turns on two unanswered questions: how often regressions occur during a run, and how much of that activity survives to the final state.
 
-We answer both by measuring the timeline rather than the endpoint. Our contributions are:
+We answer both by measuring the timeline rather than the endpoint, treating observation of the working tree as the operating-system-level primitive on which a recovery primitive should be built. Our contributions are:
 
 1. **An instrument for event-level regression measurement.** Every mutating tool call is recorded as a commit on a git reference the agent cannot see; after the run, the instance's held-out passing tests are replayed at every recorded state inside the benchmark's pinned container, and detection is attributed by coverage. Validity is established by controls, a liveness gate, a golden check through the agent's own execution path, and a re-scoring control (Section 3).
 2. **Measurements on SWE-bench Verified.** Across the GPT-5.6 rollback runs that produced any regression, the timeline recorded 184 events and the final state exposed one (Section 5.2). Event frequency depended on the model stack: identical instances and harness gave 0 events under one frontier stack and 140 under another (Section 5.3).
@@ -27,9 +27,9 @@ All measurements are exploratory and were made on a development slice of the ben
 
 ## 2. Background and related work
 
-**Benchmarks and their validity.** SWE-bench [1] grades a patch by tests that must go from failing to passing and tests that must keep passing; Verified [2] is the human-screened 500-instance subset. Concerns about the static subset have accumulated: contamination, memorisation, and leaked solutions [6], flawed tests [7], and rolling [3, 5] or private [4] alternatives in response. UTBoost [7] showed the held-out tests are often insufficient, changing 24% of Verified leaderboard verdicts. TDAD [8] measured regressions in submitted patches on Verified and found them in about 30% of resolved instances; we measure the same quantity on the timeline, and Section 5.2 compares the two on the same runs.
+**Benchmarks and their validity.** SWE-bench [1] grades a patch by tests that must go from failing to passing and tests that must keep passing; Verified [2] is the human-screened 500-instance subset. Concerns about the static subset have accumulated: contamination, memorisation, and leaked solutions [6], flawed tests [7], and rolling [3, 5] or private [4] alternatives in response. UTBoost [7] found the held-out tests often insufficient: augmented tests exposed 345 mislabelled patches, affecting 24.4% of Verified leaderboard entries. TDAD [8] measured regressions in submitted patches on Verified (6.1% of runs under a vanilla open-weight agent) and reduced them with a pre-change impact-analysis map that tells the agent which tests to verify; we measure the same quantity on the timeline, and Section 5.6's gate is the run-the-tests-before-accepting counterpart.
 
-**Agent scaffolds and recovery.** SWE-agent [9], OpenHands [10], Agentless [11], and mini-swe-agent [12] span the scaffold design space, built on CodeAct [13] and ReAct [14]. Within-episode recovery has been studied as self-reflection [15, 16], progress-gated recovery [17], checkpoint repair [18], and provenance-based rollback [19]; operating-system framings [20] treat checkpointing as a shared primitive. Process reward models and rubric verifiers [24, 25] approach the verifier-precision problem of Section 5.5 from the training side.
+**Agent scaffolds and recovery.** SWE-agent [9], OpenHands [10], Agentless [11], and mini-swe-agent [12] span the scaffold design space, built on CodeAct [13] and ReAct [14]. Within-episode recovery has been studied as self-reflection [15, 16], progress-gated recovery [17], checkpoint repair [18], and provenance-based rollback [19]; operating-system framings [20] move scheduling, context, memory, and storage management into a kernel for agents, without yet a primitive for observing or restoring the working tree. Process reward models and rubric verifiers [24, 25] approach the verifier-precision problem of Section 5.5 from the training side.
 
 **Automated program repair.** The regression problem is the plausible-versus-correct patch problem of program repair [26, 28, 29]; regression tests are the main defence against overfitting patches [27]. Our results concern regressions the agent's own process repairs before the patch is tested; trajectory-level evaluation [21, 22, 23] argues that resolve rate alone is uninformative. Public leaderboard trajectories record actions and observations but not the tree at each step, so this measurement cannot be mined from them without re-execution; the instrument commits the tree.
 
@@ -79,13 +79,13 @@ Figure 3 shows a single run in detail. The grader marked it resolved with all gr
 
 On the same 40 instances, under the same harness and rollback policy, the Claude stack produced no regression events in 40 runs (227 observations, all replayed). The GPT-5.6 stack produced 140 declared events in 11 incidents across 6 of 37 attempted runs (bearing fraction 16.2%, exact CI 6.2% to 32.0%). A one-sided Fisher exact test on the bearing fractions gives p = 0.010; this is a single pairwise test on six bearing runs (reassign three of them and p = 0.11), and the two stacks also traverse different provider adapters. Observation density differs by a factor of 1.2, which does not account for 140 to 0. The two stacks resolved the same number of instances (13 of 40 each) for total sweep costs of $34.24 against $8.14: the stack that never broke adjacent behaviour cost four times as much per run. The three storms that supply 88% of the events are model edits, not harness artifacts: a six-line change to seaborn's `plot.py`, a nine-line change to django's `query.py`, and a 262-line deletion in flask's `blueprints.py`, none truncated, none containing a shell idiom, and none from a capped turn (defect D10 was fixed before these sweeps).
 
-The Claude result is a measured zero rather than a detection failure: the same stack's earlier canary run produced three events, and re-scoring its archived timeline under the instrument used for the 40-run sweep reproduces them.
+The Claude zero is measured, not a detection failure: the same stack's earlier canary run produced three events, and re-scoring its archived timeline under the sweep's instrument reproduces them.
 
 We had first read the low event rate as a property of the benchmark; the second stack falsified that. The pre-declared event-rate gate still failed for both stacks, so no arm here is a confirmatory pass (Appendix B), and we claim no more than a single-sweep dependence on the model stack.
 
 ### 5.4 Recovery policy: rollback keeps the final tree clean
 
-![The five recovery arms under the GPT-5.6 stack on the same 40 instances. Contamination counts cells whose final patch fails a previously-passing test.](fig_contrast.pdf){width=0.76}
+![The five recovery arms under the GPT-5.6 stack on the same 40 instances. Contamination counts cells whose final patch fails a previously-passing test.](fig_contrast.pdf){width=0.72}
 
 Figure 4 summarises the pre-declared contrast. The primary endpoint, final-state contamination, is paired by instance: no recovery was worse than rollback on 9 instances, better on 1, and tied on 25 (exact sign test, p = 0.022). Repair-in-place was worse on 5, better on 1, and tied on 29 (p = 0.22). The co-primary endpoint, incident exposure, did not differ detectably for either comparison (no recovery p = 0.45; repair-in-place p = 1.0): regressions occurred at similar rates under every policy, and the policy determined whether they persisted.
 
@@ -97,11 +97,11 @@ Rollback resolved fewer tasks than either alternative (Figure 4, left): 13 of 40
 
 ### 5.6 Regression-gated rollback removes the tradeoff
 
-A fourth arm, added after the contrast was unblinded and therefore exploratory, replaces the monitor's planner-written check with the repository's previously-passing tests, run in the agent's container at the start and after every attempt; a step is rejected only if a test that passed at the start fails now. It resolved **26 of 40 instances (65.0%)**, the most of any arm, with **no contaminated final tree** (Figure 4). Paired against plain rollback on the 35 shared instances, it resolved 10 that plain rollback did not and lost 1 (McNemar exact p = 0.012; post hoc, one of eight tests reported, unadjusted; paired onset exposure p = 0.73). The gate reads the instance's previously-passing tests, selected from benchmark metadata, so its baseline oracle coincides with the grading oracle (median ratio 1.00) and the clean final trees are guaranteed by construction. Both gated arms also *select* their tests from that metadata, which observes roughly the gold test patch's blast radius, information a deployed agent lacks; the deployed analogue gates on the full repository suite at baseline (django's full suite takes about two minutes per attempt at four workers, against 4 to 8 seconds scoped, with 97 baseline failures and errors in the pinned image that a flake screen must absorb), and the gated resolve rates are upper bounds on a metadata-free gate. A fifth arm, a split variant, removes that guarantee: the gate reads results for a deterministic half of the previously-passing test ids (2,278) and never reads the other half (2,585), on which the grader then rules. It resolved **28 of 40 (70.0%)**, indistinguishable from the full gate (5 discordant pairs against 3, p = 0.73) and 13 pairs against 2 over plain rollback (McNemar exact p = 0.007), with no final tree failing a held-out test (the one apparent exception is the parser-capped instance of Section 5.1). A second plain-rollback sweep reproduced the first (13 and 13 resolved; 6 of 37 bearing both times), so the gain is outside run-to-run variability. Running the tests before accepting an edit is standard advice; the contribution is measuring what it buys and why plain rollback loses it.
+A fourth arm, added after the contrast was unblinded and therefore exploratory, replaces the monitor's planner-written check with the repository's previously-passing tests, run in the agent's container at the start and after every attempt; a step is rejected only if a test that passed at the start fails now. It resolved **26 of 40 instances (65.0%)**, the most of any arm, with **no contaminated final tree** (Figure 4). Paired against plain rollback on the 35 shared instances, it resolved 10 that plain rollback did not and lost 1 (McNemar exact p = 0.012; post hoc, one of eight tests reported, unadjusted; paired onset exposure p = 0.73). The gate reads the instance's previously-passing tests, selected from benchmark metadata, so its baseline oracle coincides with the grading oracle (median ratio 1.00) and the clean final trees are guaranteed by construction. Both gated arms also *select* their tests from that metadata, which observes roughly the gold test patch's blast radius, information a deployed agent lacks; the deployed analogue gates on the full repository suite at baseline (django's takes about two minutes per attempt, against 4 to 8 seconds scoped, with 97 baseline failures and errors a flake screen must absorb) or on a metadata-free selector such as TDAD's dependency map [8], and the gated resolve rates are upper bounds on either. A fifth arm, a split variant, removes that guarantee: the gate reads results for a deterministic half of the previously-passing test ids (2,278) and never reads the other half (2,585), on which the grader then rules. It resolved **28 of 40 (70.0%)**, indistinguishable from the full gate (5 discordant pairs against 3, p = 0.73) and 13 pairs against 2 over plain rollback (McNemar exact p = 0.007), with no final tree failing a held-out test, net of the parser-capped instance of Section 5.1. A second plain-rollback sweep reproduced the first (13 and 13 resolved; 6 of 37 bearing both times), so the gain is outside run-to-run variability. Running the tests before accepting an edit is standard advice; the contribution is measuring what it buys and why plain rollback loses it.
 
 ## 6. Discussion
 
-**Why timeline regressions matter.** A regression the agent repairs before submission did not reach the user, but it is not free: across the bearing runs, 27% of spend ($0.63 of the $2.33 spent across the eight bearing runs) went to work done while a regression was open. The events are the per-step ground truth that process reward models for software agents [24, 25] need; for agent-OS design, a recovery primitive without an observation primitive hides exactly the activity that distinguishes recovery policies.
+**Why timeline regressions matter.** A regression the agent repairs before submission did not reach the user, but it is not free: across the bearing runs, 27% of spend ($0.63 of $2.33 summed over the eight bearing runs) went to work done while a regression was open. The events are the per-step ground truth that process reward models for software agents [24, 25] need; for agent-OS design, a recovery primitive without an observation primitive hides exactly the activity that distinguishes recovery policies.
 
 **Summary.** Final-state evaluation misses the regressions an agent's own process repairs, nearly all of them in our measurements; measuring the timeline is feasible, validates against controls, separates recovery policies the final patch cannot, and locates rollback's cost in verifier precision. Building the instrument produced 28 defects (Appendix A); two rules, record infrastructure failures as missing observations and require a positive liveness signal, would have prevented most of them.
 
@@ -114,39 +114,39 @@ All measurements come from a 40-instance development slice, one sweep per arm, w
 ### References
 
 [1] C. Jimenez et al. SWE-bench: Can language models resolve real-world GitHub issues? ICLR 2024. arXiv:2310.06770.
-[2] OpenAI. Introducing SWE-bench Verified. 2024.
-[3] L. Zhang et al. SWE-bench Goes Live! arXiv:2505.23419, 2025.
+[2] OpenAI. Introducing SWE-bench Verified. OpenAI blog, August 2024. openai.com/index/introducing-swe-bench-verified.
+[3] L. Zhang et al. SWE-bench Goes Live! NeurIPS 2025 Datasets and Benchmarks. arXiv:2505.23419.
 [4] X. Deng et al. SWE-Bench Pro: Can AI agents solve long-horizon software engineering tasks? arXiv:2509.16941, 2025.
-[5] I. Badertdinov et al. SWE-rebench: An automated pipeline for task collection and decontaminated evaluation of software engineering agents. arXiv:2505.20411, 2025.
+[5] I. Badertdinov et al. SWE-rebench: An automated pipeline for task collection and decontaminated evaluation of software engineering agents. NeurIPS 2025. arXiv:2505.20411.
 [6] S. Liang et al. The SWE-Bench Illusion: When state-of-the-art LLMs remember instead of reason. arXiv:2506.12286, 2025.
-[7] H. Yu et al. UTBoost: Rigorous evaluation of coding agents on SWE-Bench. ACL 2025. arXiv:2506.09289.
-[8] TDAD: Regressions introduced by coding agents on SWE-bench Verified. arXiv:2603.17973, 2026.
+[7] B. Yu et al. UTBoost: Rigorous evaluation of coding agents on SWE-Bench. ACL 2025. arXiv:2506.09289.
+[8] P. Alonso, S. Yovine, and V. A. Braberman. TDAD: Test-driven agentic development: Reducing code regressions in AI coding agents via graph-based impact analysis. arXiv:2603.17973, 2026.
 [9] J. Yang et al. SWE-agent: Agent-computer interfaces enable automated software engineering. NeurIPS 2024. arXiv:2405.15793.
 [10] X. Wang et al. OpenHands: An open platform for AI software developers as generalist agents. ICLR 2025. arXiv:2407.16741.
-[11] C. Xia et al. Agentless: Demystifying LLM-based software engineering agents. arXiv:2407.01489, 2024.
-[12] SWE-agent team. mini-swe-agent. Software, 2025.
+[11] C. S. Xia et al. Agentless: Demystifying LLM-based software engineering agents. FSE 2025. arXiv:2407.01489.
+[12] K. Lieret and C. E. Jimenez. mini-swe-agent. Software, 2025. github.com/SWE-agent/mini-swe-agent.
 [13] X. Wang et al. Executable code actions elicit better LLM agents. ICML 2024. arXiv:2402.01030.
 [14] S. Yao et al. ReAct: Synergizing reasoning and acting in language models. ICLR 2023. arXiv:2210.03629.
 [15] N. Shinn et al. Reflexion: Language agents with verbal reinforcement learning. NeurIPS 2023. arXiv:2303.11366.
 [16] A. Madaan et al. Self-Refine: Iterative refinement with self-feedback. NeurIPS 2023. arXiv:2303.17651.
-[17] ReflexGrad: Within-episode failure recovery in LLM agents via progress-gated dual-process routing. arXiv:2511.14584, 2025.
-[18] REPOT: Recoverable program-of-thought via checkpoint repair. arXiv:2605.30052, 2026.
-[19] From agent traces to trust: Evidence tracing and execution provenance in LLM agents. arXiv:2606.04990, 2026.
-[20] K. Mei et al. AIOS: LLM agent operating system. arXiv:2403.16971, 2024.
-[21] Holistic Agent Leaderboard: The missing infrastructure for AI agent evaluation. arXiv:2510.11977, 2025.
-[22] What resolve rate hides: Trajectory structure diagnostics for coding agents. arXiv:2607.06184, 2026.
-[23] SWE-EVO: Benchmarking coding agents in long-horizon software evolution scenarios. arXiv:2512.18470, 2025.
-[24] Agentic rubrics as contextual verifiers for SWE agents. arXiv:2601.04171, 2026.
-[25] SWE-Shepherd: Advancing PRMs for reinforcing code agents. arXiv:2604.10493, 2026.
-[26] Patch overfitting in program repair: A survey. 2024.
-[27] Y. Wang et al. When automated program repair meets regression testing: An extensive study on two million patches. ACM TOSEM, 2024. arXiv:2105.07311.
-[28] Patch correctness assessment: A survey. ACM TOSEM, 2024. doi:10.1145/3702972.
-[29] H. Ye et al. Automated patch assessment for program repair at scale. Empirical Software Engineering, 2021.
-[30] SWE-bench issue #601: Test result hijacking via stdout forging in the evaluation harness. github.com/SWE-bench/SWE-bench, 2025.
-[31] OpenHands issues #4235 and #7044: Environment errors in SWE-bench instance evaluation. github.com/OpenHands/OpenHands.
-[32] J. Yang et al. SWE-smith: Scaling data for software engineering agents. arXiv:2504.21798, 2025.
-[33] J. Pan et al. Training software engineering agents and verifiers with SWE-Gym. arXiv:2412.21139, 2024.
-[34] Context as a tool: Context management for long-horizon SWE agents. arXiv:2512.22087, 2025.
+[17] A. Kadu and A. Krishnan. ReflexGrad: Within-episode failure recovery in LLM agents via progress-gated dual-process routing. arXiv:2511.14584, 2025.
+[18] P. Mazaheri. REPOT: Recoverable program-of-thought via checkpoint repair. arXiv:2605.30052, 2026.
+[19] Y. Wang et al. From agent traces to trust: A survey of evidence tracing and execution provenance in LLM agents. arXiv:2606.04990, 2026.
+[20] K. Mei et al. AIOS: LLM agent operating system. COLM 2025. arXiv:2403.16971.
+[21] S. Kapoor et al. Holistic Agent Leaderboard: The missing infrastructure for AI agent evaluation. arXiv:2510.11977, 2025.
+[22] R. Shu et al. What resolve rate hides: Trajectory structure diagnostics for coding agents. arXiv:2607.06184, 2026.
+[23] T. Le et al. SWE-EVO: Benchmarking coding agents in long-horizon software evolution scenarios. arXiv:2512.18470, 2025.
+[24] M. Raghavendra et al. Agentic rubrics as contextual verifiers for SWE agents. ACL 2026. arXiv:2601.04171.
+[25] M. L. Dihan and M. A. R. Khan. SWE-Shepherd: Advancing PRMs for reinforcing code agents. arXiv:2604.10493, 2026.
+[26] Z. Qi, F. Long, S. Achour, and M. Rinard. An analysis of patch plausibility and correctness for generate-and-validate patch generation systems. ISSTA 2015. doi:10.1145/2771783.2771791.
+[27] Y. Lou et al. When automated program repair meets regression testing: An extensive study on two million patches. ACM TOSEM 33(7), 2024. arXiv:2105.07311.
+[28] Z. Fei et al. Patch correctness assessment: A survey. ACM TOSEM 34(2), 2025. doi:10.1145/3702972.
+[29] H. Ye, M. Martinez, and M. Monperrus. Automated patch assessment for program repair at scale. Empirical Software Engineering 26(2), 2021. doi:10.1007/s10664-020-09920-w.
+[30] SWE-bench issue #601: Test result hijacking via stdout forging in evaluation harness. github.com/SWE-bench/SWE-bench/issues/601, June 2026.
+[31] OpenHands issues #4235 (October 2024) and #7044 (March 2025): Docker and environment errors in SWE-bench instance evaluation. github.com/OpenHands/OpenHands.
+[32] J. Yang et al. SWE-smith: Scaling data for software engineering agents. NeurIPS 2025 Datasets and Benchmarks. arXiv:2504.21798.
+[33] J. Pan et al. Training software engineering agents and verifiers with SWE-Gym. ICML 2025. arXiv:2412.21139.
+[34] S. Liu et al. Context as a tool: Context management for long-horizon SWE-agents. Findings of ACL 2026. arXiv:2512.22087.
 
 ## Appendix A: The measurement defect catalogue
 
