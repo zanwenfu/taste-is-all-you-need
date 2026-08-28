@@ -243,3 +243,27 @@ Anonymised (converter drops the draft header; sweep clean).
 | cells with a held-out failure in the final tree | 0 of 26 | same |
 | cells with a watched failure in the final tree | 0 of 26 | same |
 | why superseded | file-level split leaves single-file instances with nothing to watch; id-level split replaces it | regression_gate.py docstring |
+
+## Split-oracle gate, id-level (A3reg2, GPT-5.6, 2026-08-28) — the held-out answer to the circularity objection
+
+| quantity | value | source |
+|---|---|---|
+| cells | 40: 38 completed, 1 budget (sphinx-8638, $2.25), 1 infra (sphinx-7985, $0) ; wall 6883 s ; spend $9.40 | /root/contrast40_A3reg2.log |
+| resolve | 28/40 = 70.0% (all 40 graded; unfinished cells count as unresolved) | pilotstats |
+| gate reads | sha1-even half of previously-passing ids: 2278 watched, 2585 held out (never read by the gate) | scripts/heldout.py |
+| cells with a held-out failure in the final tree | 0 of 40 on the instrument's endpoint. The official grade flags scikit-learn-14710 (11 held-out + 5 watched ids, all `test_init_parameters_validation[...]` cases): those 16 ids are stored truncated at the first space in the dataset and the current upstream parser keys the full id, so they match nothing in any arm (47/63 in all six arms). Direct check: with the split-gate final patch applied in the raw image, all 32 validation cases pass. Defect 35 (benchmark mechanism, A.3). | scripts/heldout.py; /tmp/sk14710_split.patch |
+| instrument final-state contamination | 0 cells (the 16 ids are baseline-dead in the agent's tree: they exist only under the hidden test patch) | pilotstats / contrast.py ties 40 |
+| paired resolve vs plain rollback (35 shared) | both 11, rollback-only 2, split-only 13; McNemar exact p = 0.0074 | inline McNemar |
+| paired resolve vs full-oracle gate (40 shared) | both 23, full-only 3, split-only 5; p = 0.73 | same |
+| paired contamination vs plain rollback | split better on 1, worse on 0, ties 34 (sign p = 1.0) | contrast.py |
+| onset exposure vs plain rollback | more on 2, fewer on 6, ties 27; p = 0.29 | contrast.py |
+| events | 225 observations, 14 declared, 3 bearing runs (7.5%) | pilotstats |
+
+## Defect 35 — dataset/parser id drift (found 2026-08-28 via the split-gate arm)
+
+| quantity | value | source |
+|---|---|---|
+| mechanism | SWE-bench dataset ids for parametrised cases were produced by the v4.1.0 parser (`test_case[1]`, truncated at the first space); upstream `main` `parse_log_pytest_v2` keys `" ".join(test_case[1:])`; our port follows `main` (delta 2 in swebench_log.py) | upstream python.py at main vs v4.1.0, fetched to /tmp on the box |
+| exposure in the 40-instance slice | 6 instances carry 81 truncated ids; only scikit-learn-14710 (16 ids) is on the v2 parser; pytest/requests/matplotlib parsers truncate and match | census in /tmp/gradecheck.py |
+| consequence | scikit-learn-14710 grades unresolved in every arm (F2P 1/1, P2P 47/63) regardless of patch; the instrument marks the 16 ids baseline-dead (excluded) so contamination endpoints are unaffected | grade summaries across six roots |
+| decision | keep mirroring `main` (the stated grading contract); report the cell as unresolved everywhere; catalogue the mechanism in A.3 rather than rescue the cell | this session |
