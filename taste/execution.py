@@ -562,7 +562,12 @@ class DockerProvider:
             # Dead without a close() — evict, then fall through to reopen.
             self._open.pop(key, None)
             cached.close()
-        name = f"{self.prefix}-{key}".replace("/", "_").replace(":", "_")[:200]
+        # The process id is part of the name. Two processes opening the same
+        # instance -- a re-score timing run beside a live sweep -- used to
+        # build identically named containers, and whichever closed first
+        # removed the other's: every replay in the survivor became a hole
+        # and the cell scored as 94 never-passed tests. Defect 34.
+        name = f"{self.prefix}-{key}-{os.getpid()}".replace("/", "_").replace(":", "_")[:200]
         self._remove_stale(name)
         sandbox = DockerSandbox(
             image=image,

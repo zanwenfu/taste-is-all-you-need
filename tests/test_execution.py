@@ -353,3 +353,40 @@ def test_the_workdir_is_checked_before_any_command_runs() -> None:
     DockerSandbox(image="i", name="t", workdir="/testbed", client=client)
     first = client.containers.container.execs[0]["cmd"]
     assert first == ["test", "-d", "/testbed"]
+
+
+def test_container_names_are_unique_per_process(tmp_path: Path) -> None:
+    """Defect 34: two processes opening the same instance built identically
+    named containers, and one's close() removed the other's. The name must
+    carry the process id so concurrent sweeps and re-scores cannot collide."""
+    import os
+    from taste.execution import DockerProvider
+
+    captured = {}
+
+    class _Client:
+        class containers:
+            @staticmethod
+            def run(image, **kw):
+                captured["name"] = kw.get("name")
+                class _C:
+                    id = "c"
+                    status = "running"
+                    def reload(self): pass
+                    def exec_run(self, *a, **k): return type("R", (), {"exit_code": 0, "output": b""})()
+                    def remove(self, **k): pass
+                return _C()
+            @staticmethod
+            def get(name):
+                raise LookupError(name)
+            @staticmethod
+            def list(**kw):
+                return []
+
+    provider = DockerProvider(client=_Client())
+    try:
+        provider.open(key="inst-1", image="img:latest")
+    except Exception:
+        pass  # the fake client is minimal; the name is captured before any exec
+    assert captured.get("name"), "no container name captured"
+    assert str(os.getpid()) in captured["name"]

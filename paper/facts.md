@@ -223,3 +223,13 @@ Anonymised (converter drops the draft header; sweep clean).
 | Figure 4 denominators | resolve now shown as x/40 for every arm (13, 26, 24, 22) | figs.py |
 | Claude vs GPT trade | 13/40 resolved each; $34.24 vs $8.14; 0 vs 140 events | ledgers |
 | split-oracle gate arm (A3reg2) | gate watches a deterministic half of each instance's test files (sha1 of path, even); grader scored on the held-out half via `grade_failed` in the sidecar | code + sweep in flight |
+
+## Replay cost (timed re-scores, 2026-08-28)
+
+| cell | observations | wall | per observation | source |
+|---|---|---|---|---|
+| pytest-dev__pytest-6197 | 9 | 69.5 s | 7.7 s | /root/replay_timing.log |
+| django__django-15128 | 5 | 19.9 s | 4.0 s | same |
+| mwaskom__seaborn-3069 | 9 | 32.6 s | invalid — collided with the concurrent split sweep on the same instance (defect 34); all 94 tests read as holes | same |
+| 40-instance sweep projection | 259 obs × ~6 s ≈ 26 CPU-min | | computed |
+| 500 instances × 100 edits | ≈ 80 CPU-hours | | computed |
