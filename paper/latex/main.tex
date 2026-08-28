@@ -49,7 +49,7 @@ All measurements are exploratory and were made on a development slice of the ben
 
 \section{Instrument}
 
-\begin{figure}[t]\centering\includegraphics[width=0.92\linewidth]{fig_system.pdf}\caption{The harness and the instrument. The planner, worker, monitor, and recovery policy run inside the benchmark's pinned container; every mutating tool call is committed to a hidden git reference; held-out tests are replayed at every observation and detections are attributed by coverage. In the gated arm (dashed), the timeline's tests serve as the monitor. The official grader sees only the final patch.}\label{fig:fig-system}\end{figure}
+\begin{figure}[t]\centering\includegraphics[width=0.97\linewidth]{fig_system.pdf}\caption{The harness and the instrument. The planner, worker, monitor, and recovery policy run inside the benchmark's pinned container; every mutating tool call is committed to a hidden git reference; held-out tests are replayed at every observation and detections are attributed by coverage. In the gated arm (dashed), the timeline's tests serve as the monitor. The official grader sees only the final patch.}\label{fig:fig-system}\end{figure}
 
 Figure~\ref{fig:fig-system} shows the harness and the instrument. \textbf{Observational timeline.} After every mutating tool call, the working tree is committed to a git reference outside the agent's view, using a private index so that the agent's own \texttt{git status} and \texttt{git diff} are unchanged. Rollbacks and the end of the run are observations too, and because observations are commits, an archived run can be re-measured later without re-running the agent.
 
