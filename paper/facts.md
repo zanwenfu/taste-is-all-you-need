@@ -267,3 +267,36 @@ Anonymised (converter drops the draft header; sweep clean).
 | exposure in the 40-instance slice | 6 instances carry 81 truncated ids; only scikit-learn-14710 (16 ids) is on the v2 parser; pytest/requests/matplotlib parsers truncate and match | census in /tmp/gradecheck.py |
 | consequence | scikit-learn-14710 grades unresolved in every arm (F2P 1/1, P2P 47/63) regardless of patch; the instrument marks the 16 ids baseline-dead (excluded) so contamination endpoints are unaffected | grade summaries across six roots |
 | decision | keep mirroring `main` (the stated grading contract); report the cell as unresolved everywhere; catalogue the mechanism in A.3 rather than rescue the cell | this session |
+
+## Trajectory length (mutating tool calls per run = observations), 2026-08-28
+
+| arm | runs | mean | median | IQR | max |
+|---|---|---|---|---|---|
+| Claude rollback (pilot40c) | 40 | 5.7 | 5 | 4–8 | 10 |
+| GPT rollback (pilot40d) | 35 | 7.4 | 7 | 4–9 | 13 |
+| gated (A3reg) | 40 | 6.3 | 6 | 4–9 | 12 |
+| split-gated (A3reg2) | 40 | 5.6 | 4 | 4–7 | 12 |
+| repair-in-place (A2) | 40 | 6.9 | 6 | 5–9 | 19 |
+| no recovery (A0) | 40 | 4.7 | 4 | 4–5 | 13 |
+| all six arms pooled | 235 | — | 5 | 4–8 | 19 (94% of runs ≤ 10) |
+
+Source: /tmp/obsdist.py over evidence sidecars (`observations`). Public-scaffold trajectories on Verified run to tens or hundreds of actions; the §3 projection assumes 100 edits per instance.
+
+## Cross-stack Fisher sensitivity (one-sided, Claude 0/40 bearing vs GPT k/37)
+
+| k | p |
+|---|---|
+| 6 (observed) | 0.0098 |
+| 5 | 0.022 |
+| 4 | 0.049 |
+| 3 | 0.106 |
+
+Source: /tmp/obsdist.py. Reassigning three of the six bearing runs removes significance at 0.05.
+
+## Deployed-gate cost: full repository suite in the pinned image (2026-08-28)
+
+| instance | command | wall | outcome | source |
+|---|---|---|---|---|
+| django__django-11133 | `tests/runtests.py --parallel=4 -v0` | 111 s | FAILED: failures=10, errors=87, skipped=902, xfail=4 (baseline-dead in the image) | /tmp/fullsuite.log on the box |
+| pytest-dev__pytest-6197 | `pytest testing -q` | 3 s | 2 collection errors — the image cannot run its own full suite unscoped; not a usable timing | manual run |
+| scoped gate run (member files) / replay | — | 4–8 s per observation | — | §3 replay timing |
