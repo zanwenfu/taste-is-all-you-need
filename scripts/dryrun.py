@@ -148,6 +148,8 @@ def main() -> int:
     ap.add_argument("--max-consecutive-failures", type=int, default=5,
                     help="Abort the sweep after this many zero-progress failures "
                          "in a row (0 disables).")
+    ap.add_argument("--skip-completed", action="store_true",
+                    help="Resume: skip instances this arm already graded in the root.")
     ap.add_argument("--sweep-budget", type=float, default=None,
                     help="Stop-loss in billed dollars across the whole sweep; "
                          "no new cell starts once it is crossed.")
@@ -179,6 +181,17 @@ def main() -> int:
         print(f"  docker pull --platform linux/amd64 {image_for(everything[0])}")
         return 2
     chosen = pool[: args.instances]
+    if args.skip_completed:
+        # The selection above is what fixes the instance set; only after it
+        # is made may completed cells drop out, so a resumed sweep runs the
+        # same 40 as the interrupted one and re-pays only the infra cells.
+        done = set()
+        for f in (ledger / "evidence").glob(f"*__{args.arm}__*.json"):
+            ev = json.loads(f.read_text())
+            if ev.get("resolved") is not None:
+                done.add(ev["instance_id"])
+        chosen = [i for i in chosen if i.instance_id not in done]
+        print(f"  resuming: {len(done)} completed cell(s) kept, {len(chosen)} to run", flush=True)
     print(f"{len(pool)} instance image(s) available locally; running {len(chosen)}:", flush=True)
     for i in chosen:
         print(f"  {i.instance_id:32s} {i.repo:26s} |P2P|={len(i.pass_to_pass)}", flush=True)

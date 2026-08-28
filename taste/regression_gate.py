@@ -44,43 +44,54 @@ class RegressionGate:
     (the router's exec)."""
     timeout: int = 1200
     split: str = "all"
-    """Which of the instance's test files the gate is allowed to see.
-    ``all``: every file holding a previously-passing test (the gate's oracle
-    then coincides with the grading oracle, and a clean final tree is partly
-    guaranteed by construction). ``half``: a deterministic half of those
-    files by name hash; the other half is never run by the gate, so the
-    grader's verdict on it is a genuine held-out test of whether gating
-    generalises beyond the tests it watches."""
+    """Which of the instance's previously-passing tests the gate is allowed
+    to read. ``all``: every one (the gate's oracle then coincides with the
+    grading oracle, and a clean final tree is partly guaranteed by
+    construction). ``half``: a deterministic half of the test ids by name
+    hash. The suite still runs whole -- most instances hold their tests in
+    one file, and a file-level split left 8 of 21 cells with nothing to
+    watch -- but results for the other half are dropped before the gate
+    reads them, so the grader's verdict on that half is a genuine held-out
+    test of whether gating generalises beyond the tests it watches."""
     baseline_pass: frozenset[str] = frozenset()
     established: bool = False
     checks: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
 
     def watched_files(self) -> list[str]:
-        files = sorted(swebench.member_test_files(self.instance))
-        if self.split == "half":
-            import hashlib
+        return sorted(swebench.member_test_files(self.instance))
 
-            files = [f for f in files if int(hashlib.sha1(f.encode()).hexdigest(), 16) % 2 == 0]
-        return files
+    def watched_ids(self) -> frozenset[str] | None:
+        """Test ids the gate may read; ``None`` means every id."""
+        if self.split != "half":
+            return None
+        import hashlib
+
+        return frozenset(
+            t for t in self.instance.pass_to_pass if int(hashlib.sha1(t.encode()).hexdigest(), 16) % 2 == 0
+        )
 
     def _suite(self) -> dict[str, str]:
         command = swebench.plain_suite_command(self.instance, self.watched_files())
         result = self.run(command, timeout=self.timeout)
         if getattr(result, "timed_out", False):
             raise TimeoutError("regression gate suite timed out")
-        return swebench.parse_eval_output(self.instance, result.stdout)
+        statuses = swebench.parse_eval_output(self.instance, result.stdout)
+        allowed = self.watched_ids()
+        if allowed is not None:
+            statuses = {t: s for t, s in statuses.items() if t in allowed}
+        return statuses
 
     def establish_baseline(self) -> None:
         """Run the suite once before the agent acts. No results at all means
         the environment cannot run the repository's tests — infrastructure,
         refused before a model call is paid for, never a silent all-pass."""
-        if not self.watched_files():
-            # A half-split can leave a single-file instance with nothing to
-            # watch; the gate then has no oracle and must say so rather than
-            # pass everything.
+        allowed = self.watched_ids()
+        if not self.watched_files() or (allowed is not None and not allowed):
+            # A half-split of a one-test instance leaves nothing to watch; the
+            # gate then has no oracle and must say so rather than pass everything.
             raise InfraFailure(
-                "regression gate: no test files in the watched split",
+                "regression gate: no tests in the watched split",
                 attempts=1,
                 last_error="empty watched split",
             )

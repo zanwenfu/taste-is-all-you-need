@@ -207,12 +207,38 @@ def test_the_half_split_is_deterministic_and_leaves_a_held_out_half() -> None:
         problem_statement="", test_patch="", version="7.2", fail_to_pass=(),
         pass_to_pass=tuple(f"testing/test_{k}.py::test_it" for k in "abcdefgh"),
     )
-    a = RegressionGate(inst, _Runner(), split="half").watched_files()
-    b = RegressionGate(inst, _Runner(), split="half").watched_files()
-    everything = RegressionGate(inst, _Runner(), split="all").watched_files()
+    a = RegressionGate(inst, _Runner(), split="half").watched_ids()
+    b = RegressionGate(inst, _Runner(), split="half").watched_ids()
+    assert RegressionGate(inst, _Runner(), split="all").watched_ids() is None
     assert a == b, "the split must be deterministic"
-    assert 0 < len(a) < len(everything), "half must hold something out and keep something"
-    assert set(a) < set(everything)
+    assert 0 < len(a) < len(inst.pass_to_pass), "half must hold something out and keep something"
+    assert a < set(inst.pass_to_pass)
+
+
+def test_the_half_split_never_reads_the_held_out_half() -> None:
+    """The split is over test ids, not files: most instances keep every
+    previously-passing test in one file, and a file-level split left 8 of 21
+    cells with nothing to watch. The suite runs whole; the held-out results
+    are dropped before the gate reads them, at baseline and at every check."""
+    ids = tuple(f"testing/test_one.py::test_{k}" for k in "abcdefgh")
+    inst = swebench.SWEInstance(
+        instance_id="x__x-3", repo="pytest-dev/pytest", base_commit="0" * 40,
+        problem_statement="", test_patch="", version="7.2", fail_to_pass=(),
+        pass_to_pass=ids,
+    )
+    gate = RegressionGate(inst, _Runner(_log(*[f"PASSED {t}" for t in ids])), split="half")
+    gate.establish_baseline()
+    watched = gate.watched_ids()
+    assert gate.baseline_pass == watched
+    held_out = [t for t in ids if t not in watched]
+    assert held_out
+    # every held-out test breaks; the gate must not notice
+    gate.run = _Runner(_log(*[f"PASSED {t}" for t in watched], *[f"FAILED {t}" for t in held_out]))
+    assert gate.check().passed
+    # one watched test breaks; the gate must notice
+    broken = sorted(watched)[0]
+    gate.run = _Runner(_log(*[f"{'FAILED' if t == broken else 'PASSED'} {t}" for t in ids]))
+    assert not gate.check().passed
 
 
 def test_an_empty_watched_split_is_refused_not_passed() -> None:
@@ -222,7 +248,7 @@ def test_an_empty_watched_split_is_refused_not_passed() -> None:
         pass_to_pass=("testing/test_only.py::test_it",),
     )
     gate = RegressionGate(inst, _Runner(_log("PASSED testing/test_only.py::test_it")), split="half")
-    if not gate.watched_files():
+    if not gate.watched_ids():
         with pytest.raises(InfraFailure):
             gate.establish_baseline()
     else:

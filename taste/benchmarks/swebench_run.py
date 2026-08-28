@@ -298,7 +298,10 @@ def make_execute(
                 instance=ctx.instance, run=router.exec,
                 split=getattr(ctx.config, "gate_split", "all"),
             )
-            ctx.gate_watched = gate.watched_files()
+            # Ids under a half split (the held-out half is every other
+            # previously-passing id); files under the full gate.
+            ids = gate.watched_ids()
+            ctx.gate_watched = sorted(ids) if ids is not None else gate.watched_files()
         kernel = Kernel(
             workspace=ctx.workspace, llm=llm,
             **kernel_kwargs(ctx.config), config=ctx.config,

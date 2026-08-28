@@ -35,7 +35,7 @@ All measurements are exploratory and were made on a development slice of the ben
 
 ## 3. Instrument
 
-![The harness and the instrument. The planner, worker, monitor, and recovery policy run inside the benchmark's pinned container; every mutating tool call is committed to a hidden git reference; held-out tests are replayed at every observation and detections are attributed by coverage. In the gated arm (dashed), the timeline's tests serve as the monitor. The official grader sees only the final patch.](fig_system.pdf){width=0.62}
+![The harness and the instrument. The planner, worker, monitor, and recovery policy run inside the benchmark's pinned container; every mutating tool call is committed to a hidden git reference; held-out tests are replayed at every observation and detections are attributed by coverage. In the gated arm (dashed), the timeline's tests serve as the monitor. The official grader sees only the final patch.](fig_system.pdf){width=0.54}
 
 Figure 1 shows the harness and the instrument. **Observational timeline.** The harness wraps every mutating tool call. After each call, the working tree is committed to a git reference outside the agent's view, using a private index so that the agent's own `git status` and `git diff` are unchanged. Rollbacks and the end of the run are recorded as observations too. Because observations are commits, an archived run can be re-measured later without re-running the agent.
 
@@ -67,11 +67,11 @@ Under rollback, the Claude stack resolved 13 of 40 instances (32.5%, exact 95% C
 
 ### 5.2 The final state hides almost all regression activity
 
-![Every run that produced at least one regression event, in both GPT-5.6 sweeps. Left bars (red) are events recorded on the timeline; right bars (grey) are held-out test failures visible in the graded final patch.](fig_undercount.pdf){width=0.84}
+![Every run that produced at least one regression event, in both GPT-5.6 sweeps. Left bars (red) are events recorded on the timeline; right bars (grey) are held-out test failures visible in the graded final patch.](fig_undercount.pdf){width=0.74}
 
 Figure 2 shows every run that produced a regression event under the GPT-5.6 stack with the rollback policy, pooling the 10-instance calibration and the 40-instance sweep (47 runs). The timeline recorded 184 declared events across eight runs; the final patch exposed one. Run-weighted, seven of the eight bearing runs ended with a clean final patch; three storms (73, 48, and 41 events) supply 88% of the event count, so the run-weighted figure is the more robust statement. Measured from the final patch, as prior work does [8], the same runs show one event.
 
-![One run that the official grader marked resolved, with all 147 graded tests passing. The timeline shows three regressions of the same test function, each repaired by rollback two observations later.](fig_timeline.pdf){width=0.8}
+![One run that the official grader marked resolved, with all 147 graded tests passing. The timeline shows three regressions of the same test function, each repaired by rollback two observations later.](fig_timeline.pdf){width=0.7}
 
 Figure 3 shows a single run in detail. The grader marked it resolved with all graded tests passing; its timeline contains three regressions of the same test function at observations 3, 5, and 7, each repaired by rollback. Two of the three went undetected by any harness check while open; the repairing rollback was triggered by an unrelated failure. Across the full GPT-5.6 sweep, 48 of 162 raw episodes (events before collapsing parametrised variants) had no co-occurring harness failure at all.
 
@@ -85,33 +85,29 @@ We had first read the low event rate as a property of the benchmark, and a pre-d
 
 ### 5.4 Recovery policy: rollback keeps the final tree clean
 
-![The four recovery arms under the GPT-5.6 stack on the same 40 instances. Contamination counts cells whose final patch fails a previously-passing test.](fig_contrast.pdf){width=0.78}
+![The four recovery arms under the GPT-5.6 stack on the same 40 instances. Contamination counts cells whose final patch fails a previously-passing test.](fig_contrast.pdf){width=0.52}
 
 Figure 4 summarises the pre-declared contrast. The primary endpoint, final-state contamination, is paired by instance: no recovery was worse than rollback on 9 instances, better on 1, and tied on 25 (exact sign test, p = 0.022). Repair-in-place was worse on 5, better on 1, and tied on 29 (p = 0.22). The co-primary endpoint, incident exposure, did not differ detectably for either comparison (no recovery p = 0.45; repair-in-place p = 1.0): regressions occurred at similar rates under every policy, and the policy determined whether they persisted.
 
-One no-recovery run illustrates the mechanism: its final tree begins with the literal string `$(cat django/db/models/expressions.py)`, a shell idiom pasted into a file write, and none of the instance's 137 graded tests ran; under rollback the same model's failed attempt was reset and the final patch passed all 137.
-
-**Disclosure.** The first unblinding gave p = 0.375; Appendix B records the grading correction (seven catastrophically contaminated cells had been dropped as ungradable) and the re-grade of their archived trees.
+**Disclosure.** The first unblinding gave p = 0.375; Appendix B records the grading correction that produced the final number.
 
 ### 5.5 Rollback loses resolution to verifier precision
 
-Rollback resolved fewer tasks than either alternative (Figure 4, left): 13 of 40 against 24 of 40 for repair-in-place and 22 of 40 for no recovery; paired by instance, it won one discordant pair and lost nine against repair-in-place (McNemar exact p = 0.022) and won three and lost nine against no recovery (p = 0.15). The loss is attributable to the verifier: of the 18 rollback runs that failed, 15 failed at the first step, and 9 of the 18 were resolved under a policy that kept the rejected work. The monitor's planner-written check had rejected a patch the grader accepted, and rollback discarded it, so the verifier's false-rejection rate sets how many correct patches are lost per contaminated tree avoided.
+Rollback resolved fewer tasks than either alternative (Figure 4, left): 13 of 40 against 24 of 40 for repair-in-place and 22 of 40 for no recovery; paired by instance, it won one discordant pair and lost nine against repair-in-place (McNemar exact p = 0.022) and won three and lost nine against no recovery (p = 0.15). The loss is attributable to the verifier: of the 18 rollback runs that failed, 15 failed at the first step, and 9 of the 18 were resolved under a policy that kept the rejected work; the monitor's planner-written check had rejected a patch the grader accepted, and rollback discarded it. The verifier's false-rejection rate sets how many correct patches are lost per contaminated tree avoided.
 
 ### 5.6 Regression-gated rollback removes the tradeoff
 
-A fourth arm, added after the contrast was unblinded and therefore exploratory, replaces the monitor's planner-written check with the repository's previously-passing tests, run in the agent's container at the start of the run and after every attempt; a step is rejected only if a test that passed at the start fails now. It resolved **26 of 40 instances (65.0%)**, the most of any arm, with **no contaminated final tree** (Figure 4). Paired against plain rollback on the 35 shared instances, it resolved 10 that plain rollback did not and lost 1 (McNemar exact p = 0.012; post hoc, one of seven tests reported, unadjusted). Paired onset exposure did not differ detectably (p = 0.73). The gate runs the test files holding the instance's previously-passing tests, selected from benchmark metadata, and its baseline oracle coincides with the grading oracle (median ratio 1.00), so the clean final trees are guaranteed by construction; the informative result is the resolve gain, and a split variant graded on test files the gate never sees is the next experiment. A second full sweep of plain rollback reproduced the first (13 and 13 resolved on 34 paired instances; 6 of 37 bearing runs both times), so the gain is well outside run-to-run variability.
+A fourth arm, added after the contrast was unblinded and therefore exploratory, replaces the monitor's planner-written check with the repository's previously-passing tests, run in the agent's container at the start of the run and after every attempt; a step is rejected only if a test that passed at the start fails now. It resolved **26 of 40 instances (65.0%)**, the most of any arm, with **no contaminated final tree** (Figure 4). Paired against plain rollback on the 35 shared instances, it resolved 10 that plain rollback did not and lost 1 (McNemar exact p = 0.012; post hoc, one of seven tests reported, unadjusted). Paired onset exposure did not differ detectably (p = 0.73). The gate runs the test files holding the instance's previously-passing tests, selected from benchmark metadata, and its baseline oracle coincides with the grading oracle (median ratio 1.00), so the clean final trees are guaranteed by construction; the informative result is the resolve gain, and a split variant graded on test files the gate never sees is the next experiment. A second sweep of plain rollback reproduced the first (13 and 13 resolved on 34 paired instances; 6 of 37 bearing both times), so the gain is outside run-to-run variability.
 
 ## 6. Discussion
 
-**Why timeline regressions matter.** A regression the agent repairs before submission did not reach the user, so the objection that it is harmless deserves an answer. It is not free: across the bearing runs, 27% of spend ($0.63 of $2.33) went to work done while a regression was open. The events are also the per-step ground truth that process reward models for software agents [24, 25] need, and the transient states include destructive ones (a tree with every test uncollectable) that no final-state grade records. For agent-OS design, a recovery primitive without an observation primitive hides exactly the activity that distinguishes recovery policies.
+**Why timeline regressions matter.** A regression the agent repairs before submission did not reach the user, but it is not free: across the bearing runs, 27% of spend ($0.63 of $2.33) went to work done while a regression was open. The events are the per-step ground truth that process reward models for software agents [24, 25] need, and the transient states include destructive ones (a tree with every test uncollectable, as in one no-recovery run whose final file began with a pasted `$(cat ...)` shell idiom) that no final-state grade records. For agent-OS design, a recovery primitive without an observation primitive hides exactly the activity that distinguishes recovery policies.
 
-**On the measurement defects.** Building the instrument produced 28 defects (Appendix A), 23 of which produced a plausible number rather than an error. Two rules would have prevented most of them: record infrastructure failures as missing observations, and require a positive liveness signal.
-
-**Summary.** Final-state evaluation misses the regressions an agent's own process repairs, which in our measurements is nearly all of them; measuring the timeline is feasible, validates against controls, separates recovery policies the final patch cannot, and locates rollback's cost in verifier precision.
+**Summary.** Final-state evaluation misses the regressions an agent's own process repairs, nearly all of them in our measurements; measuring the timeline is feasible, validates against controls, separates recovery policies the final patch cannot, and locates rollback's cost in verifier precision.
 
 ## 7. Limitations
 
-All measurements come from a 40-instance development slice: one sweep per arm, plus a calibration and one replication of plain rollback for the GPT-5.6 stack, so variability is measured for that arm only. The cross-stack comparison is a single pairwise test on six bearing runs, confounded with the provider adapter; the gated arm is post hoc. The held-out tests observe roughly the gold test patch's blast radius, so event counts are lower bounds; confidence intervals ignore repository clustering (16 of 40 instances are django); and the instrument has not been applied to a public scaffold, which is the next experiment.
+All measurements come from a 40-instance development slice, one sweep per arm, with variability measured only for plain rollback under GPT-5.6. The cross-stack comparison is six bearing runs, confounded with the provider adapter; the gated arm is post hoc. The held-out tests observe roughly the gold test patch's blast radius, so event counts are lower bounds; intervals ignore repository clustering (16 of 40 instances are django); and the instrument has not been applied to a public scaffold, which is the next experiment.
 
 ---
 
@@ -153,6 +149,8 @@ All measurements come from a 40-instance development slice: one sweep per arm, p
 [34] Context as a tool: Context management for long-horizon SWE agents. arXiv:2512.22087, 2025.
 
 ## Appendix A: The measurement defect catalogue
+
+Two rules would have prevented most of the defects below: record infrastructure failures as missing observations, and require a positive liveness signal.
 
 ### A.1 The catalogue by mechanism
 

@@ -13,7 +13,9 @@ real container would answer them.
 
 from __future__ import annotations
 
+import contextlib
 import io
+import os
 import tarfile
 from pathlib import Path
 
@@ -359,9 +361,6 @@ def test_container_names_are_unique_per_process(tmp_path: Path) -> None:
     """Defect 34: two processes opening the same instance built identically
     named containers, and one's close() removed the other's. The name must
     carry the process id so concurrent sweeps and re-scores cannot collide."""
-    import os
-    from taste.execution import DockerProvider
-
     captured = {}
 
     class _Client:
@@ -384,9 +383,7 @@ def test_container_names_are_unique_per_process(tmp_path: Path) -> None:
                 return []
 
     provider = DockerProvider(client=_Client())
-    try:
+    with contextlib.suppress(Exception):  # the fake client is minimal; the name is captured before any exec
         provider.open(key="inst-1", image="img:latest")
-    except Exception:
-        pass  # the fake client is minimal; the name is captured before any exec
     assert captured.get("name"), "no container name captured"
     assert str(os.getpid()) in captured["name"]

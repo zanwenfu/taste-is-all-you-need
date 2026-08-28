@@ -7,7 +7,6 @@ Anything else passes through so the diff is inspectable.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "workshop.md"
