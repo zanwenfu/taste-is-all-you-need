@@ -238,7 +238,8 @@ Anonymised (converter drops the draft header; sweep clean).
 
 | quantity | value | source |
 |---|---|---|
-| cells completed before the arm was stopped | 12 graded (9 resolved), 8 infra (empty watched half), $1.80 | /root/contrast40_A3reg2_filesplit |
-| held-out P2P ids on unwatched files | 1741 | /tmp/heldout.py (file version) |
-| cells with a held-out failure in the final tree | 0 | same |
+| cells completed before the arm was stopped | 26 graded (11 resolved), 8+ infra (empty watched half) | /root/contrast40_A3reg2_filesplit |
+| P2P ids: watched by the gate / held out (files the gate never ran) | 1847 / 2187 | scripts/heldout.py |
+| cells with a held-out failure in the final tree | 0 of 26 | same |
+| cells with a watched failure in the final tree | 0 of 26 | same |
 | why superseded | file-level split leaves single-file instances with nothing to watch; id-level split replaces it | regression_gate.py docstring |
