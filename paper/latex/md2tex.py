@@ -121,8 +121,9 @@ def convert(md: str) -> str:
         m_img = re.match(r"!\[(.*?)\]\((.*?)\)(?:\{width=([0-9.]+)\})?\s*$", ln.strip())
         if m_img:
             cap, path = m_img.group(1), m_img.group(2)
+            width = m_img.group(3) or "1"
             label = re.sub(r"[^a-z0-9]+", "-", Path(path).stem.lower())
-            out.append(r"\begin{figure}[t]\centering\includegraphics[width=\linewidth]{" + path + "}"
+            out.append(r"\begin{figure}[t]\centering\includegraphics[width=" + width + r"\linewidth]{" + path + "}"
                        + r"\caption{" + inline(cap) + "}\label{fig:" + label + "}\end{figure}")
             i += 1; continue
         if ln.startswith("|"):
