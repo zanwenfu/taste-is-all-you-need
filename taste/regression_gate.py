@@ -57,8 +57,16 @@ class RegressionGate:
     established: bool = False
     checks: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
+    files_fn: Callable[[Any], Any] | None = None
+    """Substrate seam. Verified is the default; a Live gate injects
+    ``probe_files`` / a bracketed pytest script / ``parse_live_output`` so the
+    gate reads the same oracle the instrument replays on that substrate."""
+    command_fn: Callable[[Any, list[str]], str] | None = None
+    parse_fn: Callable[[Any, str], dict[str, str]] | None = None
 
     def watched_files(self) -> list[str]:
+        if self.files_fn is not None:
+            return sorted(self.files_fn(self.instance))
         return sorted(swebench.member_test_files(self.instance))
 
     def watched_ids(self) -> frozenset[str] | None:
@@ -72,11 +80,16 @@ class RegressionGate:
         )
 
     def _suite(self) -> dict[str, str]:
-        command = swebench.plain_suite_command(self.instance, self.watched_files())
+        files = self.watched_files()
+        command = (
+            self.command_fn(self.instance, files) if self.command_fn is not None
+            else swebench.plain_suite_command(self.instance, files)
+        )
         result = self.run(command, timeout=self.timeout)
         if getattr(result, "timed_out", False):
             raise TimeoutError("regression gate suite timed out")
-        statuses = swebench.parse_eval_output(self.instance, result.stdout)
+        parse = self.parse_fn or swebench.parse_eval_output
+        statuses = parse(self.instance, result.stdout)
         allowed = self.watched_ids()
         if allowed is not None:
             statuses = {t: s for t, s in statuses.items() if t in allowed}

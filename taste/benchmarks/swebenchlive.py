@@ -39,6 +39,7 @@ from taste.replay import SuiteProbe
 
 __all__ = [
     "LiveInstance",
+    "build_live_gate_script",
     "build_live_probe_script",
     "grade_live_in_sandbox",
     "live_parity_check",
@@ -167,6 +168,16 @@ def build_live_probe_script(instance: LiveInstance, *, workdir: str = "/testbed"
         )
         if part
     )
+
+
+def build_live_gate_script(instance: LiveInstance, files, *, workdir: str = "/testbed") -> str:
+    """The regression gate's suite on Live: the oracle's files, run on the
+    agent's tree as it stands (no restore -- the gate reads what the agent
+    left; the instrument's replay restores). Bracketed like the probe so
+    ``parse_live_output`` reads only the run."""
+    files = list(files) or list(probe_files(instance))
+    body = f"python -m pytest -rA {' '.join(files)}" if files else "\n".join(instance.test_cmds)
+    return "\n".join(("exec 2>&1", f"cd {workdir}", f"echo '{START_MARKER}'", body, f"echo '{END_MARKER}'"))
 
 
 def parse_live_output(instance: LiveInstance, log: str) -> dict[str, str]:

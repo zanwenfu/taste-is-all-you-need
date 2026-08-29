@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from taste.agent import AgentSpec
 from taste.attempts import harvest_by_instance
 from taste.benchmarks import swebench
+from taste.benchmarks import swebenchlive as live
 from taste.benchmarks.swebench_run import (
     make_execute,
     make_grade,
@@ -121,6 +122,14 @@ def build_instance_coverage(provider, instances, *, cache_dir: Path):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", type=int, default=5)
+    ap.add_argument("--substrate", choices=["verified", "live"], default="verified",
+                    help="live: SWE-bench-Live instances (RepoLaunch images, their grading "
+                         "rulebook, no coverage maps -- attribution reports UNKNOWN).")
+    ap.add_argument("--candidates", default="",
+                    help="JSON list of instance ids fixing the selection order (pre-declared slice).")
+    ap.add_argument("--precheck", action="store_true",
+                    help="Before choosing, open each candidate's container and run the parity "
+                         "check; take the first --instances that pass. $0.")
     ap.add_argument("--arm", default="A3")
     ap.add_argument("--budget", type=float, default=1.00, help="work-cost cap per cell")
     ap.add_argument("--root", default="/tmp/taste-dryrun")
@@ -159,8 +168,17 @@ def main() -> int:
     ledger = root / "ledger"
     have = local_images()
 
-    everything = swebench.load_dataset(Path(args.dataset))
+    if args.substrate == "live":
+        if args.dataset == "data/verified.jsonl":
+            args.dataset = "data/live_lite.jsonl"
+        everything = live.load_live_dataset(Path(args.dataset))
+    else:
+        everything = swebench.load_dataset(Path(args.dataset))
     pool = [i for i in everything if image_for(i) in have]
+    if args.candidates:
+        order = json.loads(Path(args.candidates).read_text())
+        rank = {iid: k for k, iid in enumerate(order)}
+        pool = sorted((i for i in pool if i.instance_id in rank), key=lambda i: rank[i.instance_id])
     if args.only:
         wanted = set(args.only.split(","))
         pool = [i for i in pool if i.instance_id in wanted]
@@ -175,11 +193,36 @@ def main() -> int:
         mirror = cache / f"{instance.repo.replace('/', '__')}.git"
         return (0 if mirror.exists() else 1, 0 if instance.repo in small else 1)
 
-    pool.sort(key=cost)
+    if not args.candidates:
+        pool.sort(key=cost)
     if not pool:
         print("No SWE-bench images present locally. Pull at least one, e.g.:")
         print(f"  docker pull --platform linux/amd64 {image_for(everything[0])}")
         return 2
+    if args.precheck:
+        # The slice is fixed before any outcome is seen: candidates are tried
+        # in their pre-declared order and dropped only for infrastructure
+        # (image, interpreter, collection), which is printed.
+        pre_provider = DockerProvider(env_prefix="" if args.substrate == "live" else None) \
+            if args.substrate == "live" else DockerProvider()
+        check = live.live_parity_check if args.substrate == "live" else swebench.environment_parity_check
+        kept, dropped = [], []
+        for i in pool:
+            if len(kept) >= args.instances:
+                break
+            object.__setattr__(i, "image", image_for(i))
+            try:
+                sb = pre_provider.open(key=f"precheck:{i.instance_id}", image=i.image)
+                try:
+                    reason = check(sb, i)
+                finally:
+                    sb.close()
+            except Exception as exc:  # noqa: BLE001 - infrastructure, reported not hidden
+                reason = f"container: {exc}"
+            (kept if reason is None else dropped).append((i, reason))
+            print(f"  [precheck] {i.instance_id:36s} {'ok' if reason is None else 'DROP: ' + str(reason)[:120]}", flush=True)
+        print(f"  precheck: kept {len(kept)}, dropped {len(dropped)}", flush=True)
+        pool = [i for i, _ in kept]
     chosen = pool[: args.instances]
     if args.skip_completed:
         # The selection above is what fixes the instance set; only after it
@@ -201,7 +244,7 @@ def main() -> int:
         object.__setattr__(i, "image", image_for(i))
     instances = {i.instance_id: i for i in chosen}
 
-    provider = DockerProvider()
+    provider = DockerProvider(env_prefix="") if args.substrate == "live" else DockerProvider()
 
     def llm_factory(_ctx):
         if args.offline:
@@ -215,7 +258,9 @@ def main() -> int:
               f"${record.billed_usd:6.4f} {record.error or ''}", flush=True)
 
     coverage: dict[str, tuple] = {}
-    if not args.no_coverage:
+    if args.substrate == "live" and not args.no_coverage:
+        print("  coverage maps: none on Live (attribution reports UNKNOWN)", flush=True)
+    elif not args.no_coverage:
         coverage = build_instance_coverage(
             provider, chosen, cache_dir=root / "coverage"
         )
@@ -251,9 +296,12 @@ def main() -> int:
             # runs the agent on the host against an uninstalled checkout —
             # bug 20 — and exists only for synthetic tasks and Gate 0.
             route_execution=True,
+            parity_check=live.live_parity_check if args.substrate == "live" else None,
         ),
         execute=make_execute(
             llm_factory=llm_factory, retry_allowance=allowance,
+            gate_adapter={"files_fn": live.probe_files, "command_fn": live.build_live_gate_script,
+                          "parse_fn": live.parse_live_output} if args.substrate == "live" else None,
             spec=AgentSpec(
                 name="swe",
                 description="Resolve the reported issue.",
@@ -265,7 +313,11 @@ def main() -> int:
                 ),
             ) if args.models == "openai" else None,
         ),
-        score=make_score(ledger_dir=ledger, grade=make_grade()),
+        score=make_score(
+            ledger_dir=ledger,
+            grade=make_grade(grader=live.grade_live_in_sandbox if args.substrate == "live" else None),
+            suite_factory=live.live_suite_factory if args.substrate == "live" else None,
+        ),
         on_cell=announce,
         max_consecutive_failures=args.max_consecutive_failures or None,
         sweep_budget_usd=args.sweep_budget,

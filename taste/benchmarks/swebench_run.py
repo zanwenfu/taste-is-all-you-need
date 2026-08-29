@@ -239,8 +239,12 @@ def make_execute(
     spec: AgentSpec | None = None,
     run_overrides=None,
     retry_allowance: Mapping[str, int] | None = None,
+    gate_adapter: Mapping[str, Any] | None = None,
 ):
     """Build the ``execute`` callable.
+
+    ``gate_adapter`` carries the substrate's ``files_fn`` / ``command_fn`` /
+    ``parse_fn`` for the regression gate (Live); absent means Verified.
 
     ``llm_factory`` is called once per cell. One LLM per cell, never shared:
     the budget cap and the telemetry both live on it, so a shared instance
@@ -297,6 +301,7 @@ def make_execute(
             gate = RegressionGate(
                 instance=ctx.instance, run=router.exec,
                 split=getattr(ctx.config, "gate_split", "all"),
+                **dict(gate_adapter or {}),
             )
             # Ids under a half split (the held-out half is every other
             # previously-passing id); files under the full gate.
@@ -344,14 +349,19 @@ def make_execute(
     return execute
 
 
-def make_grade(*, timeout: int = 1800):
+def make_grade(*, timeout: int = 1800, grader=None):
     """Build the ``grade`` callable for make_score: the official resolve verdict.
 
     This is the number that was never wired: every pilot recorded
     ``resolved=None`` on every cell because make_score's ``grade`` parameter
     had zero call sites. "Completed 8/40" was the Monitor's opinion of
     itself; this is the benchmark's opinion of the patch.
+
+    ``grader(sandbox, instance, patch, timeout=...)`` is the substrate's own
+    rulebook: Verified's ``grade_in_sandbox`` by default, Live's
+    ``grade_live_in_sandbox`` when the sweep runs on Live.
     """
+    run_grader = grader or swebench.grade_in_sandbox
 
     def grade(ctx: CellContext, result) -> bool | None:
         if ctx.provider is None:
@@ -377,9 +387,7 @@ def make_grade(*, timeout: int = 1800):
             network_mode="bridge",
         )
         try:
-            report = swebench.grade_in_sandbox(
-                sandbox, ctx.instance, patch, timeout=timeout
-            )
+            report = run_grader(sandbox, ctx.instance, patch, timeout=timeout)
         finally:
             sandbox.close()
         if report is None:
