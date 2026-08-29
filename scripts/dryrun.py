@@ -258,8 +258,9 @@ def main() -> int:
         return LLM(budget_usd=args.budget, cap_on="work")
 
     def announce(record) -> None:
+        why = record.error or getattr(record, "failure_reason", None) or ""
         print(f"  [cell] {record.task:30s} {record.status:9s} "
-              f"${record.billed_usd:6.4f} {record.error or ''}", flush=True)
+              f"${record.billed_usd:6.4f} {str(why)[:160]}", flush=True)
 
     coverage: dict[str, tuple] = {}
     if args.substrate == "live" and not args.no_coverage:

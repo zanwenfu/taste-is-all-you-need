@@ -32,6 +32,9 @@ _STOP_REASONS = {
 }
 
 
+ANTHROPIC_TIMEOUT_S = 900.0
+
+
 class AnthropicProvider:
     name = "anthropic"
 
@@ -52,7 +55,14 @@ class AnthropicProvider:
 
             # max_retries=0: the facade owns retry policy, so it cannot
             # differ between providers or double up with the SDK's own.
-            self._client = anthropic.Anthropic(api_key=self._api_key, max_retries=0)
+            # An explicit client timeout, not the SDK default: with the 32K
+            # output ceiling the SDK's non-streaming heuristic ("may take
+            # longer than 10 minutes") raises before any request is sent, and
+            # every Claude call became an infra failure. Defect 36 -- found
+            # only because a whole sweep aborted on it.
+            self._client = anthropic.Anthropic(
+                api_key=self._api_key, max_retries=0, timeout=ANTHROPIC_TIMEOUT_S
+            )
         return self._client
 
     # ------------------------------------------------------------ calls

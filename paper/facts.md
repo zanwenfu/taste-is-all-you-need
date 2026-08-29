@@ -300,3 +300,12 @@ Source: /tmp/obsdist.py. Reassigning three of the six bearing runs removes signi
 | django__django-11133 | `tests/runtests.py --parallel=4 -v0` | 111 s | FAILED: failures=10, errors=87, skipped=902, xfail=4 (baseline-dead in the image) | /tmp/fullsuite.log on the box |
 | pytest-dev__pytest-6197 | `pytest testing -q` | 3 s | 2 collection errors — the image cannot run its own full suite unscoped; not a usable timing | manual run |
 | scoped gate run (member files) / replay | — | 4–8 s per observation | — | §3 replay timing |
+
+## Defect 36 — Anthropic SDK non-streaming timeout heuristic (found 2026-08-29 on the Live Claude sweep)
+
+| quantity | value | source |
+|---|---|---|
+| symptom | every Claude cell on Live: status infra after the planner call ($0.03–0.05), `ValueError: Streaming is required for operations that may take longer than 10 minutes` | /root/live40c_A3 (first launch, aborted by the circuit breaker after 6 cells, $0.22) |
+| cause | the 32K output ceiling (defect D10 fix) makes the SDK's default-timeout heuristic refuse non-streaming requests; the client was built without an explicit timeout | taste/providers/_anthropic.py |
+| fix | `anthropic.Anthropic(..., timeout=900.0)`; test asserts the explicit timeout | commit after 9a5d84d |
+| scope | Claude Verified data predate the ceiling change and are unaffected; the sweep-level infra reason was invisible in the driver's cell line (now printed) | ledger `failure_reason` |
