@@ -42,6 +42,8 @@ def esc(t: str) -> str:
         t = t.replace(a, b)
     t = t.replace("λ̂", r"$\hat\lambda$").replace("≥", r"$\geq$").replace("≤", r"$\leq$").replace("×", r"$\times$").replace("→", r"$\rightarrow$").replace("—", "---").replace("–", "--").replace("≈", r"$\approx$")
     t = t.replace("✓", r"\cmark{}").replace("✗", r"\xmark{}").replace("§", r"\S")
+    for d, m in zip("₀₁₂₃₄₅₆₇₈₉ₙ", "0123456789n"):
+        t = t.replace(d, "$_" + m + "$")
     return t
 
 def inline(t: str) -> str:

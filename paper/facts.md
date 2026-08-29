@@ -358,3 +358,18 @@ Source: /tmp/obsdist.py. Reassigning three of the six bearing runs removes signi
 | cross-stack on 39 shared | GPT bearing 6, Claude 3, both 3 (reflex-4129, sphinx-12975, tox-3388); one-sided Fisher p = 0.24 | inline |
 
 Live model spend total: $10.29 + $49.80 + $11.49 + $8.95 = $80.53 (plus $0.22 aborted first Claude launch and ~$2 of killed in-flight cells).
+
+## Slice oracle sizes and provenance (added 2026-08-29 after the final review)
+
+| quantity | value | source |
+|---|---|---|
+| Live slice (39 graded) median PASS_TO_PASS | 1,189 | /tmp/facts2.py |
+| Verified slice (40) median PASS_TO_PASS | 58 | same |
+| ratio | 20.5× | same |
+| Live lite (300) median | 1,710 | same |
+| Live slice created_at | 2024-10-02 to 2024-11-13 | same |
+| Live golden checks | cfn-lint-3798 (resolved_fresh; rotted oracle), pvlib-2249 (resolved_fresh), reflex-4087 (poetry; resolved, null unresolved) | /root/livegolden*.log |
+| defects after the census | 29 symlink sync, 30 patch-killed suite, 31 rescore grading, 32 .taste leak, 33 pip into venv, 34 container names, 35 dataset/parser id drift, 36 Anthropic timeout heuristic | research log |
+| Claude Live torchtune cell | resolved False, 0 events, not contaminated (grade 558/558) — exclusion changes only the denominator | live40c_A3_all |
+| Claude Live contaminated cell | kubernetes-client-2303: suite-killed final tree (0/245) | live40c_A3_all |
+| instructlab-2572 (Live gated) | 13 failing tests beyond baseline-dead, 7 in tests/test_lab_init.py, the file the hidden test patch rewrites | live40_A3reg_all |
