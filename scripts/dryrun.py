@@ -217,7 +217,7 @@ def main() -> int:
                     reason = check(sb, i)
                 finally:
                     sb.close()
-            except Exception as exc:  # noqa: BLE001 - infrastructure, reported not hidden
+            except Exception as exc:
                 reason = f"container: {exc}"
             (kept if reason is None else dropped).append((i, reason))
             print(f"  [precheck] {i.instance_id:36s} {'ok' if reason is None else 'DROP: ' + str(reason)[:120]}", flush=True)

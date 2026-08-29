@@ -56,9 +56,17 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
     ap.add_argument("--dataset", default="data/verified.jsonl")
+    ap.add_argument("--substrate", choices=["verified", "live"], default="verified")
     args = ap.parse_args()
 
-    instances = {i.instance_id: i for i in swebench.load_dataset(Path(args.dataset))}
+    if args.substrate == "live":
+        from taste.benchmarks import swebenchlive as live
+
+        if args.dataset == "data/verified.jsonl":
+            args.dataset = "data/live_lite.jsonl"
+        instances = {i.instance_id: i for i in live.load_live_dataset(Path(args.dataset))}
+    else:
+        instances = {i.instance_id: i for i in swebench.load_dataset(Path(args.dataset))}
     graded = resolved = held_cells = watched_cells = held_total = watched_total = 0
     rows = []
     for inst_id, d in sorted(load_evidence(Path(args.root)).items()):

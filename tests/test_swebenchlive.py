@@ -185,3 +185,26 @@ def test_parity_refuses_when_collection_dies() -> None:
     )
     reason = live_parity_check(sandbox, _instance())
     assert reason is not None and "collect" in reason
+
+
+def test_runner_prefix_follows_the_instance_test_command() -> None:
+    """Poetry- and pdm-managed Live repositories keep their environment off
+    PATH; every instrument command must carry the repository's own runner."""
+    from taste.benchmarks.swebenchlive import (
+        LiveInstance,
+        build_live_gate_script,
+        build_live_probe_script,
+        runner_prefix,
+        venv_on_path_script,
+    )
+    base = dict(instance_id="x__y-1", repo="x/y", base_commit="0" * 40, problem_statement="",
+                test_patch="", fail_to_pass=("tests/test_a.py::test_f",), pass_to_pass=("tests/test_a.py::test_g",),
+                log_parser="pytest")
+    poetry = LiveInstance(test_cmds=("poetry run pytest -rA",), **base)
+    plain = LiveInstance(test_cmds=("pytest -rA tests",), **base)
+    assert runner_prefix(poetry) == "poetry run " and runner_prefix(plain) == ""
+    assert "poetry run python -m pytest -rA tests/test_a.py" in build_live_probe_script(poetry)
+    assert "poetry run python -m pytest -rA tests/test_a.py" in build_live_gate_script(poetry, ["tests/test_a.py"])
+    assert build_live_probe_script(plain).count("poetry") == 0
+    assert venv_on_path_script(plain) is None
+    assert "/etc/profile.d/taste_venv.sh" in venv_on_path_script(poetry)

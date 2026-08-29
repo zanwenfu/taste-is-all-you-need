@@ -47,6 +47,8 @@ __all__ = [
     "load_live_dataset",
     "parse_live_output",
     "probe_files",
+    "runner_prefix",
+    "venv_on_path_script",
 ]
 
 START_MARKER = "TASTE_START_TEST_OUTPUT"
@@ -113,6 +115,40 @@ def _as_list(value) -> list[str]:
     return [str(v) for v in value]
 
 
+_RUNNERS = ("poetry run", "pdm run", "uv run", "pipenv run")
+
+
+def runner_prefix(instance: LiveInstance) -> str:
+    """The repository's own test runner, from its first ``test_cmds`` entry.
+
+    A third of Live's repositories keep their environment in a poetry or pdm
+    virtualenv that is not on the image's PATH: bare ``python -m pytest``
+    then finds the system interpreter with nothing installed, and the parity
+    check refuses the cell. Every command the instrument runs on such an
+    instance carries this prefix (``"poetry run "``); the empty string means
+    the environment is on PATH, as RepoLaunch images usually have it.
+    """
+    first = instance.test_cmds[0].strip() if instance.test_cmds else ""
+    for runner in _RUNNERS:
+        if first.startswith(runner + " "):
+            return runner + " "
+    return ""
+
+
+def venv_on_path_script(instance: LiveInstance, *, workdir: str = "/testbed") -> str | None:
+    """A one-time, container-local step that puts the runner's virtualenv on
+    the login-shell PATH, so the AGENT's bare ``pytest`` and ``python`` hit
+    the environment the benchmark grades (the instrument's own commands use
+    ``runner_prefix`` and do not depend on this). None when nothing to do."""
+    prefix = runner_prefix(instance)
+    if not prefix:
+        return None
+    return (
+        f"cd {workdir} && venv=$({prefix}python -c 'import sys; print(sys.prefix)' 2>/dev/null) && "
+        f"test -d \"$venv/bin\" && printf 'export PATH=%s/bin:$PATH\\n' \"$venv\" > /etc/profile.d/taste_venv.sh"
+    )
+
+
 def probe_files(instance: LiveInstance) -> tuple[str, ...]:
     """The files the oracle lives in, from the members' own id prefixes.
 
@@ -149,7 +185,7 @@ def build_live_probe_script(instance: LiveInstance, *, workdir: str = "/testbed"
     files = probe_files(instance)
     if files:
         joined = " ".join(files)
-        commands = [f"python -m pytest -rA {joined}"]
+        commands = [f"{runner_prefix(instance)}python -m pytest -rA {joined}"]
         restore = f"git checkout -q taste-baseline -- {joined} 2>/dev/null || true"
     else:
         commands = list(instance.test_cmds)
@@ -176,7 +212,7 @@ def build_live_gate_script(instance: LiveInstance, files, *, workdir: str = "/te
     left; the instrument's replay restores). Bracketed like the probe so
     ``parse_live_output`` reads only the run."""
     files = list(files) or list(probe_files(instance))
-    body = f"python -m pytest -rA {' '.join(files)}" if files else "\n".join(instance.test_cmds)
+    body = f"{runner_prefix(instance)}python -m pytest -rA {' '.join(files)}" if files else "\n".join(instance.test_cmds)
     return "\n".join(("exec 2>&1", f"cd {workdir}", f"echo '{START_MARKER}'", body, f"echo '{END_MARKER}'"))
 
 
@@ -298,13 +334,19 @@ def live_parity_check(sandbox, instance: LiveInstance) -> str | None:
     Collection imports the package under test — a bare uninstalled checkout
     (bug 20's signature) dies here, before any model call."""
     run = getattr(sandbox, "exec_in_env", sandbox.exec)
-    python = run("python -c 'import sys; print(sys.version.split()[0])'", timeout=60)
+    prefix = runner_prefix(instance)
+    setup = venv_on_path_script(instance, workdir=sandbox.workdir)
+    if setup is not None:
+        placed = sandbox.exec(setup, timeout=120)
+        if placed.exit_code != 0:
+            return f"{prefix.strip()} environment not found: {(placed.stderr or placed.stdout)[-200:]}"
+    python = run(f"{prefix}python -c 'import sys; print(sys.version.split()[0])'", timeout=120)
     if python.exit_code != 0:
         return f"no working python on the agent's PATH: {(python.stderr or python.stdout)[-200:]}"
     files = probe_files(instance)
     if files:
         collect = run(
-            f"cd {sandbox.workdir} && python -m pytest --collect-only -q {' '.join(files)}",
+            f"cd {sandbox.workdir} && {prefix}python -m pytest --collect-only -q {' '.join(files)}",
             timeout=300,
         )
         if collect.exit_code not in (0, 5):
