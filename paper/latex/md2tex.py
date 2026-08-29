@@ -136,7 +136,7 @@ def convert(md: str) -> str:
                 rows.append(lines[i]); i += 1
             label = re.sub(r"[^a-z0-9]+", "-", caption.lower()[:24]).strip("-")
             out.append(r"\begin{table}[t]\caption{" + inline(caption) + "}\label{tab:" + label + "}"
-                       + "\n" + table(rows).replace(r"\begin{center}\footnotesize", r"\centering\footnotesize").replace(r"\end{tabular}\end{center}", r"\end{tabular}")
+                       + "\n" + table(rows).replace(r"\begin{center}\footnotesize", r"\centering\scriptsize").replace(r"\end{tabular}\end{center}", r"\end{tabular}")
                        + "\n" + r"\end{table}"); continue
         if ln.startswith("|"):
             rows = []
