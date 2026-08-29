@@ -309,3 +309,16 @@ Source: /tmp/obsdist.py. Reassigning three of the six bearing runs removes signi
 | cause | the 32K output ceiling (defect D10 fix) makes the SDK's default-timeout heuristic refuse non-streaming requests; the client was built without an explicit timeout | taste/providers/_anthropic.py |
 | fix | `anthropic.Anthropic(..., timeout=900.0)`; test asserts the explicit timeout | commit after 9a5d84d |
 | scope | Claude Verified data predate the ceiling change and are unaffected; the sweep-level infra reason was invisible in the driver's cell line (now printed) | ledger `failure_reason` |
+
+## SWE-bench Live, GPT-5.6 gated (A3reg), 2026-08-29 — first Live arm to complete
+
+| quantity | value | source |
+|---|---|---|
+| cells | 40: 32 completed, 6 failed, 1 budget, 1 error (torchtune-1806: gate baseline suite exceeded the 20-min budget) → 39 graded | /root/live40_A3reg_all (two shards merged) |
+| resolve, Live's strict rule | 1/40 (kubernetes-client-2303) | scripts/substrate_table.py |
+| resolve, rot-aware (all F2P pass, no failure beyond baseline-dead) | 4/40 | same |
+| cells with baseline-dead P2P tests (time rot in the raw image) | 15/39 | /tmp/live_diag.py |
+| declared events / incidents / bearing runs | 280 / 6 / 3 of 39 (tox-3409 alone 263 events; reflex-4129 11; sphinx-12975 6) | pilotstats, diag |
+| contaminated final trees (recorded failures beyond baseline-dead) | 2: instructlab-2572 (13), pvlib-2286 (suite killed; run ended on budget exhaustion mid-step, $6.95 work ≥ $4 cap; replay records the final state as a hole, grade records 0/1189) | diag, sidecar |
+| spend | $11.49 | ledger |
+| held-out check | full gate (no split) — all 46,820 P2P ids watched | scripts/heldout.py --substrate live |

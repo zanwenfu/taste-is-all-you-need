@@ -42,20 +42,40 @@ def row(label: str, root: Path, slice_size: int = 40) -> str:
     events = sum(int(d.get("contamination_events_declared") or 0) for d in ev.values())
     incidents = sum(len({e.get("onset_seq") for e in (d.get("episodes") or [])}) for d in ev.values())
     bearing = sum(1 for d in ev.values() if (d.get("contamination_events_declared") or 0) > 0)
-    contaminated = 0
+    contaminated = fresh = 0
     for d in graded:
         g = d.get("grade") or {}
-        if g.get("pass_to_pass"):
-            passed, total = (int(x) for x in g["pass_to_pass"].split("/"))
-            if total - passed - len(d.get("never_passed") or []) > 0:
-                contaminated += 1
-    return (f"| {label} | {len(graded)} | {resolved}/{slice_size} ({100 * resolved / slice_size:.0f}%) | {events} | "
+        # Recorded failures beyond the baseline-dead set. On Live a graded test
+        # absent from the log blocks nothing (their rule), so "total - passed"
+        # over-counts; the recorded failure list is the honest signal on both
+        # substrates.
+        dead = set(d.get("never_passed") or [])
+        if "grade_failed" in d:
+            failed = set(d.get("grade_failed") or []) - dead
+        else:
+            # Older sidecars carry only the counts; there a graded test absent
+            # from the log was scored failed (upstream's rule), so the count
+            # formula is exact for them.
+            failed = set()
+            if g.get("pass_to_pass"):
+                passed, total = (int(x) for x in g["pass_to_pass"].split("/"))
+                if total - passed - len(dead) > 0:
+                    failed = {"(count)"}
+        if failed:
+            contaminated += 1
+        f2p = g.get("fail_to_pass", "")
+        f2p_ok = bool(f2p) and f2p.split("/")[0] == f2p.split("/")[1]
+        # Rot-aware resolve: every target test passes and nothing fails that
+        # the unmodified image had not already lost (the golden check's rule).
+        if f2p_ok and not failed:
+            fresh += 1
+    return (f"| {label} | {len(graded)} | {resolved}/{slice_size} ({100 * resolved / slice_size:.0f}%) | {fresh}/{slice_size} | {events} | "
             f"{incidents} | {bearing}/{len(ev)} | {contaminated} | ${spend(root):.2f} |")
 
 
 def main() -> int:
-    print("| substrate: arm | graded | resolved | events | incidents | bearing runs | contaminated trees | spend |")
-    print("|---|---|---|---|---|---|---|---|")
+    print("| substrate: arm | graded | resolved (strict) | resolved (rot-aware) | events | incidents | bearing runs | contaminated trees | spend |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for spec in sys.argv[1:]:
         label, root = spec.split("=", 1)
         print(row(label.replace(":", ": "), Path(root)))
