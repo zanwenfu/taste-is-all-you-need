@@ -322,3 +322,24 @@ Source: /tmp/obsdist.py. Reassigning three of the six bearing runs removes signi
 | contaminated final trees (recorded failures beyond baseline-dead) | 2: instructlab-2572 (13), pvlib-2286 (suite killed; run ended on budget exhaustion mid-step, $6.95 work ≥ $4 cap; replay records the final state as a hole, grade records 0/1189) | diag, sidecar |
 | spend | $11.49 | ledger |
 | held-out check | full gate (no split) — all 46,820 P2P ids watched | scripts/heldout.py --substrate live |
+
+## SWE-bench Live, Claude rollback (A3, claude-opus-4-7 / claude-sonnet-4-6), 2026-08-29
+
+| quantity | value | source |
+|---|---|---|
+| cells | 40: 21 completed, 17 failed, 2 budget → 40 graded | /root/live40c_A3_all |
+| resolve strict / rot-aware | 2/40 / 3/40 | scripts/substrate_table.py |
+| declared events / incidents / bearing runs | 49 / 6 / 3 of 40 (7.5%, exact CI 1.6–20.4%) | pilotstats |
+| contaminated final trees | 1 | substrate_table |
+| spend | $49.80 | ledger |
+| note | the Verified Claude sweep produced 0 events in 40 runs; on Live the same stack produces events | — |
+
+## SWE-bench Live, GPT-5.6 no recovery (A0), 2026-08-29
+
+| quantity | value | source |
+|---|---|---|
+| cells | 39 graded (torchtune-1806 excluded from every Live arm: its suite exceeds the gate's 20-min baseline budget and makes each replay observation take tens of minutes on this machine) | /root/live40_A0_all |
+| resolve strict / rot-aware | 4/40 / 6/40 | substrate_table |
+| declared events / incidents / bearing runs | 30 / 4 / 4 of 39 | pilotstats |
+| contaminated final trees | 4 | substrate_table |
+| spend | $8.95 | ledger |

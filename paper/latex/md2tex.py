@@ -127,6 +127,17 @@ def convert(md: str) -> str:
             out.append(r"\begin{figure}[t]\centering\includegraphics[width=" + width + r"\linewidth]{" + path + "}"
                        + r"\caption{" + inline(cap) + "}\label{fig:" + label + "}\end{figure}")
             i += 1; continue
+        if ln.startswith("Table: "):
+            caption = ln[len("Table: "):].strip(); i += 1
+            while i < len(lines) and not lines[i].startswith("|"):
+                i += 1
+            rows = []
+            while i < len(lines) and lines[i].startswith("|"):
+                rows.append(lines[i]); i += 1
+            label = re.sub(r"[^a-z0-9]+", "-", caption.lower()[:24]).strip("-")
+            out.append(r"\begin{table}[t]\caption{" + inline(caption) + "}\label{tab:" + label + "}"
+                       + "\n" + table(rows).replace(r"\begin{center}\footnotesize", r"\centering\footnotesize").replace(r"\end{tabular}\end{center}", r"\end{tabular}")
+                       + "\n" + r"\end{table}"); continue
         if ln.startswith("|"):
             rows = []
             while i < len(lines) and lines[i].startswith("|"):
@@ -169,6 +180,8 @@ def convert(md: str) -> str:
         return ("Figure~\\ref{" + labels[n-1] + "}") if 0 < n <= len(labels) else m.group(0)
     body = "\n\n".join(out)
     body = re.sub(r"Figure (\d)(?!\d)", figref, body)
+    tlabels = re.findall(r"\\label\{(tab:[^}]+)\}", body)
+    body = re.sub(r"Table (\d)(?!\d)", lambda m: ("Table~\\ref{" + tlabels[int(m.group(1)) - 1] + "}") if 0 < int(m.group(1)) <= len(tlabels) else m.group(0), body)
     pre = PREAMBLE.replace("TITLE_PLACEHOLDER", title_tex)
     if "\\appendix" in body:
         head, _, tail = body.partition("\\appendix")
