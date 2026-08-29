@@ -808,6 +808,22 @@ REPO_MODULES = {
 }
 
 
+def lenient_data_filter(skipped: list[str]):
+    """``tarfile``'s data filter, except that a member it would refuse (an
+    absolute link, a link or path escaping the destination) is skipped and
+    recorded instead of aborting the whole extraction."""
+    import tarfile
+
+    def _filter(member, path):
+        try:
+            return tarfile.data_filter(member, path)
+        except tarfile.FilterError:
+            skipped.append(member.name)
+            return None
+
+    return _filter
+
+
 def materialize_from_image(
     sandbox, instance: SWEInstance, workspace: Path
 ) -> Path:
@@ -845,7 +861,14 @@ def materialize_from_image(
     import tarfile
 
     with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
-        archive.extractall(workspace, filter="data")
+        skipped: list[str] = []
+        archive.extractall(workspace, filter=lenient_data_filter(skipped))
+    if skipped:
+        # Bug 29's family: a tree that ships absolute or escaping links (tox's
+        # fixture virtualenvs) must not abort the cell on the host side. The
+        # container's tree is intact -- the agent runs there -- and the host
+        # copy is for the timeline; the skipped paths are visible, not silent.
+        print(f"  [materialize] {instance.instance_id}: skipped {len(skipped)} untransportable link(s)", flush=True)
     return _init_workspace(instance, workspace)
 
 

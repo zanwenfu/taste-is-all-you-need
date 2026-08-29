@@ -661,3 +661,24 @@ def test_rescore_wires_the_grader() -> None:
     re-scorer must construct its scorer with a grader."""
     src = (Path(__file__).resolve().parent.parent / "scripts" / "rescore.py").read_text()
     assert "grade=make_grade()" in src
+
+
+def test_materialize_skips_untransportable_links_instead_of_aborting(tmp_path) -> None:
+    """tox's image ships a fixture virtualenv with absolute symlinks; the host
+    copy must skip and record them, never abort the cell (bug 29's family)."""
+    import io
+    import tarfile
+
+    from taste.benchmarks.swebench import lenient_data_filter
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        data = b"print(1)\n"
+        info = tarfile.TarInfo("pkg/a.py"); info.size = len(data); tar.addfile(info, io.BytesIO(data))
+        link = tarfile.TarInfo("pkg/pip"); link.type = tarfile.SYMTYPE; link.linkname = "/usr/bin/pip"; tar.addfile(link)
+    buf.seek(0)
+    skipped: list[str] = []
+    with tarfile.open(fileobj=buf) as tar:
+        tar.extractall(tmp_path, filter=lenient_data_filter(skipped))
+    assert (tmp_path / "pkg" / "a.py").read_text() == "print(1)\n"
+    assert skipped == ["pkg/pip"]

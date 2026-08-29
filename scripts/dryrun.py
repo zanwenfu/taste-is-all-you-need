@@ -45,7 +45,11 @@ from taste.viz import write_index, write_run
 def image_for(instance: swebench.SWEInstance) -> str:
     """SWE-bench's published naming. Defined on the instance so the sweep
     driver and the re-scorer cannot drift into two different tags."""
-    return instance.published_image
+    image = instance.published_image
+    # Live's convention carries no tag; `docker images` lists `repo:latest`,
+    # and a pool filtered on the bare name is empty -- every instance skipped
+    # as "not pulled" while 48 images sit on disk.
+    return image if ":" in image.rsplit("/", 1)[-1] else f"{image}:latest"
 
 
 def local_images() -> set[str]:
