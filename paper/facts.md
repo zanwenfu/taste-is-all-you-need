@@ -343,3 +343,18 @@ Source: /tmp/obsdist.py. Reassigning three of the six bearing runs removes signi
 | declared events / incidents / bearing runs | 30 / 4 / 4 of 39 | pilotstats |
 | contaminated final trees | 4 | substrate_table |
 | spend | $8.95 | ledger |
+
+## SWE-bench Live, GPT-5.6 rollback (A3), 2026-08-29 — final
+
+| quantity | value | source |
+|---|---|---|
+| cells | 39 graded (13 completed, 26 failed; torchtune excluded) | /root/live40_A3_all (shards s1, s2, s3 merged) |
+| resolve strict / rot-aware | 0/40 / 2/40 | substrate_table |
+| declared events / incidents / bearing runs | 156 / 9 / 6 of 39 (15.4%, exact CI 5.9–30.5%); sphinx-12975 alone 127 events | pilotstats, diag |
+| contaminated final trees | 0 | substrate_table |
+| spend | $10.29 | ledger |
+| paired vs no recovery (39 shared) | contamination: none worse on 4, better on 0, sign p = 0.125; onset: none fewer on 4, more on 1, p = 0.375; resolve 0 vs 4 | contrast.py |
+| paired vs gated (39 shared) | contamination: gated worse on 2, better 0, p = 0.50; onset: gated more 2, fewer 5, p = 0.45 | contrast.py |
+| cross-stack on 39 shared | GPT bearing 6, Claude 3, both 3 (reflex-4129, sphinx-12975, tox-3388); one-sided Fisher p = 0.24 | inline |
+
+Live model spend total: $10.29 + $49.80 + $11.49 + $8.95 = $80.53 (plus $0.22 aborted first Claude launch and ~$2 of killed in-flight cells).

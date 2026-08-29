@@ -105,12 +105,12 @@ Table: Every arm on both substrates: resolved of 40 (Live: strict rule, rot-awar
 | Verified | GPT-5.6 split-gated | 28 | 14 | 4 | 3/40 | 0 | $9.40 |
 | Verified | GPT-5.6 repair-in-place | 24 | 84 | 7 | 7/40 | 5 | $14.73 |
 | Verified | GPT-5.6 no recovery | 22 | 19 | 3 | 3/40 | 9 | $4.40 |
-| Live | GPT-5.6 rollback | 0 (2) | 156 | 9 | 6/37 | 0 | $9.54 |
+| Live | GPT-5.6 rollback | 0 (2) | 156 | 9 | 6/39 | 0 | $10.29 |
 | Live | Claude rollback | 2 (3) | 49 | 6 | 3/40 | 1 | $49.80 |
 | Live | GPT-5.6 gated | 1 (4) | 280 | 6 | 3/39 | 2 | $11.49 |
 | Live | GPT-5.6 no recovery | 4 (6) | 30 | 4 | 4/39 | 4 | $8.95 |
 
-The same instrument and analysis, unchanged, ran on the Live slice (Table 1). Resolve collapsed for every arm, to at most 6 of 40 even rot-aware against 22 to 28 on Verified, so the recovery contrast on resolve is uninformative on Live and the Verified rates of this harness owe much to contamination [6, 46]. The undercount replicated: GPT-5.6 rollback recorded 156 events in 9 incidents across 6 of 37 runs and left no contaminated final tree, while no recovery left one in each of its 4 bearing runs (worse than rollback on 4 shared instances, better on 0; sign test p = 0.125). The stack difference did not: the Claude stack, silent on Verified, produced 49 events in 3 bearing runs on Live against GPT-5.6's 6 of 37 (one-sided Fisher p = 0.24), and its three bearing instances bore events under GPT-5.6 too. On Verified, then, the Claude zero reads as memorised fixes rather than a cleaner model.
+The same instrument and analysis, unchanged, ran on the Live slice (Table 1). Resolve collapsed for every arm, to at most 6 of 40 even rot-aware against 22 to 28 on Verified, so the recovery contrast on resolve is uninformative on Live and the Verified rates of this harness owe much to contamination [6, 46]. The undercount replicated: GPT-5.6 rollback recorded 156 events in 9 incidents across 6 of 39 runs and left no contaminated final tree, while no recovery left one in each of its 4 bearing runs (worse than rollback on 4 shared instances, better on 0; sign test p = 0.125). The stack difference did not: the Claude stack, silent on Verified, produced 49 events in 3 bearing runs on Live against GPT-5.6's 6 of 39 (one-sided Fisher p = 0.24), and its three bearing instances bore events under GPT-5.6 too. On Verified, then, the Claude zero reads as memorised fixes rather than a cleaner model.
 
 ## 6. Discussion
 
