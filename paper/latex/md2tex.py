@@ -14,7 +14,8 @@ OUT = Path(__file__).resolve().parent / "main.tex"
 
 PREAMBLE = r"""\documentclass{article}
 \PassOptionsToPackage{numbers,sort&compress}{natbib}
-\usepackage{neurips_2026}
+\usepackage[dblblindworkshop]{neurips_2026}
+\workshoptitle{AgenticOS}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{booktabs}
@@ -172,8 +173,8 @@ def convert(md: str) -> str:
     if "\\appendix" in body:
         head, _, tail = body.partition("\\appendix")
         body = head + "\n".join(bib) + "\n\n\\appendix" + tail
-        return pre + body + "\n\\end{document}\n"
-    return pre + body + "\n\n" + "\n".join(bib) + "\n\\end{document}\n"
+        return pre + body + "\n\\newpage\n\\input{checklist.tex}\n\\end{document}\n"
+    return pre + body + "\n\n" + "\n".join(bib) + "\n\\newpage\n\\input{checklist.tex}\n\\end{document}\n"
 
 if __name__ == "__main__":
     OUT.write_text(convert(SRC.read_text()))
