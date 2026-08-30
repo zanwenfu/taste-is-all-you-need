@@ -138,14 +138,25 @@ class ScaffoldStats:
     cache_delta_usd: float = 0.0
 
 
-def load_scaffold_config(model_name: str | None = None, *, cost_limit: float | None = None) -> dict:
-    """The scaffold's own SWE-bench config, with only the model name swapped."""
+def load_scaffold_config(
+    model_name: str | None = None, *, cost_limit: float | None = None, model_class: str | None = None
+) -> dict:
+    """The scaffold's own SWE-bench config, with only the model name swapped.
+
+    ``model_class`` selects one of the scaffold's own model layers (e.g.
+    ``litellm_response`` for the Responses API, which its leaderboard uses
+    for GPT-5-class models; under chat completions gpt-5.6-sol answered
+    three times without a tool call and the scaffold exited with
+    RepeatedFormatError).
+    """
     import yaml
     from minisweagent.config import get_config_path
 
     config = yaml.safe_load(Path(get_config_path("swebench.yaml")).read_text(encoding="utf-8"))
     if model_name:
         config.setdefault("model", {})["model_name"] = model_name
+    if model_class:
+        config.setdefault("model", {})["model_class"] = model_class
     if cost_limit is not None:
         config.setdefault("agent", {})["cost_limit"] = cost_limit
     return config
@@ -244,7 +255,9 @@ def build_run_result(
     )
 
 
-def make_miniswe_execute(*, model_name: str, cost_limit: float | None = None, model_factory=None):
+def make_miniswe_execute(
+    *, model_name: str, cost_limit: float | None = None, model_class: str | None = None, model_factory=None
+):
     """Build the ``execute`` callable for ``run_sweep``: one mini-swe-agent run per cell.
 
     ``model_factory`` (a zero-arg callable returning a scaffold ``Model``)
@@ -259,7 +272,7 @@ def make_miniswe_execute(*, model_name: str, cost_limit: float | None = None, mo
 
         if ctx.agent_sandbox is None:
             raise RuntimeError("mini-swe-agent must run routed (a pinned container); refusing the host path")
-        config = load_scaffold_config(model_name, cost_limit=cost_limit)
+        config = load_scaffold_config(model_name, cost_limit=cost_limit, model_class=model_class)
         started = time.time()
         session_id = uuid.uuid4().hex[:8]
         ctx.session = session_id

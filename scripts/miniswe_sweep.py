@@ -58,6 +58,8 @@ def main() -> int:
     ap.add_argument("--model", default="anthropic/claude-sonnet-4-6",
                     help="litellm model name for the scaffold (default: the paper's Claude worker snapshot).")
     ap.add_argument("--cost-limit", type=float, default=None, help="Override the scaffold's per-instance cost limit (default: its config, $3).")
+    ap.add_argument("--model-class", default=None,
+                    help="One of the scaffold's model layers, e.g. litellm_response (Responses API) for GPT-5-class models.")
     ap.add_argument("--scripted", action="store_true", help="No model: replay fixed commands ($0 path check).")
     ap.add_argument("--root", default="/tmp/taste-mswe")
     ap.add_argument("--skip-completed", action="store_true")
@@ -105,7 +107,7 @@ def main() -> int:
 
     provider = DockerProvider(env_prefix="") if args.substrate == "live" else DockerProvider()
     execute = make_miniswe_execute(
-        model_name=args.model, cost_limit=args.cost_limit,
+        model_name=args.model, cost_limit=args.cost_limit, model_class=args.model_class,
         model_factory=(lambda: ScriptedModel(list(SMOKE_COMMANDS))) if args.scripted else None,
     )
 
