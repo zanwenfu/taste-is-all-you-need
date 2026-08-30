@@ -674,8 +674,13 @@ def test_materialize_skips_untransportable_links_instead_of_aborting(tmp_path) -
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
         data = b"print(1)\n"
-        info = tarfile.TarInfo("pkg/a.py"); info.size = len(data); tar.addfile(info, io.BytesIO(data))
-        link = tarfile.TarInfo("pkg/pip"); link.type = tarfile.SYMTYPE; link.linkname = "/usr/bin/pip"; tar.addfile(link)
+        info = tarfile.TarInfo("pkg/a.py")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+        link = tarfile.TarInfo("pkg/pip")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/usr/bin/pip"
+        tar.addfile(link)
     buf.seek(0)
     skipped: list[str] = []
     with tarfile.open(fileobj=buf) as tar:
