@@ -29,7 +29,11 @@ from taste.execution import DockerProvider
 SMOKE_COMMANDS = [
     "ls",
     "printf 'x = 1\\n' > taste_smoke_note.py",
-    "rm -f taste_smoke_note.py",
+    # What the scaffold's own workflow relies on: git must still show the
+    # edit on the *next* command (transparent sync, not an advancing baseline).
+    "git status --porcelain && git log --oneline | wc -l",
+    "sed -i '1s/^/# smoke\\n/' setup.py 2>/dev/null || sed -i '1s/^/# smoke\\n/' setup.cfg; git diff --stat",
+    "git checkout -- . && rm -f taste_smoke_note.py && git status --porcelain | wc -l",
     "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git diff",
 ]
 

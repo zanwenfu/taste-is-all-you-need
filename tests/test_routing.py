@@ -111,6 +111,48 @@ def test_a_container_side_deletion_reaches_the_host(testbed: Path, tmp_path: Pat
     assert not (ws / "doomed.py").exists()
 
 
+# ------------------------------------------------------------ transparent mode
+
+
+def test_transparent_mode_keeps_git_diff_meaningful_for_the_agent(testbed: Path, tmp_path: Path) -> None:
+    """An agent that verifies its edit with git must see it there.
+
+    Against an advancing baseline the edit is committed by the sync the
+    moment the command returns, so the agent's next ``git diff`` is empty
+    and ``git status`` is clean — mini-swe-agent's first paid pilot spent
+    eight steps on exactly that. Transparent mode leaves HEAD alone.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "lib.py").write_text((testbed / "lib.py").read_text())
+    router = SandboxRouter(LocalSandbox(testbed), ws, workdir=str(testbed), advance_baseline=False)
+
+    router.exec("printf 'def rate():\\n    return 2\\n' > lib.py")
+    assert (ws / "lib.py").read_text().endswith("return 2\n"), "the host must still receive the edit"
+    diff = router.exec("git diff")
+    assert "+    return 2" in diff.stdout, "the agent's own git diff must show its edit"
+    status = router.exec("git status --porcelain")
+    assert status.stdout.strip().startswith("M"), status.stdout
+    assert _git(testbed, "log", "--oneline").count("\n") == 1, "no sync commits may appear"
+
+    # The host keeps following later edits too — the pull is idempotent.
+    router.exec("printf 'def rate():\\n    return 3\\n' > lib.py")
+    assert (ws / "lib.py").read_text().endswith("return 3\n")
+
+
+def test_transparent_mode_pulls_work_the_agent_committed(testbed: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "lib.py").write_text((testbed / "lib.py").read_text())
+    router = SandboxRouter(LocalSandbox(testbed), ws, workdir=str(testbed), advance_baseline=False)
+    router.exec("printf 'x = 1\\n' > committed.py && git add committed.py && git -c user.name=a -c user.email=a@b commit -qm agent")
+    assert (ws / "committed.py").read_text() == "x = 1\n", "a commit must not hide work from the pull"
+    router.exec("rm lib.py")
+    assert not (ws / "lib.py").exists(), "a deletion against the baseline must reach the host"
+    # A pull on an unchanged tree changes nothing and raises nothing.
+    assert router.pull() == ("committed.py",)
+
+
 def test_junk_from_a_test_run_never_crosses_the_boundary(
     testbed: Path, tmp_path: Path
 ) -> None:

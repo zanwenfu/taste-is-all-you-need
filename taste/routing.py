@@ -140,6 +140,7 @@ class SandboxRouter:
         workspace: Path,
         *,
         workdir: str = "/testbed",
+        advance_baseline: bool = True,
     ) -> None:
         self.sandbox = sandbox
         self.workspace = Path(workspace)
@@ -149,7 +150,18 @@ class SandboxRouter:
         #: Paths pull could not transport (symlinks, vanished files) — counted
         #: rather than silently dropped.
         self.skipped: list[str] = []
-        prepare_container_tree(sandbox, workdir=workdir)
+        #: ``advance_baseline=False`` is the transparent mode for an agent
+        #: that reads git itself. The harness's Worker never runs git in the
+        #: container, so advancing the sync commit after every transfer was
+        #: invisible to it; mini-swe-agent verifies its work with ``git
+        #: diff`` and ``git status``, and against an advancing baseline both
+        #: are empty the moment after an edit (the first paid pilot spent
+        #: eight steps discovering that). Transparent mode leaves the
+        #: container's HEAD at the baseline forever and pulls whatever
+        #: differs from it — the working tree against the baseline commit,
+        #: so even an agent that commits cannot hide its work from the pull.
+        self._advance = advance_baseline
+        self._baseline = prepare_container_tree(sandbox, workdir=workdir)
 
     # ------------------------------------------------------------ marking
 
@@ -187,7 +199,8 @@ class SandboxRouter:
             quoted = " ".join(shlex.quote(f"{self.workdir}/{d}") for d in deletions)
             self.sandbox.exec(f"rm -f {quoted}", timeout=120)
         self._dirty.clear()
-        self._advance_baseline()
+        if self._advance:
+            self._advance_baseline()
 
     def pull(self) -> tuple[str, ...]:
         """Bring container-side changes home. Returns the pulled paths.
@@ -196,6 +209,39 @@ class SandboxRouter:
         command has no obligation to be read-only (``makemigrations`` is a
         legal check), and a pull on an unchanged tree costs one git status.
         """
+        changed = self._changes_since_baseline() if not self._advance else self._changes_since_sync()
+
+        pulled: list[str] = []
+        for kind, rel in changed:
+            if self._excluded(rel):
+                continue
+            host = self.workspace / rel
+            if kind == "D":
+                if host.is_file():
+                    host.unlink()
+                    pulled.append(rel)
+                continue
+            try:
+                payload = self.sandbox.get_bytes(f"{self.workdir}/{rel}")
+            except (FileNotFoundError, KeyError, IsADirectoryError):
+                # Symlinks and other irregular members: the tar the transport
+                # returns carries no file content for them, and sphinx's test
+                # fixtures are full of them — two paid cells died here before
+                # this except existed. Skipped, counted, and visible: a
+                # symlink in fixtures is not agent work the instrument must
+                # mirror, but a skip that vanishes would be D-class.
+                if rel not in self.skipped:
+                    self.skipped.append(rel)
+                continue
+            host.parent.mkdir(parents=True, exist_ok=True)
+            host.write_bytes(payload)
+            pulled.append(rel)
+        if changed and self._advance:
+            self._advance_baseline()
+        return tuple(pulled)
+
+    def _changes_since_sync(self) -> list[tuple[str, str]]:
+        """What moved since the last sync commit: one ``git status``."""
         status = self.sandbox.exec(
             f"git -C {self._q} status --porcelain -z", timeout=300
         )
@@ -220,34 +266,34 @@ class SandboxRouter:
                 kind = "D" if "D" in code else "A"
                 changed.append((kind, path))
             i += 1
+        return changed
 
-        pulled: list[str] = []
-        for kind, rel in changed:
-            if self._excluded(rel):
-                continue
-            host = self.workspace / rel
-            if kind == "D":
-                if host.is_file():
-                    host.unlink()
-                    pulled.append(rel)
-                continue
-            try:
-                payload = self.sandbox.get_bytes(f"{self.workdir}/{rel}")
-            except (FileNotFoundError, KeyError, IsADirectoryError):
-                # Symlinks and other irregular members: the tar the transport
-                # returns carries no file content for them, and sphinx's test
-                # fixtures are full of them — two paid cells died here before
-                # this except existed. Skipped, counted, and visible: a
-                # symlink in fixtures is not agent work the instrument must
-                # mirror, but a skip that vanishes would be D-class.
-                self.skipped.append(rel)
-                continue
-            host.parent.mkdir(parents=True, exist_ok=True)
-            host.write_bytes(payload)
-            pulled.append(rel)
-        if changed:
-            self._advance_baseline()
-        return tuple(pulled)
+    def _changes_since_baseline(self) -> list[tuple[str, str]]:
+        """Everything that differs from the baseline commit, however it got
+        there: the working tree diffed against the baseline (staged,
+        unstaged and committed alike), plus untracked files. Idempotent —
+        a file the agent changed is copied again after every command, which
+        is a few small files against a `docker cp` each."""
+        diff = self.sandbox.exec(
+            f"git -C {self._q} diff --name-status -z --no-renames {shlex.quote(self._baseline)}",
+            timeout=300,
+        )
+        others = self.sandbox.exec(
+            f"git -C {self._q} ls-files --others --exclude-standard -z", timeout=300
+        )
+        if diff.exit_code != 0 or others.exit_code != 0:
+            raise RuntimeError(
+                "sync pull cannot see the container tree: "
+                f"{diff.stderr or diff.stdout or others.stderr or others.stdout}"
+            )
+        changed: list[tuple[str, str]] = []
+        fields = [f for f in diff.stdout.split("\0") if f != ""]
+        for code, path in zip(fields[0::2], fields[1::2], strict=False):
+            changed.append(("D" if code.startswith("D") else "A", path))
+        for path in others.stdout.split("\0"):
+            if path.strip():
+                changed.append(("A", path))
+        return changed
 
     # ------------------------------------------------------------ execution
 

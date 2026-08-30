@@ -264,7 +264,12 @@ def make_miniswe_execute(*, model_name: str, cost_limit: float | None = None, mo
         session_id = uuid.uuid4().hex[:8]
         ctx.session = session_id
         memory = Memory.open_session(ctx.workspace, session_id, base_ref="HEAD")
-        router = SandboxRouter(ctx.agent_sandbox, ctx.workspace, workdir=ctx.agent_sandbox.workdir)
+        # Transparent sync: the scaffold verifies its work with git diff /
+        # git status inside the container, so the sync baseline must not
+        # advance underneath it (see SandboxRouter.advance_baseline).
+        router = SandboxRouter(
+            ctx.agent_sandbox, ctx.workspace, workdir=ctx.agent_sandbox.workdir, advance_baseline=False
+        )
         ctx.router = router
         Path(ctx.gitdir).mkdir(parents=True, exist_ok=True)
         shadow = ShadowLog(memory, gitdir=Path(ctx.gitdir), session=session_id)
