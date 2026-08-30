@@ -1,6 +1,6 @@
 """What one mini-swe-agent sweep root says, in the paper's own quantities.
 
-    python scripts/mswe_report.py /root/mswe40_sonnet [/root/mswe40_gpt ...]
+    python scripts/mswe_report.py sonnet=/root/mswe40_sonnet_s1+/root/mswe40_sonnet_s2+/root/mswe40_sonnet_s3 [gpt=...]
 
 Per root: the substrate-table row (same code path as the paper's Table 1),
 then per cell: the scaffold's exit status, commands issued, observations
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from substrate_table import load, row
+from substrate_table import load, row_from, spend
 
 
 def manifests(root: Path) -> dict[str, dict]:
@@ -49,6 +49,21 @@ def visible_failures(d: dict) -> int | None:
     return None
 
 
+def parse_spec(spec: str) -> tuple[str, list[Path]]:
+    """``/root/a`` or ``label=/root/a+/root/b`` (shards merged into one set)."""
+    label, _, paths = spec.rpartition("=")
+    roots = [Path(p) for p in paths.split("+") if p]
+    return (label or f"mswe:{roots[0].name}"), roots
+
+
+def merged(fn, roots: list[Path]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for r in roots:
+        for k, v in fn(r).items():
+            out.setdefault(k, v)
+    return out
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -56,12 +71,12 @@ def main() -> int:
     print("| substrate: arm | graded | resolved (strict) | resolved (rot-aware) | events | incidents | bearing runs | contaminated trees | spend |")
     print("|---|---|---|---|---|---|---|---|---|")
     for spec in sys.argv[1:]:
-        root = Path(spec)
-        print(row(f"mswe:{root.name}", root))
+        label, roots = parse_spec(spec)
+        print(row_from(label, merged(load, roots), sum(spend(r) for r in roots)))
     for spec in sys.argv[1:]:
-        root = Path(spec)
-        ev, man, led = load(root), manifests(root), ledger(root)
-        print(f"\n== {root} ==")
+        label, roots = parse_spec(spec)
+        ev, man, led = merged(load, roots), merged(manifests, roots), merged(ledger, roots)
+        print(f"\n== {label}: {' + '.join(str(r) for r in roots)} ==")
         print(f"{'instance':32s} {'exit':16s} {'cmds':>5s} {'obs':>4s} {'events':>6s} {'visible':>7s} {'resolved':>8s} {'$':>7s}  status")
         totals = {"cmds": 0, "obs": 0, "events": 0, "visible": 0, "bearing": 0, "resolved": 0, "graded": 0, "usd": 0.0}
         for inst in sorted(set(ev) | set(man) | set(led)):

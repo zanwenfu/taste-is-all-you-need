@@ -36,7 +36,11 @@ def spend(root: Path) -> float:
 
 
 def row(label: str, root: Path, slice_size: int = 40) -> str:
-    ev = load(root)
+    return row_from(label, load(root), spend(root), slice_size)
+
+
+def row_from(label: str, ev: dict[str, dict], spend_usd: float, slice_size: int = 40) -> str:
+    """The table row for an evidence set — one root, or several merged."""
     graded = [d for d in ev.values() if d.get("resolved") is not None]
     resolved = sum(1 for d in graded if d["resolved"])
     events = sum(int(d.get("contamination_events_declared") or 0) for d in ev.values())
@@ -70,7 +74,7 @@ def row(label: str, root: Path, slice_size: int = 40) -> str:
         if f2p_ok and not failed:
             fresh += 1
     return (f"| {label} | {len(graded)} | {resolved}/{slice_size} ({100 * resolved / slice_size:.0f}%) | {fresh}/{slice_size} | {events} | "
-            f"{incidents} | {bearing}/{len(ev)} | {contaminated} | ${spend(root):.2f} |")
+            f"{incidents} | {bearing}/{len(ev)} | {contaminated} | ${spend_usd:.2f} |")
 
 
 def main() -> int:
