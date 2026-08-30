@@ -76,16 +76,47 @@ def test_environment_raises_submitted_on_the_scaffold_sentinel() -> None:
 def test_environment_reports_timeouts_the_scaffold_way() -> None:
     env = TasteEnvironment(_Router(), None)
     out = env.execute({"command": "sleep timeout"})
-    assert out["returncode"] == 124 and out["exception_info"].startswith("TimeoutError")
+    assert out["returncode"] == -1 and "timed out" in out["exception_info"]
 
 
-def test_environment_never_raises_into_the_scaffold() -> None:
+def test_environment_reports_a_one_off_failure_the_scaffold_way_then_declares_death() -> None:
     class Boom:
         def exec(self, command, *, timeout=600):
             raise RuntimeError("container gone")
 
-    out = TasteEnvironment(Boom(), None).execute({"command": "ls"})
+    env = TasteEnvironment(Boom(), None)
+    out = env.execute({"command": "ls"})
     assert out["returncode"] == -1 and "container gone" in out["exception_info"]
+    env.execute({"command": "ls"})
+    with pytest.raises(RuntimeError, match="environment dead"):
+        env.execute({"command": "ls"})
+
+
+def test_observations_carry_the_scaffolds_running_cost() -> None:
+    env = TasteEnvironment(_Router(), None)
+    env.agent = type("Agent", (), {"cost": 0.42})()
+    env.execute({"command": "true"})
+    assert env.cost_pair() == (0.42, 0.42)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 - <<'PY'\nprint('heredoc')\nPY",
+        "echo trailing # a comment at the very end",
+        "printf 'x\\n' | cat",
+    ],
+)
+def test_routed_command_survives_heredoc_terminators_and_comments(command: str) -> None:
+    """Defect 38: ``(cmd)`` on one line makes ``EOF)`` a non-terminator."""
+    import subprocess
+
+    from taste.execution import routed_command
+
+    wrapped = routed_command("", ".", command)
+    proc = subprocess.run(["bash", "-lc", wrapped], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "delimited by end-of-file" not in proc.stderr and "syntax error" not in proc.stderr
 
 
 def test_scripted_model_walks_its_commands_then_submits() -> None:

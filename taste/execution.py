@@ -296,6 +296,21 @@ class ScriptedSandbox:
 # ---------------------------------------------------------------- docker
 
 
+def routed_command(env_prefix: str, workdir: str, command: str) -> str:
+    """Activate, anchor in the workdir, run ``command`` in a subshell.
+
+    The subshell's closing parenthesis sits on its own line. On one line
+    (``(cmd)``) any command that ends in a here-document terminator or a
+    ``#`` comment swallows the parenthesis — ``EOF)`` is not a terminator —
+    and bash reports "here-document delimited by end-of-file" (defect 38:
+    186 such failures across 39 of 40 GPT-5.6 cells, whose agent writes
+    every script with a heredoc). The scaffold's own environment runs the
+    command bare, so this must be invisible.
+    """
+    prefix = f"{env_prefix} && " if env_prefix else ""
+    return f"{prefix}cd {shlex.quote(workdir)} && (\n{command}\n)"
+
+
 class DockerSandbox:
     """A long-lived container on a pinned image.
 
@@ -449,9 +464,7 @@ class DockerSandbox:
         grades. One place, not per caller -- a caller that forgets the prefix
         reproduces bug 20 inside the container.
         """
-        prefix = f"{self.env_prefix} && " if self.env_prefix else ""
-        prefixed = f"{prefix}cd {shlex.quote(self.workdir)} && ({command})"
-        return self.exec(prefixed, timeout=timeout, env=env)
+        return self.exec(routed_command(self.env_prefix, self.workdir, command), timeout=timeout, env=env)
 
     def put_text(self, path: str, text: str) -> None:
         """Ship a file in via the archive API.

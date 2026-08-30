@@ -72,18 +72,45 @@ class TasteEnvironment:
         self.env = dict(DEFAULT_ENV if env is None else env)
         self.n_commands = 0
         self.observed = 0
+        self.consecutive_errors = 0
+        #: Set once the scaffold's agent exists: observations stamp its
+        #: running cost, so per-episode dollar metrics mean the same thing
+        #: they mean for the harness arms (whose kernel reads RunStats).
+        self.agent: Any = None
+        self.cost_box = {"usd": 0.0}
+
+    #: Consecutive transport failures after which the environment is
+    #: declared dead. The scaffold's own environment returns returncode -1
+    #: for any exception and lets the model carry on; ours does the same for
+    #: a one-off, but a container that is gone would otherwise be probed
+    #: until the $3 cap, billed as agent behaviour.
+    DEAD_AFTER = 3
+
+    def cost_pair(self) -> tuple[float, float]:
+        return (self.cost_box["usd"], self.cost_box["usd"])
 
     # -- protocol ---------------------------------------------------------
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         command = action.get("command", "")
         self.n_commands += 1
+        if self.agent is not None:
+            self.cost_box["usd"] = float(getattr(self.agent, "cost", 0.0))
         exports = " ".join(f"{k}={_sh_quote(v)}" for k, v in self.env.items())
         prefix = f"export {exports}; " if exports else ""
         cd = f"cd {_sh_quote(cwd)} && " if cwd and cwd != self.cwd else ""
         try:
             result = self.router.exec(prefix + cd + command, timeout=timeout or self.timeout)
         except Exception as exc:
-            return {"output": "", "returncode": -1, "exception_info": f"{type(exc).__name__}: {exc}"}
+            self.consecutive_errors += 1
+            if self.consecutive_errors >= self.DEAD_AFTER:
+                raise RuntimeError(f"environment dead after {self.consecutive_errors} transport failures: {exc}") from exc
+            return {
+                "output": "",
+                "returncode": -1,
+                "exception_info": f"An error occurred while executing the command: {exc}",
+                "extra": {"exception_type": type(exc).__name__, "exception": str(exc)},
+            }
+        self.consecutive_errors = 0
         # Observe after every command; the shadow log dedupes an unchanged tree,
         # so only mutating commands produce observations -- the same grid the
         # harness arms use under observe_tools.
@@ -94,8 +121,17 @@ class TasteEnvironment:
             if commit is not None:
                 self.observed += 1
         output = result.stdout + (("\n" + result.stderr) if result.stderr else "")
-        exception = "TimeoutError: command exceeded the environment timeout" if getattr(result, "timed_out", False) else ""
-        out = {"output": output, "returncode": result.exit_code, "exception_info": exception}
+        if getattr(result, "timed_out", False):
+            # The scaffold's shape for a timeout: returncode -1 and the
+            # exception text, with the partial output kept.
+            out = {
+                "output": output,
+                "returncode": -1,
+                "exception_info": f"An error occurred while executing the command: Command timed out after {timeout or self.timeout} seconds",
+                "extra": {"exception_type": "TimeoutExpired"},
+            }
+        else:
+            out = {"output": output, "returncode": result.exit_code, "exception_info": ""}
         self._check_finished(out)
         return out
 
@@ -220,7 +256,8 @@ def build_run_result(
     *,
     task: str,
     session_id: str,
-    memory: Memory,
+    branch: str,
+    final_sha: str,
     started: float,
     exit_status: str,
     cost: float,
@@ -243,11 +280,11 @@ def build_run_result(
     return RunResult(
         task=task,
         session_id=session_id,
-        branch=memory.branch,
+        branch=branch,
         status="completed" if exit_status == "Submitted" else "failed",
         plan=Plan(task=task, steps=[Step(id="agent", description=f"{SCAFFOLD} run", verification=Verification(kind="shell", command="true"))]),
         outcomes=[],
-        final_sha=memory.head().sha,
+        final_sha=final_sha,
         elapsed_seconds=round(time.time() - started, 2),
         failure_reason=exception or (None if exit_status == "Submitted" else exit_status),
         stats=ScaffoldStats(total_cost_usd=cost, total_work_usd=cost),  # type: ignore[arg-type]
@@ -266,9 +303,7 @@ def make_miniswe_execute(
     """
 
     def execute(cell, ctx) -> RunResult:
-        from minisweagent.agents.default import DefaultAgent
 
-        from taste.routing import SandboxRouter
 
         if ctx.agent_sandbox is None:
             raise RuntimeError("mini-swe-agent must run routed (a pinned container); refusing the host path")
@@ -276,7 +311,26 @@ def make_miniswe_execute(
         started = time.time()
         session_id = uuid.uuid4().hex[:8]
         ctx.session = session_id
-        memory = Memory.open_session(ctx.workspace, session_id, base_ref="HEAD")
+        try:
+            return _run_cell(ctx, config, session_id, started, model_name, model_factory)
+        finally:
+            # Whatever happened above -- a model layer that failed to build,
+            # a dead container, a clean run -- the cell's container goes.
+            if ctx.agent_sandbox is not None:
+                with contextlib.suppress(Exception):
+                    ctx.agent_sandbox.close()
+                ctx.agent_sandbox = None
+
+    return execute
+
+
+def _run_cell(ctx, config: dict, session_id: str, started: float, model_name: str, model_factory) -> RunResult:
+    from minisweagent.agents.default import DefaultAgent
+
+    from taste.routing import SandboxRouter
+
+    memory = Memory.open_session(ctx.workspace, session_id, base_ref="HEAD")
+    try:
         # Transparent sync: the scaffold verifies its work with git diff /
         # git status inside the container, so the sync baseline must not
         # advance underneath it (see SandboxRouter.advance_baseline).
@@ -285,17 +339,18 @@ def make_miniswe_execute(
         )
         ctx.router = router
         Path(ctx.gitdir).mkdir(parents=True, exist_ok=True)
-        shadow = ShadowLog(memory, gitdir=Path(ctx.gitdir), session=session_id)
-        ctx.shadow_ref = shadow.ref if hasattr(shadow, "ref") else f"TASTE_SHADOW_HEAD_{session_id.upper()}"
-        shadow.observe(step_id="run", attempt=0, trigger="run")
-
         env_cfg = config.get("environment", {})
         env = TasteEnvironment(
-            router, shadow,
+            router, None,
             cwd=env_cfg.get("cwd", ctx.agent_sandbox.workdir),
             timeout=int(env_cfg.get("timeout", 60)),
             env=env_cfg.get("env"),
         )
+        shadow = ShadowLog(memory, gitdir=Path(ctx.gitdir), session=session_id, cost_pair_reader=env.cost_pair)
+        env.shadow = shadow
+        ctx.shadow_ref = shadow.ref if hasattr(shadow, "ref") else f"TASTE_SHADOW_HEAD_{session_id.upper()}"
+        shadow.observe(step_id="run", attempt=0, trigger="run")
+
         if model_factory is not None:
             model = model_factory()
         else:
@@ -306,6 +361,7 @@ def make_miniswe_execute(
         agent_cfg = dict(config.get("agent", {}))
         agent_cfg["output_path"] = Path(ctx.gitdir) / "miniswe.traj.json"
         agent = DefaultAgent(model, env, **agent_cfg)
+        env.agent = agent
 
         exit_status, exception, submission = "", None, ""
         try:
@@ -314,9 +370,20 @@ def make_miniswe_execute(
             submission = str(info.get("submission", ""))
         except Exception as exc:
             exception = f"{type(exc).__name__}: {exc}"
+            # The scaffold appends an exit message naming the exception
+            # type before re-raising; keep its name as the exit status.
+            with contextlib.suppress(Exception):
+                exit_status = str(agent.messages[-1].get("extra", {}).get("exit_status", "")) or type(exc).__name__
         finally:
+            env.cost_box["usd"] = float(agent.cost)
             with contextlib.suppress(Exception):
                 shadow.observe(step_id="final", attempt=0, trigger="final", dedupe=False)
+            # Grading diffs the host tree against the root commit, and a new
+            # file is invisible to that diff until it is staged. The harness
+            # arms stage through their checkpoints; this arm has none, so it
+            # stages here -- everything except the scaffold's own patch.txt.
+            with contextlib.suppress(Exception):
+                memory.repo.git.add("--all", "--", ".", ":(exclude)patch.txt")
             manifest = {
                 "session": session_id,
                 "scaffold": SCAFFOLD,
@@ -333,18 +400,14 @@ def make_miniswe_execute(
                 "created_at": started,
             }
             (Path(ctx.gitdir) / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
-            stats = ScaffoldStats(total_cost_usd=agent.cost, total_work_usd=agent.cost)
-            ctx.llm_stats = stats
-            if ctx.agent_sandbox is not None:
-                ctx.agent_sandbox.close()
-                ctx.agent_sandbox = None
-            memory.close()
+            ctx.llm_stats = ScaffoldStats(total_cost_usd=agent.cost, total_work_usd=agent.cost)
+        final_sha = memory.head().sha
         return build_run_result(
-            task=ctx.instance.problem_statement, session_id=session_id, memory=Memory(ctx.workspace, memory.branch),
+            task=ctx.instance.problem_statement, session_id=session_id, branch=memory.branch, final_sha=final_sha,
             started=started, exit_status=exit_status, cost=agent.cost, exception=exception,
         )
-
-    return execute
+    finally:
+        memory.close()
 
 
 def _scaffold_version() -> str:
