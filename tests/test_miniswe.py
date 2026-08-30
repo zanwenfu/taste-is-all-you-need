@@ -52,28 +52,35 @@ def test_environment_routes_commands_and_observes_after_each() -> None:
     # intact inside a brace group whose streams are merged the way the scaffold's docker exec merges them
     assert router.commands[0].startswith("export ") and router.commands[0].endswith("{\necho hi\n} 2>&1")
     assert "PAGER=cat" in router.commands[0]
-
-
-def test_the_merged_stream_wrapper_is_valid_bash_for_heredocs_and_comments() -> None:
-    import subprocess
-
-    for command in ("python3 - <<'PY'\nimport sys; print('out'); print('err', file=sys.stderr)\nPY", "echo hi # trailing"):
-        seen = []
-
-        class Rec:
-            def exec(self, c, *, timeout=600):
-                seen.append(c)
-                p = subprocess.run(["bash", "-lc", c], capture_output=True, text=True)
-                return _Result(exit_code=p.returncode, stdout=p.stdout, stderr=p.stderr)
-
-        out = TasteEnvironment(Rec(), None, env={}).execute({"command": command})
-        assert out["returncode"] == 0, out
-        assert "delimited by end-of-file" not in out["output"] and "syntax error" not in out["output"]
-    assert "err" in out["output"] or "hi" in out["output"]
     env.execute({"command": "touch x"})
     assert [c["trigger"] for c in shadow.calls] == ["tool", "tool"]
     assert shadow.calls[0]["step_id"] == "cmd-001" and shadow.calls[1]["step_id"] == "cmd-002"
     assert env.observed == 1  # only the mutating command produced a commit
+
+
+class _RealBash:
+    """A sandbox that actually runs the wrapped string, as the container does."""
+
+    def exec(self, command: str, *, timeout: int = 600) -> _Result:
+        import subprocess
+
+        p = subprocess.run(["bash", "-lc", command], capture_output=True, text=True)
+        return _Result(exit_code=p.returncode, stdout=p.stdout, stderr=p.stderr)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 - <<'PY'\nimport sys\nprint('out')\nprint('err', file=sys.stderr)\nPY",
+        "echo hi # a trailing comment",
+    ],
+)
+def test_the_merged_stream_wrapper_is_valid_bash_for_heredocs_and_comments(command: str) -> None:
+    """Defect 38 in the environment's own wrapper, and the scaffold's stream merge."""
+    out = TasteEnvironment(_RealBash(), None, env={}).execute({"command": command})
+    assert out["returncode"] == 0, out
+    assert "delimited by end-of-file" not in out["output"] and "syntax error" not in out["output"]
+    assert ("out" in out["output"] and "err" in out["output"]) or "hi" in out["output"]
 
 
 def test_environment_raises_submitted_on_the_scaffold_sentinel() -> None:
