@@ -169,6 +169,13 @@ class HarnessConfig:
                 label="A3prime-no-reset", journal=True, shadow=True, recovery=RecoveryConfig.arm("A3prime")
             ),
             "tiered": cls(label="tiered", journal=True, shadow=True, recovery=RecoveryConfig.arm("tiered")),
+            # A public scaffold under the same instrument: mini-swe-agent runs
+            # its own loop, prompts and model layer; only its environment is
+            # ours (routed into the pinned container, tree committed to the
+            # hidden ref after every command). No monitor, no recovery. The
+            # per-command grid is the driver's choice (observe_tools), as for
+            # every other arm.
+            "MSWE": cls(label="MSWE-mini-swe-agent", journal=False, shadow=True, recovery=RecoveryConfig.arm("A0")),
             "full": cls(
                 label="full-agent-os",
                 journal=True,
@@ -184,7 +191,7 @@ class HarnessConfig:
 
     @classmethod
     def arm_names(cls) -> list[str]:
-        return ["A0", "A2", "A3", "A3reg", "A3reg2", "A3prime", "tiered", "full"]
+        return ["A0", "A2", "A3", "A3reg", "A3reg2", "A3prime", "tiered", "MSWE", "full"]
 
 
 def kernel_kwargs(config: HarnessConfig) -> dict:
