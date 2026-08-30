@@ -98,8 +98,14 @@ class TasteEnvironment:
         exports = " ".join(f"{k}={_sh_quote(v)}" for k, v in self.env.items())
         prefix = f"export {exports}; " if exports else ""
         cd = f"cd {_sh_quote(cwd)} && " if cwd and cwd != self.cwd else ""
+        # The scaffold's environment runs `docker exec ... bash -c cmd` with
+        # stderr=STDOUT: one stream, in arrival order. Our sandbox demuxes,
+        # which would hand the model all of stderr after all of stdout (a
+        # traceback below the output that preceded it). Merge at the shell,
+        # inside a group so heredocs and comments survive (defect 38).
+        wrapped = f"{prefix}{cd}{{\n{command}\n}} 2>&1"
         try:
-            result = self.router.exec(prefix + cd + command, timeout=timeout or self.timeout)
+            result = self.router.exec(wrapped, timeout=timeout or self.timeout)
         except Exception as exc:
             self.consecutive_errors += 1
             if self.consecutive_errors >= self.DEAD_AFTER:
@@ -393,6 +399,10 @@ def _run_cell(ctx, config: dict, session_id: str, started: float, model_name: st
                 "environment": env.get_template_vars(),
                 "commands": env.n_commands,
                 "observations": env.observed,
+                "sync_skipped_paths": list(router.skipped),
+                "network_mode": getattr(ctx.agent_sandbox, "network_mode", None) or "none",
+                "streams": "merged (2>&1 at the shell)",
+                "pricing_table_sha": _pricing_table_sha(),
                 "exit_status": exit_status,
                 "submission_chars": len(submission),
                 "cost_usd": agent.cost,
@@ -408,6 +418,15 @@ def _run_cell(ctx, config: dict, session_id: str, started: float, model_name: st
         )
     finally:
         memory.close()
+
+
+def _pricing_table_sha() -> str:
+    try:
+        from taste.pricing import table_sha
+
+        return str(table_sha())
+    except Exception:
+        return "unknown"
 
 
 def _scaffold_version() -> str:
