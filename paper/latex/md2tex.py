@@ -52,7 +52,7 @@ def inline(t: str) -> str:
     out = []
     for p in parts:
         if p.startswith("`") and p.endswith("`") and len(p) > 1:
-            out.append(r"\texttt{" + esc(p[1:-1]) + "}")
+            out.append(r"\texttt{" + esc(p[1:-1]).replace("--", "-{}-") + "}")
         else:
             e = esc(p)
             e = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", e, flags=re.S)
