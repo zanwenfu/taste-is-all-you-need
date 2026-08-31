@@ -53,7 +53,7 @@
 \node[lab, align=right, anchor=east] at (4.25,2.5) {commit after every\\mutating call};
 
 % regression window shading
-\fill[sig!7] (6.2,0.34) rectangle (8.6,2.22);
+\fill[sig!7] (6.2,0.66) rectangle (8.6,2.22);
 
 % baseline with axis break before s_n
 \draw[draw=mute] (3.05,1.95) -- (9.75,1.95);
@@ -78,7 +78,6 @@
   \draw[draw=sig] (\x-0.08,1.20) -- (\x+0.08,1.04);
 }
 \node[text=sig] at (7.4,0.86) {regression event ($s_3$--$s_4$)};
-\node[lab] at (7.4,0.58) {attributed by coverage to a check};
 
 % rollback arc
 \draw[soft] (8.0,2.07) to[out=90,in=90,looseness=0.5] node[above, lab, pos=0.5, inner sep=1.5pt] {rollback to $s_2$} (5.6,2.07);
