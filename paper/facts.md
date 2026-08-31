@@ -57,7 +57,7 @@ listed in §5. (The "$110" figure that circulated earlier included the
 | detection split of 57 | 39 attributed-detected-then-erased; 16 co-occurred unattributed; 2 fully silent (both inside the resolved run) | evidence sidecars |
 | final-state visibility | 0 of 57 (all recovered; bearing instances grade 59/59 and 145/145) | official grader |
 | capped turns in event logs | none (D10 guard active; revert-verified test) | event logs |
-| exhibit: flask-5014 | 54 test functions broken at one observation, all erased by rollback, final grade clean; Claude resolved the same instance with zero events | evidence |
+| exhibit: flask-5014 | 54 raw episodes at one observation, declaring 41 events over 41 distinct test functions, all erased by rollback, final grade clean; Claude resolved the same instance with zero events | evidence |
 | exhibit: pytest-6197 | resolved (F2P 2/2, P2P 145/145) with 3 regressions en route — 2 never noticed by the harness | evidence |
 
 ## Gate status under the pre-declared rules
