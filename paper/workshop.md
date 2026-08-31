@@ -60,7 +60,7 @@ Figure 1 shows the harness and the instrument. **Observational timeline.** After
 
 mini-swe-agent 2.4.6 ran unmodified on the same 40 instances. With `claude-sonnet-4-6`, 34 of 40 resolved (35 rot-aware) over 2,101 bash commands for $31.38. Four runs hit its own $3 cap. Three of those still grade resolved, because resolve reads the final tree, not the patch the scaffold never submitted. With `gpt-5.6-sol`, 33 of 40 resolved (34) over 937 commands for $12.13. None of the 80 ended byte-identical to its start.
 
-The timeline recorded 56 events in 5 of the 40 Claude runs and 79 in 6 of the 40 GPT-5.6 runs, on 8 instances, 3 bearing under both. Those 11 runs broke 135 oracle test functions counted per run (100 distinct, because the stacks overlap on the three shared instances), and when the grader read the final tree exactly one was still failing, `test_pkgfile` in pytest-6197 (Claude 0 of 56, GPT-5.6 1 of 79). The scaffold has no monitor or rollback, so every closure is an ordinary forward edit. The eleven stayed open for 1 to 22 bash commands (median 4), and three runs supply 81% of the 135. Against exposure rather than attempts the rate is higher. No run making two or fewer tree-changing observations was bearing, and 11 of the 38 that made more broke something (29%). Much of what the endpoint misses is a transient inside one logical edit, but transients are not free: 14% of what these runs cost ($1.29 of $9.52) was spent while a regression was open.
+The timeline recorded 56 events in 5 of the 40 Claude runs and 79 in 6 of the 40 GPT-5.6 runs, on 8 instances, 3 bearing under both. Those 11 runs broke 135 oracle test functions counted per run (100 distinct, because the stacks overlap on the three shared instances). The official grader, reading only the final tree, caught exactly one of them: `test_pkgfile` in pytest-6197 (Claude 0 of 56, GPT-5.6 1 of 79). The scaffold has no monitor or rollback, so every closure is an ordinary forward edit. The eleven stayed open for 1 to 22 bash commands (median 4), and three runs supply 81% of the 135. Against exposure rather than attempts the rate is higher. No run making two or fewer tree-changing observations was bearing, and 11 of the 38 that made more broke something (29%). Much of what the endpoint misses is a transient inside one logical edit, but transients are not free: 14% of what these runs cost ($1.29 of $9.52) was spent while a regression was open.
 
 **One run in full.** On django-12965 the GPT-5.6 scaffold read `SQLDeleteCompiler` for twelve commands, then at command 13 changed `single_alias` to count active aliases with `<= 1`. Its own reproduction script crashed, and at command 15 `runtests.py delete` printed `ERROR: test_fast_delete_large_batch`. Command 16 replaced the edit, command 18 ran the suite clean, and the run graded resolved at 52 of 52. The timeline holds all of this. The graded patch holds none of it.
 
@@ -90,32 +90,36 @@ Rollback pays for its clean tree in delivered work, resolving 13 of 40 against 2
 
 ### 5.4 Replacing the check removes the tradeoff
 
-A fourth arm, added after unblinding (exploratory), replaces the planner-written check with the repository's own oracle, run after every attempt. A step is rejected only if a test that passed at the start now fails. It resolved **26 of 40 (65.0%)**, above rollback's 13 and the ungated arms' 24 and 22, with **no contaminated final tree** and 4 empty patches against rollback's 17. The guarantee is cheap. The gate runs at least 4 times in the median run at 4 to 8 seconds each, so 16 to 32 seconds of wall-clock and $2.37 more model spend than rollback, and per resolved instance it costs $0.40 against rollback's $0.63 and repair-in-place's $0.61. It beat rollback on 35 shared instances, winning 10 discordant pairs and losing 1 (p = 0.012), and resolved 26 against repair-in-place's 24, with no contaminated tree against that arm's 5. The gate gives a guarantee, not a rate, and it is circular. Its tests are the benchmark's own oracle (median ratio 1.00), so a clean tree follows whenever the gate saw the final tree and the grader reads what the gate read. A fifth arm weakens that, reading a deterministic half of the ids (2,278) and never the other half (2,585), on which the grader also rules [44]. The split is over ids, not files, so a break reaching a held-out id usually reaches a watched one, and the held-out half bounds the leak instead of sampling it. A file-level or non-oracle gate would settle it. It resolved **28 of 40 (70.0%)**, indistinguishable from the full gate (p = 0.73) and better than rollback (13 to 2, p = 0.007), with no held-out failure apart from the parser-capped instance.
+A fourth arm, added after unblinding (exploratory), replaces the planner-written check with the repository's own oracle, run after every attempt. A step is rejected only if a test that passed at the start now fails. It resolved **26 of 40 (65.0%)**, above rollback's 13 and the ungated arms' 24 and 22, with **no contaminated final tree** and 4 empty patches against rollback's 17. The guarantee is cheap. The gate runs at least 4 times in the median run at 4 to 8 seconds each, so 16 to 32 seconds of wall-clock and $2.37 more model spend than rollback, and per resolved instance it costs $0.40 against rollback's $0.63 and repair-in-place's $0.61. It beat rollback on 35 shared instances, winning 10 discordant pairs and losing 1 (p = 0.012), and resolved 26 against repair-in-place's 24, with no contaminated tree against that arm's 5.
+
+The gate gives a guarantee, not a rate, and it is circular. Its tests are the benchmark's own oracle (median ratio 1.00), so a clean tree follows whenever the gate saw the final tree and the grader reads what the gate read. A fifth arm weakens that, reading a deterministic half of the ids (2,278) and never the other half (2,585), on which the grader also rules [44]. The split is over ids, not files, so a break reaching a held-out id usually reaches a watched one, and the held-out half bounds the leak instead of sampling it. A file-level or non-oracle gate would settle it. It resolved **28 of 40 (70.0%)**, indistinguishable from the full gate (p = 0.73) and better than rollback (13 to 2, p = 0.007), with no held-out failure apart from the parser-capped instance.
 
 ### 5.5 Replication on SWE-bench Live
 
-Table: Every arm on both substrates. **empty**: runs ending byte-identical to their start. **events**: declared (test function, onset) pairs, exposure only, never a denominator. **broken → left**: oracle tests broken during the bearing runs against those still failing at grade time. **inc.**: incidents, the pre-declared co-primary. **contam.**: graded cells failing an oracle test, net of baseline-dead. The Claude rollback arm's 1 is baseline rot, not agent damage (Appendix C). The public-scaffold rows ran under mini-swe-agent's own budget, not our cap. Composition and provenance: Appendix C.
+Table: Every arm on both substrates. **contam.**: graded cells failing an oracle test, net of baseline-dead. **empty**: runs ending byte-identical to their start. **events**: declared (test function, onset) pairs, exposure only, never a denominator. **inc.**: incidents, the pre-declared co-primary. **broken → left**: oracle tests broken during the bearing runs against those still failing at grade time. The Claude rollback arm's 1 is baseline rot, not agent damage (Appendix C). The public-scaffold rows ran under mini-swe-agent's own budget, not our cap. Composition and provenance: Appendix C.
 
-| substrate | arm | resolved | empty | events | inc. | bearing | broken → left | contam. | spend |
+| substrate | arm | resolved | contam. | empty | events | inc. | bearing | broken → left | spend |
 |---|---|---|---|---|---|---|---|---|---|
-| Verified | mini-swe-agent, Claude | 34 | 0/40 | 56 | 5 | 5/40 | 56 → 0 | 0 | $31.38 |
-| Verified | mini-swe-agent, GPT-5.6 | 33 | 0/40 | 79 | 6 | 6/40 | 79 → 1 | 1 | $12.13 |
-| Verified | GPT-5.6 rollback | 13 | 17/37 | 140 | 11 | 6/37 | 104 → 1 | 1 | $8.14 |
-| Verified | Claude rollback | 13 | 19/40 | 0 | 0 | 0/40 | — | 1 | $34.24 |
-| Verified | GPT-5.6 gated | 26 | 4/40 | 70 | 7 | 5/40 | 62 → 0 | 0 | $10.51 |
-| Verified | GPT-5.6 split-gated | 28 | 3/40 | 14 | 4 | 3/40 | 14 → 0 | 0 | $9.40 |
-| Verified | GPT-5.6 repair-in-place | 24 | 0/40 | 84 | 7 | 7/40 | 83 → 4 | 5 | $14.73 |
-| Verified | GPT-5.6 no recovery | 22 | 1/40 | 19 | 3 | 3/40 | 19 → 19 | 9 | $4.40 |
-| Live | GPT-5.6 rollback | 0 (2) | 25/39 | 156 | 9 | 6/39 | 147 → 0 | 0 | $10.29 |
-| Live | Claude rollback | 2 (3) | 24/39 | 49 | 6 | 3/39 | 48 → 0 | 1 | $49.80 |
-| Live | GPT-5.6 gated | 1 (4) | 9/39 | 280 | 6 | 3/39 | 270 → 0 | 2 | $11.49 |
-| Live | GPT-5.6 no recovery | 4 (6) | 3/39 | 30 | 4 | 4/39 | 30 → 30 | 4 | $8.95 |
+| Verified | mini-swe-agent, Claude | 34 | 0 | 0/40 | 56 | 5 | 5/40 | 56 → 0 | $31.38 |
+| Verified | mini-swe-agent, GPT-5.6 | 33 | 1 | 0/40 | 79 | 6 | 6/40 | 79 → 1 | $12.13 |
+| Verified | GPT-5.6 rollback | 13 | 1 | 17/37 | 140 | 11 | 6/37 | 104 → 1 | $8.14 |
+| Verified | Claude rollback | 13 | 1 | 19/40 | 0 | 0 | 0/40 | — | $34.24 |
+| Verified | GPT-5.6 gated | 26 | 0 | 4/40 | 70 | 7 | 5/40 | 62 → 0 | $10.51 |
+| Verified | GPT-5.6 split-gated | 28 | 0 | 3/40 | 14 | 4 | 3/40 | 14 → 0 | $9.40 |
+| Verified | GPT-5.6 repair-in-place | 24 | 5 | 0/40 | 84 | 7 | 7/40 | 83 → 4 | $14.73 |
+| Verified | GPT-5.6 no recovery | 22 | 9 | 1/40 | 19 | 3 | 3/40 | 19 → 19 | $4.40 |
+| Live | GPT-5.6 rollback | 0 (2) | 0 | 25/39 | 156 | 9 | 6/39 | 147 → 0 | $10.29 |
+| Live | Claude rollback | 2 (3) | 1 | 24/39 | 49 | 6 | 3/39 | 48 → 0 | $49.80 |
+| Live | GPT-5.6 gated | 1 (4) | 2 | 9/39 | 280 | 6 | 3/39 | 270 → 0 | $11.49 |
+| Live | GPT-5.6 no recovery | 4 (6) | 4 | 3/39 | 30 | 4 | 4/39 | 30 → 30 | $8.95 |
 
 Live keeps the undercount and loses the resolve rates, at most 6 of 40 even rot-aware, so its recovery contrast is uninformative. Rollback broke 147 test functions across 6 of 39 runs, none still failing, against Verified's 104 across 6. Live's oracles are twenty times larger, so the two counts are not comparable. No recovery left all 30 of its own (p = 0.125). The stack difference did not replicate (3 of 39 against 6, p = 0.24).
 
 ## 6. Discussion
 
-**Why timeline regressions matter.** A repaired regression still costs money. Work done while one was open took 14% of the scaffold's bearing-run cost and 27% of our harness's ($0.63 of $2.33), both small-base estimates. An endpoint-only benchmark also cannot tell a run that broke nothing from one that broke 49 tests and repaired them. The events are the step-level ground truth patch verifiers [24] and process reward models [25] need and instance-scale training sets [32, 33] lack, and they tell a recovery primitive [41] when to abort. Two rules would have prevented most of Appendix A's defects: record infrastructure failures as missing observations, and require positive evidence that the measurement path is live. **Limitations.** Every rate estimates a 40-instance slice with one sweep per arm, and event counts bound the truth from both sides (Appendix C).
+**Why timeline regressions matter.** A repaired regression still costs money. Work done while one was open took 14% of the scaffold's bearing-run cost and 27% of our harness's ($0.63 of $2.33), both small-base estimates. An endpoint-only benchmark also cannot tell a run that broke nothing from one that broke 49 tests and repaired them. Patch verifiers [24] and process reward models [25] need step-level ground truth, and instance-scale training sets [32, 33] do not carry it. The events supply it, and they tell a recovery primitive [41] when to abort. Two rules would have prevented most of Appendix A's defects: record infrastructure failures as missing observations, and require positive evidence that the measurement path is live.
+
+**Limitations.** Every rate estimates a 40-instance slice with one sweep per arm, and event counts bound the truth from both sides (Appendix C).
 
 ---
 
