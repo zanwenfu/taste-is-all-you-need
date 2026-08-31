@@ -31,7 +31,7 @@
 \node[box] (planner) at (2.15,4.35) {\textbf{Planner}\\steps + checks};
 \node[box] (worker)  at (4.70,4.35) {\textbf{Worker}\\read $\cdot$ write $\cdot$ shell};
 \node[box] (monitor) at (7.40,4.35) {\textbf{Monitor}\\runs the step's check};
-\node[box] (recov)   at (10.45,4.35) {\textbf{Recovery}\\rollback $\cdot$ repair $\cdot$ none};
+\node[box] (recov)   at (10.85,4.35) {\textbf{Recovery}\\rollback $\cdot$ repair $\cdot$ none};
 
 \draw[flow] (planner) -- (worker);
 \draw[flow] (worker) -- (monitor);
@@ -42,7 +42,7 @@
 
 % container boundary
 \draw[draw=mute, dashed, dash pattern=on 2pt off 1.5pt, rounded corners=2pt]
-  (0.8,3.05) rectangle (11.9,5.38);
+  (0.8,3.05) rectangle (12.35,5.38);
 \node[lab, anchor=west, font=\footnotesize\scshape] at (0.85,5.05) {pinned container};
 
 % ---------------- instrument (bottom lane) ----------------
@@ -83,7 +83,7 @@
 \draw[soft] (8.0,2.07) to[out=90,in=90,looseness=0.5] node[above, lab, pos=0.5, inner sep=1.5pt] {rollback to $s_2$} (5.6,2.07);
 
 % gated arm feedback: the prior-passing tests become the Monitor
-\draw[gate] (9.38,1.12) -- (8.78,1.12) |- (monitor.south);
+\draw[gate] (9.38,1.12) -- (8.70,1.12) |- (monitor.south);
 \node[text=acc, anchor=west, align=left] at (9.15,2.62) {gated arm: prior-passing\\tests become the Monitor};
 
 % grader
