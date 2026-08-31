@@ -138,8 +138,8 @@
 
 \item {\bf Broader impacts}
     \item[] Question: Does the paper discuss both potential positive societal impacts and negative societal impacts of the work performed?
-    \item[] Answer: \answerNo{}
-    \item[] Justification: The contribution is an evaluation instrument and measurements of it. The plausible impact is positive (agents that break less existing behaviour); we see no direct path to a negative application, and the paper does not discuss societal impact.
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The contribution is an evaluation instrument and measurements of it, and the plausible direct impact is positive: agents whose regressions are visible break less existing behaviour, and the archived timelines give patch verifiers and process reward models step-level supervision they currently have to guess at. Two negative paths are worth naming. An instrument that commits the working tree after every action is agent telemetry: deployed outside a benchmark it would record whatever an agent touches, including proprietary or personal code, so the hidden reference is a surveillance surface as much as a measurement one. And a gate that rejects any step failing a prior-passing test is an enforcement mechanism, not only an observer: applied to real repositories it would suppress legitimate refactors that temporarily break tests, which is the behaviour a maintainer sometimes wants. Both argue for the gate being advisory and the timeline being local and short-lived by default.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that there is no societal impact of the work performed.
