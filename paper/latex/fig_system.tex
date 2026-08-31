@@ -26,24 +26,24 @@
 ]
 
 % ---------------- harness (top lane) ----------------
-\node[lane] at (0.45,4.55) {harness};
+\node[lane] at (0.45,4.15) {harness};
 
-\node[box] (planner) at (2.15,4.75) {\textbf{Planner}\\steps + checks};
-\node[box] (worker)  at (4.70,4.75) {\textbf{Worker}\\read $\cdot$ write $\cdot$ shell};
-\node[box] (monitor) at (7.40,4.75) {\textbf{Monitor}\\runs the step's check};
-\node[box] (recov)   at (7.40,3.65) {\textbf{Recovery}\\rollback $\cdot$ repair $\cdot$ none};
+\node[box] (planner) at (2.15,4.35) {\textbf{Planner}\\steps + checks};
+\node[box] (worker)  at (4.70,4.35) {\textbf{Worker}\\read $\cdot$ write $\cdot$ shell};
+\node[box] (monitor) at (7.40,4.35) {\textbf{Monitor}\\runs the step's check};
+\node[box] (recov)   at (10.45,4.35) {\textbf{Recovery}\\rollback $\cdot$ repair $\cdot$ none};
 
 \draw[flow] (planner) -- (worker);
 \draw[flow] (worker) -- (monitor);
-\draw[flow] (monitor.north) -- ++(0,0.4) -| (worker.north);
-\node[lab, below, inner sep=1.5pt] at ($(worker.north)!0.5!(monitor.north)+(0,0.4)$) {pass: next step};
-\draw[flow] (monitor.south) -- node[right, lab, inner sep=1.5pt] {fail} (recov.north);
-\draw[flow] (recov.west) -| node[above, lab, pos=0.25] {resume} ([xshift=3mm]worker.south);
+\draw[flow] (monitor.north) -- ++(0,0.28) -| (worker.north);
+\node[lab, below, inner sep=1.5pt] at ($(worker.north)!0.5!(monitor.north)+(0,0.28)$) {pass: next step};
+\draw[flow] (monitor.east) -- node[above, lab, inner sep=1.5pt, fill=white] {fail} (recov.west);
+\draw[flow] (recov.south) -- ++(0,-0.48) -- node[above, lab, pos=0.62] {resume} ([xshift=3mm,yshift=-0.48cm]worker.south) -- ([xshift=3mm]worker.south);
 
 % container boundary
 \draw[draw=mute, dashed, dash pattern=on 2pt off 1.5pt, rounded corners=2pt]
-  (0.8,3.0) rectangle (9.1,6.0);
-\node[lab, anchor=west, font=\footnotesize\scshape] at (0.85,5.85) {pinned benchmark container};
+  (0.8,3.05) rectangle (11.9,5.38);
+\node[lab, anchor=west, font=\footnotesize\scshape] at (0.85,5.05) {pinned benchmark container};
 
 % ---------------- instrument (bottom lane) ----------------
 \node[lane] at (0.45,1.4) {instrument};
@@ -84,8 +84,8 @@
 \draw[soft] (8.0,2.07) to[out=90,in=90,looseness=0.5] node[above, lab, pos=0.5, inner sep=1.5pt] {rollback to $s_2$} (5.6,2.07);
 
 % gated arm feedback: the prior-passing tests become the Monitor
-\draw[gate] (9.38,1.12) -- (9.65,1.12) |- (monitor.east);
-\node[text=acc, anchor=west, align=left] at (9.78,3.4) {gated arm: prior-passing\\tests become the Monitor};
+\draw[gate] (9.38,1.12) -- (8.78,1.12) |- (monitor.south);
+\node[text=acc, anchor=west, align=left] at (9.15,2.62) {gated arm: prior-passing\\tests become the Monitor};
 
 % grader
 \draw[draw=ink] (10.5,1.95) circle (0.26);
@@ -96,9 +96,6 @@
   final patch: & \textbf{1} still failing
 \end{tabular}};
 
-% operational note (what the instrument does, after the run)
-\node[lab, anchor=north east, align=right] at (13.3,6.0)
-  {after the run, same container:\\prior-passing tests replayed\\at every state; each event\\attributed to a check};
 
 \end{tikzpicture}
 \end{document}
