@@ -10,7 +10,7 @@ plt.rcParams.update({
     "axes.linewidth": 0.5, "axes.edgecolor": "#444444", "axes.labelcolor": "#222222",
     "axes.spines.top": False, "axes.spines.right": False,
     "xtick.major.width": 0.5, "ytick.major.width": 0.5, "xtick.major.size": 2.5, "ytick.major.size": 2.5,
-    "xtick.color": "#444444", "ytick.color": "#444444", "xtick.labelsize": 7.6, "ytick.labelsize": 8.0,
+    "xtick.color": "#444444", "ytick.color": "#444444", "xtick.labelsize": 6.9, "ytick.labelsize": 8.0,
     "legend.frameon": False, "legend.fontsize": 7.8, "pdf.fonttype": 42, "ps.fonttype": 42,
 })
 SIGNAL, GREY = "#b23a3a", "#cfcfcf"
@@ -35,7 +35,10 @@ EMPTY_A3 = {"django__django-11276", "matplotlib__matplotlib-26291", "mwaskom__se
 scaffold = sum((rows_of(r) for r in
     ["/root/mswe40_sonnet2_s1", "/root/mswe40_sonnet2_s2", "/root/mswe40_sonnet2_s3",
      "/root/mswe40_gpt2_s1", "/root/mswe40_gpt2_s2", "/root/mswe40_gpt2_s3"]), [])
-harness = rows_of("/root/pilot40d", EMPTY_A3) + rows_of("/root/oai10b", {"pallets__flask-5014"})
+harness = rows_of("/root/pilot40d", EMPTY_A3) + [
+    (lab + " (calib.)", b, l, h)
+    for lab, b, l, h in rows_of("/root/oai10b", {"pallets__flask-5014"})
+]
 
 labels = [r[0] for r in scaffold + harness]
 broken = [r[1] for r in scaffold + harness]
@@ -56,7 +59,7 @@ for i, (b, l) in enumerate(zip(broken, left)):
     if l:
         ax.text(i, l + top * 0.02, str(l), ha="center", va="bottom", fontsize=7.0, color=SIGNAL, fontweight="bold")
 ax.axvline(boundary - 0.5, color="#888888", lw=0.6, ls=(0, (3, 3)))
-ax.set_xticks(x); ax.set_xticklabels(labels, rotation=34, ha="right")
+ax.set_xticks(x); ax.set_xticklabels(labels, rotation=42, ha="right")
 ax.set_ylabel("test functions")
 ax.set_ylim(0, top * 1.16)
 ax.text(0.005, 0.94, "unmodified public scaffold", transform=ax.transAxes, fontsize=7.8, color="#222222")
