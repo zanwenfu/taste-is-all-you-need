@@ -89,7 +89,12 @@ def analyse(label: str, evidence: dict[str, dict]) -> dict:
         # failing ids. There the intersection is not computable, and calling
         # it zero would report the most favourable possible answer from an
         # absent field -- the failure mode this whole file exists to avoid.
-        unknown = not d.get("grade_failed") and _failed_by_count(d) > 0
+        # The test is `is None`, not falsiness: an *empty* list is a real
+        # measurement (nothing failed under that substrate's rule), and
+        # treating it as unknown dropped Live cells whose only shortfall was
+        # ids the grader's log never mentions -- which Live does not score as
+        # failures at all.
+        unknown = d.get("grade_failed") is None and _failed_by_count(d) > 0
         rows.append({
             "instance": instance,
             "events": int(d.get("contamination_events_declared") or 0),
