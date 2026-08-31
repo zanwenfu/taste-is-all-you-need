@@ -94,7 +94,7 @@ A fourth arm, added after unblinding (exploratory), replaces the planner-written
 
 ### 5.5 Replication on SWE-bench Live
 
-Table: Every arm on both substrates. **empty**: runs ending byte-identical to their start. **events**: declared (test function, onset) pairs, exposure only, never a denominator. **broken → left**: over the bearing runs, oracle tests broken during the run against those still failing at grade time. **inc.**: incidents, the pre-declared co-primary. **contam.**: graded cells failing an oracle test, net of baseline-dead. The Claude rollback arm's 1 is baseline rot, not agent damage (Appendix C). The public-scaffold rows ran under mini-swe-agent's own budget, not our cap, so no comparison between harnesses is tested. Definitions, incidents, per-row composition and provenance: Appendix C.
+Table: Every arm on both substrates. **empty**: runs ending byte-identical to their start. **events**: declared (test function, onset) pairs, exposure only, never a denominator. **broken → left**: oracle tests broken during the bearing runs against those still failing at grade time. **inc.**: incidents, the pre-declared co-primary. **contam.**: graded cells failing an oracle test, net of baseline-dead. The Claude rollback arm's 1 is baseline rot, not agent damage (Appendix C). The public-scaffold rows ran under mini-swe-agent's own budget, not our cap. Composition and provenance: Appendix C.
 
 | substrate | arm | resolved | empty | events | inc. | bearing | broken → left | contam. | spend |
 |---|---|---|---|---|---|---|---|---|---|
