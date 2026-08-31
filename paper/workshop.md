@@ -32,7 +32,7 @@ All measurements are exploratory, on development slices excluded from future con
 
 ## 3. Instrument
 
-![The harness and the instrument. Every mutating tool call commits the tree to a hidden git reference. After the run, the instance's previously-passing tests are replayed at every state. The test row shows one regressing at s₃–s₄ and repaired by a rollback to s₂, which the official grader, reading only sₙ, never sees. The counts are the GPT-5.6 rollback arm's, over all 47 of its runs. In the gated arm (dashed), the timeline's tests serve as the monitor.](fig_system.pdf){width=0.46}
+![The harness and the instrument. The test row shows a previously-passing test regressing at s₃–s₄ and repaired by a rollback to s₂, which the official grader, reading only sₙ, never sees. The counts are the GPT-5.6 rollback arm's, over all 47 of its runs.](fig_system.pdf){width=0.55}
 
 Figure 1 shows the harness and the instrument. **Observational timeline.** After every mutating tool call the working tree is committed to a git reference outside the agent's view (a private index keeps its own `git status` unchanged). Rollbacks and the run's end are observations too, and an archived run can be re-measured without re-running the agent. The agent's tools and the harness's checks execute inside the same pinned container as the replay, synchronised to the host tree the timeline records (Appendix A.2).
 
