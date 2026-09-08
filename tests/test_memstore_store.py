@@ -205,20 +205,10 @@ def test_lost_compare_and_swap_publishes_nothing(store: Store) -> None:
     # A writer that still believes ``base`` is the head must lose, and lose cleanly:
     # this is the window a crashed lease-holder leaves behind.
     a.write("f", "2")
-    a.backend.stage_all()
-    tree = a.backend.write_tree()
+    built = a.build("stale writer")
+    object.__setattr__(built, "expected_head", base.id)  # pretend it was built earlier
     with pytest.raises(StaleBranch):
-        a._commit(
-            tree=tree,
-            parents=[base.id],
-            kind="checkpoint",
-            reason="stale writer",
-            manifest=base.manifest,
-            transcript=base.transcript,
-            verdict=None,
-            attempt=0,
-            expected_head=base.id,
-        )
+        a.publish_state(built)
     assert a.head == winner
     assert a.head.read("f") == "1"
 
@@ -247,11 +237,11 @@ def test_crash_anywhere_in_the_sequence_leaves_the_store_consistent(
         real_note = backend.note_set
         which = {"note_meta": 0, "note_manifest": 1, "note_transcript": 2}[fail_at]
 
-        def boom_note(ns: str, commit: str, text: str) -> None:
+        def boom_note(ns: str, commit: str, text: str, **kw: object) -> None:
             if calls["note"] == which:
                 raise Boom
             calls["note"] += 1
-            real_note(ns, commit, text)
+            real_note(ns, commit, text, **kw)
 
         monkeypatch.setattr(backend, "note_set", boom_note)
     else:

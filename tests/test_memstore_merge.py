@@ -108,10 +108,17 @@ def test_record_key_clash_is_a_conflict_value(store: Store) -> None:
     assert not res.ok and res.state is None
     (c,) = res.conflicts
     assert c.path == "shared.json" and c.type is ObjectType.RECORD and "k" in c.detail
-    # nothing published; the conflict is attached to our head for a brain to find
-    assert a.head == a_head
-    assert a.head.conflicts[0].path == "shared.json"
-    assert store.backend.note_get(NOTES["conflicts"], a_head.id) is not None
+    # It names what was being merged, which an orchestrator needs later.
+    assert c.theirs_branch == "b" and c.theirs_state == b.head.id and c.ours_state == a_head.id
+    # The failed merge is a state of its own: our tree is untouched, theirs is
+    # NOT an ancestor, and the record cannot overwrite an already-published one.
+    conflict_state = a.head
+    assert conflict_state.meta.kind == "conflict"
+    assert conflict_state.meta.parents == (a_head.id,)
+    assert conflict_state.meta.merged == b.head.id
+    assert conflict_state.read("shared.json") == a_head.read("shared.json")
+    assert conflict_state.conflicts[0].path == "shared.json"
+    assert store.backend.note_get(NOTES["conflicts"], a_head.id) is None
 
 
 def test_file_content_conflict(store: Store) -> None:
@@ -133,11 +140,16 @@ def test_resolved_merge_records_both_parents(store: Store) -> None:
     b.write("f.txt", "line B\n")
     b_head = b.checkpoint("b")
     assert not a.merge(b, reason="try").ok
+    conflict_state = a.head
     # A brain resolves: writes what it wants, then records the merge.
     a.write("f.txt", "line A\nline B\n")
     res = a.merge(b, reason="resolved by hand", resolved=True)
     assert res.ok
-    assert res.state.meta.parents == (a_head.id, b_head.id)
+    # Second parent is theirs; first is ours, which is the resolution the brain
+    # wrote (captured before the merge) sitting on top of the conflict state.
+    assert res.state.meta.parents[1] == b_head.id
+    ours_line = [st.id for st in store.provenance(res.state.parents[0])]
+    assert conflict_state.id in ours_line and a_head.id in ours_line
     assert res.state.read("f.txt") == "line A\nline B\n"
     # and now b is in a's history, so merging again is a no-op
     assert a.merge(b, reason="again").state == res.state

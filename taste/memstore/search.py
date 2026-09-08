@@ -1,10 +1,16 @@
-"""Finding what any branch has: the communicator's question, answered from manifests.
+"""A directory over published manifests: the communicator's lookup.
 
-Every branch head carries a manifest of what it has published. A search
-scans them and scores each entry by how many query words appear in its
-name, description or path. Deliberately simple: the point of the manifest
-is that the answer to "does anyone have X?" is a scan of a few small JSON
-notes, not a crawl of every tree.
+Every branch head carries a manifest of what it has published, and this
+scans them, scoring an entry by how many query words appear in its name,
+description or path.
+
+**This is a directory, not retrieval.** There are no embeddings and no
+ranking beyond token overlap, deliberately: semantic recall over what an
+agent *knows* is a different layer and a solved problem elsewhere (mem0 and
+friends). What belongs here is the index of what exists and where, cheap
+enough that a brain can read the whole thing. ``Store.catalog`` is that
+whole-index read, and is the right first move for a brain that does not yet
+know the words to search for.
 """
 
 from __future__ import annotations

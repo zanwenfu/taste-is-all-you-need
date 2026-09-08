@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from taste.memstore import ObjectType, StaleBranch, Store, Transcript
+from taste.memstore import ObjectType, Store, Transcript
 
 
 def run(root: Path, *, echo: bool = False) -> dict[str, Any]:
@@ -65,17 +65,14 @@ def run(root: Path, *, echo: bool = False) -> dict[str, Any]:
     assert back.parents[0] == bad
 
     # --- a kill between building and publishing a state ----------------------
+    # The objects exist; the ref has not moved. This is the window the
+    # atomicity claim is about, and it is a public API rather than a private
+    # call, so it can be exercised without reaching inside the layer.
     a.write("report.md", "# Report\n\nTotal revenue: 555 (unpublished draft)\n")
-    a.backend.stage_all()
-    tree = a.backend.write_tree()
-    head = a.head
-    try:
-        # simulate: the ref moved underneath us (another brain, or a restart)
-        a._commit(tree=tree, parents=[head.id], kind="checkpoint", reason="draft",
-                  manifest=head.manifest, transcript=head.transcript, verdict=None, attempt=0,
-                  expected_head="0" * 40)
-    except StaleBranch:
-        facts["stale_publish_rejected"] = True
+    built = a.build("a draft the process never lived to publish")
+    facts["build_is_invisible"] = a.head.id == back.id
+    a.write("report.md", facts["after_rollback"])  # the brain is killed here
+    say(f"built {built.sha[:10]} but never published it")
     store.close()
 
     # --- reopen: consistent ---------------------------------------------------
@@ -83,6 +80,7 @@ def run(root: Path, *, echo: bool = False) -> dict[str, Any]:
     a = store.branch("worker-a")
     facts["head_after_reopen"] = a.head.meta.reason
     facts["head_is_complete"] = a.head.manifest is not None and a.head.transcript is not None
+    facts["report_after_reopen"] = a.read("report.md")
     say(f"reopened: head = {facts['head_after_reopen']!r}")
     store.close()
     return facts

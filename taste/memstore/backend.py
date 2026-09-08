@@ -11,14 +11,22 @@ compose them into atomic sequences. The two that matter:
   does. That is the publish step, and it is the only step that can fail
   because someone else got there first.
 
-Notes are written under a repo-wide lock because ``git notes`` is a
-read-modify-write of the notes tree and two writers can lose an update.
+Two rules learned from an audit that broke the first version of this file:
+
+* **Content is bytes.** ``git`` output is decoded with ``surrogateescape`` at
+  this boundary and re-encoded the same way on the way in, so a blob that is
+  not UTF-8 round-trips unchanged instead of raising deep inside a merge.
+* **Nothing is excluded.** The first version imported the legacy harness's
+  ``.git/info/exclude`` writer, so caches and bytecode were silently never
+  checkpointed by a layer whose first invariant is that nothing is lost. A
+  caller that wants exclusions now has to ask for them.
 """
 
 from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import os
 import threading
 from collections.abc import Iterator
@@ -29,8 +37,6 @@ from typing import IO
 from git import Repo
 from git.exc import GitCommandError
 
-from taste.memory import _install_local_excludes
-
 # One held description per lock path, process-wide; see ``GitBackend.lock``.
 _HELD: dict[Path, tuple[IO[str], int]] = {}
 _REGISTRY_LOCK = threading.RLock()
@@ -38,8 +44,33 @@ _REGISTRY_LOCK = threading.RLock()
 ZERO_SHA = "0" * 40
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+MODE_FILE = "100644"
+MODE_EXEC = "100755"
+MODE_SYMLINK = "120000"
+MODE_GITLINK = "160000"
+#: Modes whose content is not a plain file, so a content merge is meaningless.
+UNMERGEABLE_MODES = frozenset({MODE_SYMLINK, MODE_GITLINK})
+
 IDENTITY_NAME = "taste"
 IDENTITY_EMAIL = "taste@localhost"
+
+
+class NoteConflict(RuntimeError):
+    """A note already exists on this object with different content.
+
+    Reachable only if two states share a commit id, which the store prevents
+    by making every state's message unique. It is raised rather than
+    overwritten because the first version of this file used ``notes add -f``
+    and destroyed one agent's transcript when ids did collide.
+    """
+
+
+def _dec(raw: bytes) -> str:
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
+def _enc(text: str) -> bytes:
+    return text.encode("utf-8", errors="surrogateescape")
 
 
 @dataclass(frozen=True)
@@ -47,6 +78,17 @@ class MergeTreeResult:
     tree: str
     conflicted_paths: tuple[str, ...]
     messages: str
+
+
+@dataclass(frozen=True)
+class TreeEntry:
+    mode: str
+    sha: str
+    path: str
+
+    @property
+    def is_mergeable_file(self) -> bool:
+        return self.mode not in UNMERGEABLE_MODES
 
 
 class GitBackend:
@@ -58,7 +100,6 @@ class GitBackend:
         if self.repo.bare:
             raise ValueError(f"{self.path} is bare; the memory layer needs a working tree")
         self._ensure_identity()
-        _install_local_excludes(self.common_dir.parent if self.common_dir.name == ".git" else self.path)
 
     # ---------------------------------------------------------------- basics
 
@@ -75,9 +116,15 @@ class GitBackend:
 
     @property
     def common_dir(self) -> Path:
+        """The shared ``.git`` of this repository, identical in every worktree."""
         raw = self.repo.git.rev_parse("--git-common-dir")
         p = Path(raw)
         return (self.path / p).resolve() if not p.is_absolute() else p
+
+    @property
+    def identity(self) -> str:
+        """A stable short id for the repository, for keying paths outside it."""
+        return hashlib.sha256(str(self.common_dir).encode()).hexdigest()[:12]
 
     def _ensure_identity(self) -> None:
         reader = self.repo.config_reader()
@@ -99,8 +146,6 @@ class GitBackend:
         so a nested ``lock()`` that opened the file again would block on
         itself; instead one description per lock path is held for the
         duration of the outermost holder, and nested holders only count.
-        Threads serialise on the registry lock, which is what we want: git
-        notes are a read-modify-write of one tree.
         """
         lock_path = self.common_dir / "memstore.lock"
         with _REGISTRY_LOCK:
@@ -178,42 +223,53 @@ class GitBackend:
 
     def parents_of(self, commit: str) -> list[str]:
         out = self.repo.git.rev_list("--parents", "-n", "1", commit)
-        parts = out.split()
-        return parts[1:]
+        return out.split()[1:]
 
-    def blob_at(self, commit: str, path: str) -> str | None:
+    def entry_at(self, treeish: str, path: str) -> TreeEntry | None:
+        """The mode, sha and path of one entry, or None if it is not there."""
         try:
-            return self.repo.git.rev_parse("--verify", "--quiet", f"{commit}:{path}")
+            out = self.repo.git.ls_tree(treeish, "--", path)
+        except GitCommandError:
+            return None
+        for line in out.splitlines():
+            meta, _, name = line.partition("\t")
+            parts = meta.split()
+            if len(parts) >= 3 and name == path:
+                return TreeEntry(mode=parts[0], sha=parts[2], path=path)
+        return None
+
+    def blob_at(self, treeish: str, path: str) -> str | None:
+        entry = self.entry_at(treeish, path)
+        return entry.sha if entry else None
+
+    def mode_at(self, treeish: str, path: str) -> str | None:
+        entry = self.entry_at(treeish, path)
+        return entry.mode if entry else None
+
+    def show_bytes(self, commit: str, path: str) -> bytes | None:
+        try:
+            return self.repo.git.show(
+                f"{commit}:{path}", stdout_as_string=False, strip_newline_in_stdout=False
+            )
         except GitCommandError:
             return None
 
     def show(self, commit: str, path: str) -> str | None:
-        try:
-            return self.repo.git.show(f"{commit}:{path}", strip_newline_in_stdout=False)
-        except GitCommandError:
-            return None
+        raw = self.show_bytes(commit, path)
+        return None if raw is None else _dec(raw)
+
+    def cat_blob_bytes(self, sha: str) -> bytes:
+        return self.repo.git.cat_file(
+            "-p", sha, stdout_as_string=False, strip_newline_in_stdout=False
+        )
 
     def cat_blob(self, sha: str) -> str:
-        return self.repo.git.cat_file("-p", sha, strip_newline_in_stdout=False)
+        return _dec(self.cat_blob_bytes(sha))
 
-    def hash_blob(self, content: str) -> str:
-        with self._tempfile(content) as path:
+    def hash_blob(self, content: str | bytes) -> str:
+        raw = content if isinstance(content, bytes) else _enc(content)
+        with self._tempfile(raw) as path:
             return self.repo.git.hash_object("-w", str(path))
-
-    @contextlib.contextmanager
-    def _tempfile(self, content: str) -> Iterator[Path]:
-        """A private file holding ``content``, for commands that read a path.
-
-        Lives beside the lock so it is on the same filesystem as the repo and
-        is never mistaken for part of a working tree.
-        """
-        path = self.common_dir / f"memstore.tmp.{os.getpid()}.{id(content)}"
-        path.write_text(content)
-        try:
-            yield path
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
 
     def ls_files(self, commit: str) -> list[str]:
         out = self.repo.git.ls_tree("-r", "--name-only", commit)
@@ -250,22 +306,65 @@ class GitBackend:
         out = self.repo.git.rev_list(*args, commit)
         return [line for line in out.splitlines() if line]
 
+    @contextlib.contextmanager
+    def _tempfile(self, content: bytes) -> Iterator[Path]:
+        """A private file holding ``content``, for commands that read a path."""
+        path = self.common_dir / f"memstore.tmp.{os.getpid()}.{threading.get_ident()}.{id(content)}"
+        path.write_bytes(content)
+        try:
+            yield path
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+
     # ---------------------------------------------------------------- notes
 
     def note_get(self, namespace: str, commit: str) -> str | None:
         try:
-            return self.repo.git.notes("--ref", namespace, "show", commit, strip_newline_in_stdout=False)
+            return _dec(
+                self.repo.git.notes(
+                    "--ref", namespace, "show", commit,
+                    stdout_as_string=False, strip_newline_in_stdout=False,
+                )
+            )
         except GitCommandError:
             return None
 
-    def note_set(self, namespace: str, commit: str, text: str) -> None:
-        with self.lock(), self._tempfile(text) as path:
-            self.repo.git.notes("--ref", namespace, "add", "-f", "--allow-empty", "--no-stripspace", "-F", str(path), commit)
+    def note_set(self, namespace: str, commit: str, text: str, *, overwrite: bool = True) -> None:
+        """Attach ``text`` to ``commit``.
 
-    def note_copy(self, namespace: str, src: str, dst: str) -> None:
-        text = self.note_get(namespace, src)
-        if text is not None:
-            self.note_set(namespace, dst, text)
+        With ``overwrite=False`` an existing note whose content differs raises
+        ``NoteConflict`` instead of being replaced. The store uses that for
+        every note it writes, so a commit-id collision can never silently
+        destroy another agent's record.
+        """
+        with self.lock():
+            if not overwrite:
+                current = self.note_get(namespace, commit)
+                if current is not None and current != text:
+                    raise NoteConflict(
+                        f"{namespace} already holds a different note on {commit[:10]}"
+                    )
+            with self._tempfile(_enc(text)) as path:
+                self.repo.git.notes(
+                    "--ref", namespace, "add", "-f", "--allow-empty",
+                    "--no-stripspace", "-F", str(path), commit,
+                )
+
+    def note_prune(self, namespace: str) -> None:
+        """Drop notes whose object is gone. Safe to call at any time."""
+        with self.lock(), contextlib.suppress(GitCommandError):
+            self.repo.git.notes("--ref", namespace, "prune")
+
+    def prune_unreachable(self) -> None:
+        """Delete objects no ref reaches.
+
+        Notes must be pruned *after* this: ``git notes prune`` drops a note
+        whose object is gone, and an unpublished commit is unreferenced but
+        still present until it is pruned.
+        """
+        with self.lock(), contextlib.suppress(GitCommandError):
+            self.repo.git.prune("--expire=now")
 
     # ---------------------------------------------------------------- worktree
 
@@ -273,13 +372,45 @@ class GitBackend:
         self.repo.git.reset("--hard")
         self.repo.git.clean("-fd")
 
+    def dirty_paths(self) -> list[str]:
+        """Paths that differ from HEAD, without touching the index.
+
+        ``status --porcelain`` reports tracked modifications and untracked
+        files alike and does not stage anything, so asking whether a branch
+        is dirty cannot itself change what a checkpoint would capture.
+        """
+        out = self.repo.git.status("--porcelain", "--untracked-files=all")
+        paths: list[str] = []
+        for line in out.splitlines():
+            if len(line) > 3:
+                path = line[3:].strip()
+                if " -> " in path:  # a rename reports "old -> new"
+                    path = path.split(" -> ", 1)[1]
+                paths.append(path.strip('"'))
+        return paths
+
     def worktree_add(self, path: Path, ref: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.repo.git.worktree("add", str(path), ref)
+        try:
+            self.repo.git.worktree("add", str(path), ref)
+        except GitCommandError:
+            # A checkout whose directory was deleted leaves an administrative
+            # entry behind that blocks re-adding it. Pruning is the documented
+            # repair and is safe: it only drops entries whose path is gone.
+            self.repo.git.worktree("prune")
+            self.repo.git.worktree("add", str(path), ref)
 
     def worktree_remove(self, path: Path) -> None:
         with contextlib.suppress(GitCommandError):
             self.repo.git.worktree("remove", "--force", str(path))
+        with contextlib.suppress(GitCommandError):
+            self.repo.git.worktree("prune")
+
+    def write_excludes(self, patterns: list[str]) -> None:
+        """Set this repository's local excludes. Empty means exclude nothing."""
+        exclude = self.common_dir / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("\n".join(patterns) + ("\n" if patterns else ""))
 
     # ---------------------------------------------------------------- merge
 
@@ -307,7 +438,6 @@ class GitBackend:
                 if line.strip() == "":
                     in_entries = False
                     continue
-                # "<mode> <sha> <stage>\t<path>"
                 _, _, path = line.partition("\t")
                 if path and path not in conflicted:
                     conflicted.append(path)
@@ -317,18 +447,20 @@ class GitBackend:
             raise RuntimeError(f"merge-tree failed ({status}): {err or out}")
         return MergeTreeResult(tree=tree, conflicted_paths=tuple(conflicted), messages="\n".join(messages))
 
-    def tree_with_blob(self, tree: str, path: str, blob: str) -> str:
-        """Return a new tree equal to ``tree`` with ``path`` replaced by ``blob``.
+    def tree_with_blob(self, tree: str, path: str, blob: str, mode: str = MODE_FILE) -> str:
+        """Return a new tree equal to ``tree`` with ``path`` replaced.
 
-        Done through a throwaway index so the real index and working tree
-        are never touched.
+        ``mode`` is preserved by the caller rather than assumed: the first
+        version hardcoded ``100644`` and silently turned executables into
+        plain files. Done through a throwaway index so the real index and
+        working tree are never touched.
         """
-        index_path = self.common_dir / f"memstore.index.{os.getpid()}"
+        index_path = self.common_dir / f"memstore.index.{os.getpid()}.{threading.get_ident()}"
         env = {"GIT_INDEX_FILE": str(index_path)}
         try:
             with self.repo.git.custom_environment(**env):
                 self.repo.git.read_tree(tree)
-                self.repo.git.update_index("--add", "--cacheinfo", f"100644,{blob},{path}")
+                self.repo.git.update_index("--add", "--cacheinfo", f"{mode},{blob},{path}")
                 return self.repo.git.write_tree()
         finally:
             with contextlib.suppress(FileNotFoundError):

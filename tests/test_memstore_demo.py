@@ -20,6 +20,7 @@ def test_communicator_scenario(tmp_path: Path) -> None:
         "drafted report",
         "branch worker-a from session root",
     ]
-    assert facts["stale_publish_rejected"] is True
+    assert facts["build_is_invisible"] is True
     assert facts["head_after_reopen"] == "monitor: total does not match B's record"
     assert facts["head_is_complete"] is True
+    assert facts["report_after_reopen"] == "# Report\n\nTotal revenue: 555\n"
