@@ -64,17 +64,25 @@ def test_it_satisfies_the_sdks_own_conformance_suite(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ our own claims
 
 
-def test_a_transcript_is_real_history_not_a_side_file(store: Store) -> None:
-    """The whole reason for this adapter: a brain's conversation and its
-    artifacts are one history, so they move together."""
+def test_a_transcript_becomes_history_at_the_brains_own_checkpoint(store: Store) -> None:
+    """A brain's conversation and its artifacts are one history.
+
+    The adapter itself never commits: ``checkpoint`` stages the whole
+    worktree, so a mirror batch landing mid-edit would commit half-written
+    code under a reason claiming to be a transcript write. It writes durably
+    and lets the sub-brain's own checkpoint -- where the tree is coherent and
+    the reason is true -- turn that into history.
+    """
     sess = MemstoreSessionStore(store, "brain")
     key = {"project_key": "proj", "session_id": "s-1"}
     _run(sess.append(key, [_entry(uuid="a", text="thinking")]))
 
     branch = store.branch("brain")
-    files = branch.head.files()
-    assert any(f.endswith(f"{MAIN_SUBPATH}.jsonl") for f in files), files
-    assert branch.head.meta.reason.startswith("transcript:")
+    assert branch.head.read(sess._path(key)) is None, "the adapter must not commit"
+    assert _run(sess.load(key)) == [_entry(uuid="a", text="thinking")]
+
+    st = branch.checkpoint("the brain's own work")
+    assert any(f.endswith(f"{MAIN_SUBPATH}.jsonl") for f in st.files()), st.files()
 
 
 def test_entries_are_stored_verbatim(store: Store) -> None:
@@ -117,10 +125,10 @@ def test_a_rollback_takes_the_conversation_with_it(store: Store) -> None:
     key = {"project_key": "proj", "session_id": "s-1"}
 
     _run(sess.append(key, [_entry(uuid="a", text="sound plan")]))
-    good = store.branch("brain").head
+    good = store.branch("brain").checkpoint("a sound plan")
 
     _run(sess.append(key, [_entry(uuid="b", text="the mistake")]))
-    bad = store.branch("brain").head
+    bad = store.branch("brain").checkpoint("the mistake")
     assert len(_run(sess.load(key))) == 2
 
     store.branch("brain").rollback(good, "that approach was wrong")
@@ -204,3 +212,122 @@ def test_the_brain_layer_states_its_dependency_at_import(tmp_path: Path) -> None
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert out.stdout.strip() == "OK", f"{out.stdout}{out.stderr}"
+
+
+def test_a_long_key_resolves_to_the_same_place_in_every_process() -> None:
+    """A brain must find its own transcript after a restart.
+
+    ``_safe`` shortens an over-long key with a digest. Python randomizes
+    string hashing per process, so ``hash()`` would put the same session in a
+    different directory on every run and resume would silently find nothing --
+    and a realistic worktree realpath is already ~127 characters, so this is
+    the ordinary path rather than an edge case.
+    """
+    import subprocess
+    import sys
+
+    long_key = (
+        "/private/var/folders/w5/_y5qsxd54h7g1bgp2wv659h0000gn/T/brain-spike-abc123"
+        "/.taste-worktrees/9f2a1b3c4d5e/session-name/worker-01"
+    ).replace("/", "-")
+    assert len(long_key) > 120, "the fixture must actually exercise the shortening path"
+
+    code = (
+        "from taste.brains.session_store import MemstoreSessionStore as M\n"
+        f"print(M._safe({long_key!r}))\n"
+    )
+    seen = {
+        subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120).stdout.strip()
+        for _ in range(3)
+    }
+    assert len(seen) == 1, f"the same key resolved to {len(seen)} different paths: {seen}"
+
+
+def test_no_entry_is_lost_across_many_appends(tmp_path: Path) -> None:
+    """Batching commits must never cost entries.
+
+    ``branch.read`` returns the last *committed* state while ``branch.write``
+    writes the working tree, so a read-modify-write rebased every batch onto a
+    base that only advanced at a checkpoint. At checkpoint_every=5, eight of
+    ten entries were destroyed before any commit could preserve them, and
+    nothing raised -- the obvious cure for the adapter's latency was the thing
+    that deleted the brain's reasoning.
+    """
+    s = Store.open(tmp_path / "repo", "s1")
+    try:
+        sess = MemstoreSessionStore(s, "brain")
+        key = {"project_key": "p", "session_id": "sess"}
+        for i in range(10):
+            _run(sess.append(key, [_entry(uuid=f"u{i}")]))
+        got = _run(sess.load(key))
+        assert got is not None, "every append returned successfully; load found nothing"
+        assert [e["uuid"] for e in got] == [f"u{i}" for i in range(10)]
+    finally:
+        s.close()
+
+
+def test_a_resume_sees_entries_that_are_not_committed_yet(tmp_path: Path) -> None:
+    """The tail of a transcript is the part a resuming brain needs most.
+
+    Entries written since the last checkpoint are real -- they are fsynced --
+    so a read that consulted only committed state would hand the brain a
+    transcript missing its most recent turns.
+    """
+    s = Store.open(tmp_path / "repo", "s1")
+    try:
+        sess = MemstoreSessionStore(s, "brain")
+        key = {"project_key": "p", "session_id": "sess"}
+        _run(sess.append(key, [_entry(uuid="a", text="the newest thinking")]))
+
+        assert s.branch("brain").head.read(sess._path(key)) is None, (
+            "the fixture must leave the entry uncommitted"
+        )
+        got = _run(sess.load(key))
+        assert got == [_entry(uuid="a", text="the newest thinking")]
+    finally:
+        s.close()
+
+
+def test_a_mirror_batch_never_commits_the_brains_half_written_work(store: Store) -> None:
+    """``Branch.checkpoint`` stages the whole worktree.
+
+    An adapter that committed per mirror batch photographed whatever the brain
+    happened to be mid-keystroke on, and labelled it a transcript write -- a
+    state no monitor could interpret and a rollback would faithfully restore.
+    """
+    sess = MemstoreSessionStore(store, "brain")
+    branch = store.branch("brain")
+    branch.write("auth.py", "def login():\n    # half-written\n    return (\n")
+
+    _run(sess.append({"project_key": "p", "session_id": "s"}, [_entry(uuid="u0")]))
+
+    assert not branch.history()[:-1] or "auth.py" not in branch.head.files(), (
+        "a transcript mirror committed the brain's broken mid-edit file"
+    )
+    assert branch.is_dirty(), "the brain's work should still be its own to commit"
+
+
+def test_a_redelivered_batch_is_not_stored_twice(store: Store) -> None:
+    """The SDK retries a failed batch three times.
+
+    The protocol says most entries carry a stable uuid to be treated as an
+    idempotency key; without that, a retry after a partial success doubles the
+    brain's own turns and it resumes reading itself twice.
+    """
+    sess = MemstoreSessionStore(store, "brain")
+    key = {"project_key": "p", "session_id": "s"}
+    batch = [_entry(uuid="u1"), _entry(uuid="u2")]
+
+    _run(sess.append(key, batch))
+    _run(sess.append(key, batch))
+
+    assert [e["uuid"] for e in _run(sess.load(key))] == ["u1", "u2"]
+
+
+def test_entries_without_a_uuid_are_never_deduplicated(store: Store) -> None:
+    """Titles, tags and mode markers carry no identity; two of them are two
+    entries, not a duplicate."""
+    sess = MemstoreSessionStore(store, "brain")
+    key = {"project_key": "p", "session_id": "s"}
+    _run(sess.append(key, [{"type": "title"}, {"type": "title"}]))
+    assert len(_run(sess.load(key))) == 2

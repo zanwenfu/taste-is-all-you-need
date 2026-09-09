@@ -29,7 +29,9 @@ parent sees the message. This adapter therefore commits synchronously: when
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import time
 from typing import Any
 
@@ -87,11 +89,10 @@ class MemstoreSessionStore:
     together on rollback.
     """
 
-    def __init__(self, store: Store, branch: str, *, checkpoint_every: int = 1) -> None:
+    def __init__(self, store: Store, branch: str) -> None:
         self.store = store
         self.branch_name = branch
-        self.checkpoint_every = max(1, checkpoint_every)
-        self._pending = 0
+        self._seen: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------------ paths
 
@@ -107,7 +108,12 @@ class MemstoreSessionStore:
         out = out.strip(".") or "_"
         if len(out) > 120:
             # Keep it addressable, keep it unique.
-            digest = format(abs(hash(segment)) % (1 << 32), "08x")
+            # sha256, never hash(): Python randomizes string hashing per
+            # process, so the same key would resolve to a different directory
+            # on every run and a brain could never find its own transcript
+            # again. A realistic worktree realpath is already ~127 characters,
+            # so this is the ordinary path, not an edge case.
+            digest = hashlib.sha256(segment.encode("utf-8", "surrogateescape")).hexdigest()[:16]
             out = f"{out[:100]}_{digest}"
         return out
 
@@ -151,10 +157,23 @@ class MemstoreSessionStore:
 
         branch = self.store.branch(self.branch_name)
         path = self._path(key)
-        existing = branch.read(path) or ""
-        # Verbatim, one JSON object per line, in call order.
-        added = "".join(json.dumps(e, sort_keys=True) + "\n" for e in entries)
-        branch.write(path, existing + added)
+        # Append to the file; never rebuild it from the committed head.
+        # ``branch.read`` returns the last *committed* state while
+        # ``branch.write`` writes the working tree, so read-then-rewrite
+        # rebased every batch onto a base that only advances at a checkpoint:
+        # at checkpoint_every=5, eight of ten entries were destroyed before
+        # any commit could preserve them, silently. Appending is also O(1)
+        # rather than O(n), which is what made a long session quadratic.
+        fresh = self._undelivered(path, entries)
+        if not fresh:
+            return
+        added = "".join(json.dumps(e, sort_keys=True) + "\n" for e in fresh)
+        target = branch.path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(added)
+            fh.flush()
+            os.fsync(fh.fileno())
 
         project_key, session_id = key["project_key"], key["session_id"]
         stamped = _now_ms()
@@ -168,14 +187,53 @@ class MemstoreSessionStore:
             json.dumps({"session_id": session_id, "mtime": stamped}) + "\n",
         )
 
-        self._pending += 1
-        if self._pending >= self.checkpoint_every:
-            branch.checkpoint(f"transcript: {session_id[:12]} +{len(entries)}")
-            self._pending = 0
+        # Deliberately no checkpoint here. ``Branch.checkpoint`` stages the
+        # whole worktree, so a mirror batch arriving while the brain was
+        # mid-edit committed half-written code under a reason claiming to be a
+        # transcript write -- a state no monitor could interpret, and one that
+        # a rollback would then restore. Durability rests on the fsync above,
+        # not on the commit; turning these entries into history is the
+        # sub-brain's own checkpoint, where the tree is coherent and the
+        # reason is true.
+
+    def _undelivered(self, path: str, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop entries this path has already stored.
+
+        The protocol says most entries carry a stable uuid "that adapters
+        should treat as an idempotency key", because a batch can be
+        re-delivered -- the SDK retries a failed append three times. Without
+        this, a retry that partially succeeded appends every entry twice and
+        a resumed brain reads its own turns doubled.
+
+        Entries without a uuid are appended unconditionally, as the protocol
+        requires: titles, tags and mode markers carry no identity and are not
+        duplicates of one another.
+        """
+        seen = self._seen.get(path)
+        if seen is None:
+            seen = set()
+            for line in (self._read_current(path) or "").splitlines():
+                if line.strip():
+                    try:
+                        uuid = json.loads(line).get("uuid")
+                    except json.JSONDecodeError:
+                        continue
+                    if uuid:
+                        seen.add(uuid)
+            self._seen[path] = seen
+        out = []
+        for entry in entries:
+            uuid = entry.get("uuid")
+            if uuid and uuid in seen:
+                continue
+            if uuid:
+                seen.add(uuid)
+            out.append(entry)
+        return out
 
     async def load(self, key: Any) -> list[dict[str, Any]] | None:
         """Serve a resume from our store. ``None`` means never written."""
-        raw = self._read(self._path(key))
+        raw = self._read_current(self._path(key))
         if raw is None:
             return None
         return [json.loads(line) for line in raw.splitlines() if line.strip()]
@@ -192,7 +250,7 @@ class MemstoreSessionStore:
     async def list_session_summaries(self, project_key: str) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for session_id, _meta in self._each_session(project_key):
-            raw = self._read(self._summary_path(project_key, session_id))
+            raw = self._read_current(self._summary_path(project_key, session_id))
             if raw:
                 out.append(json.loads(raw))
         return out
@@ -209,14 +267,18 @@ class MemstoreSessionStore:
             targets = [self._path(key)]
         else:
             prefix = self._dir(key["project_key"], key["session_id"]) + "/"
-            targets = [p for p in branch.head.files() if p.startswith(prefix)]
-        if not targets:
-            return
+            targets = [p for p in self._files() if p.startswith(prefix)]
         for path in targets:
             full = branch.path(path)
             if full.exists():
                 full.unlink()
-        branch.checkpoint(f"transcript deleted: {key['session_id'][:12]}")
+            self._seen.pop(path, None)
+        # No checkpoint, for the same reason append takes none: committing
+        # here would sweep the sub-brain's unrelated work into a state
+        # labelled "transcript deleted". The removal is real on disk and
+        # becomes history at the sub-brain's next checkpoint. Nothing is lost
+        # in the memory-layer sense either -- the states that held these
+        # files stay reachable forever.
 
     async def list_subkeys(self, key: Any) -> list[str]:
         """Subagent transcripts under a session.
@@ -237,6 +299,23 @@ class MemstoreSessionStore:
 
     # ------------------------------------------------------------- internals
 
+    def _read_current(self, path: str) -> str | None:
+        """The live file if the worktree has it, else the committed state.
+
+        Between checkpoints the working tree is ahead of the head, and after a
+        worktree is removed the head is all there is, so a correct read
+        consults the worktree first and falls back to history. A resume that
+        saw only committed state would hand the brain a transcript missing its
+        most recent turns -- the reasoning it needs most.
+        """
+        try:
+            live = self.store.worktree_path_for(self.branch_name) / path
+            if live.exists():
+                return live.read_text(encoding="utf-8", errors="surrogateescape")
+        except (OSError, ValueError):
+            pass
+        return self._read(path)
+
     def _read(self, path: str) -> str | None:
         """Read from the branch head, or None if the branch has no head yet.
 
@@ -250,8 +329,25 @@ class MemstoreSessionStore:
         return view.read(path)
 
     def _files(self) -> list[str]:
+        """Transcript files that exist now, committed or not.
+
+        The adapter writes the working tree and lets the sub-brain's own
+        checkpoint turn that into history, so committed state alone is always
+        behind. Listing sessions from it would hide the session currently
+        being written -- the only one anybody is asking about.
+        """
+        seen: list[str] = []
+        root = self.store.worktree_path_for(self.branch_name) / TRANSCRIPT_DIR
+        if root.exists():
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    seen.append(str(path.relative_to(root.parent)))
         view = self.store.view(self.branch_name)
-        return view.head.files() if view.exists() else []
+        if view.exists():
+            for path in view.head.files():
+                if path.startswith(TRANSCRIPT_DIR + "/") and path not in seen:
+                    seen.append(path)
+        return seen
 
     def _each_session(self, project_key: str):
         """(session_id, meta) for every session written under a project."""
@@ -259,7 +355,7 @@ class MemstoreSessionStore:
         suffix = f"/{MAIN_SUBPATH}.meta.json"
         for path in self._files():
             if path.startswith(prefix) and path.endswith(suffix):
-                raw = self._read(path)
+                raw = self._read_current(path)
                 if raw:
                     meta = json.loads(raw)
                     yield meta["session_id"], meta
