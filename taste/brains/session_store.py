@@ -89,9 +89,17 @@ class MemstoreSessionStore:
     together on rollback.
     """
 
-    def __init__(self, store: Store, branch: str) -> None:
+    def __init__(self, store: Store, branch: str, *, project_key: str | None = None) -> None:
         self.store = store
         self.branch_name = branch
+        # A brain's memory follows its identity, not its filesystem location.
+        # The SDK derives project_key from the realpath of cwd and offers no
+        # way to set it, so a worktree recreated at a different path would
+        # address a different transcript and the brain would wake amnesiac.
+        # Pinning it to the branch makes worktrees disposable, which is what
+        # the architecture assumes: the branch is the address space, the
+        # worktree is scratch. Left None, the SDK's own scoping is honoured.
+        self.project_key = project_key
         self._seen: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------------ paths
@@ -117,8 +125,21 @@ class MemstoreSessionStore:
             out = f"{out[:100]}_{digest}"
         return out
 
+    def _scope(self, project_key: str) -> str:
+        """The directory a project's sessions live under.
+
+        Digested rather than used verbatim: the raw key is a sanitised
+        filesystem path, so it is long, ugly, and different on every machine.
+        The digest keeps distinct projects isolated -- which the protocol
+        requires -- while making the layout independent of path length and of
+        where the worktree happens to sit.
+        """
+        key = self.project_key if self.project_key is not None else project_key
+        digest = hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+        return f"{self._safe(key)[:60]}-{digest}"
+
     def _dir(self, project_key: str, session_id: str) -> str:
-        return f"{TRANSCRIPT_DIR}/{self._safe(project_key)}/{self._safe(session_id)}"
+        return f"{TRANSCRIPT_DIR}/{self._scope(project_key)}/{self._safe(session_id)}"
 
     def _path(self, key: Any) -> str:
         subpath = key.get("subpath") or MAIN_SUBPATH
@@ -351,7 +372,7 @@ class MemstoreSessionStore:
 
     def _each_session(self, project_key: str):
         """(session_id, meta) for every session written under a project."""
-        prefix = f"{TRANSCRIPT_DIR}/{self._safe(project_key)}/"
+        prefix = f"{TRANSCRIPT_DIR}/{self._scope(project_key)}/"
         suffix = f"/{MAIN_SUBPATH}.meta.json"
         for path in self._files():
             if path.startswith(prefix) and path.endswith(suffix):

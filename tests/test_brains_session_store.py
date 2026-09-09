@@ -331,3 +331,42 @@ def test_entries_without_a_uuid_are_never_deduplicated(store: Store) -> None:
     key = {"project_key": "p", "session_id": "s"}
     _run(sess.append(key, [{"type": "title"}, {"type": "title"}]))
     assert len(_run(sess.load(key))) == 2
+
+
+def test_a_brain_finds_its_memory_after_its_worktree_moves(tmp_path: Path) -> None:
+    """A brain's memory follows its identity, not its filesystem location.
+
+    The SDK derives ``project_key`` from the realpath of cwd and offers no way
+    to set it, so a worktree recreated at a different path addressed a
+    different transcript and the brain woke amnesiac -- with no error. Pinning
+    the scope to the branch makes worktrees disposable, which is what the
+    architecture assumes: the branch is the address space, the worktree is
+    scratch.
+    """
+    s = Store.open(tmp_path / "repo", "s1")
+    try:
+        sess = MemstoreSessionStore(s, "brain", project_key="mem/s1/brain")
+        before = {"project_key": "-Users-someone-wt-abc123", "session_id": "s-1"}
+        _run(sess.append(before, [_entry(uuid="a", text="what I learned")]))
+
+        # the worktree is recreated somewhere else; the SDK derives a new key
+        after = {"project_key": "-private-var-folders-T-wt-zzz999", "session_id": "s-1"}
+        assert _run(sess.load(after)) == [_entry(uuid="a", text="what I learned")]
+    finally:
+        s.close()
+
+
+def test_two_projects_stay_isolated_when_the_scope_is_not_pinned(tmp_path: Path) -> None:
+    """Pinning is opt-in; without it the SDK's own scoping must still hold,
+    because the protocol requires distinct projects to be isolated."""
+    s = Store.open(tmp_path / "repo", "s1")
+    try:
+        sess = MemstoreSessionStore(s, "brain")
+        a = {"project_key": "A", "session_id": "s1"}
+        b = {"project_key": "B", "session_id": "s1"}
+        _run(sess.append(a, [_entry(uuid="a", who="A")]))
+        _run(sess.append(b, [_entry(uuid="b", who="B")]))
+        assert _run(sess.load(a)) == [_entry(uuid="a", who="A")]
+        assert _run(sess.load(b)) == [_entry(uuid="b", who="B")]
+    finally:
+        s.close()
