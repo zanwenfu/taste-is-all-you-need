@@ -55,6 +55,10 @@ IDENTITY_NAME = "taste"
 IDENTITY_EMAIL = "taste@localhost"
 
 
+class RefUpdateFailed(RuntimeError):
+    """A ref write failed for a reason that is not a lost compare-and-swap."""
+
+
 class NoteConflict(RuntimeError):
     """A note already exists on this object with different content.
 
@@ -130,13 +134,21 @@ class GitBackend:
         reader = self.repo.config_reader()
         have_name = reader.has_option("user", "name")
         have_email = reader.has_option("user", "email")
-        if have_name and have_email:
+        # ``core.quotePath`` defaults on, which makes git report café.txt as
+        # "caf\303\251.txt" wherever it prints a path. The parsers here read
+        # NUL-delimited output and are immune, but ``merge-tree`` has no such
+        # form, and a quoted path there produced a conflict on a name that
+        # matched nothing. Turning it off at the repository settles it once.
+        have_quoting = reader.has_option("core", "quotepath")
+        if have_name and have_email and have_quoting:
             return
         with self.repo.config_writer() as w:
             if not have_name:
                 w.set_value("user", "name", IDENTITY_NAME)
             if not have_email:
                 w.set_value("user", "email", IDENTITY_EMAIL)
+            if not have_quoting:
+                w.set_value("core", "quotepath", "false")
 
     @contextlib.contextmanager
     def lock(self) -> Iterator[None]:
@@ -184,8 +196,18 @@ class GitBackend:
         try:
             self.repo.git.update_ref(ref, new, expected)
             return True
-        except GitCommandError:
-            return False
+        except GitCommandError as exc:
+            current = self.ref_sha(ref) or ZERO_SHA
+            if current != expected:
+                return False
+            # The compare would have succeeded, so the ref did not move and
+            # something else refused the write. Reporting that as a lost race
+            # sent callers off to resolve a conflict that never happened --
+            # a pruned object, for one, reads exactly like staleness.
+            raise RefUpdateFailed(
+                f"{ref} still points at {expected[:10]}, so the update failed "
+                f"for another reason: {exc}"
+            ) from exc
 
     def delete_ref(self, ref: str) -> None:
         with contextlib.suppress(GitCommandError):
@@ -228,14 +250,19 @@ class GitBackend:
     def entry_at(self, treeish: str, path: str) -> TreeEntry | None:
         """The mode, sha and path of one entry, or None if it is not there."""
         try:
-            out = self.repo.git.ls_tree(treeish, "--", path)
+            out = self.repo.git.ls_tree(
+                treeish, "-z", "--", path,
+                stdout_as_string=False, strip_newline_in_stdout=False,
+            )
         except GitCommandError:
             return None
-        for line in out.splitlines():
-            meta, _, name = line.partition("\t")
+        for record in out.split(b"\0"):
+            if not record:
+                continue
+            meta, _, name = record.partition(b"\t")
             parts = meta.split()
-            if len(parts) >= 3 and name == path:
-                return TreeEntry(mode=parts[0], sha=parts[2], path=path)
+            if len(parts) >= 3 and _dec(name) == path:
+                return TreeEntry(mode=_dec(parts[0]), sha=_dec(parts[2]), path=path)
         return None
 
     def blob_at(self, treeish: str, path: str) -> str | None:
@@ -272,18 +299,32 @@ class GitBackend:
             return self.repo.git.hash_object("-w", str(path))
 
     def ls_files(self, commit: str) -> list[str]:
-        out = self.repo.git.ls_tree("-r", "--name-only", commit)
-        return [line for line in out.splitlines() if line]
+        out = self.repo.git.ls_tree(
+            "-r", "--name-only", "-z", commit,
+            stdout_as_string=False, strip_newline_in_stdout=False,
+        )
+        return [_dec(name) for name in out.split(b"\0") if name]
 
     def diff_names(self, a: str, b: str) -> list[tuple[str, str]]:
         """(status, path) for every path that differs between two commits."""
-        out = self.repo.git.diff_tree("--name-status", "-r", a, b)
+        out = self.repo.git.diff_tree(
+            "--name-status", "-r", "-z", a, b,
+            stdout_as_string=False, strip_newline_in_stdout=False,
+        )
+        fields = [f for f in out.split(b"\0") if f]
         rows: list[tuple[str, str]] = []
-        for line in out.splitlines():
-            if not line:
-                continue
-            status, _, path = line.partition("\t")
-            rows.append((status[:1], path))
+        i = 0
+        while i < len(fields):
+            status = _dec(fields[i])[:1]
+            i += 1
+            # A rename or copy is followed by two paths, source then
+            # destination; every other status by one. The destination is the
+            # path that exists in ``b``, which is the one a caller wants.
+            wanted = 2 if status in ("R", "C") else 1
+            if i + wanted > len(fields):
+                break
+            rows.append((status, _dec(fields[i + wanted - 1])))
+            i += wanted
         return rows
 
     def is_ancestor(self, maybe_ancestor: str, commit: str) -> bool:
@@ -379,15 +420,83 @@ class GitBackend:
         files alike and does not stage anything, so asking whether a branch
         is dirty cannot itself change what a checkpoint would capture.
         """
-        out = self.repo.git.status("--porcelain", "--untracked-files=all")
+        out = self.repo.git.status(
+            "--porcelain", "-z", "--untracked-files=all",
+            stdout_as_string=False, strip_newline_in_stdout=False,
+        )
+        entries = out.split(b"\0")
         paths: list[str] = []
-        for line in out.splitlines():
-            if len(line) > 3:
-                path = line[3:].strip()
-                if " -> " in path:  # a rename reports "old -> new"
-                    path = path.split(" -> ", 1)[1]
-                paths.append(path.strip('"'))
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            xy, path = entry[:2], entry[3:]
+            if b"R" in xy or b"C" in xy:
+                # NUL format puts the destination in this record and the
+                # source in the next one; the source is not a dirty path.
+                i += 1
+            paths.append(_dec(path))
         return paths
+
+    def untracked_paths(self) -> list[str]:
+        """Paths git does not track yet, without staging any of them."""
+        out = self.repo.git.status(
+            "--porcelain", "-z", "--untracked-files=all",
+            stdout_as_string=False, strip_newline_in_stdout=False,
+        )
+        entries = out.split(b"\0")
+        paths: list[str] = []
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            xy, path = entry[:2], entry[3:]
+            if b"R" in xy or b"C" in xy:
+                i += 1
+            if xy == b"??":
+                paths.append(_dec(path))
+        return paths
+
+    def _diff_untracked(self, rel: str, *, numstat: bool) -> bytes:
+        """A patch for a file git has never seen, as an addition from nothing.
+
+        ``git diff`` against a commit cannot show an untracked file, and the
+        alternative -- ``add --intent-to-add`` -- writes to the index, which
+        would make asking what changed change what a checkpoint captures.
+        ``--no-index`` against /dev/null shows it while touching nothing.
+        """
+        args = ["git", "diff", "--no-color"]
+        if numstat:
+            args.append("--numstat")
+        args += ["--no-index", "--", os.devnull, rel]
+        _status, out, _err = self.repo.git.execute(
+            args, with_extended_output=True, with_exceptions=False, stdout_as_string=False,
+        )
+        return out if isinstance(out, bytes) else _enc(out)
+
+    def diff_pending(self, against: str | None = None, *, numstat: bool = False) -> str:
+        """Uncommitted work as patch text, untracked files included.
+
+        This is what a monitor reads. ``TypedDiff`` answers which paths
+        changed between two published states; a monitor has to judge work that
+        has not been published yet, and it has to see the code.
+        """
+        args = ["diff", "--no-color"]
+        if numstat:
+            args.append("--numstat")
+        args += [against or "HEAD", "--"]
+        chunks = [
+            self.repo.git.execute(
+                ["git", *args],
+                with_extended_output=False, stdout_as_string=False,
+            )
+        ]
+        chunks += [self._diff_untracked(rel, numstat=numstat) for rel in self.untracked_paths()]
+        return _dec(b"".join(c for c in chunks if c))
 
     def worktree_add(self, path: Path, ref: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

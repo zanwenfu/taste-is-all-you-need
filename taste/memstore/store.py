@@ -29,6 +29,7 @@ import json
 import os
 import re
 import socket
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,67 @@ NOTES = {
 #: Write a full transcript instead of a delta every this many states, so
 #: reconstructing one is a bounded walk rather than a walk of the whole run.
 TRANSCRIPT_SNAPSHOT_EVERY = 64
+
+VERDICT_LOOKBACK = 64
+
+
+def _read_holder(path: Path) -> dict[str, Any] | None:
+    """Who holds a lease, or None if it is free.
+
+    The kernel file lock is the truth; this file is only the label on it. The
+    label is cleared on release and discarded when the process that wrote it
+    is gone, so a leftover record cannot make a free branch look busy. It is
+    never used to decide whether the lease can be taken -- only to say who has
+    it -- because a label can be stale in ways a lock cannot.
+    """
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        holder = dict(json.loads(raw))
+    except json.JSONDecodeError:
+        return None
+    pid = holder.get("pid")
+    if holder.get("host") == socket.gethostname() and isinstance(pid, int):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except OSError:
+            pass  # alive, just not ours to signal
+    return holder
+
+
+def _parse_journal(raw: bytes) -> tuple[list[dict[str, Any]], int]:
+    """Turns in a journal, and how many bytes of it they account for.
+
+    A process killed mid-write leaves one partial line, and it can only be the
+    last. The turn it describes never finished being recorded, so there is
+    nothing in it to recover; the walk stops there and those bytes are not
+    counted as consumed.
+    """
+    turns: list[dict[str, Any]] = []
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        text = line.decode("utf-8", "surrogateescape")
+        if not text.strip():
+            offset += len(line)
+            continue
+        try:
+            turns.append(json.loads(text))
+        except json.JSONDecodeError:
+            break
+        offset += len(line)
+    return turns, offset
+"""How far back ``resume`` looks for judgments a brain has not acknowledged.
+
+Bounded rather than unbounded: a verdict the brain walked past many states ago
+is history, not news, and reading every ancestor's notes on every wake would
+make the cost of waking grow with the length of the run.
+"""
 
 _NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
@@ -137,6 +199,14 @@ class Built:
 
     sha: str
     expected_head: str | None
+    turns_offset: int = 0
+    """How many bytes of the turn journal this state folded in.
+
+    Recorded by position rather than by filename so that turns arriving while
+    the state is being built -- a git commit and four notes writes, a fifth of
+    a second in which the brain is still thinking -- are carried forward
+    instead of deleted unread.
+    """
 
 
 # ------------------------------------------------------------------ state
@@ -284,6 +354,7 @@ class BranchView:
         self.store = store
         self.name = name
         self.ref = store.ref_for(name)
+        self._backend: GitBackend | None = None
 
     def __repr__(self) -> str:
         return f"BranchView({self.name!r})"
@@ -322,6 +393,52 @@ class BranchView:
     def inbox(self, since: str | None = None) -> list[dict[str, Any]]:
         return self.store.inbox(self.name, since=since)
 
+    # ------------------------------------------------------ work in flight
+    #
+    # Everything below reports what a brain is doing *before* it checkpoints.
+    # Judging only published states means a monitor cannot catch a wrong turn
+    # until a minute of tool time has already been spent on it, and none of
+    # this needs the write lease: the sidecars are ordinary files and reading
+    # a working tree takes no lock.
+
+    @property
+    def intent(self) -> str | None:
+        """What the brain said it was about to attempt, if it said."""
+        path = self.store.sidecar("intent", self.name)
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    @property
+    def holder(self) -> dict[str, Any] | None:
+        """Who holds the write lease, or None if the branch is free."""
+        return _read_holder(self.store.sidecar("lease", self.name))
+
+    def pending_turns(self) -> list[dict[str, Any]]:
+        """Turns the brain has recorded since its last state."""
+        if not self.exists():
+            return []
+        path = self.store.sidecar("turns", self.name, f".{self.head.id}")
+        if not path.exists():
+            return []
+        return _parse_journal(path.read_bytes())[0]
+
+    def _worktree_backend(self) -> GitBackend | None:
+        worktree = self.store.worktree_path_for(self.name)
+        if not worktree.exists():
+            return None
+        if self._backend is None:
+            self._backend = GitBackend(worktree)
+        return self._backend
+
+    def dirty_paths(self) -> list[str]:
+        """Files the brain has changed but not yet checkpointed."""
+        backend = self._worktree_backend()
+        return backend.dirty_paths() if backend is not None else []
+
+    def pending_diff(self, *, numstat: bool = False) -> str:
+        """Uncommitted work as patch text -- what a monitor actually reads."""
+        backend = self._worktree_backend()
+        return backend.diff_pending(numstat=numstat) if backend is not None else ""
+
 
 # ------------------------------------------------------------------ branch
 
@@ -341,8 +458,8 @@ class Branch:
         self._lease: IO[str] | None = self._acquire_lease()
         self._pending: dict[str, ManifestEntry] = {}
         self._unpublish: set[str] = set()
-        self._pending_turns: list[dict[str, Any]] = []
         self._pending_sources: list[Source] = []
+        self._journal_lock = threading.Lock()
 
     def __repr__(self) -> str:
         return f"Branch({self.name!r})"
@@ -361,6 +478,13 @@ class Branch:
         lock rather than a record in the store.
         """
         if self._lease is not None:
+            # Clear the label but keep the file: unlinking it would let the
+            # next process flock a different inode and believe it held the
+            # same lease.
+            with contextlib.suppress(OSError):
+                self._lease.seek(0)
+                self._lease.truncate()
+                self._lease.flush()
             fcntl.flock(self._lease.fileno(), fcntl.LOCK_UN)
             self._lease.close()
             self._lease = None
@@ -368,20 +492,13 @@ class Branch:
 
     @property
     def holder(self) -> dict[str, Any] | None:
-        """Who holds this branch, from the lease file, or None if it is free."""
-        try:
-            raw = self._lease_path().read_text()
-        except OSError:
-            return None
-        try:
-            return dict(json.loads(raw))
-        except json.JSONDecodeError:
-            return None
+        """Who holds this branch, or None if it is free."""
+        return _read_holder(self._lease_path())
 
     # ---------------------------------------------------------- lease
 
     def _lease_path(self) -> Path:
-        return self.store.backend.common_dir / f"memstore.lease.{self.store.session}.{self.name}"
+        return self.store.sidecar("lease", self.name)
 
     def _assert_same_repo(self) -> None:
         """A worktree must belong to this repository, not merely sit at that path."""
@@ -451,10 +568,82 @@ class Branch:
     def is_dirty(self) -> bool:
         return bool(self.backend.dirty_paths())
 
+    def pending_diff(self, *, numstat: bool = False) -> str:
+        """Uncommitted work as patch text, untracked files included."""
+        return self.backend.diff_pending(numstat=numstat)
+
     # ---------------------------------------------------------- intent and resume
 
     def _intent_path(self) -> Path:
-        return self.store.backend.common_dir / f"memstore.intent.{self.store.session}.{self.name}"
+        return self.store.sidecar("intent", self.name)
+
+    def _turns_path(self, head_id: str | None = None) -> Path:
+        """Where turns accumulate before they are folded into a state.
+
+        Keyed on the state the turns extend, so a journal left behind by a
+        crash *after* publication names a state the branch has already moved
+        past and can never be mistaken for pending work.
+        """
+        head = head_id if head_id is not None else self.head.id
+        return self.store.sidecar("turns", self.name, f".{head}")
+
+    def _read_journal(self, head_id: str | None = None) -> tuple[list[dict[str, Any]], int]:
+        """The pending turns, and how many bytes of journal they account for.
+
+        The offset is what makes the fold safe: a state consumes a prefix of
+        the journal, never the file, so a turn appended while the state was
+        being built is still there afterwards.
+        """
+        path = self._turns_path(head_id)
+        if not path.exists():
+            return [], 0
+        return _parse_journal(path.read_bytes())
+
+    def _pending_turns(self) -> list[dict[str, Any]]:
+        """Turns recorded since the head state and not yet folded into one."""
+        with self._journal_lock:
+            return self._read_journal()[0]
+
+    def _acked_path(self) -> Path:
+        return self.store.sidecar("acked", self.name)
+
+    def _acked(self) -> dict[str, int]:
+        path = self._acked_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+
+    def _recent_verdicts(self) -> list[tuple[str, list[Verdict]]]:
+        """Verdicts on the head and its recent ancestors, newest state first."""
+        found: list[tuple[str, list[Verdict]]] = []
+        for state in self.store.provenance(self.head)[:VERDICT_LOOKBACK]:
+            verdicts = state.verdicts
+            if verdicts:
+                found.append((state.id, verdicts))
+        return found
+
+    def unacked_verdicts(self) -> list[Verdict]:
+        """Judgments this brain has not yet seen, newest state first."""
+        acked = self._acked()
+        pending: list[Verdict] = []
+        for state_id, verdicts in self._recent_verdicts():
+            pending.extend(verdicts[acked.get(state_id, 0) :])
+        return pending
+
+    def acknowledge(self) -> None:
+        """Mark every verdict currently visible as read.
+
+        Counted per state rather than watermarked by state, so a monitor that
+        judges an older state after the brain has moved on is still delivered
+        exactly once.
+        """
+        acked = self._acked()
+        for state_id, verdicts in self._recent_verdicts():
+            acked[state_id] = len(verdicts)
+        self._acked_path().write_text(json.dumps(acked, sort_keys=True), encoding="utf-8")
 
     def intend(self, reason: str) -> None:
         """Record what this brain is about to attempt.
@@ -477,6 +666,9 @@ class Branch:
             intent=intent,
             open_conflicts=tuple(head.conflicts),
             inbox=tuple(self.store.inbox(self.name)),
+            recovered_turns=tuple(self._pending_turns()),
+            verdicts=tuple(head.verdicts),
+            unacked=tuple(self.unacked_verdicts()),
         )
 
     # ---------------------------------------------------------- publishing
@@ -524,8 +716,25 @@ class Branch:
     # ---------------------------------------------------------- context
 
     def turn(self, **turn: Any) -> None:
-        """Append one turn to the brain's context, flushed at the next state."""
-        self._pending_turns.append(dict(turn))
+        """Append one turn to the brain's context, durably, as it happens.
+
+        Written to disk on the spot rather than held until the next state. A
+        model's output is paid for the moment it arrives, and a brain killed
+        before it can checkpoint has to wake up still holding its own
+        reasoning and its tool results -- that is the material it improves
+        from. The write is the durability point because a killed process runs
+        no ``finally``, no ``atexit`` and no flush on the way out.
+        """
+        line = (json.dumps(dict(turn), sort_keys=True) + "\n").encode("utf-8", "surrogateescape")
+        with self._journal_lock:
+            self._append_journal(self.head.id, line)
+
+    def _append_journal(self, head_id: str, payload: bytes) -> None:
+        """Append to a journal and return only once the bytes are on disk."""
+        with open(self._turns_path(head_id), "ab") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
 
     # ---------------------------------------------------------- writing states
 
@@ -544,14 +753,22 @@ class Branch:
         A transcript of ``None`` carries the previous state's forward plus any
         turns appended with :meth:`turn`.
         """
-        built = self.build(
-            reason,
-            transcript=transcript,
-            records=records,
-            verdict=verdict,
-            attempt=attempt,
-        )
-        return self.publish_state(built)
+        # Held across build and publish so a gc() in another process cannot
+        # land between the commit and the ref move: prune takes this same
+        # lock, and an object pruned mid-checkpoint used to surface as a
+        # spurious StaleBranch. The lock is re-entrant, so the notes writes
+        # inside still take it as before. The public build/publish split is
+        # deliberately left unlocked -- a caller may hold a Built for as long
+        # as it likes, and that window is documented.
+        with self.backend.lock():
+            built = self.build(
+                reason,
+                transcript=transcript,
+                records=records,
+                verdict=verdict,
+                attempt=attempt,
+            )
+            return self.publish_state(built)
 
     def build(
         self,
@@ -606,6 +823,13 @@ class Branch:
         """
         self._capture("rollback", reason)
         head = self.head
+        # Ancestry alone is too weak once this branch has merged another: the
+        # other branch's states become git ancestors, so rolling "back" to one
+        # of them would silently adopt its tree, manifest and transcript and
+        # drop this branch's own files. Reinstating another branch's work is
+        # what adopt and merge are for.
+        if to.meta.branch != self.name and to.id not in {s.id for s in self.history()}:
+            raise NotAnAncestor(f"{to.id[:10]} is not a state of {self.name}")
         if not self.backend.is_ancestor(to.id, head.id):
             raise NotAnAncestor(f"{to.id[:10]} is not in the history of {self.name}")
         self._pending.clear()
@@ -671,9 +895,15 @@ class Branch:
     ) -> Built:
         """Create commit and notes. Nothing is visible until the ref moves."""
         now = now_iso()
-        for name, entry in self._pending.items():
+        for name, entry in list(self._pending.items()):
             blob = self.backend.blob_at(tree, entry.path)
             if blob is None:
+                # Drop the request before raising. Left pending, it made every
+                # later checkpoint re-raise the same error, and because
+                # ``_capture`` checkpoints before rollback and merge, a single
+                # bad publish() wedged the branch against ever committing
+                # again -- turning a rejected bit of metadata into total loss.
+                self._pending.pop(name, None)
                 raise PublishError(f"{entry.path} is not in the checkpoint that publishes {name!r}")
             manifest = manifest.with_entry(
                 ManifestEntry(
@@ -688,8 +918,10 @@ class Branch:
 
         base_full = transcript_base.transcript if transcript_base is not None else Transcript()
         wanted = transcript if transcript is not None else base_full
-        if self._pending_turns:
-            wanted = wanted.extend(self._pending_turns)
+        with self._journal_lock:
+            pending, turns_offset = self._read_journal()
+        if pending:
+            wanted = wanted.extend(pending)
         depth = self._transcript_depth(transcript_base)
         if transcript_base is not None and wanted.extends(base_full) and depth < TRANSCRIPT_SNAPSHOT_EVERY:
             delta, transcript_from = wanted.since(base_full), transcript_base.id
@@ -736,7 +968,7 @@ class Branch:
                     NOTES["conflicts"], sha,
                     json.dumps([c.to_dict() for c in conflicts]), overwrite=False,
                 )
-        return Built(sha=sha, expected_head=expected_head)
+        return Built(sha=sha, expected_head=expected_head, turns_offset=turns_offset)
 
     def _transcript_depth(self, base: State | None) -> int:
         depth = 0
@@ -748,18 +980,48 @@ class Branch:
 
     def publish_state(self, built: Built) -> State:
         """Move the branch ref to a built state, or fail having published nothing."""
-        if not self.backend.cas_update_ref(self.ref, built.sha, built.expected_head):
-            raise StaleBranch(
-                f"{self.name} moved: expected head {(built.expected_head or 'none')[:10]}; "
-                "nothing published"
-            )
+        with self._journal_lock:
+            carried = self._carry_forward(built)
+            if not self.backend.cas_update_ref(self.ref, built.sha, built.expected_head):
+                if carried:
+                    # Nothing was published, so the turns belong where they
+                    # already are: on the journal of the head we are still on.
+                    with contextlib.suppress(FileNotFoundError):
+                        self._turns_path(built.sha).unlink()
+                raise StaleBranch(
+                    f"{self.name} moved: expected head {(built.expected_head or 'none')[:10]}; "
+                    "nothing published"
+                )
+            if built.expected_head is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    self._turns_path(built.expected_head).unlink()
         self._pending.clear()
         self._unpublish.clear()
-        self._pending_turns.clear()
         self._pending_sources.clear()
         with contextlib.suppress(FileNotFoundError):
             self._intent_path().unlink()
         return self.store.state(built.sha)
+
+    def _carry_forward(self, built: Built) -> bool:
+        """Move turns recorded after the fold onto the state about to publish.
+
+        Written before the compare-and-swap so a crash on either side of it is
+        safe. If the swap succeeds the turns are already where the next state
+        will look for them; if it fails they are still in the journal the
+        branch is really on, and the speculative copy is simply dropped.
+        Either way they appear exactly once, which an unlink by filename could
+        not promise.
+        """
+        if built.expected_head is None:
+            return False
+        path = self._turns_path(built.expected_head)
+        if not path.exists():
+            return False
+        leftover = path.read_bytes()[built.turns_offset :]
+        if not leftover:
+            return False
+        self._append_journal(built.sha, leftover)
+        return True
 
 
 # ------------------------------------------------------------------ store
@@ -796,6 +1058,18 @@ class Store:
 
     def ref_for(self, name: str) -> str:
         return f"refs/heads/{self.short_ref_for(name)}"
+
+    def sidecar(self, kind: str, branch: str, suffix: str = "") -> Path:
+        """A per-branch file beside the repository, not inside any state.
+
+        Intent, lease, turn journal and verdict acknowledgements live here:
+        they describe work in flight rather than work that happened, so they
+        are not history and must not be committed as if they were.
+        """
+        return (
+            self.backend.common_dir
+            / f"memstore.{kind}.{self.session}.{_check_name(branch, 'branch')}{suffix}"
+        )
 
     def worktree_path_for(self, name: str) -> Path:
         """Keyed by repository identity, not by the parent directory.
@@ -853,8 +1127,6 @@ class Store:
         ref = self.ref_for(name)
         if self.backend.ref_sha(ref) is None:
             base = from_state.id if from_state is not None else self._session_root()
-            if not self.backend.cas_update_ref(ref, base, None):
-                raise StaleBranch(f"branch {name} was created concurrently")
             self._seed(name, ref, base, from_state, producer)
         wt = self.worktree_path_for(name)
         if not wt.exists():
@@ -889,8 +1161,12 @@ class Store:
         self.backend.note_set(NOTES["meta"], sha, meta.to_json(), overwrite=False)
         self.backend.note_set(NOTES["manifest"], sha, manifest.to_json(), overwrite=False)
         self.backend.note_set(NOTES["transcript"], sha, "", overwrite=False)
-        if not self.backend.cas_update_ref(ref, sha, base):
-            raise StaleBranch(f"branch {name} moved while being seeded")
+        # One ref write, from nothing straight to the seeded state. Claiming
+        # the name first and seeding second meant a crash in between left the
+        # branch permanently pointing at another branch's state, with an empty
+        # history and no way to repair it by reopening.
+        if not self.backend.cas_update_ref(ref, sha, None):
+            raise StaleBranch(f"branch {name} was created concurrently")
 
     def branches(self) -> list[str]:
         prefix = f"{self.REF_ROOT}/{self.session}/"
@@ -928,6 +1204,26 @@ class Store:
         self.backend.prune_unreachable()
         for ns in NOTES.values():
             self.backend.note_prune(ns)
+        self._sweep_turn_journals()
+
+    def _sweep_turn_journals(self) -> None:
+        """Drop turn journals that no branch can still be extending.
+
+        A journal is live only while it names its branch's current head; once
+        the branch moves on, the turns in it were either folded into that move
+        or belong to a state that was never published. Either way no brain can
+        still be adding to it. Journals for a head that is still current are
+        untouched, so collecting is never a way to lose pending reasoning.
+        """
+        live = set()
+        for name in self.branches():
+            sha = self.backend.ref_sha(self.ref_for(name))
+            if sha is not None:
+                live.add(f"memstore.turns.{self.session}.{name}.{sha}")
+        for path in self.backend.common_dir.glob(f"memstore.turns.{self.session}.*"):
+            if path.name not in live:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
 
     # ---------------------------------------------------------- states
 

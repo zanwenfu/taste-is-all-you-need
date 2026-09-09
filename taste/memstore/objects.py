@@ -432,8 +432,24 @@ class Resume:
     intent: str | None
     open_conflicts: tuple[Conflict, ...]
     inbox: tuple[dict[str, Any], ...]
+    recovered_turns: tuple[dict[str, Any], ...] = ()
+    verdicts: tuple[Verdict, ...] = ()
+    unacked: tuple[Verdict, ...] = ()
+    """Verdicts the brain has not yet acknowledged, newest state first.
+
+    A monitor is a separate process, so its judgment arrives as a note on the
+    state rather than as a return value. Without this, a brain woke to a clean
+    resume and carried on building on a state the monitor had already failed;
+    and because verdicts are keyed by state, one more checkpoint hid the
+    failure behind an ancestor.
+    """
 
     @property
     def crashed(self) -> bool:
         """True if work was in flight when the process ended."""
-        return bool(self.dirty_paths) or self.intent is not None
+        return bool(self.dirty_paths) or self.intent is not None or bool(self.recovered_turns)
+
+    @property
+    def failed(self) -> bool:
+        """True if an unacknowledged verdict says this branch went wrong."""
+        return any(v.status == "fail" for v in self.unacked)
