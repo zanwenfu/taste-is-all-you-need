@@ -72,17 +72,45 @@ class WriteAheadLog:
 
     def __init__(self, branch: Any) -> None:
         self.branch = branch
+        self._head: str = ""
         self._path: Path = branch._turns_path()
 
     def rebind(self) -> None:
-        """Re-resolve the journal after the branch head moves."""
+        """Re-resolve the journal after the branch head moves.
+
+        Kept for callers that know a move happened, but correctness no longer
+        depends on anyone remembering: :meth:`_append` re-resolves whenever the
+        head has changed. It used to, and a rollback -- which moves the head
+        without going through ``SubBrain.checkpoint`` -- left the log writing
+        into an orphaned journal that ``resume`` never reads. An ``rm -rf``
+        recorded there was invisible to the next brain.
+        """
+        self._head = ""
         self._path = self.branch._turns_path()
 
     # ------------------------------------------------------------------ write
 
+    def _current_path(self) -> Path:
+        """The journal for the head as it is now.
+
+        The check is a file-existence test, not a git read. ``publish_state``
+        unlinks the journal it folded in, so a path that has vanished is
+        exactly the signal that the head moved -- and asking the filesystem
+        costs 0.01 ms against the ~8 ms of resolving the head through git,
+        which matters because this sits in a PreToolUse hook whose cost is
+        added 1:1 to every tool call.
+
+        A missing journal for a head that has NOT moved is equally handled:
+        re-resolving simply returns the same path and the file is recreated on
+        append.
+        """
+        if not self._path.exists():
+            self._path = self.branch._turns_path()
+        return self._path
+
     def _append(self, record: dict[str, Any]) -> None:
         line = json.dumps(record, sort_keys=True, default=str) + "\n"
-        with open(self._path, "a", encoding="utf-8") as fh:
+        with open(self._current_path(), "a", encoding="utf-8") as fh:
             fh.write(line)
             fh.flush()
             # The durability point. A killed process runs no finally, no

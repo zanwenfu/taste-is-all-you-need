@@ -301,37 +301,53 @@ class MonitorBrain:
         """
         self.record(judgement)
         rung = "none"
-        if judgement.severity is Severity.DRIFTING:
-            # A nudge: say it and let the brain course-correct. Interrupting a
-            # brain that is merely wobbling costs more than it saves.
-            rung = "nudge"
-            await client.query(
-                f"[monitor] {judgement.as_feedback()}\n"
-                "Continue if you disagree, but say why."
+        # Every rung below is wrapped: an escalation that raises halfway --
+        # a closed client, a failed interrupt -- would otherwise leave the
+        # worker stopped and never told why, while the monitor's own report
+        # claimed no intervention happened. The verdict is already recorded
+        # above, so what is at stake here is only whether the record matches
+        # what the worker actually experienced.
+        failure = ""
+        try:
+            if judgement.severity is Severity.DRIFTING:
+                # A nudge: say it and let the brain course-correct. Interrupting a
+                # brain that is merely wobbling costs more than it saves.
+                rung = "nudge"
+                await client.query(
+                    f"[monitor] {judgement.as_feedback()}\n"
+                    "Continue if you disagree, but say why."
+                )
+            elif judgement.severity is Severity.WRONG:
+                # Stop the current turn, then say what was wrong. Order matters:
+                # feedback sent to a brain mid-tool-call is read after the tool it
+                # was meant to prevent.
+                rung = "interrupt"
+                await client.interrupt()
+                await client.query(
+                    f"[monitor] I stopped you. {judgement.as_feedback()}\n"
+                    "Before continuing, check the state of your worktree: a tool "
+                    "may have completed even though it was interrupted."
+                )
+            elif judgement.severity is Severity.LOST:
+                # Demote rather than kill. The reasoning is the expensive part and
+                # it survives; a brain in plan mode can still report what it knows,
+                # which is what the central brain needs in order to re-plan.
+                rung = "demote"
+                await client.interrupt()
+                await client.set_permission_mode("plan")
+                await client.query(
+                    f"[monitor] I have stopped your editing. {judgement.as_feedback()}\n"
+                    "Do not attempt further changes. Report what you tried, what "
+                    "you learned, and what you think should happen instead."
+                )
+        except Exception as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+            self.state.interventions.append(
+                (f"{rung}-failed", f"{judgement.reason} [{failure}]")
             )
-        elif judgement.severity is Severity.WRONG:
-            # Stop the current turn, then say what was wrong. Order matters:
-            # feedback sent to a brain mid-tool-call is read after the tool it
-            # was meant to prevent.
-            rung = "interrupt"
-            await client.interrupt()
-            await client.query(
-                f"[monitor] I stopped you. {judgement.as_feedback()}\n"
-                "Before continuing, check the state of your worktree: a tool "
-                "may have completed even though it was interrupted."
-            )
-        elif judgement.severity is Severity.LOST:
-            # Demote rather than kill. The reasoning is the expensive part and
-            # it survives; a brain in plan mode can still report what it knows,
-            # which is what the central brain needs in order to re-plan.
-            rung = "demote"
-            await client.interrupt()
-            await client.set_permission_mode("plan")
-            await client.query(
-                f"[monitor] I have stopped your editing. {judgement.as_feedback()}\n"
-                "Do not attempt further changes. Report what you tried, what "
-                "you learned, and what you think should happen instead."
-            )
+            self._save_state()
+            return f"{rung}-failed"
+
         if rung != "none":
             self.state.interventions.append((rung, judgement.reason))
             self._save_state()

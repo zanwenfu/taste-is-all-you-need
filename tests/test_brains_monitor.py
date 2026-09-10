@@ -424,3 +424,37 @@ def test_a_restarted_monitor_does_not_re_judge_old_events(store: Store) -> None:
     restarted = MonitorBrain(store, brain.contract, judge_always(Severity.FINE), batch_size=2)
     assert restarted.unjudged() == []
     brain.close()
+
+
+def test_a_failed_escalation_is_reported_as_failed(store: Store) -> None:
+    """An escalation that raises halfway would otherwise leave the worker
+    stopped and never told why, while report() claimed no intervention.
+
+    The verdict is recorded before any rung is attempted, so a broken client
+    costs the brain its interruption, never its warning.
+    """
+    import asyncio
+
+    class BrokenClient:
+        async def interrupt(self) -> None:
+            raise RuntimeError("client is closed")
+
+        async def query(self, text: str) -> None:
+            pass
+
+        async def set_permission_mode(self, mode: str) -> None:
+            pass
+
+    brain = SubBrain(store, a_contract())
+    brain.checkpoint("base")
+    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.WRONG))
+
+    rung = asyncio.run(
+        monitor.respond(Judgement(Severity.WRONG, "editing the wrong file"), BrokenClient())
+    )
+
+    assert rung == "interrupt-failed"
+    assert monitor.state.interventions[0][0] == "interrupt-failed"
+    assert "RuntimeError" in monitor.state.interventions[0][1]
+    assert [v.detail for v in brain.wake().unacked] == ["editing the wrong file"]
+    brain.close()

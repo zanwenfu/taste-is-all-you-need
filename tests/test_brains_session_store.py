@@ -370,3 +370,43 @@ def test_two_projects_stay_isolated_when_the_scope_is_not_pinned(tmp_path: Path)
         assert _run(sess.load(b)) == [_entry(uuid="b", who="B")]
     finally:
         s.close()
+
+
+def test_a_rollback_lets_a_re_mirrored_entry_back_in(tmp_path: Path) -> None:
+    """The dedup cache is keyed on the head for a reason.
+
+    A rollback removes turns from the transcript, and a cache that outlived it
+    swallowed the SDK's re-mirror of exactly those entries -- the brain lost
+    them for good, silently, having been told they were already stored.
+    """
+    s = Store.open(tmp_path / "repo", "s1")
+    try:
+        sess = MemstoreSessionStore(s, "brain")
+        key = {"project_key": "p", "session_id": "sess"}
+        branch = s.branch("brain")
+
+        _run(sess.append(key, [_entry(uuid="u1")]))
+        good = branch.checkpoint("a good state")
+        _run(sess.append(key, [_entry(uuid="u2")]))
+        branch.checkpoint("a state we will abandon")
+
+        branch.rollback(good, "that was wrong")
+        _run(sess.append(key, [_entry(uuid="u2")]))
+
+        assert [e["uuid"] for e in _run(sess.load(key))] == ["u1", "u2"]
+    finally:
+        s.close()
+
+
+def test_dedup_still_holds_within_one_state(tmp_path: Path) -> None:
+    """Keying the cache on the head must not disable the dedup it exists for."""
+    s = Store.open(tmp_path / "repo", "s1")
+    try:
+        sess = MemstoreSessionStore(s, "brain")
+        key = {"project_key": "p", "session_id": "sess"}
+        batch = [_entry(uuid="u1")]
+        _run(sess.append(key, batch))
+        _run(sess.append(key, batch))
+        assert [e["uuid"] for e in _run(sess.load(key))] == ["u1"]
+    finally:
+        s.close()

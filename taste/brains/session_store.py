@@ -101,6 +101,7 @@ class MemstoreSessionStore:
         # worktree is scratch. Left None, the SDK's own scoping is honoured.
         self.project_key = project_key
         self._seen: dict[str, set[str]] = {}
+        self._seen_head: str | None = None
 
     # ------------------------------------------------------------------ paths
 
@@ -230,6 +231,14 @@ class MemstoreSessionStore:
         requires: titles, tags and mode markers carry no identity and are not
         duplicates of one another.
         """
+        # Keyed on the head as well as the path: a rollback removes turns
+        # from the transcript, and a cache that outlived it swallowed the
+        # SDK's re-mirror of exactly those entries -- the brain lost them for
+        # good, silently, having been told they were already stored.
+        head = self._head_id()
+        if self._seen_head != head:
+            self._seen.clear()
+            self._seen_head = head
         seen = self._seen.get(path)
         if seen is None:
             seen = set()
@@ -319,6 +328,11 @@ class MemstoreSessionStore:
         return sorted(out)
 
     # ------------------------------------------------------------- internals
+
+    def _head_id(self) -> str:
+        """Which state the dedup cache was built against."""
+        view = self.store.view(self.branch_name)
+        return view.head.id if view.exists() else ""
 
     def _read_current(self, path: str) -> str | None:
         """The live file if the worktree has it, else the committed state.

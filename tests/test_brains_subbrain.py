@@ -424,3 +424,51 @@ def test_in_flight_warnings_survive_several_checkpoints(store: Store) -> None:
     assert [f.tool_use_id for f in waking.in_flight] == ["danger"]
     assert "deploy --prod" in waking.briefing()
     brain.close()
+
+
+def test_the_wal_follows_the_branch_through_a_rollback(store: Store) -> None:
+    """A rollback moves the head without going through SubBrain.checkpoint,
+    so nothing calls rebind -- and the log was left writing into an orphaned
+    journal that resume() never reads. An ``rm -rf`` recorded there was
+    invisible to the next brain.
+
+    Correctness must not depend on a caller remembering, so the log
+    re-resolves whenever its journal has vanished -- which is precisely what
+    publish_state does to the journal it folded in.
+    """
+    brain = SubBrain(store, a_contract())
+    brain.wal.intent("Bash", "early", {})
+    good = brain.checkpoint("a good state")
+    brain.wal.intent("Bash", "mistake", {})
+    brain.checkpoint("a bad state")
+
+    brain.branch.rollback(good, "that approach was wrong")
+    brain.wal.intent("Bash", "after-rollback", {"command": "rm -rf build"})
+
+    in_flight = {f.tool_use_id for f in brain.wake().in_flight}
+    assert "after-rollback" in in_flight, "the log wrote to an orphaned journal"
+    brain.close()
+
+
+def test_the_wal_stays_cheap_enough_for_a_hook(store: Store) -> None:
+    """Following the branch must not cost a git read per append.
+
+    Resolving the head through git costs ~8 ms, which both hooks together
+    would spend most of the ~20 ms gate budget on. A file-existence check is
+    0.01 ms and answers the same question, because publish_state unlinks the
+    journal it consumed.
+    """
+    import time
+
+    brain = SubBrain(store, a_contract())
+    brain.checkpoint("base")
+
+    times = []
+    for i in range(100):
+        start = time.perf_counter()
+        brain.wal.intent("Bash", f"t{i}", {"command": "pytest"})
+        times.append((time.perf_counter() - start) * 1000)
+    times.sort()
+    median = times[len(times) // 2]
+    assert median < 2.0, f"{median:.3f} ms per append is too slow for a hook"
+    brain.close()
