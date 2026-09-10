@@ -338,3 +338,38 @@ def test_installing_a_contract_twice_does_not_overwrite_a_revision(
     brain.install_contract()
     assert brain.branch.path(CONTRACT_PATH).read_text() == revised
     brain.close()
+
+
+def test_a_brain_its_monitor_failed_is_not_treated_as_fresh(store: Store) -> None:
+    """The verdict channel exists to stop a brain building on work already
+    judged wrong. It was durable and delivered -- `unacked` held it -- but the
+    briefing ignored it whenever the tree happened to be clean, so the brain
+    woke up and carried on. Found by the monitor's own tests.
+    """
+    from taste.memstore import Verdict
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    state = brain.checkpoint("work the monitor will fail")
+    store.judge(state, Verdict(status="fail", by="monitor", detail="B is a dead end"))
+
+    waking = brain.wake()
+    assert not waking.fresh, "a brain that has been failed is not fresh"
+    assert "B is a dead end" in waking.briefing()
+    assert "B is a dead end" in brain.opening_prompt()
+    brain.close()
+
+
+def test_an_acknowledged_verdict_stops_reopening_the_briefing(store: Store) -> None:
+    """Once reacted to, an old failure is history, not news -- otherwise every
+    wake reruns the same correction."""
+    from taste.memstore import Verdict
+
+    brain = SubBrain(store, a_contract())
+    state = brain.checkpoint("work")
+    store.judge(state, Verdict(status="fail", by="monitor", detail="dead end"))
+    assert not brain.wake().fresh
+
+    brain.branch.acknowledge()
+    assert brain.wake().fresh
+    brain.close()

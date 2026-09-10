@@ -77,7 +77,11 @@ class Waking:
         """
         if self.fresh:
             return ""
-        parts = ["You are resuming work that was interrupted."]
+        parts = (
+            ["Your monitor has judged your work; read this before continuing."]
+            if self.unacked and not (self.intent or self.in_flight or self.dirty_paths)
+            else ["You are resuming work that was interrupted."]
+        )
         if self.intent:
             parts.append(f"\nWhen you stopped you were about to: {self.intent}")
         if self.in_flight:
@@ -161,7 +165,12 @@ class SubBrain:
         # it with "You are resuming work that was interrupted" on its first
         # breath -- wrong, and a waste of the context it opens with.
         dirty = tuple(p for p in resume.dirty_paths if p != CONTRACT_PATH)
-        fresh = not (resume.intent or in_flight or dirty)
+        # An unacknowledged verdict means the monitor has already judged this
+        # brain and it has not reacted. A brain with a clean tree in that
+        # position is not fresh -- it is a brain that has been told it went
+        # wrong and does not know yet, which is precisely what the verdict
+        # channel exists to prevent.
+        fresh = not (resume.intent or in_flight or dirty or resume.unacked)
         return Waking(
             fresh=fresh,
             intent=resume.intent,
