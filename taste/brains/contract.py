@@ -36,6 +36,9 @@ class Contract:
     inputs: tuple[str, ...] = ()
     outputs: tuple[str, ...] = ()
     success_criteria: tuple[str, ...] = ()
+    # Declared as tuples and normalised in __post_init__: a caller passing a
+    # list produces a Contract that is not equal to the same contract read
+    # back from JSON, which turns a round-trip test into a false negative.
     issued_by: str = "central"
     notes: str = ""
     budget_usd: float | None = None
@@ -44,8 +47,19 @@ class Contract:
     def __post_init__(self) -> None:
         if not self.identity.strip():
             raise ValueError("a sub-brain must have an identity")
+        # The identity IS the branch name, so it has to satisfy memstore's own
+        # rule. Checked here rather than at spawn because the planner is the
+        # one that can still choose a different name: a contract that only
+        # fails when the spawner opens the branch fails after the planner has
+        # already committed to a decomposition around it.
+        from taste.memstore.store import _check_name
+
+        _check_name(self.identity, "branch")
         if not self.task.strip():
             raise ValueError(f"{self.identity}: a sub-brain must have a task")
+        object.__setattr__(self, "inputs", tuple(self.inputs))
+        object.__setattr__(self, "outputs", tuple(self.outputs))
+        object.__setattr__(self, "success_criteria", tuple(self.success_criteria))
         if not self.success_criteria:
             # Without this a monitor has nothing to judge against and falls
             # back to taste, which is exactly the failure the architecture is
@@ -103,14 +117,29 @@ class Contract:
             "max_turns": self.max_turns,
         }
 
+    @staticmethod
+    def _lines(value: Any) -> tuple[str, ...]:
+        """Coerce a field that should be a list of lines.
+
+        A bare string is the likely mistake -- a planner writing
+        ``"success_criteria": "the tests pass"`` -- and ``tuple()`` would
+        silently shred it into single characters, leaving a contract with
+        ten one-character criteria that no monitor can judge.
+        """
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            return (value,)
+        return tuple(str(v) for v in value)
+
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Contract:
         return cls(
             identity=raw["identity"],
             task=raw["task"],
-            inputs=tuple(raw.get("inputs", ())),
-            outputs=tuple(raw.get("outputs", ())),
-            success_criteria=tuple(raw.get("success_criteria", ())),
+            inputs=cls._lines(raw.get("inputs")),
+            outputs=cls._lines(raw.get("outputs")),
+            success_criteria=cls._lines(raw.get("success_criteria")),
             issued_by=raw.get("issued_by", "central"),
             notes=raw.get("notes", ""),
             budget_usd=raw.get("budget_usd"),

@@ -120,10 +120,21 @@ class GitBackend:
 
     @property
     def common_dir(self) -> Path:
-        """The shared ``.git`` of this repository, identical in every worktree."""
-        raw = self.repo.git.rev_parse("--git-common-dir")
-        p = Path(raw)
-        return (self.path / p).resolve() if not p.is_absolute() else p
+        """The shared ``.git`` of this repository, identical in every worktree.
+
+        Memoized because it is a git subprocess costing ~7.7 ms and the answer
+        cannot change for the life of this backend -- a worktree does not
+        migrate to another repository. It sits under ``turn()``, which the
+        layer above calls from a hook on the hot path, where that was most of
+        a 15 ms budget spent re-asking git a constant.
+        """
+        cached = getattr(self, "_common_dir", None)
+        if cached is None:
+            raw = self.repo.git.rev_parse("--git-common-dir")
+            p = Path(raw)
+            cached = (self.path / p).resolve() if not p.is_absolute() else p
+            self._common_dir = cached
+        return cached
 
     @property
     def identity(self) -> str:

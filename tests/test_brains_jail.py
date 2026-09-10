@@ -1,12 +1,20 @@
-"""The worktree jail, which is the only boundary a sub-brain has.
+"""The worktree jail: an advisory gate over the real sandbox.
 
-Measured on this SDK: there is no filesystem sandbox. From one worktree, under
-both ``acceptEdits`` and ``bypassPermissions``, a brain wrote into the shared
-``.git`` and into a sibling's worktree, reporting success every time. So these
-are not defence-in-depth tests; the jail is the defence.
+``cwd`` confines nothing -- from one worktree, under both ``acceptEdits`` and
+``bypassPermissions``, a brain wrote into the shared ``.git`` and into a
+sibling's worktree, reporting success every time. The conclusion first drawn
+from that, that the jail must therefore BE the boundary, was wrong:
+``ClaudeAgentOptions.sandbox`` is an OS-level sandbox that refuses those writes
+with "operation not permitted", including ``D=../sib; echo x > $D/f`` and
+``dd of=../sib/f``, which defeat any command parser.
 
-A false allow corrupts a sibling brain or the shared repository. A false deny
-costs one explained retry. The tests are written with that asymmetry in mind.
+So these tests hold the gate to what a gate can promise: it catches the common
+cases early and explains them in the brain's own language, and it never lets an
+odd input through by crashing -- because a hook that raises FAILS OPEN
+(measured: the exception is logged, the tool runs, the run reports success).
+
+A false allow here is a bug, not a breach; the sandbox is underneath. A false
+deny costs one explained retry. The asymmetry still favours denying.
 """
 
 from __future__ import annotations
@@ -214,3 +222,121 @@ def test_an_explicitly_allowed_path_is_permitted(tmp_path: Path) -> None:
 
     assert jail.check("Bash", {"command": f"cat {shared}/input.csv"}) is None
     assert jail.check("Write", {"file_path": str(tmp_path / "elsewhere" / "x")}) is not None
+
+
+# ------------------------------------------------ the gate must fail closed
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        pytest.param(["../sibling/x"], id="input-is-a-list"),
+        pytest.param("../sibling/x", id="input-is-a-string"),
+        pytest.param(None, id="input-is-none"),
+        pytest.param({"file_path": "../sibling/x\x00"}, id="nul-byte-in-path"),
+        pytest.param({"file_path": ["../sibling/x"]}, id="path-is-a-list"),
+        pytest.param({"file_path": 7}, id="path-is-an-int"),
+        pytest.param({"edits": "not-a-list"}, id="edits-is-a-string"),
+        pytest.param({"edits": ["not-a-dict"]}, id="edit-is-a-string"),
+    ],
+)
+def test_a_malformed_call_is_denied_not_crashed(jail: WorktreeJail, tool_input) -> None:
+    """A hook that raises FAILS OPEN.
+
+    Measured against CLI 2.1.257: the exception is logged, the tool executes
+    anyway, and the run reports success -- the opposite of
+    ``HookMatcher(timeout=)``, which fails closed. So every input that could
+    raise is a silent bypass unless the gate turns it into a denial itself.
+
+    A NUL byte is the sharp case: ``os.path.realpath`` raises ``ValueError``
+    ("embedded null character"), which is not an ``OSError`` and so escaped the
+    original guard entirely.
+    """
+    import asyncio
+
+    out = asyncio.run(
+        jail.hook({"tool_name": "Write", "tool_input": tool_input}, "t", None)
+    )
+    decision = out.get("hookSpecificOutput", {}).get("permissionDecision")
+    assert decision == "deny", f"{tool_input!r} was not denied: {out!r}"
+
+
+def test_a_nul_byte_in_a_command_is_denied(jail: WorktreeJail) -> None:
+    import asyncio
+
+    out = asyncio.run(
+        jail.hook(
+            {"tool_name": "Bash", "tool_input": {"command": "cat ../sibling/x\x00"}},
+            "t",
+            None,
+        )
+    )
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_the_gate_still_allows_ordinary_work_after_hardening(jail: WorktreeJail) -> None:
+    """Failing closed must not mean failing on everything."""
+    import asyncio
+
+    for tool, ti in [
+        ("Write", {"file_path": "keep.txt"}),
+        ("Bash", {"command": "pytest -q"}),
+        ("Edit", {"file_path": "sub/x.py"}),
+        ("Write", {}),
+    ]:
+        out = asyncio.run(jail.hook({"tool_name": tool, "tool_input": ti}, "t", None))
+        assert out == {}, f"{tool} {ti!r} was wrongly denied: {out!r}"
+
+
+# ------------------------------------- escapes an earlier version let through
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
+            "git --git-dir=../repo/.git update-ref -d refs/heads/mem/s/beta",
+            id="git-dir-deletes-a-siblings-branch",
+        ),
+        pytest.param("git --work-tree=../sibling checkout -- x", id="work-tree"),
+        pytest.param("echo x >../sibling/theirs.txt", id="redirect-without-a-space"),
+        pytest.param("dd of=../sibling/theirs.txt", id="operand-hidden-behind-of="),
+    ],
+)
+def test_flag_and_operand_forms_do_not_slip_past(jail: WorktreeJail, command: str) -> None:
+    """Every one of these passed an earlier version of the gate.
+
+    ``--git-dir`` is the sharpest: skipping any word starting with ``-`` meant
+    a brain could point git at the shared repository and delete a sibling's
+    branch -- the only ref reaching that brain's states, after which ``gc``
+    would prune them permanently.
+    """
+    assert jail.check("Bash", {"command": command}) is not None, command
+
+
+def test_a_brain_cannot_switch_off_its_own_sandbox(jail: WorktreeJail) -> None:
+    """The Bash tool takes a ``dangerouslyDisableSandbox`` parameter and the
+    model can set it. Measured: a model refused by the sandbox re-issued the
+    identical command with the flag set, and the write landed.
+
+    The sandbox is the real boundary; this gate is advisory. Letting the flag
+    through would let one brain dismantle what protects the others.
+    """
+    reason = jail.check("Bash", {"command": "pytest -q", "dangerouslyDisableSandbox": True})
+    assert reason is not None and "sandbox cannot be disabled" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q --maxfail=1",
+        "git log --format=%H -n 5",
+        "git add -A && git commit -m 'work'",
+        "echo hi >out.txt",
+        "python -m pytest tests/ -k test_x",
+        "grep -rn 'def foo' src/",
+    ],
+)
+def test_hardening_did_not_break_ordinary_flags(jail: WorktreeJail, command: str) -> None:
+    """Checking the value half of ``--flag=value`` must not deny every flag."""
+    assert jail.check("Bash", {"command": command}) is None, command
