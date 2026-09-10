@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-__all__ = ["WriteAheadLog", "InFlight", "reconcile"]
+__all__ = ["InFlight", "WriteAheadLog", "reconcile"]
 
 INTENT = "tool_intent"
 RESULT = "tool_result"

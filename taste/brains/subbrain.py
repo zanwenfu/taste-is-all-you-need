@@ -44,7 +44,7 @@ from taste.brains.session_store import MemstoreSessionStore
 from taste.brains.wal import InFlight, WriteAheadLog, reconcile
 from taste.memstore import Store
 
-__all__ = ["SubBrain", "Waking", "SubBrainResult"]
+__all__ = ["SubBrain", "SubBrainResult", "Waking"]
 
 
 @dataclass(frozen=True)

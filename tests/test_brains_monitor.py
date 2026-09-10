@@ -21,15 +21,14 @@ from taste.memstore import Store
 
 pytest.importorskip("claude_agent_sdk", reason="the brain layer needs claude-agent-sdk")
 
-from taste.brains.contract import Contract  # noqa: E402
-from taste.brains.monitor import (  # noqa: E402
-    BATCH_SIZE,
+from taste.brains.contract import Contract
+from taste.brains.monitor import (
     Judgement,
     MonitorBrain,
     Severity,
     batch_prompt,
 )
-from taste.brains.subbrain import SubBrain  # noqa: E402
+from taste.brains.subbrain import SubBrain
 
 
 def a_contract(**kw) -> Contract:
@@ -299,4 +298,60 @@ def test_severity_is_ordered_so_the_worst_wins(store: Store) -> None:
         Judgement(Severity.DRIFTING, "c"),
     ]
     assert monitor.state.worst is Severity.WRONG
+    brain.close()
+
+
+def test_a_checkpoint_does_not_make_the_monitor_skip_events(store: Store) -> None:
+    """The journal is keyed on the branch head, so a checkpoint starts a fresh
+    one.
+
+    A single running index carried across that boundary pointed past the new
+    journal's start and silently discarded as many fresh events as it had
+    already judged -- and the monitor looked perfectly healthy while never
+    seeing the work. Position is per state for that reason.
+    """
+    seen: list[list[str]] = []
+
+    def recording_judge(contract, batch, view):
+        seen.append([e["tool_use_id"] for e in batch])
+        return Judgement(Severity.FINE, "ok")
+
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, recording_judge, batch_size=2)
+
+    for i in range(2):
+        brain.wal.intent("Bash", f"a{i}", {})
+    monitor.tick()
+
+    brain.checkpoint("the worker commits its work")
+
+    for i in range(2):
+        brain.wal.intent("Bash", f"b{i}", {})
+    monitor.tick()
+
+    assert seen == [["a0", "a1"], ["b0", "b1"]], "events were skipped across the checkpoint"
+    brain.close()
+
+
+def test_events_are_still_judged_once_across_many_checkpoints(store: Store) -> None:
+    """A worker that checkpoints often would otherwise have most of its work
+    never looked at."""
+    judged: list[str] = []
+
+    def recording_judge(contract, batch, view):
+        judged.extend(e["tool_use_id"] for e in batch)
+        return Judgement(Severity.FINE, "ok")
+
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, recording_judge, batch_size=1)
+
+    expected = []
+    for round_no in range(4):
+        tool_id = f"t{round_no}"
+        brain.wal.intent("Bash", tool_id, {})
+        expected.append(tool_id)
+        monitor.tick()
+        brain.checkpoint(f"round {round_no}")
+
+    assert judged == expected
     brain.close()

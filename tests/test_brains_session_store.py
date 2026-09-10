@@ -18,9 +18,9 @@ from taste.memstore import Store
 
 pytest.importorskip("claude_agent_sdk", reason="the brain layer needs claude-agent-sdk")
 
-from claude_agent_sdk.testing import run_session_store_conformance  # noqa: E402
+from claude_agent_sdk.testing import run_session_store_conformance
 
-from taste.brains.session_store import MAIN_SUBPATH, MemstoreSessionStore  # noqa: E402
+from taste.brains.session_store import MAIN_SUBPATH, MemstoreSessionStore
 
 
 @pytest.fixture

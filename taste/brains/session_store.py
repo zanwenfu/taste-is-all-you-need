@@ -48,7 +48,7 @@ except ImportError as exc:  # pragma: no cover - exercised by the isolation test
         "taste.brains needs claude-agent-sdk: pip install 'taste[brains]'"
     ) from exc
 
-__all__ = ["MemstoreSessionStore", "TRANSCRIPT_DIR", "MAIN_SUBPATH"]
+__all__ = ["MAIN_SUBPATH", "TRANSCRIPT_DIR", "MemstoreSessionStore"]
 
 TRANSCRIPT_DIR = "sdk-sessions"
 """Where session transcripts live inside a brain's branch."""

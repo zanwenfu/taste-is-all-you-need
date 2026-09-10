@@ -14,10 +14,10 @@ rollback, and is readable by any brain that can read the branch.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["Contract", "CONTRACT_PATH"]
+__all__ = ["CONTRACT_PATH", "Contract"]
 
 CONTRACT_PATH = "contract.json"
 """Where a sub-brain's contract lives in its branch."""

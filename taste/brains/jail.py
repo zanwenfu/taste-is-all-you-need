@@ -54,7 +54,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-__all__ = ["WorktreeJail", "MUTATING_TOOLS", "JailDenial"]
+__all__ = ["MUTATING_TOOLS", "JailDenial", "WorktreeJail"]
 
 MUTATING_TOOLS = ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit")
 """Tools that can change the world, and so must pass the jail.
@@ -226,7 +226,7 @@ class WorktreeJail:
         try:
             tool_name = str(input_data.get("tool_name", "")) if isinstance(input_data, dict) else ""
             reason = self.check(tool_name, input_data.get("tool_input") if isinstance(input_data, dict) else None)
-        except Exception as exc:  # noqa: BLE001 - see below; this must be total
+        except Exception as exc:
             # A hook that raises FAILS OPEN: measured against CLI 2.1.257, the
             # exception is logged, the tool runs anyway, and the run reports
             # success. That is the opposite of HookMatcher(timeout=), which

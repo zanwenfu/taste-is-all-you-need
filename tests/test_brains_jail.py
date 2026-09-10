@@ -19,7 +19,6 @@ deny costs one explained retry. The asymmetry still favours denying.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest

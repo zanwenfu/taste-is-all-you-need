@@ -45,13 +45,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from taste.brains.contract import Contract
 from taste.memstore import Store, Verdict
 
-__all__ = ["Severity", "Judgement", "MonitorBrain", "BATCH_SIZE"]
+__all__ = ["BATCH_SIZE", "Judgement", "MonitorBrain", "Severity"]
 
 BATCH_SIZE = 10
 """How many events a monitor judges per model call.
@@ -63,7 +63,7 @@ event, and it stays flat instead of climbing.
 """
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     """How wrong things are, which is what chooses the response.
 
     Ordered, so a monitor can compare. The distinction that matters is between
@@ -128,7 +128,15 @@ class Judgement:
 class MonitorState:
     """What the monitor has seen, so it can be resumed like anything else."""
 
-    judged_through: int = 0
+    judged_through: dict[str, int] = field(default_factory=dict)
+    """How far this monitor has read, per state.
+
+    Per state, not one running count: the journal is keyed on the branch head,
+    so a checkpoint starts a fresh one. A single index carried across that
+    boundary pointed past the new journal's start and silently discarded as
+    many fresh events as it had already judged -- a monitor that looked
+    healthy while never seeing the work.
+    """
     judgements: list[Judgement] = field(default_factory=list)
     interventions: list[tuple[str, str]] = field(default_factory=list)
 
@@ -160,7 +168,32 @@ class MonitorBrain:
         self.identity = f"monitor/{contract.identity}"
         self._judge = judge
         self.batch_size = batch_size
-        self.state = MonitorState()
+        self.state = self._load_state()
+
+    def _state_path(self):
+        return self.store.sidecar("monitor", self.contract.identity)
+
+    def _load_state(self) -> MonitorState:
+        path = self._state_path()
+        if not path.exists():
+            return MonitorState()
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return MonitorState(
+            judged_through=dict(raw.get("judged_through", {})),
+            interventions=[tuple(i) for i in raw.get("interventions", [])],
+        )
+
+    def _save_state(self) -> None:
+        self._state_path().write_text(
+            json.dumps(
+                {
+                    "judged_through": self.state.judged_through,
+                    "interventions": [list(i) for i in self.state.interventions],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
 
     # ------------------------------------------------------------------ reading
 
@@ -182,8 +215,13 @@ class MonitorBrain:
         """
         return list(self.view().pending_turns())
 
+    def head_id(self) -> str:
+        """Which journal the worker is writing to right now."""
+        view = self.view()
+        return view.head.id if view.exists() else ""
+
     def unjudged(self) -> list[dict[str, Any]]:
-        return self.observations()[self.state.judged_through :]
+        return self.observations()[self.state.judged_through.get(self.head_id(), 0) :]
 
     def worker_is_alive(self) -> bool:
         """Whether anyone still holds the branch.
@@ -209,9 +247,13 @@ class MonitorBrain:
         if len(pending) < self.batch_size and alive:
             return None
         batch = pending[: self.batch_size]
+        head = self.head_id()
         judgement = self._judge(self.contract, batch, self.view())
-        self.state.judged_through += len(batch)
+        self.state.judged_through[head] = (
+            self.state.judged_through.get(head, 0) + len(batch)
+        )
         self.state.judgements.append(judgement)
+        self._save_state()
         return judgement
 
     def record(self, judgement: Judgement) -> None:
@@ -268,6 +310,7 @@ class MonitorBrain:
             )
         if rung != "none":
             self.state.interventions.append((rung, judgement.reason))
+            self._save_state()
         return rung
 
     # ------------------------------------------------------------------ report

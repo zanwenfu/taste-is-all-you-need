@@ -13,7 +13,6 @@ actually executed it yet, so let me run it now" and repeated the command.
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 from pathlib import Path
@@ -24,9 +23,9 @@ from taste.memstore import Store
 
 pytest.importorskip("claude_agent_sdk", reason="the brain layer needs claude-agent-sdk")
 
-from taste.brains.contract import CONTRACT_PATH, Contract  # noqa: E402
-from taste.brains.subbrain import SubBrain  # noqa: E402
-from taste.brains.wal import InFlight, WriteAheadLog, reconcile  # noqa: E402
+from taste.brains.contract import CONTRACT_PATH, Contract
+from taste.brains.subbrain import SubBrain
+from taste.brains.wal import WriteAheadLog, reconcile
 
 
 def a_contract(**kw) -> Contract:

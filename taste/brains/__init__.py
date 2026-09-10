@@ -13,7 +13,7 @@ from __future__ import annotations
 __all__ = ["MemstoreSessionStore"]
 
 
-def __getattr__(name: str):  # noqa: ANN202 - PEP 562 module __getattr__
+def __getattr__(name: str):
     if name == "MemstoreSessionStore":
         from taste.brains.session_store import MemstoreSessionStore
 
