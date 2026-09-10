@@ -159,7 +159,15 @@ class SubBrain:
     def wake(self) -> Waking:
         """What this brain knows before it thinks, fresh or resumed."""
         resume = self.branch.resume()
-        in_flight = tuple(reconcile(resume.recovered_turns))
+        # Committed turns AND the live journal. `recovered_turns` is only the
+        # journal for the current head, but a checkpoint folds the journal into
+        # the state and unlinks it -- so an intent recorded before a checkpoint
+        # became invisible to `reconcile` the moment the brain committed, even
+        # though it was provably still on disk in the state transcript. That
+        # turned "the gap is detectable" into "the gap is silent", which is the
+        # whole distinction this layer claims to hold.
+        history = self._recorded_turns()
+        in_flight = tuple(reconcile(history))
         # The contract is scaffolding the spawner wrote, not work the brain
         # did. Counting it made a brand-new brain look interrupted and greeted
         # it with "You are resuming work that was interrupted" on its first
@@ -179,6 +187,18 @@ class SubBrain:
             unacked=resume.unacked,
             inbox=resume.inbox,
         )
+
+    def _recorded_turns(self) -> list[dict[str, Any]]:
+        """Every turn this brain has recorded, committed or not.
+
+        The two halves are the same sequence: `Branch._build` folds the
+        journal into the state transcript and `publish_state` then unlinks the
+        journal, so reading either alone sees only part of the run.
+        """
+        view = self.store.view(self.contract.identity)
+        if not view.exists():
+            return list(self.branch.resume().recovered_turns)
+        return list(view.head.transcript.turns) + list(view.pending_turns())
 
     def install_contract(self) -> None:
         """Put the contract in the branch, so every brain reads the same one.

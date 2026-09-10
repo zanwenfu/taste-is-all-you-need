@@ -128,7 +128,7 @@ class Judgement:
 class MonitorState:
     """What the monitor has seen, so it can be resumed like anything else."""
 
-    judged_through: dict[str, int] = field(default_factory=dict)
+    judged_through: int = 0
     """How far this monitor has read, per state.
 
     Per state, not one running count: the journal is keyed on the branch head,
@@ -179,7 +179,16 @@ class MonitorBrain:
             return MonitorState()
         raw = json.loads(path.read_text(encoding="utf-8"))
         return MonitorState(
-            judged_through=dict(raw.get("judged_through", {})),
+            judged_through=int(raw.get("judged_through", 0)),
+            judgements=[
+                Judgement(
+                    severity=Severity(j["severity"]),
+                    reason=j.get("reason", ""),
+                    evidence=tuple(j.get("evidence", ())),
+                    suggestion=j.get("suggestion", ""),
+                )
+                for j in raw.get("judgements", ())
+            ],
             interventions=[tuple(i) for i in raw.get("interventions", [])],
         )
 
@@ -188,6 +197,19 @@ class MonitorBrain:
             json.dumps(
                 {
                     "judged_through": self.state.judged_through,
+                    # Persisted because report() is what the central brain
+                    # reads to decide whether to re-plan: without these a
+                    # restarted monitor said worst="fine" for a worker it had
+                    # just judged LOST.
+                    "judgements": [
+                        {
+                            "severity": j.severity.value,
+                            "reason": j.reason,
+                            "evidence": list(j.evidence),
+                            "suggestion": j.suggestion,
+                        }
+                        for j in self.state.judgements
+                    ],
                     "interventions": [list(i) for i in self.state.interventions],
                 },
                 sort_keys=True,
@@ -213,15 +235,20 @@ class MonitorBrain:
         intents and results as they are fsynced rather than at checkpoint
         boundaries.
         """
-        return list(self.view().pending_turns())
-
-    def head_id(self) -> str:
-        """Which journal the worker is writing to right now."""
         view = self.view()
-        return view.head.id if view.exists() else ""
+        if not view.exists():
+            return []
+        # Both sources. The live journal is how a monitor sees intents and
+        # results as they are fsynced; the committed transcript is where those
+        # same turns go when the worker checkpoints, because publish_state
+        # folds them into the state and unlinks the journal. Reading only the
+        # journal destroyed any partial batch held back before a checkpoint:
+        # for a worker checkpointing every N events at batch size B, exactly
+        # N mod B events were never judged, at every checkpoint.
+        return list(view.head.transcript.turns) + list(view.pending_turns())
 
     def unjudged(self) -> list[dict[str, Any]]:
-        return self.observations()[self.state.judged_through.get(self.head_id(), 0) :]
+        return self.observations()[self.state.judged_through :]
 
     def worker_is_alive(self) -> bool:
         """Whether anyone still holds the branch.
@@ -247,11 +274,8 @@ class MonitorBrain:
         if len(pending) < self.batch_size and alive:
             return None
         batch = pending[: self.batch_size]
-        head = self.head_id()
         judgement = self._judge(self.contract, batch, self.view())
-        self.state.judged_through[head] = (
-            self.state.judged_through.get(head, 0) + len(batch)
-        )
+        self.state.judged_through += len(batch)
         self.state.judgements.append(judgement)
         self._save_state()
         return judgement

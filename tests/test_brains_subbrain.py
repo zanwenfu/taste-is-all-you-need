@@ -372,3 +372,55 @@ def test_an_acknowledged_verdict_stops_reopening_the_briefing(store: Store) -> N
     brain.branch.acknowledge()
     assert brain.wake().fresh
     brain.close()
+
+
+def test_an_in_flight_tool_survives_a_checkpoint(store: Store) -> None:
+    """This is the WAL's headline claim, and a checkpoint used to break it.
+
+    ``reconcile`` read only the journal for the current head, but ``_build``
+    folds that journal into the state transcript and ``publish_state`` unlinks
+    it. So an intent recorded before a checkpoint became invisible the moment
+    the brain committed -- while still provably on disk in the transcript. The
+    gap stopped being detectable, which is exactly the difference between
+    "nothing is lost" and "nothing is lost silently".
+    """
+    brain = SubBrain(store, a_contract())
+    brain.wal.intent("Bash", "t1", {"command": "psql -c 'TRUNCATE users'"})
+    assert brain.wake().uncertain
+
+    brain.checkpoint("preserve the work so far")
+
+    waking = brain.wake()
+    assert waking.uncertain, "the checkpoint hid an in-flight tool"
+    assert [f.tool_use_id for f in waking.in_flight] == ["t1"]
+    assert "TRUNCATE" in waking.briefing()
+    brain.close()
+
+
+def test_a_tool_that_finished_after_a_checkpoint_is_not_reported(store: Store) -> None:
+    """An intent and its result can straddle a checkpoint. Reading across the
+    boundary must pair them, not warn about a tool that demonstrably finished.
+    """
+    brain = SubBrain(store, a_contract())
+    brain.wal.intent("Bash", "t1", {"command": "pytest"})
+    brain.checkpoint("commit between the intent and the result")
+    brain.wal.result("Bash", "t1", ok=True, summary="3 passed")
+
+    waking = brain.wake()
+    assert waking.in_flight == (), "a finished tool was reported as unknown"
+    brain.close()
+
+
+def test_in_flight_warnings_survive_several_checkpoints(store: Store) -> None:
+    """A long run checkpoints many times; the warning must not decay."""
+    brain = SubBrain(store, a_contract())
+    brain.wal.intent("Bash", "danger", {"command": "deploy --prod"})
+    for i in range(3):
+        brain.wal.intent("Bash", f"ok{i}", {})
+        brain.wal.result("Bash", f"ok{i}", ok=True)
+        brain.checkpoint(f"round {i}")
+
+    waking = brain.wake()
+    assert [f.tool_use_id for f in waking.in_flight] == ["danger"]
+    assert "deploy --prod" in waking.briefing()
+    brain.close()

@@ -330,6 +330,7 @@ def test_a_checkpoint_does_not_make_the_monitor_skip_events(store: Store) -> Non
     monitor.tick()
 
     assert seen == [["a0", "a1"], ["b0", "b1"]], "events were skipped across the checkpoint"
+    assert not monitor.unjudged(), "nothing should be left unreachable"
     brain.close()
 
 
@@ -354,4 +355,72 @@ def test_events_are_still_judged_once_across_many_checkpoints(store: Store) -> N
         brain.checkpoint(f"round {round_no}")
 
     assert judged == expected
+    brain.close()
+
+
+def test_a_partial_batch_survives_a_checkpoint(store: Store) -> None:
+    """Events held back as a partial batch must not be destroyed by a commit.
+
+    ``tick`` holds back an incomplete batch while the worker is alive, and
+    ``publish_state`` unlinks the journal when the worker checkpoints. Reading
+    only the live journal therefore lost exactly ``N mod B`` events at every
+    checkpoint -- they were in the published transcript, and the monitor could
+    never reach them. ``observations`` spans both sources for that reason.
+    """
+    seen: list[str] = []
+
+    def recording_judge(contract, batch, view):
+        seen.extend(e["tool_use_id"] for e in batch)
+        return Judgement(Severity.FINE, "ok")
+
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, recording_judge, batch_size=3)
+
+    for i in range(5):  # 3 judged, 2 held back
+        brain.wal.intent("Bash", f"e{i}", {})
+    monitor.tick()
+    assert seen == ["e0", "e1", "e2"]
+
+    brain.checkpoint("the worker commits mid-batch")
+    brain.wal.intent("Bash", "e5", {})
+    monitor.tick()
+
+    # e3 and e4 were the held-back partial batch; e5 completes it.
+    assert seen == ["e0", "e1", "e2", "e3", "e4", "e5"], (
+        "the partial batch did not survive the checkpoint"
+    )
+
+    brain.close()
+    monitor.tick()
+    assert set(seen) == {f"e{i}" for i in (0, 1, 2, 3, 4, 5)}
+    assert not monitor.unjudged()
+
+
+def test_a_restarted_monitor_still_knows_the_worker_went_wrong(store: Store) -> None:
+    """``report()`` is what the central brain reads to decide whether to
+    re-plan. Persisting the position but not the judgements meant a restarted
+    monitor reported worst="fine" for a worker it had just judged LOST.
+    """
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.LOST), batch_size=1)
+    brain.wal.intent("Bash", "t0", {})
+    monitor.tick()
+    assert monitor.state.worst is Severity.LOST
+
+    restarted = MonitorBrain(store, brain.contract, judge_always(Severity.FINE), batch_size=1)
+    assert restarted.state.worst is Severity.LOST
+    assert restarted.report()["worst"] == "lost"
+    brain.close()
+
+
+def test_a_restarted_monitor_does_not_re_judge_old_events(store: Store) -> None:
+    """Re-judging would re-interrupt a worker for work already handled."""
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.FINE), batch_size=2)
+    for i in range(2):
+        brain.wal.intent("Bash", f"t{i}", {})
+    monitor.tick()
+
+    restarted = MonitorBrain(store, brain.contract, judge_always(Severity.FINE), batch_size=2)
+    assert restarted.unjudged() == []
     brain.close()
