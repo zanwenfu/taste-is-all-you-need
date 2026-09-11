@@ -29,13 +29,17 @@ import fcntl
 import hashlib
 import os
 import threading
-from collections.abc import Iterator
+from collections import OrderedDict
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
-from typing import IO
+from typing import IO, Concatenate, ParamSpec, TypeVar, cast
 
 from git import Repo
-from git.exc import GitCommandError
+from git.exc import BadName, BadObject, GitCommandError
+from git.objects import Blob, Commit, Tree
+from git.refs import SymbolicReference
 
 # One held description per lock path, process-wide; see ``GitBackend.lock``.
 _HELD: dict[Path, tuple[IO[str], int]] = {}
@@ -53,6 +57,70 @@ UNMERGEABLE_MODES = frozenset({MODE_SYMLINK, MODE_GITLINK})
 
 IDENTITY_NAME = "taste"
 IDENTITY_EMAIL = "taste@localhost"
+
+_CACHE_MISS = object()
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+# Object ids and cache cardinalities are intentionally bounded.  Coordinator
+# processes can live for days and encounter an unbounded number of states.
+_NOTE_TREE_CACHE_MAX_REFS = 16
+_NOTE_TREE_CACHE_MAX_TARGETS = 16_384
+_NOTE_BLOB_CACHE_MAX_ENTRIES = 4_096
+_NOTE_BLOB_CACHE_MAX_VALUE_BYTES = 256 * 1_024
+_NOTE_BLOB_CACHE_MAX_TOTAL_BYTES = 8 * 1_024 * 1_024
+_TREE_CACHE_MAX_ENTRIES = 2_048
+_PARENTS_CACHE_MAX_ENTRIES = 2_048
+_PARENTS_CACHE_MAX_PARENTS = 64
+_ENTRY_CACHE_MAX_ENTRIES = 4_096
+_CACHE_MAX_PATH_CHARACTERS = 4_096
+_SHOW_CACHE_MAX_ENTRIES = 512
+_SHOW_CACHE_MAX_VALUE_BYTES = 256 * 1_024
+_SHOW_CACHE_MAX_TOTAL_BYTES = 8 * 1_024 * 1_024
+_LS_FILES_CACHE_MAX_ENTRIES = 128
+_LS_FILES_CACHE_MAX_PATHS = 8_192
+_LS_FILES_CACHE_MAX_CHARACTERS = 512 * 1_024
+_FIRST_PARENT_CACHE_MAX_ENTRIES = 32
+_FIRST_PARENT_CACHE_MAX_COMMITS = 4_096
+
+
+def _lru_get(cache: OrderedDict[_K, _V], key: _K) -> _V | object:
+    try:
+        value = cache.pop(key)
+    except KeyError:
+        return _CACHE_MISS
+    cache[key] = value
+    return value
+
+
+def _lru_put(cache: OrderedDict[_K, _V], key: _K, value: _V, *, maximum: int) -> None:
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > maximum:
+        cache.popitem(last=False)
+
+
+def _serialized_object_read(
+    method: Callable[Concatenate[GitBackend, _P], _R],
+) -> Callable[Concatenate[GitBackend, _P], _R]:
+    @wraps(method)
+    def wrapped(self: GitBackend, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with self._object_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
+def _is_full_object_id(value: str) -> bool:
+    """Whether ``value`` names one immutable Git object without resolution.
+
+    Refs and abbreviated object names are intentionally excluded: both can
+    resolve to a different object later in the same process.  Git object ids
+    are currently SHA-1 or SHA-256, hence the two accepted lengths.
+    """
+    return len(value) in {40, 64} and all(character in "0123456789abcdef" for character in value)
 
 
 class RefUpdateFailed(RuntimeError):
@@ -103,6 +171,32 @@ class GitBackend:
         self.repo = Repo(self.path)
         if self.repo.bare:
             raise ValueError(f"{self.path} is bare; the memory layer needs a working tree")
+        # A full object id must mean its hashed bytes.  Git normally lets a
+        # mutable refs/replace entry reinterpret even an explicit SHA, which
+        # would invalidate every exact-id cache below.
+        self.repo.git.update_environment(GIT_NO_REPLACE_OBJECTS="1")
+        # GitPython multiplexes object reads through one persistent
+        # ``cat-file --batch`` stream per Repo.  Concurrent reads otherwise
+        # consume one another's headers and corrupt the protocol.
+        self._object_lock = threading.RLock()
+        # Git notes are ordinary content-addressed trees behind mutable refs.
+        # Cache only the tree decoded for one exact ref commit; a note write,
+        # deletion, or raw ref rollback necessarily selects a different key.
+        self._note_tree_cache: OrderedDict[str, tuple[str, dict[str, Blob]]] = OrderedDict()
+        self._note_blob_cache: OrderedDict[str, bytes] = OrderedDict()
+        self._note_blob_cache_size = 0
+        # These plumbing results are immutable only when addressed by a full
+        # object id.  Never populate them for a ref or abbreviated id.  Lists
+        # are stored as tuples so callers cannot mutate a cached result.
+        self._tree_cache: OrderedDict[str, str] = OrderedDict()
+        self._parents_cache: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+        self._entry_cache: OrderedDict[tuple[str, str], TreeEntry | None] = OrderedDict()
+        self._show_bytes_cache: OrderedDict[tuple[str, str], bytes] = OrderedDict()
+        self._show_bytes_cache_size = 0
+        self._ls_files_cache: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+        self._first_parent_cache: OrderedDict[tuple[str, int | None], tuple[str, ...]] = (
+            OrderedDict()
+        )
         self._ensure_identity()
 
     # ---------------------------------------------------------------- basics
@@ -116,7 +210,8 @@ class GitBackend:
         return cls(path)
 
     def close(self) -> None:
-        self.repo.close()
+        with self._object_lock:
+            self.repo.close()
 
     @property
     def common_dir(self) -> Path:
@@ -191,10 +286,15 @@ class GitBackend:
 
     # ---------------------------------------------------------------- refs
 
+    @_serialized_object_read
     def ref_sha(self, ref: str) -> str | None:
         try:
-            return self.repo.git.rev_parse("--verify", "--quiet", f"{ref}^{{commit}}")
-        except GitCommandError:
+            # GitPython resolves the ref from disk on every call, then checks
+            # its object through the serialized batch stream.  This keeps
+            # mutable refs live without spawning ``rev-parse`` thousands of
+            # times in one coordinator cycle.
+            return self.repo.commit(ref).hexsha
+        except (BadName, BadObject, TypeError, ValueError):
             return None
 
     def cas_update_ref(self, ref: str, new: str, old: str | None) -> bool:
@@ -251,21 +351,99 @@ class GitBackend:
         args += ["-m", message]
         return self.repo.git.commit_tree(*args)
 
+    def _assert_raw_ancestry(self) -> None:
+        """Reject local mechanisms that rewrite or truncate commit ancestry."""
+        for path in (self.common_dir / "shallow", self.common_dir / "info" / "grafts"):
+            try:
+                populated = path.stat().st_size > 0
+            except FileNotFoundError:
+                populated = False
+            if populated:
+                raise ValueError(f"memstore requires raw, complete ancestry; found {path}")
+
+    def _tree_object(self, treeish: str) -> Tree:
+        obj = self.repo.rev_parse(treeish)
+        if isinstance(obj, Commit):
+            return obj.tree
+        if isinstance(obj, Tree):
+            # A root tree resolved by id has no path.  Tree.join() expects the
+            # root path to be the empty string when walking a nested path.
+            return Tree(self.repo, obj.binsha, path="")
+        raise ValueError(f"object {treeish} is neither a commit nor a tree")
+
+    @_serialized_object_read
     def tree_of(self, commit: str) -> str:
-        return self.repo.git.rev_parse(f"{commit}^{{tree}}")
+        if _is_full_object_id(commit):
+            cached = _lru_get(self._tree_cache, commit)
+            if cached is not _CACHE_MISS:
+                return cast(str, cached)
+        tree = (
+            self.repo.commit(commit).tree.hexsha
+            if _is_full_object_id(commit)
+            else self.repo.git.rev_parse(f"{commit}^{{tree}}")
+        )
+        if _is_full_object_id(commit):
+            _lru_put(self._tree_cache, commit, tree, maximum=_TREE_CACHE_MAX_ENTRIES)
+        return tree
 
+    @_serialized_object_read
     def parents_of(self, commit: str) -> list[str]:
-        out = self.repo.git.rev_list("--parents", "-n", "1", commit)
-        return out.split()[1:]
+        if _is_full_object_id(commit):
+            self._assert_raw_ancestry()
+            cached = _lru_get(self._parents_cache, commit)
+            if cached is not _CACHE_MISS:
+                return list(cast(tuple[str, ...], cached))
+            parents = tuple(parent.hexsha for parent in self.repo.commit(commit).parents)
+        else:
+            out = self.repo.git.rev_list("--parents", "-n", "1", commit)
+            parents = tuple(out.split()[1:])
+        if _is_full_object_id(commit) and len(parents) <= _PARENTS_CACHE_MAX_PARENTS:
+            _lru_put(
+                self._parents_cache,
+                commit,
+                parents,
+                maximum=_PARENTS_CACHE_MAX_ENTRIES,
+            )
+        return list(parents)
 
+    @_serialized_object_read
     def entry_at(self, treeish: str, path: str) -> TreeEntry | None:
         """The mode, sha and path of one entry, or None if it is not there."""
+        cache_key = (treeish, path)
+        cacheable = _is_full_object_id(treeish) and len(path) <= _CACHE_MAX_PATH_CHARACTERS
+        if cacheable:
+            cached = _lru_get(self._entry_cache, cache_key)
+            if cached is not _CACHE_MISS:
+                return cast(TreeEntry | None, cached)
         try:
+            if cacheable:
+                entry = self._tree_object(treeish) / path
+                result = TreeEntry(mode=f"{entry.mode:06o}", sha=entry.hexsha, path=path)
+                _lru_put(
+                    self._entry_cache,
+                    cache_key,
+                    result,
+                    maximum=_ENTRY_CACHE_MAX_ENTRIES,
+                )
+                return result
             out = self.repo.git.ls_tree(
-                treeish, "-z", "--", path,
-                stdout_as_string=False, strip_newline_in_stdout=False,
+                treeish,
+                "-z",
+                "--",
+                path,
+                stdout_as_string=False,
+                strip_newline_in_stdout=False,
             )
-        except GitCommandError:
+        except KeyError:
+            if cacheable:
+                _lru_put(
+                    self._entry_cache,
+                    cache_key,
+                    None,
+                    maximum=_ENTRY_CACHE_MAX_ENTRIES,
+                )
+            return None
+        except (BadName, BadObject, GitCommandError, TypeError, ValueError):
             return None
         for record in out.split(b"\0"):
             if not record:
@@ -273,7 +451,22 @@ class GitBackend:
             meta, _, name = record.partition(b"\t")
             parts = meta.split()
             if len(parts) >= 3 and _dec(name) == path:
-                return TreeEntry(mode=_dec(parts[0]), sha=_dec(parts[2]), path=path)
+                result = TreeEntry(mode=_dec(parts[0]), sha=_dec(parts[2]), path=path)
+                if cacheable:
+                    _lru_put(
+                        self._entry_cache,
+                        cache_key,
+                        result,
+                        maximum=_ENTRY_CACHE_MAX_ENTRIES,
+                    )
+                return result
+        if cacheable:
+            _lru_put(
+                self._entry_cache,
+                cache_key,
+                None,
+                maximum=_ENTRY_CACHE_MAX_ENTRIES,
+            )
         return None
 
     def blob_at(self, treeish: str, path: str) -> str | None:
@@ -284,13 +477,39 @@ class GitBackend:
         entry = self.entry_at(treeish, path)
         return entry.mode if entry else None
 
+    @_serialized_object_read
     def show_bytes(self, commit: str, path: str) -> bytes | None:
+        cache_key = (commit, path)
+        cacheable = _is_full_object_id(commit) and len(path) <= _CACHE_MAX_PATH_CHARACTERS
+        if cacheable:
+            cached = _lru_get(self._show_bytes_cache, cache_key)
+            if cached is not _CACHE_MISS:
+                return cast(bytes, cached)
         try:
-            return self.repo.git.show(
-                f"{commit}:{path}", stdout_as_string=False, strip_newline_in_stdout=False
-            )
-        except GitCommandError:
+            if cacheable:
+                blob = self._tree_object(commit) / path
+                if not isinstance(blob, Blob):
+                    return None
+                raw = blob.data_stream.read()
+            else:
+                raw = self.repo.git.show(
+                    f"{commit}:{path}", stdout_as_string=False, strip_newline_in_stdout=False
+                )
+        except (BadName, BadObject, GitCommandError, KeyError, TypeError, ValueError):
             return None
+        if cacheable and len(raw) <= _SHOW_CACHE_MAX_VALUE_BYTES:
+            previous = self._show_bytes_cache.pop(cache_key, None)
+            if previous is not None:
+                self._show_bytes_cache_size -= len(previous)
+            self._show_bytes_cache[cache_key] = raw
+            self._show_bytes_cache_size += len(raw)
+            while (
+                len(self._show_bytes_cache) > _SHOW_CACHE_MAX_ENTRIES
+                or self._show_bytes_cache_size > _SHOW_CACHE_MAX_TOTAL_BYTES
+            ):
+                _old_key, old_value = self._show_bytes_cache.popitem(last=False)
+                self._show_bytes_cache_size -= len(old_value)
+        return raw
 
     def show(self, commit: str, path: str) -> str | None:
         raw = self.show_bytes(commit, path)
@@ -309,18 +528,53 @@ class GitBackend:
         with self._tempfile(raw) as path:
             return self.repo.git.hash_object("-w", str(path))
 
+    @_serialized_object_read
     def ls_files(self, commit: str) -> list[str]:
-        out = self.repo.git.ls_tree(
-            "-r", "--name-only", "-z", commit,
-            stdout_as_string=False, strip_newline_in_stdout=False,
-        )
-        return [_dec(name) for name in out.split(b"\0") if name]
+        if _is_full_object_id(commit):
+            cached = _lru_get(self._ls_files_cache, commit)
+            if cached is not _CACHE_MISS:
+                return list(cast(tuple[str, ...], cached))
+        if _is_full_object_id(commit):
+            files = tuple(
+                sorted(
+                    entry.path
+                    for entry in self._tree_object(commit).traverse()
+                    if entry.type != "tree"
+                )
+            )
+        else:
+            out = self.repo.git.ls_tree(
+                "-r",
+                "--name-only",
+                "-z",
+                commit,
+                stdout_as_string=False,
+                strip_newline_in_stdout=False,
+            )
+            files = tuple(_dec(name) for name in out.split(b"\0") if name)
+        if (
+            _is_full_object_id(commit)
+            and len(files) <= _LS_FILES_CACHE_MAX_PATHS
+            and sum(map(len, files)) <= _LS_FILES_CACHE_MAX_CHARACTERS
+        ):
+            _lru_put(
+                self._ls_files_cache,
+                commit,
+                files,
+                maximum=_LS_FILES_CACHE_MAX_ENTRIES,
+            )
+        return list(files)
 
     def diff_names(self, a: str, b: str) -> list[tuple[str, str]]:
         """(status, path) for every path that differs between two commits."""
         out = self.repo.git.diff_tree(
-            "--name-status", "-r", "-z", a, b,
-            stdout_as_string=False, strip_newline_in_stdout=False,
+            "--name-status",
+            "-r",
+            "-z",
+            a,
+            b,
+            stdout_as_string=False,
+            strip_newline_in_stdout=False,
         )
         fields = [f for f in out.split(b"\0") if f]
         rows: list[tuple[str, str]] = []
@@ -351,12 +605,50 @@ class GitBackend:
         except GitCommandError:
             return None
 
+    @_serialized_object_read
     def rev_list_first_parent(self, commit: str, limit: int | None = None) -> list[str]:
-        args = ["--first-parent"]
-        if limit is not None:
-            args += ["-n", str(limit)]
-        out = self.repo.git.rev_list(*args, commit)
-        return [line for line in out.splitlines() if line]
+        cache_key = (commit, limit)
+        if _is_full_object_id(commit):
+            self._assert_raw_ancestry()
+            cached = _lru_get(self._first_parent_cache, cache_key)
+            if cached is not _CACHE_MISS:
+                return list(cast(tuple[str, ...], cached))
+            history: list[str] = []
+            current = self.repo.commit(commit)
+            while limit is None or len(history) < limit:
+                history.append(current.hexsha)
+                if not current.parents:
+                    break
+                current = current.parents[0]
+            commits = tuple(history)
+        else:
+            args = ["--first-parent"]
+            if limit is not None:
+                args += ["-n", str(limit)]
+            out = self.repo.git.rev_list(*args, commit)
+            commits = tuple(line for line in out.splitlines() if line)
+        if _is_full_object_id(commit) and len(commits) <= _FIRST_PARENT_CACHE_MAX_COMMITS:
+            _lru_put(
+                self._first_parent_cache,
+                cache_key,
+                commits,
+                maximum=_FIRST_PARENT_CACHE_MAX_ENTRIES,
+            )
+        return list(commits)
+
+    @_serialized_object_read
+    def _clear_object_caches(self) -> None:
+        """Forget object reads before an operation that may delete objects."""
+        self._tree_cache.clear()
+        self._parents_cache.clear()
+        self._entry_cache.clear()
+        self._show_bytes_cache.clear()
+        self._show_bytes_cache_size = 0
+        self._ls_files_cache.clear()
+        self._first_parent_cache.clear()
+        self._note_tree_cache.clear()
+        self._note_blob_cache.clear()
+        self._note_blob_cache_size = 0
 
     @contextlib.contextmanager
     def _tempfile(self, content: bytes) -> Iterator[Path]:
@@ -371,16 +663,96 @@ class GitBackend:
 
     # ---------------------------------------------------------------- notes
 
+    @_serialized_object_read
     def note_get(self, namespace: str, commit: str) -> str | None:
+        """Read one note from the exact current notes-ref tree.
+
+        ``git notes show`` starts a subprocess for every property read.  A
+        State audit reads the same immutable metadata hundreds of times, so
+        that implementation dominated coordinator runtime.  GitPython can
+        traverse the same content-addressed tree in-process.  The cache is
+        scoped to the current notes-ref commit, not merely ``(namespace,
+        target)``: forward writes, deletion, and raw rollback are therefore
+        observed on the very next call.
+        """
         try:
-            return _dec(
-                self.repo.git.notes(
-                    "--ref", namespace, "show", commit,
-                    stdout_as_string=False, strip_newline_in_stdout=False,
-                )
-            )
-        except GitCommandError:
+            # Read the mutable ref itself every time, but resolve its commit
+            # and tree only when that exact value changes.
+            ref_sha = SymbolicReference.dereference_recursive(self.repo, namespace)
+        except ValueError as exc:
+            self._note_tree_cache.pop(namespace, None)
+            if (self.common_dir / namespace).exists():
+                raise ValueError(f"notes ref {namespace!r} is malformed") from exc
             return None
+        cached_value = _lru_get(self._note_tree_cache, namespace)
+        cached = (
+            cast(tuple[str, dict[str, Blob]], cached_value)
+            if cached_value is not _CACHE_MISS
+            else None
+        )
+        if cached is None or cached[0] != ref_sha:
+            self._note_tree_cache.pop(namespace, None)
+            try:
+                note_commit = self.repo.commit(ref_sha)
+            except (BadName, BadObject, TypeError, ValueError) as exc:
+                raise ValueError(f"notes ref {namespace!r} points to non-commit {ref_sha}") from exc
+            notes: dict[str, Blob] = {}
+            for entry in note_commit.tree.traverse():
+                if entry.type == "tree":
+                    prefix = entry.path.replace("/", "")
+                    if (
+                        not prefix
+                        or len(prefix) >= len(ref_sha)
+                        or any(character not in "0123456789abcdef" for character in prefix)
+                        or len(cast(Tree, entry)) == 0
+                    ):
+                        raise ValueError(
+                            f"notes ref {namespace!r} contains invalid tree prefix {entry.path!r}"
+                        )
+                    continue
+                if entry.type != "blob":
+                    raise ValueError(
+                        f"notes ref {namespace!r} contains non-blob entry {entry.path!r}"
+                    )
+                target = entry.path.replace("/", "")
+                if len(target) != len(ref_sha) or any(
+                    character not in "0123456789abcdef" for character in target
+                ):
+                    raise ValueError(
+                        f"notes ref {namespace!r} contains invalid target path {entry.path!r}"
+                    )
+                blob = cast(Blob, entry)
+                previous = notes.setdefault(target, blob)
+                if previous != entry:
+                    raise ValueError(f"notes ref {namespace!r} contains duplicate target paths")
+            cached = (ref_sha, notes)
+            if len(notes) <= _NOTE_TREE_CACHE_MAX_TARGETS:
+                _lru_put(
+                    self._note_tree_cache,
+                    namespace,
+                    cached,
+                    maximum=_NOTE_TREE_CACHE_MAX_REFS,
+                )
+        blob = cached[1].get(commit)
+        if blob is None:
+            return None
+        cached_raw = _lru_get(self._note_blob_cache, blob.hexsha)
+        if cached_raw is not _CACHE_MISS:
+            return _dec(cast(bytes, cached_raw))
+        raw = blob.data_stream.read()
+        if len(raw) <= _NOTE_BLOB_CACHE_MAX_VALUE_BYTES:
+            previous = self._note_blob_cache.pop(blob.hexsha, None)
+            if previous is not None:
+                self._note_blob_cache_size -= len(previous)
+            self._note_blob_cache[blob.hexsha] = raw
+            self._note_blob_cache_size += len(raw)
+            while (
+                len(self._note_blob_cache) > _NOTE_BLOB_CACHE_MAX_ENTRIES
+                or self._note_blob_cache_size > _NOTE_BLOB_CACHE_MAX_TOTAL_BYTES
+            ):
+                _old_key, old_value = self._note_blob_cache.popitem(last=False)
+                self._note_blob_cache_size -= len(old_value)
+        return _dec(raw)
 
     def note_set(self, namespace: str, commit: str, text: str, *, overwrite: bool = True) -> None:
         """Attach ``text`` to ``commit``.
@@ -399,8 +771,15 @@ class GitBackend:
                     )
             with self._tempfile(_enc(text)) as path:
                 self.repo.git.notes(
-                    "--ref", namespace, "add", "-f", "--allow-empty",
-                    "--no-stripspace", "-F", str(path), commit,
+                    "--ref",
+                    namespace,
+                    "add",
+                    "-f",
+                    "--allow-empty",
+                    "--no-stripspace",
+                    "-F",
+                    str(path),
+                    commit,
                 )
 
     def note_prune(self, namespace: str) -> None:
@@ -415,8 +794,10 @@ class GitBackend:
         whose object is gone, and an unpublished commit is unreferenced but
         still present until it is pruned.
         """
-        with self.lock(), contextlib.suppress(GitCommandError):
-            self.repo.git.prune("--expire=now")
+        with self.lock():
+            with contextlib.suppress(GitCommandError):
+                self.repo.git.prune("--expire=now")
+            self._clear_object_caches()
 
     # ---------------------------------------------------------------- worktree
 
@@ -432,8 +813,11 @@ class GitBackend:
         is dirty cannot itself change what a checkpoint would capture.
         """
         out = self.repo.git.status(
-            "--porcelain", "-z", "--untracked-files=all",
-            stdout_as_string=False, strip_newline_in_stdout=False,
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+            stdout_as_string=False,
+            strip_newline_in_stdout=False,
         )
         entries = out.split(b"\0")
         paths: list[str] = []
@@ -454,8 +838,11 @@ class GitBackend:
     def untracked_paths(self) -> list[str]:
         """Paths git does not track yet, without staging any of them."""
         out = self.repo.git.status(
-            "--porcelain", "-z", "--untracked-files=all",
-            stdout_as_string=False, strip_newline_in_stdout=False,
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+            stdout_as_string=False,
+            strip_newline_in_stdout=False,
         )
         entries = out.split(b"\0")
         paths: list[str] = []
@@ -485,7 +872,10 @@ class GitBackend:
             args.append("--numstat")
         args += ["--no-index", "--", os.devnull, rel]
         _status, out, _err = self.repo.git.execute(
-            args, with_extended_output=True, with_exceptions=False, stdout_as_string=False,
+            args,
+            with_extended_output=True,
+            with_exceptions=False,
+            stdout_as_string=False,
         )
         return out if isinstance(out, bytes) else _enc(out)
 
@@ -503,7 +893,8 @@ class GitBackend:
         chunks = [
             self.repo.git.execute(
                 ["git", *args],
-                with_extended_output=False, stdout_as_string=False,
+                with_extended_output=False,
+                stdout_as_string=False,
             )
         ]
         chunks += [self._diff_untracked(rel, numstat=numstat) for rel in self.untracked_paths()]
@@ -565,7 +956,9 @@ class GitBackend:
                 messages.append(line)
         if status not in (0, 1):
             raise RuntimeError(f"merge-tree failed ({status}): {err or out}")
-        return MergeTreeResult(tree=tree, conflicted_paths=tuple(conflicted), messages="\n".join(messages))
+        return MergeTreeResult(
+            tree=tree, conflicted_paths=tuple(conflicted), messages="\n".join(messages)
+        )
 
     def tree_with_blob(self, tree: str, path: str, blob: str, mode: str = MODE_FILE) -> str:
         """Return a new tree equal to ``tree`` with ``path`` replaced.

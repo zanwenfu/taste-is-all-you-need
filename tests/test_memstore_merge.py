@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,29 @@ def test_record_key_clash_is_a_conflict_value(store: Store) -> None:
     assert conflict_state.read("shared.json") == a_head.read("shared.json")
     assert conflict_state.conflicts[0].path == "shared.json"
     assert store.backend.note_get(NOTES["conflicts"], a_head.id) is None
+
+
+def test_conflict_note_rewrite_is_detected_by_immutable_commit_binding(
+    store: Store,
+) -> None:
+    a, b, _ = _two_branches(store)
+    a.checkpoint("a sets k", records={"shared.json": {"k": "a"}})
+    b.checkpoint("b sets k", records={"shared.json": {"k": "b"}})
+    assert not a.merge(b, reason="combine").ok
+    conflict_state = a.head
+    raw = store.backend.note_get(NOTES["conflicts"], conflict_state.id)
+    assert raw is not None
+    forged = json.loads(raw)
+    forged[0]["detail"] = "forged resolver instruction"
+    store.backend.note_set(
+        NOTES["conflicts"],
+        conflict_state.id,
+        json.dumps(forged),
+        overwrite=True,
+    )
+
+    with pytest.raises(ValueError, match="immutable commit binding"):
+        _ = conflict_state.conflicts
 
 
 def test_file_content_conflict(store: Store) -> None:

@@ -24,8 +24,9 @@ from taste.memstore import Store
 pytest.importorskip("claude_agent_sdk", reason="the brain layer needs claude-agent-sdk")
 
 from taste.brains.contract import CONTRACT_PATH, Contract
-from taste.brains.subbrain import SubBrain
+from taste.brains.subbrain import BUDGETED_WORKER_TOOLS, WORKER_TOOLS, SubBrain
 from taste.brains.wal import WriteAheadLog, reconcile
+from taste.pricing import ensure_priced, max_call_cost_usd
 
 
 def a_contract(**kw) -> Contract:
@@ -69,8 +70,13 @@ def test_a_finished_tool_is_not_reported_as_unknown() -> None:
 
 def test_an_unfinished_tool_is_reported() -> None:
     turns = [
-        {"kind": "tool_intent", "tool": "Bash", "tool_use_id": "t1",
-         "request": {"command": "rm -rf build"}, "at": "now"},
+        {
+            "kind": "tool_intent",
+            "tool": "Bash",
+            "tool_use_id": "t1",
+            "request": {"command": "rm -rf build"},
+            "at": "now",
+        },
     ]
     out = reconcile(turns)
     assert [f.tool_use_id for f in out] == ["t1"]
@@ -187,6 +193,42 @@ def test_the_briefing_tells_the_brain_to_check_before_repeating(store: Store) ->
     brain.close()
 
 
+def test_the_opening_prompt_includes_live_inbox_messages(store: Store) -> None:
+    store.send(
+        "worker-1",
+        {"kind": "artifact_request", "need": "parser-fixture"},
+        sender="central",
+    )
+    brain = SubBrain(store, a_contract())
+
+    waking = brain.wake()
+
+    assert not waking.fresh
+    assert "New messages have arrived" in waking.briefing()
+    assert "central" in brain.opening_prompt()
+    assert "parser-fixture" in brain.opening_prompt()
+    brain.close()
+
+
+def test_the_opening_prompt_includes_unresolved_conflicts(store: Store) -> None:
+    brain = SubBrain(store, a_contract())
+    brain.branch.write("parser.py", "ours\n")
+    brain.branch.checkpoint("ours")
+    other = store.branch("worker-2")
+    other.write("parser.py", "theirs\n")
+    other.checkpoint("theirs")
+
+    result = brain.branch.merge(other, reason="combine")
+
+    assert not result.ok
+    waking = brain.wake()
+    assert not waking.fresh
+    assert "merge conflicts are unresolved" in waking.briefing()
+    assert "parser.py" in brain.opening_prompt()
+    other.close()
+    brain.close()
+
+
 # ------------------------------------------------------------------ wiring
 
 
@@ -196,6 +238,8 @@ def test_a_gate_that_would_never_fire_is_refused(store: Store) -> None:
     brain = SubBrain(store, a_contract())
     with pytest.raises(ValueError, match="shadow"):
         brain.options(allowed_tools=["Bash"])
+    with pytest.raises(ValueError, match="allowed_tools"):
+        brain.options(allowed_tools=["Read"])
     brain.close()
 
 
@@ -229,6 +273,105 @@ def test_the_brain_runs_on_a_streaming_client_with_the_gates_installed(
     assert options.sandbox["enabled"] and not options.sandbox["allowUnsandboxedCommands"]
     assert options.cwd == str(brain.worktree)
     assert options.setting_sources == []
+    assert options.tools == list(WORKER_TOOLS)
+    assert not {"Agent", "Task", "WebSearch", "WebFetch"} & set(options.tools)
+    assert options.mcp_servers == {}
+    assert options.strict_mcp_config is True
+    assert options.fallback_model is None
+    assert options.env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
+    brain.close()
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"tools": None},
+        {"tools": ["Read", "WebSearch"]},
+        {"add_dirs": ["../sibling"]},
+        {
+            "sandbox": {
+                "enabled": True,
+                "autoAllowBashIfSandboxed": True,
+                "allowUnsandboxedCommands": False,
+                "excludedCommands": ["git"],
+            }
+        },
+        {"mcp_servers": {"remote": {"type": "http", "url": "https://example.test"}}},
+        {"strict_mcp_config": False},
+        {"fallback_model": "claude-opus-5"},
+    ],
+)
+def test_paid_or_unaccounted_worker_surfaces_cannot_be_enabled(
+    store: Store, override: dict[str, object]
+) -> None:
+    brain = SubBrain(store, a_contract())
+    with pytest.raises(ValueError):
+        brain.options(**override)
+    brain.close()
+
+
+def test_worker_budget_holds_back_the_worst_final_provider_call(store: Store) -> None:
+    model = "claude-sonnet-5"
+    price = ensure_priced(model)
+    exposure = max_call_cost_usd(
+        model,
+        max_output_tokens=price.context_window,
+        max_attempts=1,
+        cap_on="billed",
+    )
+    brain = SubBrain(
+        store,
+        a_contract(budget_usd=2 * (exposure + 0.75)),
+        model=model,
+    )
+
+    options = brain.options()
+
+    assert options.max_budget_usd == pytest.approx(0.75)
+    assert 2 * (options.max_budget_usd + exposure) <= brain.contract.budget_usd
+    assert options.tools == list(BUDGETED_WORKER_TOOLS)
+    assert "Bash" not in options.tools
+    assert "Bash" in options.disallowed_tools
+    assert options.env["DISABLE_COMPACT"] == "1"
+    assert options.extra_args == {"disable-slash-commands": None}
+    brain.close()
+
+
+def test_too_small_worker_budget_is_refused_before_provider_start(store: Store) -> None:
+    model = "claude-sonnet-5"
+    price = ensure_priced(model)
+    exposure = max_call_cost_usd(
+        model,
+        max_output_tokens=price.context_window,
+        max_attempts=1,
+        cap_on="billed",
+    )
+    brain = SubBrain(store, a_contract(budget_usd=2 * exposure), model=model)
+
+    with pytest.raises(ValueError, match="cannot cover the reset-safe model exposure"):
+        brain.options()
+    brain.close()
+
+
+def test_worker_budget_subtracts_durable_spend_from_prior_resets(store: Store) -> None:
+    model = "claude-sonnet-5"
+    price = ensure_priced(model)
+    exposure = max_call_cost_usd(
+        model,
+        max_output_tokens=price.context_window,
+        max_attempts=1,
+        cap_on="billed",
+    )
+    brain = SubBrain(
+        store,
+        a_contract(budget_usd=0.4 + 2 * (exposure + 0.6)),
+        model=model,
+    )
+
+    options = brain.options(budget_already_spent_usd=0.4)
+
+    assert options.max_budget_usd == pytest.approx(0.6)
+    assert 0.4 + 2 * (options.max_budget_usd + exposure) <= brain.contract.budget_usd
     brain.close()
 
 
@@ -255,18 +398,12 @@ def test_an_allowed_call_records_an_intent_then_a_result(store: Store) -> None:
 
     brain = SubBrain(store, a_contract())
     allowed = asyncio.run(
-        brain._pre_tool(
-            {"tool_name": "Write", "tool_input": {"file_path": "mine.txt"}}, "t1", None
-        )
+        brain._pre_tool({"tool_name": "Write", "tool_input": {"file_path": "mine.txt"}}, "t1", None)
     )
     assert allowed == {}
     assert len(reconcile(brain.branch.resume().recovered_turns)) == 1
 
-    asyncio.run(
-        brain._post_tool(
-            {"tool_name": "Write", "tool_response": {"ok": True}}, "t1", None
-        )
-    )
+    asyncio.run(brain._post_tool({"tool_name": "Write", "tool_response": {"ok": True}}, "t1", None))
     assert reconcile(brain.branch.resume().recovered_turns) == []
     brain.close()
 

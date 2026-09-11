@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 
 
@@ -193,6 +194,56 @@ def call_cost(
     ) / 1_000_000
     work = (prompt_total * r.input + output_tokens * r.output) / 1_000_000
     return billed, work
+
+
+def max_call_cost_usd(
+    model: str,
+    *,
+    max_output_tokens: int,
+    max_attempts: int = 1,
+    cap_on: str = "billed",
+) -> float:
+    """Conservative exposure of one facade call before it is dispatched.
+
+    A post-response budget check is too late: the provider may already have
+    billed a response that crosses the cap.  This bound prices the full model
+    context at the most expensive applicable prompt bucket, the requested
+    output allowance at the most expensive output rate, and every permitted
+    retry.  It intentionally leaves headroom unused near a cap; refusing work
+    is safer than representing a soft post-hoc threshold as a hard budget.
+    """
+    if (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or max_output_tokens < 1
+    ):
+        raise ValueError("max_output_tokens must be a positive integer")
+    if (
+        isinstance(max_attempts, bool)
+        or not isinstance(max_attempts, int)
+        or max_attempts < 1
+    ):
+        raise ValueError("max_attempts must be a positive integer")
+    if cap_on not in {"billed", "work"}:
+        raise ValueError("cap_on must be 'billed' or 'work'")
+
+    price = ensure_priced(model)
+    if cap_on == "billed":
+        prompt_rate = max(
+            max(rates.input, rates.cache_read, rates.cache_write)
+            for _limit, rates in price.tiers
+        )
+    else:
+        prompt_rate = max(rates.input for _limit, rates in price.tiers)
+    output_rate = max(rates.output for _limit, rates in price.tiers)
+    exposure = (
+        max_attempts
+        * (price.context_window * prompt_rate + max_output_tokens * output_rate)
+        / 1_000_000
+    )
+    if not math.isfinite(exposure) or exposure <= 0:
+        raise PricingError(f"maximum call exposure for {model!r} is invalid")
+    return exposure
 
 
 def table_sha() -> str:

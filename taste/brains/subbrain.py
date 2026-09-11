@@ -33,6 +33,8 @@ measured going wrong:
 
 from __future__ import annotations
 
+import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,8 +45,52 @@ from taste.brains.jail import MUTATING_TOOLS, WorktreeJail
 from taste.brains.session_store import MemstoreSessionStore
 from taste.brains.wal import InFlight, WriteAheadLog, reconcile
 from taste.memstore import Store
+from taste.pricing import ensure_priced, max_call_cost_usd
 
 __all__ = ["SubBrain", "SubBrainResult", "Waking"]
+
+# Keep the worker on local, token-free builtins.  In particular, WebSearch is
+# separately billed and Agent/Task can create model calls outside this
+# runtime's one-stream accounting boundary.
+WORKER_TOOLS = (
+    "Bash",
+    "Glob",
+    "Grep",
+    "Read",
+    "Edit",
+    "MultiEdit",
+    "Write",
+    "NotebookEdit",
+)
+BUDGETED_WORKER_TOOLS = tuple(tool for tool in WORKER_TOOLS if tool != "Bash")
+
+_PROVIDER_OVERRIDE_ENV = frozenset(
+    {
+        "ANTHROPIC_AWS_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_FOUNDRY_BASE_URL",
+        "ANTHROPIC_GOOGLE_CLOUD_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_VERTEX_BASE_URL",
+        "CLAUDE_CODE_API_BASE_URL",
+        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+        "CLAUDE_CODE_MODEL_CATALOG",
+        "CLAUDE_CODE_MODEL_CATALOG_URL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_GATEWAY",
+        "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_VERTEX",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +107,7 @@ class Waking:
     dirty_paths: tuple[str, ...] = ()
     unacked: tuple[Any, ...] = ()
     inbox: tuple[dict[str, Any], ...] = ()
+    open_conflicts: tuple[Any, ...] = ()
 
     @property
     def uncertain(self) -> bool:
@@ -96,12 +143,29 @@ class Waking:
             )
         if self.dirty_paths:
             parts.append(
-                "\nThese files have uncommitted changes: "
-                + ", ".join(self.dirty_paths[:20])
+                "\nThese files have uncommitted changes: " + ", ".join(self.dirty_paths[:20])
             )
         if self.unacked:
             parts.append("\nYour monitor has raised:")
             parts += [f"- {v.status}: {v.detail}" for v in self.unacked]
+        if self.open_conflicts:
+            parts.append(
+                "\nThese merge conflicts are unresolved. Do not treat the affected "
+                "paths as settled:"
+            )
+            for conflict in self.open_conflicts:
+                detail = f" ({conflict.detail})" if conflict.detail else ""
+                parts.append(
+                    f"- {conflict.path}: ours={conflict.ours_state[:10]} "
+                    f"theirs={conflict.theirs_state[:10]}{detail}"
+                )
+        if self.inbox:
+            parts.append("\nNew messages have arrived for you:")
+            for message in self.inbox:
+                sender = message.get("sender") or "unknown sender"
+                message_id = str(message.get("id") or "unknown")[:10]
+                body = json.dumps(message.get("body"), sort_keys=True)
+                parts.append(f"- [{message_id}] from {sender}: {body}")
         return "\n".join(parts)
 
 
@@ -112,8 +176,12 @@ class SubBrainResult:
     identity: str
     completed: bool
     terminal_reason: str = ""
-    turns: int = 0
-    cost_usd: float = 0.0
+    turns: int | None = None
+    # A killed SDK process may never emit its final accounting message.  None
+    # means unknown; zero is reserved for a run the SDK explicitly priced at
+    # zero, so supervision never turns missing evidence into a reassuring
+    # number.
+    cost_usd: float | None = None
     denials: tuple[tuple[str, str], ...] = ()
     error: str = ""
     states: list[str] = field(default_factory=list)
@@ -148,9 +216,10 @@ class SubBrain:
         # Outside the worktree: a config directory inside it shows up in
         # `git status` and a checkpoint commits the brain's own plumbing as
         # though the brain had produced it.
-        self.config_dir = Path(
-            config_root or (self.store.backend.common_dir / "brain-config")
-        ) / contract.identity
+        self.config_dir = (
+            Path(config_root or (self.store.backend.common_dir / "brain-config"))
+            / contract.identity
+        )
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self._session_id: str | None = None
 
@@ -178,7 +247,14 @@ class SubBrain:
         # position is not fresh -- it is a brain that has been told it went
         # wrong and does not know yet, which is precisely what the verdict
         # channel exists to prevent.
-        fresh = not (resume.intent or in_flight or dirty or resume.unacked)
+        fresh = not (
+            resume.intent
+            or in_flight
+            or dirty
+            or resume.unacked
+            or resume.inbox
+            or resume.open_conflicts
+        )
         return Waking(
             fresh=fresh,
             intent=resume.intent,
@@ -186,6 +262,7 @@ class SubBrain:
             dirty_paths=dirty,
             unacked=resume.unacked,
             inbox=resume.inbox,
+            open_conflicts=resume.open_conflicts,
         )
 
     def _recorded_turns(self) -> list[dict[str, Any]]:
@@ -212,9 +289,9 @@ class SubBrain:
         ):
             self.branch.write(CONTRACT_PATH, self.contract.to_json())
 
-    def opening_prompt(self) -> str:
+    def opening_prompt(self, waking: Waking | None = None) -> str:
         """The contract, plus anything an interrupted past requires."""
-        waking = self.wake()
+        waking = waking or self.wake()
         brief = self.contract.brief()
         return f"{brief}\n\n{waking.briefing()}".strip() if not waking.fresh else brief
 
@@ -236,7 +313,9 @@ class SubBrain:
             self.wal.intent(
                 str(input_data.get("tool_name", "?")),
                 str(tool_use_id or ""),
-                input_data.get("tool_input") if isinstance(input_data.get("tool_input"), dict) else {},
+                input_data.get("tool_input")
+                if isinstance(input_data.get("tool_input"), dict)
+                else {},
             )
         return {}
 
@@ -257,13 +336,40 @@ class SubBrain:
 
     # ------------------------------------------------------------------ options
 
-    def options(self, *, resume: str | None = None, **extra: Any) -> Any:
+    def options(
+        self,
+        *,
+        resume: str | None = None,
+        budget_already_spent_usd: float = 0.0,
+        **extra: Any,
+    ) -> Any:
         """The SDK options this brain runs under. See the module docstring."""
         from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
+        if (
+            isinstance(budget_already_spent_usd, bool)
+            or not isinstance(budget_already_spent_usd, (int, float))
+            or not math.isfinite(float(budget_already_spent_usd))
+            or float(budget_already_spent_usd) < 0
+        ):
+            raise ValueError("budget_already_spent_usd must be finite and non-negative")
+        already_spent = float(budget_already_spent_usd)
+
         env = dict(os.environ)
+        for name in _PROVIDER_OVERRIDE_ENV:
+            env.pop(name, None)
         env["CLAUDE_CONFIG_DIR"] = str(self.config_dir)
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+        env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
+        env["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] = "1"
+        env["CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"] = "1"
+        env["CLAUDE_CODE_MAX_RETRIES"] = "0"
+        env["CLAUDE_CODE_NO_MODEL_FALLBACK"] = "1"
+        if self.contract.budget_usd is not None:
+            # A compact or slash-command clear can replace the conversation
+            # and its CLI-local cost scope. Budgeted workers fail at the
+            # context boundary instead of silently acquiring a fresh ledger.
+            env["DISABLE_COMPACT"] = "1"
         if env.get("ANTHROPIC_API_KEY") and not env.get("ANTHROPIC_AUTH_TOKEN"):
             env["ANTHROPIC_AUTH_TOKEN"] = env["ANTHROPIC_API_KEY"]
             env.pop("ANTHROPIC_API_KEY", None)
@@ -283,6 +389,21 @@ class SubBrain:
         # quietly accepted.
         defaults: dict[str, Any] = {
             "permission_mode": "acceptEdits",
+            "tools": list(
+                BUDGETED_WORKER_TOOLS if self.contract.budget_usd is not None else WORKER_TOOLS
+            ),
+            "disallowed_tools": [
+                "Agent",
+                "Task",
+                "WebSearch",
+                "WebFetch",
+                *(["Bash"] if self.contract.budget_usd is not None else []),
+            ],
+            "mcp_servers": {},
+            "strict_mcp_config": True,
+            "extra_args": (
+                {"disable-slash-commands": None} if self.contract.budget_usd is not None else {}
+            ),
             "sandbox": {
                 "enabled": True,
                 "autoAllowBashIfSandboxed": True,
@@ -305,12 +426,50 @@ class SubBrain:
             **extra,
         )
         if self.contract.budget_usd is not None:
-            options.max_budget_usd = self.contract.budget_usd
+            budget = self.contract.budget_usd
+            if (
+                isinstance(budget, bool)
+                or not isinstance(budget, (int, float))
+                or not math.isfinite(float(budget))
+                or float(budget) < 0
+            ):
+                raise ValueError("contract budget_usd must be finite and non-negative")
+
+            # Claude Code's ``--max-budget-usd`` guard compares accumulated
+            # spend *before* dispatching the next model request. Passing the
+            # contract cap through verbatim therefore permits the last request
+            # to cross it.  A conversation reset also zeroes that CLI counter,
+            # and a prompt already in its input pipe can spend another whole
+            # threshold before this host observes the reset and kills the CLI.
+            # For remaining allowance R, threshold T and one-call overhang E,
+            # the safe one-reset inequality is 2*(T + E) <= R.
+            #
+            # The runtime treats the first reset as terminal and synchronously
+            # kills the local CLI before awaiting anything. Durable spend from
+            # earlier processes is subtracted before solving the inequality.
+            price = ensure_priced(self.model)
+            final_call_exposure = max_call_cost_usd(
+                self.model,
+                max_output_tokens=price.context_window,
+                max_attempts=1,
+                cap_on="billed",
+            )
+            remaining = float(budget) - already_spent
+            provider_threshold = remaining / 2.0 - final_call_exposure
+            # Claude Code rejects a zero max-budget flag. More importantly, a
+            # remaining cap no larger than the protected requests cannot admit
+            # a request without risking a contract overrun. Refuse before the
+            # provider process exists, rather than turning missing accounting
+            # after an infrastructure exit into an ambiguous charge.
+            if provider_threshold <= 0:
+                raise ValueError(
+                    "remaining contract budget cannot cover the reset-safe model exposure"
+                )
+            options.max_budget_usd = provider_threshold
         self._assert_gates_are_live(options)
         return options
 
-    @staticmethod
-    def _assert_gates_are_live(options: Any) -> None:
+    def _assert_gates_are_live(self, options: Any) -> None:
         """Refuse a configuration whose gates would silently never fire.
 
         Naming a tool in ``allowed_tools`` auto-approves it before the
@@ -320,18 +479,84 @@ class SubBrain:
         remembered.
         """
         named = set(getattr(options, "allowed_tools", None) or ())
-        shadowed = named & set(MUTATING_TOOLS)
-        if shadowed:
+        if named:
             raise ValueError(
-                f"allowed_tools would shadow the gate for {sorted(shadowed)}; "
-                "leave mutating tools out of allowed_tools"
+                "allowed_tools must remain empty; auto-approval would shadow the "
+                "ordinary permission boundary"
             )
         sandbox = getattr(options, "sandbox", None) or {}
-        if not sandbox.get("enabled") or sandbox.get("allowUnsandboxedCommands"):
+        expected_sandbox = {
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+        }
+        if sandbox != expected_sandbox:
             raise ValueError(
-                "the sandbox is the boundary: it must be enabled with "
-                "allowUnsandboxedCommands=False"
+                "the sandbox boundary must remain enabled without exclusions, "
+                "ignored violations, weaker nesting, or unsandboxed commands"
             )
+        expected_tools = (
+            BUDGETED_WORKER_TOOLS if self.contract.budget_usd is not None else WORKER_TOOLS
+        )
+        tools = getattr(options, "tools", None)
+        if not isinstance(tools, list) or not set(tools) <= set(expected_tools):
+            raise ValueError("worker tools must be an explicit subset of local token-free builtins")
+        forbidden = {"Agent", "Task", "WebSearch", "WebFetch"}
+        if self.contract.budget_usd is not None:
+            forbidden.add("Bash")
+        if not forbidden <= set(getattr(options, "disallowed_tools", None) or ()):
+            raise ValueError("worker disallowed_tools removed a cost boundary")
+        if (
+            getattr(options, "mcp_servers", None) != {}
+            or getattr(options, "strict_mcp_config", None) is not True
+        ):
+            raise ValueError("worker MCP configuration must be strict and empty")
+        if getattr(options, "fallback_model", None) is not None:
+            raise ValueError("worker fallback_model would break exact model cost accounting")
+        if getattr(options, "agents", None) or getattr(options, "skills", None):
+            raise ValueError("worker agents and skills bypass the one-stream cost boundary")
+        if getattr(options, "plugins", None):
+            raise ValueError("worker plugins bypass the fixed local-tool boundary")
+        if getattr(options, "env", {}).get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") != "1":
+            raise ValueError("the separately billed advisor tool must remain disabled")
+        required_env = {
+            "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+            "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
+            "CLAUDE_CODE_MAX_RETRIES": "0",
+            "CLAUDE_CODE_NO_MODEL_FALLBACK": "1",
+        }
+        if any(
+            getattr(options, "env", {}).get(key) != value for key, value in required_env.items()
+        ):
+            raise ValueError("worker retry and model fallback controls must remain disabled")
+        if (
+            self.contract.budget_usd is not None
+            and getattr(options, "env", {}).get("DISABLE_COMPACT") != "1"
+        ):
+            raise ValueError("budgeted worker compaction must remain disabled")
+        if _PROVIDER_OVERRIDE_ENV & set(getattr(options, "env", {})):
+            raise ValueError("worker environment contains a provider or model override")
+        if getattr(options, "permission_mode", None) != "acceptEdits":
+            raise ValueError("worker permission_mode must remain acceptEdits")
+        if (
+            getattr(options, "extra_args", None)
+            != ({"disable-slash-commands": None} if self.contract.budget_usd is not None else {})
+            or getattr(options, "settings", None) is not None
+            or getattr(options, "cli_path", None) is not None
+            or getattr(options, "betas", None)
+            or getattr(options, "task_budget", None) is not None
+            or getattr(options, "add_dirs", None)
+            or getattr(options, "permission_prompt_tool_name", None) is not None
+            or getattr(options, "session_id", None) is not None
+            or getattr(options, "continue_conversation", False)
+            or getattr(options, "fork_session", False)
+            or getattr(options, "resume_session_at", None) is not None
+            or getattr(options, "resume_drops_turn", None) is not None
+            or getattr(options, "enable_file_checkpointing", False)
+        ):
+            raise ValueError("worker options contain an unaudited CLI escape hatch")
+        if self.contract.budget_usd is not None and getattr(options, "resume", None):
+            raise ValueError("budgeted workers cannot resume a prior provider connection")
 
     # ------------------------------------------------------------------ state
 

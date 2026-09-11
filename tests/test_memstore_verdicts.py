@@ -84,6 +84,34 @@ def test_a_second_verdict_on_an_acknowledged_state_is_still_delivered(
     assert [v.detail for v in r.unacked] == ["actually no"]
 
 
+def test_exact_verdict_watermark_does_not_acknowledge_a_racing_verdict(
+    store: Store,
+) -> None:
+    b = store.branch("worker")
+    st = b.checkpoint("work")
+    store.judge(st, Verdict(status="unknown", by="monitor", detail="first"))
+    shown_in_prompt = b.verdict_watermark()
+
+    # This lands after the runtime captured the prompt snapshot.
+    store.judge(st, Verdict(status="fail", by="monitor", detail="raced prompt"))
+    b.acknowledge(through=shown_in_prompt)
+
+    assert [verdict.detail for verdict in b.unacked_verdicts()] == ["raced prompt"]
+
+
+def test_verdict_acknowledgement_rejects_counts_not_in_the_observation(
+    store: Store,
+) -> None:
+    b = store.branch("worker")
+    st = b.checkpoint("work")
+    store.judge(st, Verdict(status="unknown", by="monitor", detail="only one"))
+
+    with pytest.raises(ValueError, match="only 1"):
+        b.acknowledge(through={st.id: 2})
+
+    assert [verdict.detail for verdict in b.unacked_verdicts()] == ["only one"]
+
+
 def test_acknowledgement_survives_the_death_of_the_brain(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     s = Store.open(root, "s1")

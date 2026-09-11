@@ -24,7 +24,7 @@ import json
 from typing import Any
 
 from taste.memstore.backend import MODE_FILE, UNMERGEABLE_MODES
-from taste.memstore.objects import Conflict, ObjectType, now_iso
+from taste.memstore.objects import Conflict, ObjectType, bind_conflict_reason, now_iso
 from taste.memstore.store import Branch, BranchView, MergeResult
 
 
@@ -212,7 +212,7 @@ def merge_branches(
             tree=backend.tree_of(ours_head.id),
             parents=[ours_head.id],
             kind="conflict",
-            reason=f"merge conflict: {reason}",
+            reason=bind_conflict_reason(f"merge conflict: {reason}", conflicts),
             manifest=ours_head.manifest,
             transcript=None,
             transcript_base=ours_head,

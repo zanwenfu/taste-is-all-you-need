@@ -25,12 +25,13 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import json
 import os
 import re
 import socket
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -53,6 +54,7 @@ from taste.memstore.objects import (
     StateKind,
     Transcript,
     Verdict,
+    conflict_digest,
     now_iso,
 )
 
@@ -81,11 +83,28 @@ def _read_holder(path: Path) -> dict[str, Any] | None:
     it -- because a label can be stale in ways a lock cannot.
     """
     try:
-        raw = path.read_text().strip()
+        handle = open(path, "a+")  # noqa: SIM115 - held through label + lock check
     except OSError:
         return None
-    if not raw:
-        return None
+    try:
+        handle.seek(0)
+        raw = handle.read().strip()
+        if not raw:
+            return None
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        except OSError:
+            # An unreadable lock state is not evidence that a writer is live.
+            return None
+        else:
+            # The label can name an alive process which has already released
+            # this branch.  The kernel lock, not kill(pid, 0), is the lease.
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return None
+    finally:
+        handle.close()
     try:
         holder = dict(json.loads(raw))
     except json.JSONDecodeError:
@@ -146,6 +165,17 @@ def _check_name(text: str, what: str = "name") -> str:
             "underscore, starting with a letter or digit"
         )
     return text
+
+
+def _serialized_branch_mutation(method):
+    """Serialize one Branch object's shared working-tree mutations."""
+
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._mutation_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
 
 
 # ------------------------------------------------------------------ diffs
@@ -280,7 +310,24 @@ class State:
     @property
     def conflicts(self) -> list[Conflict]:
         raw = self._store.backend.note_get(NOTES["conflicts"], self.id)
-        return [Conflict.from_dict(c) for c in json.loads(raw)] if raw else []
+        subject = self._store.backend.repo.git.log("-1", "--format=%s", self.id)
+        binding = re.search(r"\[(sha256:[0-9a-f]{64})\]\Z", subject)
+        if not raw:
+            if binding is not None:
+                raise ValueError("conflict state lost its immutable-bound conflict evidence")
+            return []
+        if binding is None:
+            raise ValueError("conflict evidence has no immutable commit binding")
+        try:
+            decoded = json.loads(raw)
+            if not isinstance(decoded, list):
+                raise ValueError("conflict evidence must be an array")
+            conflicts = [Conflict.from_dict(value) for value in decoded]
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise ValueError("conflict evidence is malformed") from exc
+        if conflict_digest(conflicts) != binding.group(1):
+            raise ValueError("conflict evidence differs from its immutable commit binding")
+        return conflicts
 
     @property
     def verdicts(self) -> list[Verdict]:
@@ -460,6 +507,11 @@ class Branch:
         self._unpublish: set[str] = set()
         self._pending_sources: list[Source] = []
         self._journal_lock = threading.Lock()
+        # A Store returns the same writable Branch object to in-process
+        # callers.  Its lease excludes other processes, while this lock keeps
+        # those callers from staging/resetting the shared worktree across one
+        # another's checkpoint or merge publication window.
+        self._mutation_lock = threading.RLock()
 
     def __repr__(self) -> str:
         return f"Branch({self.name!r})"
@@ -553,6 +605,7 @@ class Branch:
     def path(self, rel: str) -> Path:
         return self.worktree / rel
 
+    @_serialized_branch_mutation
     def write(self, rel: str, content: str | bytes) -> None:
         p = self.worktree / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -633,17 +686,68 @@ class Branch:
             pending.extend(verdicts[acked.get(state_id, 0) :])
         return pending
 
-    def acknowledge(self) -> None:
-        """Mark every verdict currently visible as read.
+    def verdict_watermark(self) -> dict[str, int]:
+        """The exact verdict counts visible in one observation.
 
-        Counted per state rather than watermarked by state, so a monitor that
-        judges an older state after the brain has moved on is still delivered
-        exactly once.
+        A caller can put this watermark in a prompt and later pass the same
+        mapping to :meth:`acknowledge`.  Verdicts which race the prompt have a
+        larger count and therefore remain unread instead of being silently
+        acknowledged despite never having reached the worker.
         """
+        return {
+            state_id: len(verdicts)
+            for state_id, verdicts in self._recent_verdicts()
+        }
+
+    def acknowledge(self, through: Mapping[str, int] | None = None) -> None:
+        """Mark an exact observed prefix of verdicts as read.
+
+        Counts are kept per state, so a monitor that judges an older state
+        after the brain has moved on is still delivered exactly once.  With
+        no argument this retains the original convenience API and snapshots
+        everything currently visible.  Passing ``through`` is the safe path
+        for asynchronous delivery: only the counts actually put in that
+        prompt are advanced.
+        """
+        visible = dict(self._recent_verdicts())
+        wanted = self.verdict_watermark() if through is None else dict(through)
         acked = self._acked()
-        for state_id, verdicts in self._recent_verdicts():
-            acked[state_id] = len(verdicts)
-        self._acked_path().write_text(json.dumps(acked, sort_keys=True), encoding="utf-8")
+        for state_id, count in wanted.items():
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError("verdict acknowledgement counts must be non-negative integers")
+            verdicts = visible.get(state_id)
+            if verdicts is None:
+                raise ValueError(
+                    f"cannot acknowledge verdicts for invisible state {state_id[:10]}"
+                )
+            if count > len(verdicts):
+                raise ValueError(
+                    f"cannot acknowledge {count} verdicts for {state_id[:10]}; "
+                    f"only {len(verdicts)} are visible"
+                )
+            acked[state_id] = max(acked.get(state_id, 0), count)
+
+        path = self._acked_path()
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        payload = json.dumps(acked, sort_keys=True).encode("utf-8")
+        try:
+            with open(tmp, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            try:
+                directory = os.open(path.parent, os.O_RDONLY)
+            except OSError:
+                directory = -1
+            if directory >= 0:
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                tmp.unlink()
 
     def intend(self, reason: str) -> None:
         """Record what this brain is about to attempt.
@@ -673,6 +777,7 @@ class Branch:
 
     # ---------------------------------------------------------- publishing
 
+    @_serialized_branch_mutation
     def publish(
         self,
         name: str,
@@ -681,14 +786,23 @@ class Branch:
         type: ObjectType = ObjectType.FILE,
         description: str = "",
     ) -> None:
-        """Make an artifact discoverable. Takes effect at the next checkpoint."""
+        """Make a live artifact path discoverable at the next checkpoint.
+
+        Publication follows the path, not one forever-frozen blob: later
+        checkpoints refresh its advertised blob and publication time whenever
+        its bytes change, and remove it from the manifest if the path is gone.
+        A catalog hit is still an immutable snapshot because it carries the
+        particular state and blob observed by the reader.
+        """
         self._unpublish.discard(name)
         self._pending[name] = ManifestEntry(name=name, path=path, type=type, description=description)
 
+    @_serialized_branch_mutation
     def unpublish(self, name: str) -> None:
         self._pending.pop(name, None)
         self._unpublish.add(name)
 
+    @_serialized_branch_mutation
     def adopt(self, source: State | Hit, path: str | None = None, *, as_: str | None = None) -> str:
         """Take another branch's artifact, recording where it came from.
 
@@ -697,19 +811,37 @@ class Branch:
         is the read half of the communicator: A finds B's artifact and adopts
         it rather than re-deriving it.
         """
+        advertised_blob: str | None = None
         if isinstance(source, Hit):
-            state, path = source.state, path or source.entry.path
+            if path is not None and path != source.entry.path:
+                raise PublishError(
+                    f"catalog hit {source.entry.name!r} advertises {source.entry.path}, not {path}"
+                )
+            state, path = source.state, source.entry.path
+            advertised_blob = source.entry.blob
         else:
             state = source
         if path is None:
             raise ValueError("adopt needs a path when given a state")
+        blob = state.blob(path)
+        if advertised_blob is not None and blob != advertised_blob:
+            raise PublishError(
+                f"{path} in state {state.id[:10]} does not match its advertised blob"
+            )
         raw = state.read_bytes(path)
-        if raw is None:
+        if raw is None or blob is None:
             raise PublishError(f"{path} is not in state {state.id[:10]}")
         target = as_ or path
         self.write(target, raw)
         self._pending_sources.append(
-            Source(branch=state.meta.branch, state=state.id, path=path, as_path=target)
+            Source(
+                branch=state.meta.branch,
+                state=state.id,
+                path=path,
+                as_path=target,
+                blob=blob,
+                session=state.meta.session,
+            )
         )
         return target
 
@@ -738,6 +870,7 @@ class Branch:
 
     # ---------------------------------------------------------- writing states
 
+    @_serialized_branch_mutation
     def checkpoint(
         self,
         reason: str,
@@ -770,6 +903,7 @@ class Branch:
             )
             return self.publish_state(built)
 
+    @_serialized_branch_mutation
     def build(
         self,
         reason: str,
@@ -792,8 +926,6 @@ class Branch:
         self.backend.stage_all()
         tree = self.backend.write_tree()
         manifest = head.manifest
-        for name in self._unpublish:
-            manifest = manifest.without(name)
         return self._build(
             tree=tree,
             parents=[head.id],
@@ -807,6 +939,7 @@ class Branch:
             expected_head=head.id,
         )
 
+    @_serialized_branch_mutation
     def rollback(
         self,
         to: State,
@@ -852,12 +985,14 @@ class Branch:
         self.backend.reset_hard_to_head()
         return state
 
+    @_serialized_branch_mutation
     def merge(self, other: Branch | BranchView, *, reason: str, resolved: bool = False) -> MergeResult:
         """Merge ``other`` into this branch by type rule; see ``merge.py``.
 
-        If the result carries conflicts, nothing was published. Resolve them
-        by writing the files you want into this working tree and calling
-        again with ``resolved=True``.
+        If the result carries conflicts, the merge itself did not happen, but
+        a one-parent ``conflict`` state *was* published on this branch so the
+        failed attempt is durable. Resolve it by writing the files you want
+        into this working tree and calling again with ``resolved=True``.
         """
         from taste.memstore.merge import merge_branches
 
@@ -895,6 +1030,27 @@ class Branch:
     ) -> Built:
         """Create commit and notes. Nothing is visible until the ref moves."""
         now = now_iso()
+        # Manifest entries are live paths. Apply explicit removals on every
+        # state-building path (including merge), then keep each remaining
+        # entry pinned to the bytes in this exact tree. A deletion makes the
+        # live artifact cease to exist; a content change is a new publication.
+        for name in self._unpublish:
+            manifest = manifest.without(name)
+        for name, entry in list(manifest.entries.items()):
+            blob = self.backend.blob_at(tree, entry.path)
+            if blob is None:
+                manifest = manifest.without(name)
+            elif blob != entry.blob:
+                manifest = manifest.with_entry(
+                    ManifestEntry(
+                        name=entry.name,
+                        path=entry.path,
+                        type=entry.type,
+                        description=entry.description,
+                        blob=blob,
+                        published_at=now,
+                    )
+                )
         for name, entry in list(self._pending.items()):
             blob = self.backend.blob_at(tree, entry.path)
             if blob is None:
@@ -978,6 +1134,7 @@ class Branch:
             cur = self.store.state(cur.meta.transcript_from)
         return depth
 
+    @_serialized_branch_mutation
     def publish_state(self, built: Built) -> State:
         """Move the branch ref to a built state, or fail having published nothing."""
         with self._journal_lock:
@@ -1181,13 +1338,30 @@ class Store:
         return {name: self.view(name).head for name in self.branches()}
 
     def remove_branch(self, name: str) -> None:
-        """Drop the working tree. The branch and its states stay."""
+        """Drop the working tree after preserving anything dirty in it.
+
+        A supervisor normally opens a fresh ``Store`` after its worker dies,
+        so it does not have that worker's ``Branch`` object cached. It must
+        still acquire the now-free lease and capture the tree before the
+        backend's force-removal. If the worker is actually alive, acquiring
+        the lease raises ``BranchBusy`` and nothing is removed.
+        """
         name = _check_name(name, "branch")
-        b = self._branches.pop(name, None)
+        worktree = self.worktree_path_for(name)
+        b = self._branches.get(name)
+        opened_here = False
+        if worktree.exists() and (b is None or b._lease is None):
+            b = self.branch(name)
+            opened_here = True
         if b is not None:
-            b._capture("worktree removal", name)
+            try:
+                b._capture("worktree removal", name)
+            except Exception:
+                if opened_here:
+                    b.close()
+                raise
             b.close()
-        self.backend.worktree_remove(self.worktree_path_for(name))
+        self.backend.worktree_remove(worktree)
 
     # ---------------------------------------------------------- housekeeping
 
@@ -1260,7 +1434,13 @@ class Store:
         a channel the store cannot see.
         """
         ref = f"{self.INBOX_REF}/{self.session}/{_check_name(to_branch, 'branch')}"
-        body = json.dumps({"sender": sender, "at": now_iso(), "body": message}, sort_keys=True)
+        if not isinstance(message, dict) or not isinstance(sender, str):
+            raise ValueError("inbox message must be an object and sender must be text")
+        body = json.dumps(
+            {"sender": sender, "at": now_iso(), "body": message},
+            allow_nan=False,
+            sort_keys=True,
+        )
         with self.backend.lock():
             head = self.backend.ref_sha(ref)
             sha = self.backend.commit_tree(EMPTY_TREE, [head] if head else [], body)
@@ -1269,28 +1449,95 @@ class Store:
         return sha
 
     def inbox(self, branch: str, *, since: str | None = None) -> list[dict[str, Any]]:
-        """Messages waiting for a branch, oldest first."""
+        """Messages waiting for a branch, oldest first.
+
+        The inbox cursor is cumulative, so omitting one corrupt predecessor
+        would let a caller acknowledge a later message *through* bytes it
+        never saw.  Decode the exact first-parent log fail-closed instead of
+        skipping malformed commits.
+        """
         ref = f"{self.INBOX_REF}/{self.session}/{_check_name(branch, 'branch')}"
         head = self.backend.ref_sha(ref)
-        if head is None:
-            return []
         marker = since or self.backend.ref_sha(f"{self.SEEN_REF}/{self.session}/{branch}")
+        if head is None:
+            if marker is not None:
+                raise ValueError(f"inbox for {branch} has a cursor but no message log")
+            return []
         out: list[dict[str, Any]] = []
+        found_marker = marker is None
+
+        def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            decoded: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in decoded:
+                    raise ValueError(f"duplicate key {key!r}")
+                decoded[key] = value
+            return decoded
+
+        def no_constant(value: str) -> Any:
+            raise ValueError(f"non-JSON number {value}")
+
         for sha in self.backend.rev_list_first_parent(head):
             if marker and sha == marker:
+                found_marker = True
                 break
+            if len(self.backend.parents_of(sha)) > 1:
+                raise ValueError(f"inbox commit {sha[:10]} is not a linear log entry")
             raw = self.backend.repo.git.log("-1", "--format=%B", sha)
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
+                msg = json.loads(
+                    raw,
+                    object_pairs_hook=no_duplicates,
+                    parse_constant=no_constant,
+                )
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f"inbox commit {sha[:10]} is corrupt: {exc}") from exc
+            if not isinstance(msg, dict) or set(msg) != {"sender", "at", "body"}:
+                raise ValueError(f"inbox commit {sha[:10]} has an invalid envelope")
+            if not isinstance(msg["sender"], str) or not isinstance(msg["at"], str):
+                raise ValueError(f"inbox commit {sha[:10]} has invalid envelope identity")
+            if not isinstance(msg["body"], dict):
+                raise ValueError(f"inbox commit {sha[:10]} body is not an object")
             msg["id"] = sha
             out.append(msg)
+        if not found_marker:
+            raise ValueError(
+                f"inbox cursor {marker[:10] if marker else 'unknown'} is not in {branch} history"
+            )
         return list(reversed(out))
 
     def mark_inbox_seen(self, branch: str, message_id: str) -> None:
-        ref = f"{self.SEEN_REF}/{self.session}/{_check_name(branch, 'branch')}"
-        self.backend.cas_update_ref(ref, message_id, self.backend.ref_sha(ref))
+        """Advance a branch's inbox cursor through ``message_id``.
+
+        The inbox is a linear, oldest-to-newest log. Acknowledging one message
+        acknowledges everything before it, so the cursor may only move forward
+        along that exact chain. The update is compare-and-swap checked rather
+        than best-effort: a caller must never believe a message was consumed
+        when the durable marker says otherwise.
+        """
+        branch = _check_name(branch, "branch")
+        inbox_ref = f"{self.INBOX_REF}/{self.session}/{branch}"
+        seen_ref = f"{self.SEEN_REF}/{self.session}/{branch}"
+        with self.backend.lock():
+            head = self.backend.ref_sha(inbox_ref)
+            if head is None or not self.backend.is_ancestor(message_id, head):
+                raise ValueError(f"message {message_id[:10]} is not in the inbox for {branch}")
+            current = self.backend.ref_sha(seen_ref)
+            if current == message_id:
+                return
+            if current is not None:
+                if not self.backend.is_ancestor(current, head):
+                    raise ValueError(f"current seen marker for {branch} is not in its inbox")
+                if self.backend.is_ancestor(message_id, current):
+                    raise ValueError(
+                        f"acknowledging {message_id[:10]} would rewind {branch}'s inbox"
+                    )
+                if not self.backend.is_ancestor(current, message_id):
+                    raise ValueError(
+                        f"message {message_id[:10]} does not follow {branch}'s seen marker"
+                    )
+            if not self.backend.cas_update_ref(seen_ref, message_id, current):
+                raise StaleBranch(f"inbox seen marker for {branch} moved while acknowledging")
 
     # ---------------------------------------------------------- provenance
 
@@ -1313,10 +1560,19 @@ class Store:
             if s.blob(path) != target:
                 break
             origin = s
-            for src in s.meta.sources:
-                if src.as_path == path:
-                    upstream = self.state(src.state)
-                    return self.origin(upstream, src.path) or upstream
+            # Most recent adoption wins when a path was adopted more than once.
+            # Crossing branches is safe only when the source record pins these
+            # exact bytes; old source records without a blob remain readable
+            # but cannot establish the origin of a current value.
+            for src in reversed(s.meta.sources):
+                if src.as_path != path or src.blob is None or src.blob != target:
+                    continue
+                upstream = self.state(src.state)
+                if src.session and upstream.meta.session != src.session:
+                    continue
+                if upstream.blob(src.path) != src.blob:
+                    continue
+                return self.origin(upstream, src.path) or upstream
         return origin
 
     # ---------------------------------------------------------- discovery
@@ -1326,6 +1582,8 @@ class Store:
 
         Orientation before search: a brain that does not yet know the right
         word cannot ask for it, so the whole index is small enough to read.
+        Each hit pins the branch head and manifest blob observed during this
+        call; a producer moving afterwards does not mutate an existing hit.
         """
         out: list[Hit] = []
         for name in branches or self.branches():

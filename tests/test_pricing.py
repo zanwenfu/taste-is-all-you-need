@@ -15,6 +15,7 @@ from taste.pricing import (
     PricingError,
     call_cost,
     ensure_priced,
+    max_call_cost_usd,
     provider_for,
     rates_for,
     table_sha,
@@ -164,6 +165,49 @@ def test_reasoning_tokens_are_not_added_to_output() -> None:
 
 def test_zero_usage_costs_nothing() -> None:
     assert call_cost("claude-sonnet-4-6", input_tokens=0, output_tokens=0) == (0.0, 0.0)
+
+
+def test_max_call_cost_prices_full_context_output_and_retries() -> None:
+    price = PRICES["claude-haiku-4-5-20251001"]
+    expected_once = (
+        price.context_window * 1.25 + 1024 * 5.00
+    ) / 1_000_000
+    assert max_call_cost_usd(
+        "claude-haiku-4-5-20251001",
+        max_output_tokens=1024,
+    ) == pytest.approx(expected_once)
+    assert max_call_cost_usd(
+        "claude-haiku-4-5-20251001",
+        max_output_tokens=1024,
+        max_attempts=3,
+    ) == pytest.approx(expected_once * 3)
+
+
+def test_max_call_cost_uses_the_selected_cap_currency() -> None:
+    billed = max_call_cost_usd(
+        "claude-sonnet-4-6",
+        max_output_tokens=1,
+        cap_on="billed",
+    )
+    work = max_call_cost_usd(
+        "claude-sonnet-4-6",
+        max_output_tokens=1,
+        cap_on="work",
+    )
+    assert billed > work, "cache-write rates are the worst billed prompt bucket"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_output_tokens": 0}, "max_output_tokens"),
+        ({"max_output_tokens": 1, "max_attempts": False}, "max_attempts"),
+        ({"max_output_tokens": 1, "cap_on": "tokens"}, "cap_on"),
+    ],
+)
+def test_max_call_cost_rejects_an_unbounded_configuration(kwargs, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        max_call_cost_usd("claude-haiku-4-5-20251001", **kwargs)
 
 
 # ------------------------------------------------------------------ provenance

@@ -262,6 +262,34 @@ def test_a_dead_holders_label_does_not_make_a_free_branch_look_busy(
     s.close()
 
 
+def test_an_alive_process_label_without_the_kernel_lease_is_not_a_holder(
+    tmp_path: Path,
+) -> None:
+    """PID liveness cannot substitute for the branch's actual flock."""
+    import json
+    import os
+    import socket
+
+    s = Store.open(tmp_path / "repo", "s1")
+    branch = s.branch("worker")
+    branch.checkpoint("start")
+    branch.release()
+    s.sidecar("lease", "worker").write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "host": socket.gethostname(),
+                "producer": "stale-but-alive",
+            }
+        )
+    )
+
+    assert s.view("worker").holder is None
+    replacement = s.branch("worker")
+    assert replacement.holder is not None
+    s.close()
+
+
 def test_a_rollback_gives_back_clean_context_without_discarding_the_failure(
     store: Store,
 ) -> None:

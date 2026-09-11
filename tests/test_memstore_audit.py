@@ -10,10 +10,14 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tempfile import TemporaryFile
 
 import pytest
 
+import taste.memstore.backend as backend_module
 from taste.memstore import (
     BadName,
     BranchBusy,
@@ -108,9 +112,317 @@ def test_a_note_is_never_silently_overwritten(store: Store) -> None:
     a = store.branch("a")
     a.write("f", "1")
     st = a.checkpoint("one")
-    store.backend.note_set(NOTES["meta"], st.id, st.meta.to_json(), overwrite=False)  # identical is fine
+    store.backend.note_set(
+        NOTES["meta"], st.id, st.meta.to_json(), overwrite=False
+    )  # identical is fine
     with pytest.raises(NoteConflict):
-        store.backend.note_set(NOTES["meta"], st.id, '{"schema": "taste.memstore/1"}', overwrite=False)
+        store.backend.note_set(
+            NOTES["meta"], st.id, '{"schema": "taste.memstore/1"}', overwrite=False
+        )
+
+
+def test_note_reads_follow_exact_ref_rewrite_rollback_and_deletion(store: Store) -> None:
+    a = store.branch("a")
+    st = a.checkpoint("one")
+    namespace = NOTES["meta"]
+    original = store.backend.note_get(namespace, st.id)
+    original_ref = store.backend.ref_sha(namespace)
+    assert original is not None and original_ref is not None
+
+    changed = '{"tampered":true}'
+    store.backend.note_set(namespace, st.id, changed)
+    changed_ref = store.backend.ref_sha(namespace)
+    assert changed_ref is not None and changed_ref != original_ref
+    assert store.backend.note_get(namespace, st.id) == changed
+
+    assert store.backend.cas_update_ref(namespace, original_ref, changed_ref)
+    assert store.backend.note_get(namespace, st.id) == original
+    assert store.backend.cas_update_ref(namespace, changed_ref, original_ref)
+    assert store.backend.note_get(namespace, st.id) == changed
+
+    store.backend.delete_ref(namespace)
+    assert store.backend.note_get(namespace, st.id) is None
+    assert store.backend.cas_update_ref(namespace, changed_ref, None)
+    assert store.backend.note_get(namespace, st.id) == changed
+
+
+def test_note_cache_is_bounded_and_malformed_refs_fail_closed(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a = store.branch("a")
+    first = a.checkpoint("one")
+    second = a.checkpoint("two")
+    backend = store.backend
+    monkeypatch.setattr(backend_module, "_NOTE_TREE_CACHE_MAX_REFS", 2)
+    monkeypatch.setattr(backend_module, "_NOTE_BLOB_CACHE_MAX_ENTRIES", 2)
+
+    namespaces = [f"refs/notes/cache-bound-{index}" for index in range(3)]
+    for namespace in namespaces:
+        backend.note_set(namespace, first.id, namespace)
+        assert backend.note_get(namespace, first.id) == namespace
+    assert len(backend._note_tree_cache) == 2
+    assert namespaces[0] not in backend._note_tree_cache
+    assert len(backend._note_blob_cache) == 2
+
+    monkeypatch.setattr(backend_module, "_NOTE_BLOB_CACHE_MAX_VALUE_BYTES", 3)
+    large_note_namespace = "refs/notes/cache-large-value"
+    backend.note_set(large_note_namespace, first.id, "oversized")
+    assert backend.note_get(large_note_namespace, first.id) == "oversized"
+    assert b"oversized" not in backend._note_blob_cache.values()
+
+    monkeypatch.setattr(backend_module, "_NOTE_TREE_CACHE_MAX_TARGETS", 1)
+    oversized_namespace = "refs/notes/cache-target-bound"
+    backend.note_set(oversized_namespace, first.id, "first")
+    backend.note_set(oversized_namespace, second.id, "second")
+    assert backend.note_get(oversized_namespace, first.id) == "first"
+    assert oversized_namespace not in backend._note_tree_cache
+
+    blob = backend.hash_blob("not a commit")
+    blob_namespace = "refs/notes/malformed-blob"
+    assert backend.cas_update_ref(blob_namespace, blob, None)
+    with pytest.raises(ValueError, match="points to non-commit"):
+        backend.note_get(blob_namespace, first.id)
+
+    malformed_tree = backend.tree_with_blob(backend_module.EMPTY_TREE, "not-a-target", blob)
+    malformed_commit = backend.commit_tree(malformed_tree, [], "malformed notes tree")
+    tree_namespace = "refs/notes/malformed-tree"
+    assert backend.cas_update_ref(tree_namespace, malformed_commit, None)
+    with pytest.raises(ValueError, match="invalid target path"):
+        backend.note_get(tree_namespace, first.id)
+
+    wrong_width = 64 if len(first.id) == 40 else 40
+    wrong_width_tree = backend.tree_with_blob(backend_module.EMPTY_TREE, "a" * wrong_width, blob)
+    wrong_width_commit = backend.commit_tree(wrong_width_tree, [], "wrong notes hash width")
+    wrong_width_namespace = "refs/notes/malformed-hash-width"
+    assert backend.cas_update_ref(wrong_width_namespace, wrong_width_commit, None)
+    with pytest.raises(ValueError, match="invalid target path"):
+        backend.note_get(wrong_width_namespace, first.id)
+
+    gitlink_tree = backend.tree_with_blob(
+        backend_module.EMPTY_TREE,
+        first.id,
+        first.id,
+        mode=backend_module.MODE_GITLINK,
+    )
+    gitlink_commit = backend.commit_tree(gitlink_tree, [], "non-blob notes tree")
+    gitlink_namespace = "refs/notes/malformed-gitlink"
+    assert backend.cas_update_ref(gitlink_namespace, gitlink_commit, None)
+    with pytest.raises(ValueError, match="non-blob entry"):
+        backend.note_get(gitlink_namespace, first.id)
+
+    with TemporaryFile() as stream:
+        stream.write(f"040000 tree {backend_module.EMPTY_TREE}\tnothex\n".encode("ascii"))
+        stream.seek(0)
+        empty_prefix_tree = backend.repo.git.mktree(istream=stream)
+    empty_prefix_commit = backend.commit_tree(empty_prefix_tree, [], "empty invalid prefix")
+    empty_prefix_namespace = "refs/notes/malformed-empty-prefix"
+    assert backend.cas_update_ref(empty_prefix_namespace, empty_prefix_commit, None)
+    with pytest.raises(ValueError, match="invalid tree prefix"):
+        backend.note_get(empty_prefix_namespace, first.id)
+
+
+def test_exact_object_reads_are_cached_but_mutable_refs_stay_live(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a = store.branch("a")
+    a.write("f", "one")
+    first = a.checkpoint("one")
+    a.write("f", "two")
+    a.write("new", "present")
+    a.write("dir/child", "nested")
+    second = a.checkpoint("two")
+    backend = store.backend
+
+    # Prime every immutable object lookup, including a proven-absent entry.
+    expected_tree = backend.tree_of(second.id)
+    expected_parents = backend.parents_of(second.id)
+    expected_entry = backend.entry_at(second.id, "f")
+    expected_directory = backend.entry_at(second.id, "dir")
+    assert expected_directory is not None and expected_directory.mode == "040000"
+    assert backend.entry_at(second.id, "absent") is None
+    assert backend.show_bytes(second.id, "f") == b"two"
+    expected_files = backend.ls_files(second.id)
+    expected_history = backend.rev_list_first_parent(second.id)
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an exact immutable object read was rescanned")
+
+    monkeypatch.setattr(type(backend.repo.git), "execute", unexpected)
+
+    assert backend.tree_of(second.id) == expected_tree
+    assert backend.parents_of(second.id) == expected_parents
+    assert backend.entry_at(second.id, "f") == expected_entry
+    assert backend.entry_at(second.id, "dir") == expected_directory
+    assert backend.entry_at(second.id, "absent") is None
+    assert backend.show_bytes(second.id, "f") == b"two"
+    assert backend.ls_files(second.id) == expected_files
+    assert backend.rev_list_first_parent(second.id) == expected_history
+
+    # Cached list results are copies, not mutable shared values.
+    backend.parents_of(second.id).append("forged")
+    backend.ls_files(second.id).append("forged")
+    backend.rev_list_first_parent(second.id).append("forged")
+    assert backend.parents_of(second.id) == [first.id]
+    assert "forged" not in backend.ls_files(second.id)
+    assert "forged" not in backend.rev_list_first_parent(second.id)
+
+
+def test_exact_object_and_note_reads_are_thread_safe(store: Store) -> None:
+    a = store.branch("a")
+    states = []
+    for index in range(20):
+        a.write("f", f"value-{index}")
+        states.append(a.checkpoint(f"state-{index}"))
+    expected = [
+        (
+            state.id,
+            store.backend.note_get(NOTES["meta"], state.id),
+            f"value-{index}".encode(),
+        )
+        for index, state in enumerate(states)
+    ]
+    store.backend._clear_object_caches()
+    barrier = threading.Barrier(3)
+
+    def read_all(rows: list[tuple[str, str | None, bytes]]) -> None:
+        barrier.wait()
+        for state_id, meta, content in rows:
+            assert store.backend.note_get(NOTES["meta"], state_id) == meta
+            assert store.backend.show_bytes(state_id, "f") == content
+            assert store.backend.entry_at(state_id, "f") is not None
+            assert store.backend.ls_files(state_id) == ["f"]
+            assert store.backend.tree_of(state_id)
+            assert store.backend.parents_of(state_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        forward = pool.submit(read_all, expected)
+        backward = pool.submit(read_all, list(reversed(expected)))
+        barrier.wait()
+        forward.result()
+        backward.result()
+
+
+def test_object_read_cache_never_keys_a_mutable_ref(store: Store) -> None:
+    a = store.branch("a")
+    a.write("f", "one")
+    first = a.checkpoint("one")
+    backend = store.backend
+
+    first_tree = backend.tree_of(a.ref)
+    _ = backend.parents_of(a.ref)
+    assert backend.entry_at(a.ref, "new") is None
+    assert backend.show_bytes(a.ref, "f") == b"one"
+    assert backend.ls_files(a.ref) == ["f"]
+    first_history = backend.rev_list_first_parent(a.ref)
+    assert first_history[0] == first.id
+
+    a.write("f", "two")
+    a.write("new", "present")
+    second = a.checkpoint("two")
+
+    assert backend.tree_of(a.ref) != first_tree
+    assert backend.parents_of(a.ref) == [first.id]
+    assert backend.entry_at(a.ref, "new") is not None
+    assert backend.show_bytes(a.ref, "f") == b"two"
+    assert backend.ls_files(a.ref) == ["f", "new"]
+    assert backend.rev_list_first_parent(a.ref) == [second.id, *first_history]
+
+
+def test_ref_reads_track_raw_moves_and_reject_non_commits(store: Store) -> None:
+    a = store.branch("a")
+    a.write("f", "one")
+    first = a.checkpoint("one")
+    a.write("f", "two")
+    second = a.checkpoint("two")
+    backend = store.backend
+    ref = "refs/taste-test/live-ref"
+
+    assert backend.cas_update_ref(ref, second.id, None)
+    assert backend.ref_sha(ref) == second.id
+    backend.repo.git.update_ref(ref, first.id, second.id)
+    assert backend.ref_sha(ref) == first.id
+
+    blob = backend.hash_blob("not a commit")
+    backend.repo.git.update_ref(ref, blob, first.id)
+    assert backend.ref_sha(ref) is None
+    backend.delete_ref(ref)
+    assert backend.ref_sha(ref) is None
+
+
+def test_exact_object_reads_ignore_replace_refs_and_reject_grafts(store: Store) -> None:
+    a = store.branch("a")
+    a.write("f", "one")
+    first = a.checkpoint("one")
+    a.write("f", "two")
+    second = a.checkpoint("two")
+    backend = store.backend
+
+    assert backend.show_bytes(first.id, "f") == b"one"
+    backend.repo.git.replace(first.id, second.id)
+    backend._clear_object_caches()
+    assert backend.show_bytes(first.id, "f") == b"one"
+    assert backend.tree_of(first.id) != backend.tree_of(second.id)
+
+    assert backend.parents_of(second.id) == [first.id]
+    grafts = backend.common_dir / "info" / "grafts"
+    grafts.parent.mkdir(parents=True, exist_ok=True)
+    grafts.write_text(f"{second.id}\n", encoding="ascii")
+    try:
+        with pytest.raises(ValueError, match="raw, complete ancestry"):
+            backend.parents_of(second.id)
+        with pytest.raises(ValueError, match="raw, complete ancestry"):
+            backend.rev_list_first_parent(second.id)
+    finally:
+        grafts.unlink()
+
+
+def test_object_read_caches_are_bounded_and_skip_large_values(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a = store.branch("a")
+    states = []
+    for value in ("one", "two", "tri"):
+        a.write("f", value)
+        states.append(a.checkpoint(value))
+    a.write("f", "oversized")
+    large = a.checkpoint("large")
+
+    backend = store.backend
+    backend._clear_object_caches()
+    for name in (
+        "_TREE_CACHE_MAX_ENTRIES",
+        "_PARENTS_CACHE_MAX_ENTRIES",
+        "_ENTRY_CACHE_MAX_ENTRIES",
+        "_SHOW_CACHE_MAX_ENTRIES",
+        "_LS_FILES_CACHE_MAX_ENTRIES",
+        "_FIRST_PARENT_CACHE_MAX_ENTRIES",
+    ):
+        monkeypatch.setattr(backend_module, name, 2)
+    monkeypatch.setattr(backend_module, "_SHOW_CACHE_MAX_VALUE_BYTES", 4)
+    monkeypatch.setattr(backend_module, "_SHOW_CACHE_MAX_TOTAL_BYTES", 5)
+
+    for state in states:
+        assert backend.tree_of(state.id)
+        _ = backend.parents_of(state.id)
+        assert backend.entry_at(state.id, "f") is not None
+        assert backend.show_bytes(state.id, "f") is not None
+        assert backend.ls_files(state.id) == ["f"]
+        assert backend.rev_list_first_parent(state.id)
+
+    assert len(backend._tree_cache) == 2
+    assert len(backend._parents_cache) == 2
+    assert len(backend._entry_cache) == 2
+    assert len(backend._ls_files_cache) == 2
+    assert len(backend._first_parent_cache) == 2
+    assert len(backend._show_bytes_cache) <= 2
+    assert backend._show_bytes_cache_size <= 5
+    assert states[0].id not in backend._tree_cache
+
+    assert backend.show_bytes(large.id, "f") == b"oversized"
+    assert (large.id, "f") not in backend._show_bytes_cache
 
 
 # ------------------------------------------------------------------ nothing is lost, everywhere
@@ -261,13 +573,15 @@ def test_a_monitor_can_read_a_branch_that_a_brain_is_writing(tmp_path: Path) -> 
     view = s.view("held")
     assert view.head.read("live.txt") == "written while held"
     assert next(st.meta.reason for st in view.history()) == "holder works"
-    assert "held" in s.heads()                      # heads() no longer opens branches
+    assert "held" in s.heads()  # heads() no longer opens branches
     assert s.catalog() is not None
     with pytest.raises(BranchBusy):
-        s.branch("held")                            # writing is still exclusive
+        s.branch("held")  # writing is still exclusive
 
     # A monitor records its judgment without the lease.
-    s.judge(view.head, Verdict("fail", by="monitor", detail="regression", failure_class="TESTS_FAIL"))
+    s.judge(
+        view.head, Verdict("fail", by="monitor", detail="regression", failure_class="TESTS_FAIL")
+    )
     assert [v.status for v in s.view("held").head.verdicts] == ["fail"]
     assert s.view("held").head.verdicts[0].at is not None
 
@@ -374,9 +688,9 @@ def test_catalog_lets_a_brain_look_around_before_it_can_ask(store: Store) -> Non
     b = store.branch("b")
     b.publish("revenue", "r.json", type=ObjectType.RECORD, description="Q3 revenue")
     b.checkpoint("published", records={"r.json": {}})
-    assert store.search("money") == []          # the wrong word finds nothing
+    assert store.search("money") == []  # the wrong word finds nothing
     entries = [(h.branch, h.entry.name) for h in store.catalog()]
-    assert entries == [("b", "revenue")]        # orientation needs no word at all
+    assert entries == [("b", "revenue")]  # orientation needs no word at all
 
 
 # ------------------------------------------------------------------ resume
@@ -432,7 +746,7 @@ def test_a_deleted_worktree_is_repaired_not_fatal(tmp_path: Path) -> None:
     shutil.rmtree(wt)
 
     s = Store.open(root, "s1")
-    a = s.branch("a")                      # repairs itself
+    a = s.branch("a")  # repairs itself
     assert a.head.read("f") == "1"
     a.write("f", "2")
     assert a.checkpoint("two").read("f") == "2"
@@ -479,8 +793,10 @@ def test_gc_collects_what_a_lost_race_left_behind(store: Store) -> None:
     a.write("f", "2")
     orphan = a.build("never published")
     assert store.backend.note_get(NOTES["meta"], orphan.sha) is not None
+    assert store.backend.show_bytes(orphan.sha, "f") == b"2"  # warm the exact-id cache
 
     store.gc()
     assert store.backend.note_get(NOTES["meta"], orphan.sha) is None
+    assert store.backend.show_bytes(orphan.sha, "f") is None
     # and the real state is untouched
     assert a.head == head and head.manifest is not None and head.transcript is not None

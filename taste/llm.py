@@ -22,6 +22,7 @@ separation is what lets the kernel insert a checkpoint between any two turns.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import random
 import threading
@@ -34,7 +35,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from taste import providers
-from taste.pricing import PricingError, call_cost, ensure_priced
+from taste.pricing import PricingError, call_cost, ensure_priced, max_call_cost_usd
 from taste.providers.base import (
     Completion,
     CompletionRequest,
@@ -80,10 +81,24 @@ class BudgetExceeded(RuntimeError):
 
     failure_kind = "budget"
 
-    def __init__(self, spent_usd: float, budget_usd: float) -> None:
-        super().__init__(f"budget exceeded: ${spent_usd:.4f} spent >= ${budget_usd:.4f} cap")
+    def __init__(
+        self,
+        spent_usd: float,
+        budget_usd: float,
+        *,
+        required_usd: float = 0.0,
+    ) -> None:
+        if required_usd > 0:
+            detail = (
+                f"${spent_usd:.4f} spent plus ${required_usd:.4f} "
+                f"worst-case call exposure exceeds ${budget_usd:.4f} cap"
+            )
+        else:
+            detail = f"${spent_usd:.4f} spent >= ${budget_usd:.4f} cap"
+        super().__init__(f"budget exceeded: {detail}")
         self.spent_usd = spent_usd
         self.budget_usd = budget_usd
+        self.required_usd = required_usd
 
 
 class InfraFailure(RuntimeError):
@@ -256,6 +271,15 @@ class LLM:
         if api_key:  # legacy single-key form: the Anthropic slot
             self._api_keys.setdefault("anthropic", api_key)
         self.stats = RunStats()
+        if budget_usd is not None and (
+            isinstance(budget_usd, bool)
+            or not isinstance(budget_usd, (int, float))
+            or not math.isfinite(float(budget_usd))
+            or float(budget_usd) < 0
+        ):
+            raise ValueError("budget_usd must be finite and non-negative")
+        if budget_usd is not None:
+            budget_usd = float(budget_usd)
         self.budget_usd = budget_usd
         # Which currency the cap is enforced in. "work" by default and in
         # every reported arm: billed cost depends on what ran BEFORE a run
@@ -271,6 +295,8 @@ class LLM:
         self.run_id = run_id
         self._semaphore = semaphore or _API_SEMAPHORE
         self._providers: dict[str, Any] = {}
+        self._budget_lock = threading.Lock()
+        self._reserved_usd = 0.0
 
     # ------------------------------------------------------------ providers
 
@@ -299,6 +325,36 @@ class LLM:
             self.stats.total_work_usd if self.cap_on == "work" else self.stats.total_cost_usd
         )
 
+    def _reserve_call_budget(self, model: str, max_tokens: int) -> float:
+        """Reserve worst-case exposure atomically before a provider request."""
+        if self.budget_usd is None:
+            return 0.0
+        exposure = max_call_cost_usd(
+            model,
+            max_output_tokens=max_tokens,
+            max_attempts=self.max_attempts,
+            cap_on=self.cap_on,
+        )
+        with self._budget_lock:
+            spent = self.spent_usd()
+            required = self._reserved_usd + exposure
+            if spent + required > self.budget_usd:
+                raise BudgetExceeded(
+                    spent,
+                    self.budget_usd,
+                    required_usd=required,
+                )
+            self._reserved_usd += exposure
+        return exposure
+
+    def _release_call_budget(self, exposure: float) -> None:
+        if exposure <= 0:
+            return
+        with self._budget_lock:
+            self._reserved_usd -= exposure
+            if self._reserved_usd < 0 and abs(self._reserved_usd) < 1e-12:
+                self._reserved_usd = 0.0
+
     # ------------------------------------------------------------ the call
 
     def call(
@@ -321,51 +377,52 @@ class LLM:
         rather than crashing.
         """
         ensure_priced(model)
-        if self.budget_usd is not None:
-            spent = self.spent_usd()
-            if spent >= self.budget_usd:
-                raise BudgetExceeded(spent, self.budget_usd)
+        exposure = self._reserve_call_budget(model, max_tokens)
+        try:
+            provider = self.provider_for(model)
+            request = CompletionRequest(
+                model=model,
+                system=_as_system_blocks(system),
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+                sampling=SamplingConfig(temperature=temperature, effort=effort),
+                role=role,
+                run_id=self.run_id,
+            )
 
-        provider = self.provider_for(model)
-        request = CompletionRequest(
-            model=model,
-            system=_as_system_blocks(system),
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens,
-            sampling=SamplingConfig(temperature=temperature, effort=effort),
-            role=role,
-            run_id=self.run_id,
-        )
+            last_exc: Exception | None = None
+            for attempt in range(self.max_attempts):
+                try:
+                    with self._semaphore:
+                        completion = provider.complete(request)
+                except ProtocolFailure:
+                    raise  # already typed and already infra; retrying will not help
+                except Exception as exc:
+                    if not provider.is_retryable(exc):
+                        # Credit exhausted, key revoked, malformed request: an
+                        # environment problem, surfaced typed so the kernel never
+                        # records it as the agent failing its task.
+                        raise InfraFailure(
+                            "non-retryable provider error",
+                            attempts=attempt + 1,
+                            last_error=exc,
+                        ) from exc
+                    last_exc = exc
+                    if attempt < self.max_attempts - 1:
+                        delay = min(self.backoff_base * (2**attempt), 30.0)
+                        time.sleep(delay * (0.5 + random.random()))
+                    continue
+                self.stats.record(model, completion, role=role)
+                return completion
 
-        last_exc: Exception | None = None
-        for attempt in range(self.max_attempts):
-            try:
-                with self._semaphore:
-                    completion = provider.complete(request)
-            except ProtocolFailure:
-                raise  # already typed and already infra; retrying will not help
-            except Exception as exc:
-                if not provider.is_retryable(exc):
-                    # Credit exhausted, key revoked, malformed request: an
-                    # environment problem, surfaced typed so the kernel never
-                    # records it as the agent failing its task.
-                    raise InfraFailure(
-                        "non-retryable provider error", attempts=attempt + 1, last_error=exc
-                    ) from exc
-                last_exc = exc
-                if attempt < self.max_attempts - 1:
-                    delay = min(self.backoff_base * (2**attempt), 30.0)
-                    time.sleep(delay * (0.5 + random.random()))
-                continue
-            self.stats.record(model, completion, role=role)
-            return completion
-
-        raise InfraFailure(
-            "provider failed on transient errors",
-            attempts=self.max_attempts,
-            last_error=last_exc,
-        ) from last_exc
+            raise InfraFailure(
+                "provider failed on transient errors",
+                attempts=self.max_attempts,
+                last_error=last_exc,
+            ) from last_exc
+        finally:
+            self._release_call_budget(exposure)
 
 
 # ---------------------------------------------------------------- prompts

@@ -11,7 +11,9 @@ merges. A manifest is a union. That is the whole reason the layer is typed.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -158,6 +160,10 @@ class ManifestEntry:
 class Manifest:
     """What a branch has: the index the communicator queries.
 
+    An entry names a live path on that branch. Every checkpoint refreshes its
+    blob when the path changes and removes it when the path disappears, while
+    an already-returned catalog hit remains pinned to its immutable state.
+
     Immutable; every operation returns a new manifest. Union keeps the entry
     with the later ``published_at`` when both sides publish the same name.
     """
@@ -265,19 +271,42 @@ StateKind = Literal["root", "checkpoint", "rollback", "merge", "branch", "confli
 
 @dataclass(frozen=True)
 class Source:
-    """Where an adopted artifact came from, so provenance crosses branches."""
+    """Where an adopted artifact came from, so provenance crosses branches.
+
+    ``state`` and ``blob`` pin the exact bytes that were adopted; ``session``
+    disambiguates the branch name across sessions.  Older states lack the last
+    two fields, so both are optional on read.  Such a source remains useful as
+    historical metadata, but cannot safely be followed as the origin of the
+    current bytes.
+    """
 
     branch: str
     state: str
     path: str
     as_path: str
+    blob: str | None = None
+    session: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {"branch": self.branch, "state": self.state, "path": self.path, "as_path": self.as_path}
+        return {
+            "branch": self.branch,
+            "state": self.state,
+            "path": self.path,
+            "as_path": self.as_path,
+            "blob": self.blob,
+            "session": self.session,
+        }
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Source:
-        return cls(branch=raw["branch"], state=raw["state"], path=raw["path"], as_path=raw["as_path"])
+        return cls(
+            branch=raw["branch"],
+            state=raw["state"],
+            path=raw["path"],
+            as_path=raw["as_path"],
+            blob=raw.get("blob"),
+            session=raw.get("session", ""),
+        )
 
 
 @dataclass(frozen=True)
@@ -413,6 +442,23 @@ class Conflict:
             ours_state=raw.get("ours_state", ""),
             at=raw.get("at", ""),
         )
+
+
+def conflict_digest(conflicts: Sequence[Conflict]) -> str:
+    """Content identity for conflict evidence stored outside a commit."""
+    payload = json.dumps(
+        [conflict.to_dict() for conflict in conflicts],
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def bind_conflict_reason(reason: str, conflicts: Sequence[Conflict]) -> str:
+    """Put a sidecar-conflict digest in the immutable commit subject."""
+    return f"{reason} [{conflict_digest(conflicts)}]"
 
 
 # ------------------------------------------------------------------ resume

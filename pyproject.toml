@@ -37,7 +37,7 @@ dependencies = [
 openai = ["openai>=3.0,<4"]
 # The brain layer only. Kept optional so the memory layer stays importable
 # without it -- tests/test_package_isolation.py holds that boundary.
-brains = ["claude-agent-sdk>=0.2.152,<0.3"]
+brains = ["claude-agent-sdk==0.2.152"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",

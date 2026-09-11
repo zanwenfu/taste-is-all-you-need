@@ -7,6 +7,9 @@ provider rather than a scripted wire format.
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from taste.llm import (
@@ -93,15 +96,59 @@ def test_non_retryable_error_is_typed_and_immediate() -> None:
 
 
 def test_budget_cap_blocks_the_next_call() -> None:
-    # 1M input tokens on Sonnet 4.6 is $3 — over a $1 cap.
-    provider = FakeProvider([FakeTurn(text="x", input_tokens=1_000_000)])
-    llm = _llm(provider, budget_usd=1.0)
+    # One valid 100k-token call costs $0.30.  A second call cannot be admitted:
+    # its worst-case exposure would cross the remaining $0.60.
+    provider = FakeProvider([FakeTurn(text="x", input_tokens=100_000)])
+    llm = _llm(provider, budget_usd=0.9, max_attempts=1)
 
     _call(llm)
     with pytest.raises(BudgetExceeded) as excinfo:
         _call(llm)
-    assert excinfo.value.spent_usd >= excinfo.value.budget_usd
+    assert excinfo.value.spent_usd == pytest.approx(0.30075)
+    assert excinfo.value.required_usd > 0.60
     assert provider.call_count == 1, "the capped call must not reach the provider"
+
+
+def test_tiny_budget_blocks_an_oversized_first_call_before_dispatch() -> None:
+    provider = FakeProvider([FakeTurn(text="x", input_tokens=20_000)])
+    llm = _llm(provider, budget_usd=0.001, max_attempts=1, cap_on="billed")
+
+    with pytest.raises(BudgetExceeded):
+        _call(
+            llm,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            role="monitor",
+        )
+
+    assert provider.call_count == 0
+    assert llm.stats.total_cost_usd == 0
+
+
+def test_parallel_calls_reserve_budget_before_either_response() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingProvider(FakeProvider):
+        def complete(self, request):  # type: ignore[no-untyped-def]
+            self.calls.append(request)
+            entered.set()
+            assert release.wait(timeout=5)
+            return _usage_completion(input_tokens=100, output_tokens=10)
+
+    provider = BlockingProvider()
+    llm = _llm(provider, budget_usd=1.0, max_attempts=1)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(_call, llm)
+        assert entered.wait(timeout=5)
+        try:
+            with pytest.raises(BudgetExceeded):
+                _call(llm)
+        finally:
+            release.set()
+        assert first.result().summary_text == "ok"
+
+    assert provider.call_count == 1
 
 
 def test_no_budget_means_no_cap() -> None:

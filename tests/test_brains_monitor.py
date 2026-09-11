@@ -13,6 +13,10 @@ assert that.
 
 from __future__ import annotations
 
+import json
+import os
+import signal
+import threading
 from pathlib import Path
 
 import pytest
@@ -26,6 +30,7 @@ from taste.brains.monitor import (
     Judgement,
     MonitorBrain,
     Severity,
+    TerminalDecision,
     batch_prompt,
 )
 from taste.brains.subbrain import SubBrain
@@ -457,4 +462,636 @@ def test_a_failed_escalation_is_reported_as_failed(store: Store) -> None:
     assert monitor.state.interventions[0][0] == "interrupt-failed"
     assert "RuntimeError" in monitor.state.interventions[0][1]
     assert [v.detail for v in brain.wake().unacked] == ["editing the wrong file"]
+    brain.close()
+
+
+# ------------------------------------------------------------------ crash-safe cursor and actions
+
+
+def test_a_rollback_divergence_cannot_make_the_monitor_skip_events(store: Store) -> None:
+    """A cumulative integer cursor points past the end after rollback.
+
+    The replacement trajectory shares a prefix with the abandoned one, then
+    diverges.  Only that common prefix is already judged; the new suffix is new
+    work even when its numeric position is below the old cursor.
+    """
+    seen: list[str] = []
+
+    def recording_judge(contract, batch, view):
+        seen.extend(e["tool_use_id"] for e in batch)
+        return Judgement(Severity.FINE, "ok")
+
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, recording_judge, batch_size=1)
+
+    brain.wal.intent("Bash", "a", {})
+    good = brain.checkpoint("the shared prefix")
+    monitor.tick()
+
+    brain.wal.intent("Bash", "abandoned", {})
+    brain.checkpoint("the trajectory we abandon")
+    monitor.tick()
+
+    brain.branch.rollback(good, "take another route")
+    brain.wal.intent("Bash", "replacement", {})
+    monitor.tick()
+
+    assert seen == ["a", "abandoned", "replacement"]
+    brain.close()
+
+
+def test_a_legacy_integer_cursor_is_not_trusted_after_upgrade(store: Store) -> None:
+    """Without old content identities, re-judge rather than silently skip."""
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.checkpoint("install the contract that owns the legacy monitor state")
+    brain.wal.intent("Bash", "replacement", {})
+    legacy_path = store.sidecar("monitor", brain.contract.identity)
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "judged_through": 1,
+                "judgements": [],
+                "interventions": [],
+            }
+        )
+    )
+    seen: list[str] = []
+
+    def judge(contract, batch, view):
+        seen.extend(event["tool_use_id"] for event in batch)
+        return Judgement(Severity.FINE, "checked after upgrade")
+
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=1)
+    monitor.tick()
+
+    assert seen == ["replacement"]
+    assert len(monitor.state.fingerprints) == 1
+    assert not legacy_path.exists()
+    assert monitor._state_path().exists()
+    migrated = json.loads(monitor._state_path().read_text())
+    assert migrated["schema"] == "taste.brains/MonitorState/3"
+    assert migrated["contract_digest"] == monitor.contract_digest
+    assert migrated["terminal_assessments"] == []
+    brain.close()
+
+
+def test_a_revised_contract_has_distinct_state_and_old_report_remains_readable(
+    store: Store,
+) -> None:
+    """A worker name is not a monitor-state identity.
+
+    Re-planning may keep the worker address while changing the task or success
+    criteria.  Its old LOST result remains audit history, but must not poison
+    the replacement contract's initial report or cursor.
+    """
+    original = a_contract(task="try approach A")
+    brain = SubBrain(store, original)
+    brain.wal.intent("Bash", "old-attempt", {})
+    old_monitor = MonitorBrain(
+        store,
+        original,
+        judge_always(Severity.LOST, "approach A cannot work"),
+        batch_size=1,
+    )
+    assert old_monitor.tick() is not None
+    old_report = old_monitor.report()
+    old_path = old_monitor._state_path()
+
+    revised = a_contract(
+        task="try approach B",
+        success_criteria=("approach B's tests pass",),
+    )
+    new_monitor = MonitorBrain(
+        store,
+        revised,
+        judge_always(Severity.FINE, "new contract is on track"),
+        batch_size=1,
+    )
+
+    assert new_monitor._state_path() != old_path
+    assert new_monitor.report()["worst"] == "fine"
+    assert new_monitor.report()["judgements"] == 0
+    assert new_monitor.unjudged()[0]["tool_use_id"] == "old-attempt"
+    assert new_monitor.tick() == Judgement(Severity.FINE, "new contract is on track")
+    assert new_monitor._state_path().exists()
+
+    # The old digest-addressed state is not overwritten or hidden by opening
+    # the revision; an auditor holding the original contract can still read it.
+    reopened_old = MonitorBrain(
+        store,
+        original,
+        judge_always(Severity.FINE),
+        batch_size=1,
+    )
+    assert reopened_old.report()["worst"] == old_report["worst"] == "lost"
+    assert reopened_old.report()["judgements"] == old_report["judgements"] == 1
+    assert old_path.exists()
+    brain.close()
+
+
+def test_a_judgement_is_pinned_to_the_head_and_batch_it_observed(store: Store) -> None:
+    """A slow judge can return after the worker has checkpointed again.
+
+    Its evidence and verdict belong to the snapshot it actually saw, not to
+    whichever head happens to be current when ``respond`` eventually runs.
+    """
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.wal.intent("Bash", "observed-call", {"command": "pytest"})
+    observed_head = brain.branch.head
+    heads_seen_by_judge: list[str] = []
+
+    def moving_judge(contract, batch, view):
+        heads_seen_by_judge.append(view.head.id)
+        brain.checkpoint("the worker moved while judgement was slow")
+        heads_seen_by_judge.append(view.head.id)
+        return Judgement(Severity.WRONG, "the observed call was wrong")
+
+    monitor = MonitorBrain(store, brain.contract, moving_judge, batch_size=1)
+    judgement = monitor.tick()
+    assert judgement is not None
+    assert brain.branch.head != observed_head
+    assert heads_seen_by_judge == [observed_head.id, observed_head.id]
+
+    (pending,) = monitor.pending_actions
+    assert pending.observed_head == observed_head.id
+    assert [event["tool_use_id"] for event in pending.batch] == ["observed-call"]
+
+    asyncio.run(monitor.respond(judgement, FakeClient()))
+    assert [v.detail for v in store.state(observed_head.id).verdicts] == [
+        "the observed call was wrong"
+    ]
+    brain.close()
+
+
+def test_a_kill_between_judgement_and_response_is_replayed(store: Store) -> None:
+    """Persisting the cursor before acting used to omit the action forever.
+
+    The child dies after ``tick`` has persisted its judgement.  A fresh monitor
+    must not re-bill/re-judge the batch, but must still deliver the pending
+    verdict and intervention exactly once.
+    """
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.wal.intent("Bash", "t0", {"command": "wrong"})
+
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - deliberately never returns to pytest
+        monitor = MonitorBrain(
+            store,
+            brain.contract,
+            judge_always(Severity.WRONG, "persisted before death"),
+            batch_size=1,
+        )
+        assert monitor.tick() is not None
+        os.kill(os.getpid(), signal.SIGKILL)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+
+    def must_not_rejudge(contract, batch, view):
+        raise AssertionError("the persisted judgement should be replayed")
+
+    restarted = MonitorBrain(store, brain.contract, must_not_rejudge, batch_size=1)
+    assert len(restarted.pending_actions) == 1
+    judgement, rung = asyncio.run(restarted.cycle(FakeClient()))
+    assert judgement is not None and judgement.reason == "persisted before death"
+    assert rung == "interrupt"
+    assert restarted.pending_actions == ()
+    assert restarted.unjudged() == []
+    assert [v.detail for v in brain.wake().unacked] == ["persisted before death"]
+    brain.close()
+
+
+def test_replay_does_not_duplicate_a_verdict_that_landed_before_the_kill(
+    store: Store,
+) -> None:
+    """The other side of the boundary is judge-record-kill-clear.
+
+    The durable action remains pending, but its stable verdict timestamp lets a
+    restarted monitor recognize that the state was already annotated.
+    """
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.wal.intent("Bash", "t0", {})
+    monitor = MonitorBrain(
+        store,
+        brain.contract,
+        judge_always(Severity.WRONG, "one warning, not two"),
+        batch_size=1,
+    )
+    assert monitor.tick() is not None
+    (action,) = monitor.pending_actions
+    monitor._record_action(action)  # the old process dies before clearing it
+    assert len(store.state(action.observed_head).verdicts) == 1
+
+    restarted = MonitorBrain(
+        store,
+        brain.contract,
+        judge_always(Severity.FINE),
+        batch_size=1,
+    )
+    asyncio.run(restarted.cycle(FakeClient()))
+
+    verdicts = store.state(action.observed_head).verdicts
+    assert [(v.detail, v.at) for v in verdicts] == [
+        ("one warning, not two", action.verdict_at)
+    ]
+    brain.close()
+
+
+def test_monitor_state_replacement_is_atomic(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failure before replace leaves the previous complete state readable."""
+    import taste.brains.monitor as monitor_module
+
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.FINE))
+    monitor._save_state()
+    path = monitor._state_path()
+    before = path.read_bytes()
+
+    monitor.state.interventions.append(("nudge", "new but unpublished state"))
+
+    def fail_replace(source, destination):
+        raise OSError("simulated death before rename")
+
+    monkeypatch.setattr(monitor_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated death"):
+        monitor._save_state()
+
+    assert path.read_bytes() == before
+    json.loads(path.read_text())
+    assert not list(path.parent.glob(f".{path.name}.*.tmp"))
+    brain.close()
+
+
+def test_cycle_does_not_block_the_workers_event_loop_on_a_slow_judge(store: Store) -> None:
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.wal.intent("Bash", "t0", {})
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_judge(contract, batch, view):
+        entered.set()
+        assert release.wait(timeout=10)
+        return Judgement(Severity.FINE, "ok")
+
+    monitor = MonitorBrain(store, brain.contract, slow_judge, batch_size=1)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(monitor.cycle(FakeClient()))
+        assert await asyncio.to_thread(entered.wait, 10)
+        # This coroutine is the stand-in for the SDK stream consumer.  It must
+        # still get scheduled while the model-backed judge is thinking.
+        streamed: list[str] = []
+        await asyncio.sleep(0)
+        streamed.append("message-consumed")
+        assert streamed == ["message-consumed"] and not task.done()
+        release.set()
+        await task
+
+    asyncio.run(exercise())
+    brain.close()
+
+
+# ------------------------------------------------------------------ terminal certification
+
+
+class ScriptedTerminalJudge:
+    def __init__(self, incremental: Severity = Severity.FINE) -> None:
+        self.incremental = incremental
+        self.terminal_calls: list[tuple[object, dict, list[dict]]] = []
+
+    def __call__(self, contract, batch, view):
+        return Judgement(self.incremental, "incremental finding", cost_usd=0.0)
+
+    def judge_terminal(self, contract, state, context, findings):
+        self.terminal_calls.append((state, context, findings))
+        ids = tuple(item["id"] for item in findings)
+        return TerminalDecision(
+            Judgement(
+                Severity.FINE,
+                "the exact final state corrects the finding",
+                cost_usd=0.0,
+            ),
+            resolved_finding_ids=ids,
+        )
+
+
+def test_terminal_assessment_can_be_fine_without_erasing_historical_worst(
+    store: Store,
+) -> None:
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.checkpoint("durable contract")
+    judge = ScriptedTerminalJudge(Severity.WRONG)
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=1)
+    brain.wal.intent("Bash", "bad-start", {"command": "pytest"})
+    judgement = monitor.tick()
+    assert judgement is not None
+    asyncio.run(monitor.respond(judgement, FakeClient()))
+    brain.branch.write("parser.py", "def parse(text):\n    return text\n")
+    work_state = brain.checkpoint("corrected terminal work")
+
+    assessment = asyncio.run(
+        monitor.certify_terminal(
+            work_state,
+            context={"tests": {"command": "pytest", "passed": True}},
+        )
+    )
+
+    assert assessment.state_id == work_state.id
+    assert assessment.contract_digest == monitor.contract_digest
+    assert assessment.acceptable
+    assert assessment.judgement.severity is Severity.FINE
+    assert assessment.resolved_finding_ids == assessment.finding_ids
+    assert monitor.state.worst is Severity.WRONG
+    report = monitor.report()
+    assert report["worst"] == "wrong"
+    assert report["current"] == "fine"
+    assert report["current_state"] == work_state.id
+    assert report["terminal_assessment"]["acceptable"] is True
+    seen_state, seen_context, seen_findings = judge.terminal_calls[0]
+    assert seen_state.id == work_state.id
+    assert seen_context["terminal"]["tests"]["passed"] is True
+    assert [item["severity"] for item in seen_findings] == ["wrong"]
+    brain.close()
+
+
+def test_terminal_assessment_is_durable_and_idempotent_for_the_same_state(
+    store: Store,
+) -> None:
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    work_state = brain.checkpoint("terminal work")
+    judge = ScriptedTerminalJudge()
+    monitor = MonitorBrain(store, brain.contract, judge)
+    context = {"structured_status": "completed", "tests_passed": True}
+
+    first = asyncio.run(monitor.certify_terminal(work_state, context=context))
+    second = asyncio.run(monitor.certify_terminal(work_state, context=context))
+    assert second == first
+    assert len(judge.terminal_calls) == 1
+
+    class MustNotRejudge(ScriptedTerminalJudge):
+        def judge_terminal(self, contract, state, context, findings):
+            raise AssertionError("a persisted State must not be re-billed")
+
+    restarted = MonitorBrain(store, brain.contract, MustNotRejudge())
+    restored = asyncio.run(restarted.certify_terminal(work_state, context=context))
+    assert restored == first
+    assert restarted.report()["terminal_assessment"]["id"] == first.id
+    brain.close()
+
+
+def test_monitor_cost_report_aggregates_persisted_calls_once_across_restart(
+    store: Store,
+) -> None:
+    import asyncio
+
+    class CostedJudge(ScriptedTerminalJudge):
+        def __call__(self, contract, batch, view):
+            return Judgement(Severity.FINE, "incremental", cost_usd=0.2)
+
+        def judge_terminal(self, contract, state, context, findings):
+            self.terminal_calls.append((state, context, findings))
+            return TerminalDecision(
+                Judgement(Severity.FINE, "terminal", cost_usd=0.3),
+                resolved_finding_ids=tuple(item["id"] for item in findings),
+            )
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.checkpoint("durable contract")
+    judge = CostedJudge()
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=1)
+    empty_report = monitor.report()
+    assert empty_report["model_calls"] == 0
+    assert empty_report["cost_known"] is True
+    assert empty_report["cost_usd"] == 0.0
+
+    brain.wal.intent("Bash", "one-call", {"command": "pytest"})
+    incremental = monitor.tick()
+    assert incremental is not None
+    asyncio.run(monitor.respond(incremental, FakeClient()))
+    work_state = brain.checkpoint("terminal work")
+    context = {"structured_status": "completed"}
+    asyncio.run(monitor.certify_terminal(work_state, context=context))
+    first_report = monitor.report()
+    assert first_report["model_calls"] == 2
+    assert first_report["cost_known"] is True
+    assert first_report["cost_usd"] == pytest.approx(0.5)
+
+    restarted = MonitorBrain(store, brain.contract, CostedJudge(), batch_size=1)
+    replayed = asyncio.run(restarted.certify_terminal(work_state, context=context))
+    assert replayed == monitor.state.terminal_assessments[-1]
+    assert restarted.report()["model_calls"] == 2
+    assert restarted.report()["cost_usd"] == pytest.approx(0.5)
+    brain.close()
+
+
+@pytest.mark.parametrize(
+    "invalid_cost",
+    [None, -0.1, float("nan"), float("inf"), True, "not-a-cost"],
+    ids=["unknown", "negative", "nan", "infinite", "boolean", "text"],
+)
+def test_monitor_cost_report_fails_closed_for_persisted_unknown_or_invalid_cost(
+    store: Store,
+    invalid_cost: object,
+) -> None:
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, ScriptedTerminalJudge())
+    monitor.state.judgements.append(
+        Judgement(Severity.FINE, "persisted", cost_usd=invalid_cost)  # type: ignore[arg-type]
+    )
+    monitor._save_state()
+
+    restarted = MonitorBrain(store, brain.contract, ScriptedTerminalJudge())
+    report = restarted.report()
+    assert report["model_calls"] == 1
+    assert report["cost_known"] is False
+    assert report["cost_usd"] is None
+    brain.close()
+
+
+def test_monitor_cost_report_fails_closed_for_unknown_terminal_call(
+    store: Store,
+) -> None:
+    import asyncio
+
+    class UnknownCostTerminalJudge(ScriptedTerminalJudge):
+        def judge_terminal(self, contract, state, context, findings):
+            return TerminalDecision(
+                Judgement(Severity.FINE, "terminal cost unavailable"),
+                resolved_finding_ids=tuple(item["id"] for item in findings),
+            )
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    work_state = brain.checkpoint("terminal work")
+    monitor = MonitorBrain(store, brain.contract, UnknownCostTerminalJudge())
+    asyncio.run(monitor.certify_terminal(work_state, context={}))
+
+    report = monitor.report()
+    assert report["model_calls"] == 1
+    assert report["cost_known"] is False
+    assert report["cost_usd"] is None
+    brain.close()
+
+
+def test_terminal_certification_is_async_safe_and_finishes_persistence_on_cancellation(
+    store: Store,
+) -> None:
+    import asyncio
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowTerminalJudge(ScriptedTerminalJudge):
+        def judge_terminal(self, contract, state, context, findings):
+            entered.set()
+            assert release.wait(timeout=10)
+            return super().judge_terminal(contract, state, context, findings)
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    work_state = brain.checkpoint("terminal work")
+    monitor = MonitorBrain(store, brain.contract, SlowTerminalJudge())
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            monitor.certify_terminal(work_state, context={"tests_passed": True})
+        )
+        assert await asyncio.to_thread(entered.wait, 10)
+        await asyncio.sleep(0)
+        assert not task.done(), "the synchronous judge blocked the event loop"
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    restarted = MonitorBrain(store, brain.contract, ScriptedTerminalJudge())
+    restored = asyncio.run(
+        restarted.certify_terminal(work_state, context={"tests_passed": True})
+    )
+    assert restored.acceptable
+    assert len(restarted.state.terminal_assessments) == 1
+    brain.close()
+
+
+@pytest.mark.parametrize("failure_mode", ["raise", "wrong-type", "incomplete-partition"])
+def test_terminal_judge_failures_are_persisted_fail_closed(
+    store: Store,
+    failure_mode: str,
+) -> None:
+    import asyncio
+
+    class BrokenTerminalJudge(ScriptedTerminalJudge):
+        def judge_terminal(self, contract, state, context, findings):
+            if failure_mode == "raise":
+                raise RuntimeError("model unavailable")
+            if failure_mode == "wrong-type":
+                return Judgement(Severity.FINE, "not a terminal decision")
+            return TerminalDecision(
+                Judgement(Severity.FINE, "claims the old problem vanished")
+            )
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.checkpoint("contract")
+    judge = BrokenTerminalJudge(Severity.WRONG)
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=1)
+    brain.wal.intent("Bash", "bad", {})
+    judgement = monitor.tick()
+    assert judgement is not None
+    asyncio.run(monitor.respond(judgement, FakeClient()))
+    work_state = brain.checkpoint("terminal work")
+
+    assessment = asyncio.run(monitor.certify_terminal(work_state, context={}))
+    assert not assessment.acceptable
+    assert assessment.failure.startswith("terminal judge failed:")
+    assert assessment.judgement.severity is Severity.LOST
+    assert assessment.unresolved_finding_ids == assessment.finding_ids
+
+    restarted = MonitorBrain(store, brain.contract, ScriptedTerminalJudge())
+    restored = asyncio.run(restarted.certify_terminal(work_state, context={}))
+    assert restored == assessment
+    assert restarted.report()["current"] == "lost"
+    brain.close()
+
+
+def test_terminal_certification_fails_closed_if_any_state_events_are_unjudged(
+    store: Store,
+) -> None:
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.wal.intent("Bash", "never-reviewed", {})
+    work_state = brain.checkpoint("unchecked terminal work")
+    judge = ScriptedTerminalJudge()
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=10)
+
+    assessment = asyncio.run(monitor.certify_terminal(work_state, context={}))
+    assert not assessment.acceptable
+    assert "not completely judged" in assessment.failure
+    assert judge.terminal_calls == []
+    brain.close()
+
+
+def test_schema_two_sidecar_is_atomically_upgraded_without_inventing_a_current_result(
+    store: Store,
+) -> None:
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.checkpoint("contract")
+    monitor = MonitorBrain(store, brain.contract, ScriptedTerminalJudge())
+    monitor._save_state()
+    path = monitor._state_path()
+    raw = json.loads(path.read_text())
+    raw["schema"] = "taste.brains/MonitorState/2"
+    raw.pop("terminal_assessments")
+    path.write_text(json.dumps(raw))
+
+    restarted = MonitorBrain(store, brain.contract, ScriptedTerminalJudge())
+    migrated = json.loads(path.read_text())
+    assert migrated["schema"] == "taste.brains/MonitorState/3"
+    assert migrated["terminal_assessments"] == []
+    assert restarted.report()["current"] is None
+    brain.close()
+
+
+def test_forced_drain_judges_the_final_partial_batch_before_lease_release(
+    store: Store,
+) -> None:
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    seen: list[str] = []
+
+    def judge(contract, batch, view):
+        seen.extend(e["tool_use_id"] for e in batch)
+        return Judgement(Severity.FINE, "terminal batch is fine")
+
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=10)
+    brain.wal.intent("Bash", "last", {})
+    assert monitor.tick() is None and brain.branch.holder is not None
+
+    drained = asyncio.run(monitor.drain(FakeClient(), final=True))
+    assert [j.reason for j, _ in drained] == ["terminal batch is fine"]
+    assert seen == ["last"]
+    assert brain.branch.holder is not None, "runtime checkpoints before releasing the lease"
     brain.close()

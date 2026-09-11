@@ -10,6 +10,7 @@ the branch, that it survives a kill, and that it moves with a rollback.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -237,7 +238,9 @@ def test_a_long_key_resolves_to_the_same_place_in_every_process() -> None:
         f"print(M._safe({long_key!r}))\n"
     )
     seen = {
-        subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120).stdout.strip()
+        subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+        ).stdout.strip()
         for _ in range(3)
     }
     assert len(seen) == 1, f"the same key resolved to {len(seen)} different paths: {seen}"
@@ -410,3 +413,179 @@ def test_dedup_still_holds_within_one_state(tmp_path: Path) -> None:
         assert [e["uuid"] for e in _run(sess.load(key))] == ["u1"]
     finally:
         s.close()
+
+
+def _fsync_bytes(path: Path, payload: bytes) -> None:
+    with open(path, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _leave_fsynced_transcript_before_sidecars(
+    sess: MemstoreSessionStore,
+    key: dict[str, str],
+    batch: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict:
+    """Inject the crash boundary immediately after transcript fsync."""
+
+    def crash_before_sidecars(record):
+        raise OSError("killed after transcript fsync")
+
+    monkeypatch.setattr(sess, "_apply_append_sidecars", crash_before_sidecars)
+    with pytest.raises(OSError, match="after transcript fsync"):
+        _run(sess.append(key, batch))
+    raw = sess._read_mirror_ledger()
+    assert len(raw["unresolved"]) == 1
+    return next(iter(raw["unresolved"].values()))
+
+
+def test_fsynced_uuidless_batch_recovers_after_process_reopen_without_redelivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kill after fsync must not require the SDK to resend opaque markers."""
+    root = tmp_path / "repo"
+    key = {"project_key": "p", "session_id": "sess"}
+    batch = [{"type": "title", "title": "the same marker may occur twice"}]
+
+    first = Store.open(root, "s1")
+    sess = MemstoreSessionStore(first, "brain")
+    record = _leave_fsynced_transcript_before_sidecars(sess, key, batch, monkeypatch)
+    assert record["status"] == "failed"
+    assert record["transcript"]["payload"] == sess._entry_payload(batch)
+    assert record["evidence"][-1]["classification"] == "complete"
+    assert record["failures"][-1]["message"] == "killed after transcript fsync"
+    first.close()
+
+    # A new process has no in-memory UUID cache and the SDK never redelivers.
+    second = Store.open(root, "s1")
+    try:
+        again = MemstoreSessionStore(second, "brain")
+        assert again.unresolved_mirror_batches() == ()
+        assert _run(again.load(key)) == batch
+        assert len(_run(again.list_session_summaries("p"))) == 1
+
+        history = again._read_mirror_ledger()["history"]
+        assert history[-1]["status"] == "recovered"
+        assert history[-1]["failures"][-1]["message"] == "killed after transcript fsync"
+        assert history[-1]["evidence"][-1]["classification"] == "complete"
+    finally:
+        second.close()
+
+
+@pytest.mark.parametrize("classification", ["absent", "partial", "mismatch"])
+def test_recovery_distinguishes_noncomplete_transcript_writes_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    classification: str,
+) -> None:
+    root = tmp_path / classification
+    key = {"project_key": "p", "session_id": "sess"}
+    # No UUID: retry safety must come from the byte-range journal, not dedup.
+    batch = [{"type": "mode", "mode": "careful"}]
+
+    first = Store.open(root, "s1")
+    sess = MemstoreSessionStore(first, "brain")
+    record = _leave_fsynced_transcript_before_sidecars(sess, key, batch, monkeypatch)
+    target = first.branch("brain").path(sess._path(key))
+    before_size = record["transcript"]["before"]["size"]
+    original = target.read_bytes()
+    prefix = original[:before_size]
+    payload = record["transcript"]["payload"].encode()
+    if classification == "absent":
+        changed = prefix
+    elif classification == "partial":
+        changed = prefix + payload[: max(1, len(payload) // 2)]
+    else:
+        changed = prefix + b'{"type": "different"}\n'
+    _fsync_bytes(target, changed)
+    first.close()
+
+    second = Store.open(root, "s1")
+    try:
+        again = MemstoreSessionStore(second, "brain")
+        unresolved = again.unresolved_mirror_batches()
+        assert len(unresolved) == 1
+        assert unresolved[0]["status"] == classification
+        assert unresolved[0]["evidence"][-1]["classification"] == classification
+
+        if classification == "mismatch":
+            with pytest.raises(RuntimeError, match="divergent"):
+                _run(again.append(key, batch))
+            assert again.unresolved_mirror_batches()
+        else:
+            # Exact absent/partial prefixes can be completed only when the SDK
+            # supplies the same fingerprint again.
+            _run(again.append(key, batch))
+            assert again.unresolved_mirror_batches() == ()
+            assert _run(again.load(key)) == batch
+    finally:
+        second.close()
+
+
+def test_redelivery_after_summary_failure_reconstructs_summary_and_meta(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dedup of transcript UUIDs must not skip the failed sidecar transition."""
+    sess = MemstoreSessionStore(store, "brain")
+    key = {"project_key": "p", "session_id": "sess"}
+    batch = [
+        _entry(
+            uuid="u1",
+            timestamp="2024-01-01T00:00:00.000Z",
+            customTitle="durable title",
+        )
+    ]
+
+    def fail_summary(*args, **kwargs):
+        raise OSError("summary disk failed")
+
+    monkeypatch.setattr(sess, "_fold_summary", fail_summary)
+    with pytest.raises(OSError, match="summary disk failed"):
+        _run(sess.append(key, batch))
+
+    raw = sess._read_mirror_ledger()
+    pending = next(iter(raw["unresolved"].values()))
+    assert pending["failures"][-1]["message"] == "summary disk failed"
+    assert not store.branch("brain").path(sess._summary_path("p", "sess")).exists()
+
+    # Recovery runs before fresh-entry dedup and uses the journalled fold, so
+    # the retry neither duplicates the transcript nor clears a false alarm.
+    _run(sess.append(key, batch))
+    assert sess.unresolved_mirror_batches() == ()
+    assert _run(sess.load(key)) == batch
+    [summary] = _run(sess.list_session_summaries("p"))
+    assert summary["data"]["custom_title"] == "durable title"
+    assert _run(sess.list_sessions("p"))[0]["mtime"] == summary["mtime"]
+    assert sess._read_mirror_ledger()["history"][-1]["failures"][-1]["message"] == (
+        "summary disk failed"
+    )
+
+
+def test_recovery_never_overwrites_a_divergent_summary_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    key = {"project_key": "p", "session_id": "sess"}
+    batch = [_entry(uuid="u1", customTitle="expected")]
+
+    first = Store.open(root, "s1")
+    sess = MemstoreSessionStore(first, "brain")
+    _leave_fsynced_transcript_before_sidecars(sess, key, batch, monkeypatch)
+    summary_path = first.branch("brain").path(sess._summary_path("p", "sess"))
+    divergent = b'{"session_id":"somebody-else","mtime":1,"data":{}}\n'
+    _fsync_bytes(summary_path, divergent)
+    first.close()
+
+    second = Store.open(root, "s1")
+    try:
+        again = MemstoreSessionStore(second, "brain")
+        unresolved = again.unresolved_mirror_batches()
+        assert len(unresolved) == 1
+        assert unresolved[0]["status"] == "failed"
+        assert unresolved[0]["failures"][-1]["stage"] == "reconcile_sidecars"
+        assert "divergent sidecar" in unresolved[0]["error"]
+        assert summary_path.read_bytes() == divergent
+    finally:
+        second.close()
