@@ -165,29 +165,35 @@ def test_events_are_judged_once(store: Store) -> None:
 
 
 @pytest.mark.parametrize(
-    ("severity", "expected"),
-    [
-        (Severity.FINE, []),
-        (Severity.DRIFTING, ["query"]),
-        (Severity.WRONG, ["interrupt", "query"]),
-        (Severity.LOST, ["interrupt", "set_permission_mode", "query"]),
-    ],
+    "severity", [Severity.FINE, Severity.DRIFTING, Severity.WRONG, Severity.LOST]
 )
-def test_severity_chooses_the_rung(store: Store, severity, expected) -> None:
+def test_severity_names_an_observation_not_an_action(store: Store, severity) -> None:
+    """Severity says how confident the observation is, not what to do.
+
+    Deciding what to do belongs to the central brain, which can see the plan
+    this work is part of and the other workers sharing it. The monitor sees a
+    partial view of one worker, seconds old.
+    """
     import asyncio
 
     brain = SubBrain(store, a_contract())
     monitor = MonitorBrain(store, brain.contract, judge_always(severity))
     client = FakeClient()
 
-    asyncio.run(monitor.respond(Judgement(severity=severity, reason="r"), client))
-    assert client.rungs == expected
+    rung = asyncio.run(monitor.respond(Judgement(severity=severity, reason="r"), client))
+    assert client.calls == []
+    assert rung == ("none" if severity is Severity.FINE else f"flagged-{severity.value}")
     brain.close()
 
 
-def test_a_wrong_turn_is_stopped_before_it_is_explained(store: Store) -> None:
-    """Order matters: feedback sent to a brain mid-tool-call is read after the
-    tool it was meant to prevent."""
+def test_the_worker_is_never_interrupted_by_its_own_monitor(store: Store) -> None:
+    """The measurement that removed the lever.
+
+    An interrupt lands mid-stream and the turn comes back ``aborted_*`` rather
+    than ``end_turn``, so the runtime never holds a terminal candidate and the
+    run cannot finish. Six interrupts, six aborted results, zero completions --
+    and then a verdict blaming the worker for having been interrupted.
+    """
     import asyncio
 
     brain = SubBrain(store, a_contract())
@@ -195,38 +201,28 @@ def test_a_wrong_turn_is_stopped_before_it_is_explained(store: Store) -> None:
     client = FakeClient()
 
     asyncio.run(monitor.respond(Judgement(Severity.WRONG, "editing the wrong file"), client))
-    assert client.rungs.index("interrupt") < client.rungs.index("query")
-    assert "editing the wrong file" in client.calls[-1][1]
+    assert "interrupt" not in client.rungs
+    assert client.calls == []
     brain.close()
 
 
-def test_a_lost_brain_is_demoted_not_killed(store: Store) -> None:
-    """The reasoning is the expensive part and it survives demotion -- and a
-    brain in plan mode can still report what it learned, which is what the
-    central brain needs in order to re-plan."""
+def test_a_lost_brain_is_reported_not_demoted(store: Store) -> None:
+    """Even ``lost`` only files a verdict.
+
+    Plan-mode demotion was the gentlest rung and still the wrong shape: it
+    changes a worker's capabilities mid-run on evidence the monitor cannot
+    fully see, and the central brain is the one re-planning anyway.
+    """
     import asyncio
 
     brain = SubBrain(store, a_contract())
     monitor = MonitorBrain(store, brain.contract, judge_always(Severity.LOST))
     client = FakeClient()
 
-    asyncio.run(monitor.respond(Judgement(Severity.LOST, "going in circles"), client))
-    assert ("set_permission_mode", "plan") in client.calls
-    assert "Report what you tried" in client.calls[-1][1]
-    brain.close()
-
-
-def test_an_interrupted_worker_is_told_to_check_its_worktree(store: Store) -> None:
-    """An interrupted tool can still have completed its side effect while the
-    transcript records it as rejected."""
-    import asyncio
-
-    brain = SubBrain(store, a_contract())
-    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.WRONG))
-    client = FakeClient()
-
-    asyncio.run(monitor.respond(Judgement(Severity.WRONG, "wrong file"), client))
-    assert "may have completed" in client.calls[-1][1]
+    rung = asyncio.run(monitor.respond(Judgement(Severity.LOST, "going in circles"), client))
+    assert client.calls == []
+    assert rung == "flagged-lost"
+    assert monitor.state.worst is Severity.LOST
     brain.close()
 
 
@@ -290,7 +286,7 @@ def test_the_report_tells_the_central_brain_what_it_needs(store: Store) -> None:
     report = monitor.report()
     assert report["worker"] == "worker-1"
     assert report["alive"] is True
-    assert [r for r, _ in report["interventions"]] == ["nudge", "demote"]
+    assert [r for r, _ in report["interventions"]] == ["flagged-drifting", "flagged-lost"]
     brain.close()
 
 
@@ -431,12 +427,13 @@ def test_a_restarted_monitor_does_not_re_judge_old_events(store: Store) -> None:
     brain.close()
 
 
-def test_a_failed_escalation_is_reported_as_failed(store: Store) -> None:
-    """An escalation that raises halfway would otherwise leave the worker
-    stopped and never told why, while report() claimed no intervention.
+def test_a_broken_client_cannot_cost_the_brain_its_warning(store: Store) -> None:
+    """There is no longer an escalation to fail, and that is the point.
 
-    The verdict is recorded before any rung is attempted, so a broken client
-    costs the brain its interruption, never its warning.
+    This used to assert ``interrupt-failed``: the verdict was recorded first so
+    that a closed client cost the worker its interruption but never its
+    warning. With nothing sent, the failure mode is gone entirely -- a client
+    that raises on every method changes nothing, because none is called.
     """
     import asyncio
 
@@ -445,10 +442,10 @@ def test_a_failed_escalation_is_reported_as_failed(store: Store) -> None:
             raise RuntimeError("client is closed")
 
         async def query(self, text: str) -> None:
-            pass
+            raise RuntimeError("client is closed")
 
         async def set_permission_mode(self, mode: str) -> None:
-            pass
+            raise RuntimeError("client is closed")
 
     brain = SubBrain(store, a_contract())
     brain.checkpoint("base")
@@ -458,9 +455,8 @@ def test_a_failed_escalation_is_reported_as_failed(store: Store) -> None:
         monitor.respond(Judgement(Severity.WRONG, "editing the wrong file"), BrokenClient())
     )
 
-    assert rung == "interrupt-failed"
-    assert monitor.state.interventions[0][0] == "interrupt-failed"
-    assert "RuntimeError" in monitor.state.interventions[0][1]
+    assert rung == "flagged-wrong"
+    assert monitor.state.interventions[0][0] == "flagged-wrong"
     assert [v.detail for v in brain.wake().unacked] == ["editing the wrong file"]
     brain.close()
 
@@ -658,7 +654,7 @@ def test_a_kill_between_judgement_and_response_is_replayed(store: Store) -> None
     assert len(restarted.pending_actions) == 1
     judgement, rung = asyncio.run(restarted.cycle(FakeClient()))
     assert judgement is not None and judgement.reason == "persisted before death"
-    assert rung == "interrupt"
+    assert rung == "flagged-wrong"
     assert restarted.pending_actions == ()
     assert restarted.unjudged() == []
     assert [v.detail for v in brain.wake().unacked] == ["persisted before death"]
@@ -1094,4 +1090,77 @@ def test_forced_drain_judges_the_final_partial_batch_before_lease_release(
     assert [j.reason for j, _ in drained] == ["terminal batch is fine"]
     assert seen == ["last"]
     assert brain.branch.holder is not None, "runtime checkpoints before releasing the lease"
+    brain.close()
+
+
+# ------------------------------------------------- the monitor does not act
+
+
+@pytest.mark.parametrize(
+    "severity", [Severity.FINE, Severity.DRIFTING, Severity.WRONG, Severity.LOST]
+)
+def test_no_severity_touches_the_worker(store: Store, severity) -> None:
+    """The monitor observes. The central brain acts. No rung, at any severity.
+
+    With a lever, this was measured breaking the thing it watched: the monitor
+    interrupted its worker mid-stream, every turn came back ``aborted_*`` with
+    no ``end_turn``, the run could never terminate -- and the monitor then
+    judged the worker for the interruption it had itself caused.
+    """
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, judge_always(severity), batch_size=1)
+    client = FakeClient()
+
+    brain.wal.intent("Bash", "t1", {"command": "x"})
+    drained = asyncio.run(monitor.drain(client, final=False))
+
+    assert client.calls == [], f"{severity.value} acted on the worker"
+    assert [j.severity for j, _ in drained] == [severity]
+    expected = "none" if severity is Severity.FINE else f"flagged-{severity.value}"
+    assert [r for _, r in drained] == [expected]
+    brain.close()
+
+
+def test_the_verdict_still_reaches_the_worker_and_the_central_brain(store: Store) -> None:
+    """Reporting is a different lever, not a weaker one.
+
+    ``store.judge`` needs no lease, so the verdict lands on the observed state
+    while the worker still holds its branch: the worker reads it on its next
+    wake, and the central brain reads it in the WorkerReport.
+    """
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.checkpoint("some work")
+    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.WRONG), batch_size=1)
+
+    brain.wal.intent("Bash", "t1", {"command": "x"})
+    asyncio.run(monitor.drain(FakeClient(), final=False))
+
+    assert [v.detail for v in brain.wake().unacked] == ["because"]
+    report = monitor.report()
+    assert report["worst"] == "wrong"
+    assert [r for r, _ in report["interventions"]] == ["flagged-wrong"]
+    brain.close()
+
+
+def test_a_drain_ends_because_judging_makes_no_new_work(store: Store) -> None:
+    """The old loop was fed by the monitor's own queries to the worker.
+
+    A verdict produced an answer, the answer was new events, the events were
+    the next batch. With nothing sent, the unjudged tail only shrinks.
+    """
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.WRONG), batch_size=1)
+
+    for i in range(5):
+        brain.wal.intent("Bash", f"t{i}", {"command": "x"})
+    drained = asyncio.run(monitor.drain(FakeClient(), final=True))
+
+    assert len(drained) == 5
+    assert monitor.unjudged() == []
     brain.close()

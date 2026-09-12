@@ -1,15 +1,38 @@
-"""The monitor brain: watches a sub-brain, judges it, and can stop it.
+"""The monitor brain: watches a sub-brain and says what it sees.
 
 One monitor per sub-brain, created with it, never separately -- a worker
 without its monitor is not a smaller version of the system, it is a different
 thing. Both are built from the same :class:`~taste.brains.contract.Contract`,
 so the thing doing the work and the thing grading it read identical criteria.
 
-**It lives in the sub-brain's process.** Not a style choice: measured, a second
-process that resumed a live session id and called ``interrupt()`` got success
-back with the right session id while the worker ignored it and finished all
-eight writes. Cross-process control fails *silently*, which is the worst way for
-a safety mechanism to fail. Rungs (a)-(d) below need the live client object.
+**It observes. It does not act.** No nudge, no interrupt, no demotion, at any
+severity. This is the correction that matters most in this file, because the
+opposite was tried and measured: with a lever, the monitor interrupted its
+worker into failure and then judged it for having been interrupted. One live
+run produced six ``ResultMessage``s, every one ``is_error`` with
+``terminal_reason`` ``aborted_*``, no ``end_turn``, no completion -- and a
+verdict reading "The worker run was interrupted by the user before any work
+could be completed", about an interruption the monitor itself had caused.
+Twenty-six verdicts, six interrupts, zero completed turns.
+
+A colocated observer is the wrong place for that authority. It sees a partial
+view, seconds old, of work still in flight, and it cannot see the plan the work
+belongs to or the other workers sharing it. The central brain can see all of
+that -- it created this worker and this monitor together, from one contract --
+so the central brain decides and this reports.
+
+**Reporting is not a weaker lever; it is a different one.** A verdict is
+written to the exact observed state with ``store.judge``, which needs no lease.
+It reaches the worker on its next wake through ``Resume.unacked``, and the
+central brain through ``report()`` in the ``WorkerReport``. What was removed is
+only the mid-flight shove.
+
+**It lives in the sub-brain's process.** Still true, and still not a style
+choice: a second process that resumed a live session id and called
+``interrupt()`` got success back with the right session id while the worker
+ignored it and finished all eight writes. Cross-process control fails
+*silently*. That measurement is why control was colocated; it is also, read
+again, an early sign that control belonged somewhere else entirely.
 
 **It judges off the memstore tail, never from a hook.** A ``PreToolUse`` hook
 runs in the sub-brain's own event loop and the agent awaits it, so cost is
@@ -20,24 +43,15 @@ so a slow judge becomes a tool outage rather than a slow tool.
 **So it cannot veto a single call, and does not pretend to.** Interception is a
 race governed by ``slack = tool duration - decision latency``: against an
 instant tool a monitor deliberating >=10 ms leaked the side effect 9 times out
-of 9. Prevention belongs to the jail and the sandbox. The monitor's lever is
-``interrupt()``, which stops the *run*, plus the rungs below.
+of 9. Prevention belongs to the jail and the sandbox.
 
-The ladder, by severity, each rung measured working on a live brain:
+Severity says how confident the observation is, not what to do about it:
 
 ===========  ==========================================================
- nudge       ``PermissionResultDeny(message=...)`` -- the reason reaches
-             the model verbatim and it adapts instead of retrying
- correct     ``PermissionResultAllow(updated_input=...)`` -- but NOT
-             silent: a model saw a rewritten path echoed back and called
-             it suspicious, so path rewrites need saying out loud
- demote      ``set_permission_mode('plan')`` -- reasoning survives,
-             editing stops, and it reverses cleanly
- interrupt   ``interrupt()`` -- ``terminal_reason`` is ``aborted_*``;
-             the client stays usable afterwards
- redo        fork from an earlier state -- the abandoned trajectory stays
-             intact and readable, which is what makes it a rollback
-             rather than a deletion
+ fine        nothing in the evidence contradicts the contract
+ drifting    something looks off, but the work is still plausibly on track
+ wrong       there is positive evidence the work is off-contract
+ lost        the evidence says continuing this plan will not get there
 ===========  ==========================================================
 """
 
@@ -944,66 +958,58 @@ class MonitorBrain:
     # ------------------------------------------------------------------ acting
 
     async def respond(self, judgement: Judgement, client: Any) -> str:
-        """Escalate according to severity. Returns the rung taken.
+        """Record the judgement. Returns the observation it was filed under.
 
-        ``client`` is the worker's live ``ClaudeSDKClient``, held in this same
-        process. A resumed client in another process accepts these calls and
-        affects nothing.
+        ``client`` is accepted and deliberately unused: this monitor observes
+        and never acts. See :meth:`_respond_action`.
         """
         return await self._respond_action(self._pending_for(judgement), client)
 
     async def _respond_action(self, action: MonitorAction, client: Any) -> str:
+        """File a verdict. Touch nothing.
+
+        **The monitor does not act on the worker, at any severity.** It used
+        to: drifting nudged, wrong interrupted, lost demoted to plan mode. That
+        was measured end to end and it broke the thing it was watching.
+
+        What happened, in one live run: the worker never completed a single
+        turn. Six ``ResultMessage``s, every one ``is_error`` with
+        ``terminal_reason`` ``aborted_streaming`` or ``aborted_tools`` -- the
+        monitor's own ``interrupt()`` landing mid-stream. No ``end_turn`` ever
+        arrived, so the runtime never held a terminal candidate, so the run
+        could not finish. And because an aborted run *looks* like a broken run
+        to the next batch of events, the monitor then judged the worker for the
+        damage it had just done. Verdict 13 of that run, verbatim: "The worker
+        run was interrupted by the user before any work could be completed."
+
+        The loop closes on itself: interrupt, aborted turn, adverse verdict,
+        interrupt. Twenty-six verdicts, six interrupts, zero completions.
+
+        So the lever is gone. A colocated observer should never have had one:
+        it judges a partial view of work in flight, on evidence that is seconds
+        old, and it cannot see the plan the work belongs to. The brain that can
+        see all of that is the central brain, which created worker and monitor
+        together from one contract. It decides; this reports.
+
+        Nothing is lost by reporting alone. ``_record_action`` above has
+        already written the verdict to the observed state with ``store.judge``,
+        which needs no lease -- so it reaches the worker on its next wake
+        through ``Resume.unacked``, and reaches the central brain through
+        ``report()`` in the ``WorkerReport``. What is withheld is only the
+        mid-flight shove.
+
+        There is deliberately no ``final`` parameter. ``cycle`` and ``drain``
+        still take one -- it decides whether a partial last batch is judged --
+        but it never reached here for any reason except suppressing escalation,
+        and there is no longer any to suppress.
+        """
         judgement = action.judgement
         self._record_action(action)
-        rung = "none"
-        # Every rung below is wrapped: an escalation that raises halfway --
-        # a closed client, a failed interrupt -- would otherwise leave the
-        # worker stopped and never told why, while the monitor's own report
-        # claimed no intervention happened. The verdict is already recorded
-        # above, so what is at stake here is only whether the record matches
-        # what the worker actually experienced.
-        failure = ""
-        try:
-            if judgement.severity is Severity.DRIFTING:
-                # A nudge: say it and let the brain course-correct. Interrupting a
-                # brain that is merely wobbling costs more than it saves.
-                rung = "nudge"
-                await client.query(
-                    f"[monitor] {judgement.as_feedback()}\n"
-                    "Continue if you disagree, but say why."
-                )
-            elif judgement.severity is Severity.WRONG:
-                # Stop the current turn, then say what was wrong. Order matters:
-                # feedback sent to a brain mid-tool-call is read after the tool it
-                # was meant to prevent.
-                rung = "interrupt"
-                await client.interrupt()
-                await client.query(
-                    f"[monitor] I stopped you. {judgement.as_feedback()}\n"
-                    "Before continuing, check the state of your worktree: a tool "
-                    "may have completed even though it was interrupted."
-                )
-            elif judgement.severity is Severity.LOST:
-                # Demote rather than kill. The reasoning is the expensive part and
-                # it survives; a brain in plan mode can still report what it knows,
-                # which is what the central brain needs in order to re-plan.
-                rung = "demote"
-                await client.interrupt()
-                await client.set_permission_mode("plan")
-                await client.query(
-                    f"[monitor] I have stopped your editing. {judgement.as_feedback()}\n"
-                    "Do not attempt further changes. Report what you tried, what "
-                    "you learned, and what you think should happen instead."
-                )
-        except Exception as exc:
-            failure = f"{type(exc).__name__}: {exc}"
-            failed = f"{rung}-failed"
-            self._finish_action(
-                action,
-                (failed, f"{judgement.reason} [{failure}]"),
-            )
-            return failed
-
+        rung = (
+            "none"
+            if judgement.severity is Severity.FINE
+            else f"flagged-{judgement.severity.value}"
+        )
         intervention = (rung, judgement.reason) if rung != "none" else None
         self._finish_action(action, intervention)
         return rung
@@ -1048,6 +1054,10 @@ class MonitorBrain:
         then checkpoints its terminal report, and only then releases the lease.
         """
         drained: list[tuple[Judgement, str]] = []
+        # This terminates because the monitor no longer talks to the worker.
+        # Judging creates no new events, so the unjudged tail only shrinks. It
+        # was not always so: when every verdict queried the worker, the answer
+        # became the next batch and this loop had no reason to stop.
         while True:
             judgement, rung = await self.cycle(client, final=final)
             if judgement is None:

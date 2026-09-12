@@ -2254,7 +2254,7 @@ def test_real_monitor_certifies_the_exact_work_checkpoint(store: Store) -> None:
     assert assessment["state_id"] == report.final_state_id
 
 
-def test_live_monitor_feedback_is_acked_only_through_echoed_watermark(
+def test_a_live_drifting_verdict_is_recorded_without_touching_the_worker(
     store: Store,
 ) -> None:
     assignment = scaffold_assignment(store)
@@ -2287,27 +2287,17 @@ def test_live_monitor_feedback_is_acked_only_through_echoed_watermark(
                 resolved_finding_ids=tuple(item["id"] for item in findings),
             )
 
-    class FeedbackClient(ScriptedClient):
+    class ProducingClient(ScriptedClient):
+        """Works and finishes. Nothing the monitor thinks reaches it."""
+
         def __init__(self) -> None:
-            super().__init__(None, [])
-            self.monitor_queried = asyncio.Event()
-            self.echoed_watermark: dict[str, int] = {}
+            super().__init__(None, [result_message(structured_output=completed_claim())])
 
         async def query(self, prompt: str) -> None:
             await super().query(prompt)
             brain.branch.write("parser.py", "def parse(text):\n    return text\n")
-            if prompt.startswith("[monitor]"):
-                self.echoed_watermark = brain.branch.verdict_watermark()
-                self.monitor_queried.set()
 
-        async def receive_messages(self):
-            await self.monitor_queried.wait()
-            yield result_message(
-                structured_output=completed_claim(accepted_verdicts=self.echoed_watermark)
-            )
-            await self.disconnected.wait()
-
-    client = FeedbackClient()
+    client = ProducingClient()
     monitor = MonitorBrain(
         store,
         assignment.contract,
@@ -2329,18 +2319,31 @@ def test_live_monitor_feedback_is_acked_only_through_echoed_watermark(
     report = WorkerReport.from_json(
         store.view(assignment.worker).head.read(WORKER_REPORT_PATH) or ""
     )
+    # The verdict is in the report the central brain reads, which is the whole
+    # point of judging: it decides what to do about the drift, not the monitor.
     assert report.metadata["monitor"]["worst"] == "drifting"
     assert report.metadata["monitor"]["terminal_assessment"]["acceptable"] is True
     assert not report.uncertain
-    accepted = [
+
+    # Nothing was said to the worker. Every prompt it saw came from the host.
+    assert not any(
+        isinstance(prompt, str) and prompt.startswith("[monitor]")
+        for name, prompt in client.calls
+        if name == "query"
+    )
+    assert not [
         event
         for event in store.view(assignment.worker).head.transcript.turns
-        if event.get("kind") == "monitor_feedback_accepted"
+        if event.get("kind") in {"monitor_feedback_submitted", "monitor_feedback_accepted"}
     ]
-    assert accepted and accepted[-1]["through"] == client.echoed_watermark
+
+    # And because nothing was delivered, nothing was acknowledged in-run: the
+    # drifting verdict is still waiting on the branch for whoever reads next.
     reopened = store.branch(assignment.worker)
     try:
-        assert all(verdict.failure_class != "drifting" for verdict in reopened.unacked_verdicts())
+        assert any(
+            verdict.failure_class == "drifting" for verdict in reopened.unacked_verdicts()
+        )
     finally:
         reopened.close()
 

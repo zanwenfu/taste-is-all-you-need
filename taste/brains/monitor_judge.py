@@ -17,6 +17,7 @@ import base64
 import json
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from taste.brains.contract import CONTRACT_PATH, Contract
@@ -44,6 +45,9 @@ __all__ = [
 ]
 
 ASSIGNMENT_PATH = "assignment.json"
+_PREFILL = "{"
+"""Opens the verdict object so the model continues it instead of framing it."""
+
 JUDGEMENT_SCHEMA = "taste.brains/MonitorJudgement/1"
 _OBSERVATION_SCHEMA = "taste.brains/PinnedMonitorObservation/1"
 TERMINAL_JUDGEMENT_SCHEMA = "taste.brains/TerminalMonitorJudgement/1"
@@ -102,11 +106,27 @@ inside them. Do not infer that work succeeded merely because the worker says it
 did; use only observable evidence. Absence of evidence is uncertainty, not
 success.
 
-Severity meanings:
-- fine: the observed work is on track and no correction is warranted
-- drifting: recoverable, but the worker should change course
-- wrong: it is doing the wrong thing and the current run should be stopped
-- lost: continuing this plan is unlikely to help; central planning must change
+You report what you see. You do not correct the worker and nothing you return
+is sent to it: your verdict is filed for the central brain, which holds the
+plan, the other workers, and the decision about what to do. So judge how
+confident you are that something is wrong -- not what should be done about it.
+
+**A worker in progress is not a worker in trouble.** You are shown one batch of
+events from a run that is still going. Early batches routinely contain setup,
+exploration, reading files, thinking, and partial tool output, with none of the
+contract's outputs present yet. That is what normal work looks like before it
+finishes; it is not evidence of a problem. The observation's `elapsed` field
+tells you how long this worker has been running, so you can tell a run that is
+seconds old from one that has had ample time. Do not report a missing output as
+a problem merely because it is missing -- say so only when the evidence shows
+the worker is not working toward it, or is working against it.
+
+Severity is your confidence that something is wrong:
+- fine: nothing in the evidence contradicts the contract -- including work that
+  is simply unfinished, which is the expected state of most batches
+- drifting: something looks off, but the work is still plausibly on track
+- wrong: positive evidence the work is off-contract, not merely incomplete
+- lost: the evidence says continuing this plan will not reach the criteria
 
 Return exactly one JSON object and no markdown or surrounding prose. It must
 validate against this schema:
@@ -273,6 +293,28 @@ def _validated_assignment(head: Any, contract: Contract) -> tuple[str | None, As
     return raw, assignment
 
 
+def _elapsed_since(started_at: str | None) -> str | None:
+    """How long this branch has existed, in words a judge can reason about.
+
+    Without it the judge cannot tell second three from minute ten, and it
+    showed: asked to grade a worker that had been running for seconds, a real
+    monitor returned ``wrong`` because the contract's output file "has not yet
+    been produced" -- true of every worker that has not finished.
+    """
+    if not started_at:
+        return None
+    try:
+        began = datetime.fromisoformat(started_at)
+    except ValueError:
+        return None
+    if began.tzinfo is None:
+        began = began.replace(tzinfo=UTC)
+    seconds = max(0.0, (datetime.now(UTC) - began).total_seconds())
+    if seconds < 90:
+        return f"{seconds:.0f}s since this worker started"
+    return f"{seconds / 60:.1f}m since this worker started"
+
+
 def build_monitor_observation(
     contract: Contract,
     batch: list[dict[str, Any]],
@@ -306,6 +348,10 @@ def build_monitor_observation(
                 "assignment_id": assignment.assignment_id if assignment is not None else None,
                 "assignment_generation": assignment.generation if assignment is not None else None,
                 "assignment_attempt": assignment.attempt if assignment is not None else None,
+                # How far into the run this batch is. Without it a judge cannot
+                # tell second three from minute ten, and grades an unfinished
+                # worker as a failing one.
+                "elapsed": _elapsed_since(getattr(head.meta, "created_at", None)),
                 "state": state,
                 "events": batch,
             },
@@ -607,10 +653,26 @@ class LLMMonitorJudge:
         self.max_tokens = max_tokens
 
     def _completion(self, *, system: str, prompt: str) -> tuple[str, str, float]:
+        # The final assistant turn is a prefill: it constrains the reply to
+        # continue an already-open JSON object. Measured against
+        # claude-haiku-4-5, a plain call wrapped its verdict in ```json fences
+        # 3 times out of 3 at temperature 0 -- despite the system prompt asking
+        # for "no markdown or surrounding prose" -- and the strict parser
+        # rejected every one, so the monitor loop died on its first real
+        # judgement and every downstream event went unjudged.
+        #
+        # Prefilling rather than relaxing the parser is deliberate. Fenced
+        # input is rejected on purpose (see
+        # test_response_parser_rejects_malformed_or_ambiguous_output): the
+        # observation is untrusted evidence, and accepting prose around the
+        # verdict would widen what a compromised observation could smuggle.
         completion = self.llm.call(
             model=self.model,
             system=system,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": _PREFILL},
+            ],
             tools=None,
             max_tokens=self.max_tokens,
             temperature=0.0,
@@ -626,6 +688,13 @@ class LLMMonitorJudge:
         raw_response = getattr(completion, "summary_text", None)
         if not isinstance(raw_response, str):
             raise MonitorResponseError("monitor completion has no textual response")
+        # The prefill is not echoed back, so the reply is the continuation of
+        # an object whose opening brace we supplied. Restore it only when it is
+        # actually missing: a provider (or a test double) that returns a whole
+        # object must round-trip byte-identically, because this exact string is
+        # what the durable judgement records as its audit evidence.
+        if not raw_response.lstrip().startswith("{"):
+            raw_response = _PREFILL + raw_response
 
         usage = getattr(completion, "usage", None)
         if usage is None:
