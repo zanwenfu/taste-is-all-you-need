@@ -1164,3 +1164,59 @@ def test_a_drain_ends_because_judging_makes_no_new_work(store: Store) -> None:
     assert len(drained) == 5
     assert monitor.unjudged() == []
     brain.close()
+
+
+# ------------------------------------------------- what is worth a model call
+
+
+def _sdk_turn(message_type: str, **fields):
+    return {"kind": "sdk_message", "message_type": message_type, **fields}
+
+
+def test_token_deltas_are_not_worth_a_model_call(store: Store) -> None:
+    """A StreamEvent is the transport, not the work.
+
+    Measured on one live run: 2,277 recorded events, 2,160 of them
+    ``StreamEvent`` -- 228 model calls, about sixteen minutes of judging for
+    seventy-five seconds of work, while the worker's terminal drain (and so its
+    exit) waited behind it. The finished ``AssistantMessage`` that follows each
+    burst carries the whole tool call anyway.
+    """
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.FINE))
+
+    for i in range(30):
+        brain.branch.turn(**_sdk_turn("StreamEvent", seq=i))
+    brain.branch.turn(**_sdk_turn("AssistantMessage", seq="done"))
+    brain.wal.intent("Bash", "t1", {"command": "pytest"})
+
+    seen = monitor.observations()
+    assert [e.get("message_type") or e["kind"] for e in seen] == [
+        "AssistantMessage",
+        "tool_intent",
+    ]
+    brain.close()
+
+
+def test_narrowing_does_not_rewind_a_restarted_monitors_cursor(store: Store) -> None:
+    """The cursor is content-addressed, so the filter has to be a constant.
+
+    A monitor that read the wide stream and then restarted reading a narrow one
+    would find its saved fingerprints no longer a prefix, call that a rollback,
+    and re-judge work it had already paid for.
+    """
+    brain = SubBrain(store, a_contract())
+    monitor = MonitorBrain(store, brain.contract, judge_always(Severity.FINE), batch_size=1)
+
+    brain.branch.turn(**_sdk_turn("AssistantMessage", seq="one"))
+    for i in range(10):
+        brain.branch.turn(**_sdk_turn("StreamEvent", seq=i))
+    assert monitor.tick() is not None
+    judged = list(monitor.state.fingerprints)
+
+    restarted = MonitorBrain(
+        store, brain.contract, judge_always(Severity.FINE), batch_size=1
+    )
+    assert restarted.state.fingerprints == judged
+    assert restarted.unjudged() == [], "a narrowed stream must not look like a rollback"
+    brain.close()

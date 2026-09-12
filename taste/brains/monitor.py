@@ -77,6 +77,7 @@ from taste.memstore import Store, Verdict
 
 __all__ = [
     "BATCH_SIZE",
+    "UNJUDGED_MESSAGE_TYPES",
     "Judgement",
     "MonitorAction",
     "MonitorBrain",
@@ -92,6 +93,29 @@ Batched because a persistent per-event monitor re-reads its whole transcript
 each turn, so its cost climbs with the event count. Judging N events in one
 stateless call was measured 10.6x cheaper and 2.9x faster than one call per
 event, and it stays flat instead of climbing.
+"""
+
+UNJUDGED_MESSAGE_TYPES = frozenset({"StreamEvent"})
+"""SDK message types the monitor does not judge, and why there are any.
+
+A ``StreamEvent`` is one token-level delta of a message still being written:
+``{"delta": {"partial_json": "-------"}}`` is a representative one, in full.
+It is the transport, not the work. The same turn journal carries the finished
+``AssistantMessage`` right after it, with the entire tool call and its input.
+
+Measured on one live run: 2,277 recorded events, of which 2,160 were
+``StreamEvent``. At ``BATCH_SIZE`` that is 228 model calls -- about sixteen
+minutes of judging for seventy-five seconds of work, and the worker cannot
+exit until its terminal drain finishes. Excluding them leaves 117 events,
+twelve batches, under a minute.
+
+This narrows what the *monitor reads*, never what the branch records. The
+durable transcript keeps every message, because "nothing is lost" is a claim
+of the layer beneath this one and is not ours to trade for a faster judge.
+
+It must stay a constant rather than a parameter. ``_cursor`` compares content
+fingerprints, so a monitor that filtered on one run and not on its restart
+would see its saved prefix rewind and re-judge work it had already judged.
 """
 
 _STATE_SCHEMA = "taste.brains/MonitorState/3"
@@ -699,6 +723,10 @@ class MonitorBrain:
         checkpoint and splice two different trajectories together.  Rechecking
         the head gives us an instant at which both halves belonged together;
         anything appended just afterwards is simply input to the next tick.
+
+        The stream is narrowed here, once, so every judging path sees the same
+        events and the content cursor stays stable.  See
+        :data:`UNJUDGED_MESSAGE_TYPES`.
         """
         view = self.view()
         for _ in range(8):
@@ -708,7 +736,7 @@ class MonitorBrain:
             committed = list(head.transcript.turns)
             pending = list(view.pending_turns())
             if view.head.id == head.id:
-                events = tuple([*committed, *pending])
+                events = self._judgeable(*committed, *pending)
                 return _Observed(
                     view=view,
                     head=head,
@@ -719,7 +747,7 @@ class MonitorBrain:
         # tail read.  The latest committed head is still a coherent, conservative
         # snapshot; its new journal will be picked up by a later tick.
         head = view.head
-        events = tuple(head.transcript.turns)
+        events = self._judgeable(*head.transcript.turns)
         return _Observed(
             view=view,
             head=head,
@@ -727,12 +755,23 @@ class MonitorBrain:
             fingerprints=tuple(_fingerprint(event) for event in events),
         )
 
+    @staticmethod
+    def _judgeable(*turns: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+        """The recorded turns worth spending a model call on."""
+        return tuple(
+            turn
+            for turn in turns
+            if turn.get("message_type") not in UNJUDGED_MESSAGE_TYPES
+        )
+
     def observations(self) -> list[dict[str, Any]]:
-        """Everything the worker has recorded since its last state.
+        """What the worker has recorded since its last state, minus the noise.
 
         Comes from the same journal the WAL writes, so a monitor sees tool
         intents and results as they are fsynced rather than at checkpoint
-        boundaries.
+        boundaries.  Token-level stream deltas are left out -- see
+        :data:`UNJUDGED_MESSAGE_TYPES`; the branch still records them, this
+        monitor simply does not read them.
         """
         observed = self._observation()
         return list(observed.events) if observed is not None else []
