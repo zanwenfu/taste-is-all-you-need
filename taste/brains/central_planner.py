@@ -35,6 +35,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
+from taste.brains.contract import Contract
 from taste.brains.delivery import validate_artifact_path
 from taste.brains.planner_transport import (
     PLANNER_TRANSPORT_ROOT,
@@ -47,7 +48,12 @@ from taste.brains.planner_transport import (
     planner_transport_intent_path,
     planner_transport_outcome_path,
 )
-from taste.brains.records import Assignment, PlanRevision, WorkerReport
+from taste.brains.records import (
+    Assignment,
+    PlanRevision,
+    WorkerReport,
+    contract_digest,
+)
 from taste.brains.supervisor import RUN_ROOT, SupervisorRun
 from taste.brains.worker_runtime import WORKER_REPORT_PATH
 from taste.memstore import Branch, State, Store
@@ -1878,10 +1884,134 @@ class CentralPlanner:
             "metadata": {},
         }
 
+    @staticmethod
+    def _assignment_exemplar(request: PlanningRequest) -> dict[str, Any]:
+        """One filled Assignment, with this request's own exact values in it.
+
+        The first real planner call returned a well-formed proposal that was
+        rejected for five missing fields -- ``attempt``, ``contract_digest``,
+        ``depends_on``, ``model``, ``resources``. The prompt had told it to use
+        "the complete taste.brains/Assignment/1 wire schema" and then shown it
+        ``"assignments": []``, so it was guessing a strict schema from its name.
+        It guessed six of eleven.
+
+        ``generation`` and ``base_state_id`` are the request's real values so
+        the model copies rather than invents them; everything else is shaped.
+        """
+        return {
+            "schema": Assignment.SCHEMA,
+            "assignment_id": "<unique id for this assignment>",
+            "generation": request.generation,
+            "attempt": 0,
+            "contract": {
+                "identity": "<fresh execution-branch name, not in observed_heads>",
+                "task": "<what this worker must do, in its own words>",
+                "inputs": [],
+                "outputs": ["<path it must produce>"],
+                "success_criteria": ["<how the monitor will know it is done>"],
+                "issued_by": "central",
+                "notes": "",
+                "budget_usd": None,
+                "max_turns": None,
+            },
+            "base_state_id": request.world.integration_state_id,
+            "depends_on": [],
+            "inputs": [],
+            "outputs": [
+                {
+                    "schema": "taste.brains/ArtifactSpec/1",
+                    "artifact_id": "<unique id for this artifact>",
+                    "path": "<same path as contract.outputs>",
+                    "kind": "file",
+                    "description": "",
+                    "required": True,
+                    "disposition": "present",
+                    "metadata": {},
+                }
+            ],
+            "model": "claude-sonnet-5",
+            "resources": {"wall_timeout_seconds": 600},
+            "metadata": {},
+        }
+
+    @staticmethod
+    def _assignment_schema(request: PlanningRequest) -> dict[str, Any]:
+        """The wire contract, stated rather than named.
+
+        ``contract_digest`` is deliberately absent from ``required``: it is a
+        sha256 over the canonical contract JSON, which no model can compute by
+        hand, so the parser derives it. Every other key must be present --
+        ``_check_fields`` rejects both missing and unknown keys.
+
+        ``worker`` is not a field. It is a property equal to
+        ``contract.identity``, and naming it as one is how a plan acquires a
+        key that parsing then refuses.
+        """
+        return {
+            "type": "object",
+            "required": [
+                "schema",
+                "assignment_id",
+                "generation",
+                "attempt",
+                "contract",
+                "base_state_id",
+                "depends_on",
+                "inputs",
+                "outputs",
+                "model",
+                "resources",
+                "metadata",
+            ],
+            "additionalProperties": False,
+            "properties": {
+                "schema": {"const": Assignment.SCHEMA},
+                "assignment_id": {"type": "string", "minLength": 1},
+                "generation": {"const": request.generation},
+                "attempt": {"type": "integer", "minimum": 0},
+                "contract": {
+                    "type": "object",
+                    "required": [
+                        "identity",
+                        "task",
+                        "inputs",
+                        "outputs",
+                        "success_criteria",
+                        "issued_by",
+                        "notes",
+                        "budget_usd",
+                        "max_turns",
+                    ],
+                    "additionalProperties": False,
+                },
+                "contract_digest": {
+                    "type": "string",
+                    "description": "omit this; the parser derives it from contract",
+                },
+                "base_state_id": {"type": "string"},
+                "depends_on": {"type": "array", "items": {"type": "string"}},
+                "inputs": {
+                    "type": "array",
+                    "description": (
+                        "immutable ArtifactRefs; every branch must appear in "
+                        "observed_heads, and bytes that do not exist yet cannot "
+                        "be referenced"
+                    ),
+                },
+                "outputs": {"type": "array", "minItems": 1},
+                "model": {"type": "string"},
+                "resources": {"type": "object"},
+                "metadata": {"type": "object"},
+            },
+        }
+
     def _prompt(self, request: PlanningRequest) -> str:
+        template = self._proposal_template(request)
+        template["assignments"] = [self._assignment_exemplar(request)]
         payload = {
             "request": request.to_dict(),
-            "required_output_shape": self._proposal_template(request),
+            "required_output_shape": template,
+            "assignment_schema": self._assignment_schema(request),
             "rules": {
                 "non_complete_requires_assignments": True,
                 "complete_requires_no_assignments": True,
@@ -1959,6 +2089,36 @@ class CentralPlanner:
                 f"input {artifact.artifact_id!r} does not bind the declared bytes"
             )
 
+    @staticmethod
+    def _with_derived_digest(item: Any) -> Any:
+        """Fill ``contract_digest`` from the contract, when the model omitted it.
+
+        ``contract_digest`` is a sha256 over the canonical contract JSON, and
+        ``Assignment.__post_init__`` recomputes it and rejects a mismatch. That
+        check is worth keeping -- it proves the contract was not altered between
+        proposal and execution -- but *asking a language model to compute a hash
+        by hand* is not. Measured: the first real planner call returned a
+        well-formed proposal and was rejected for five missing fields, this one
+        among them.
+
+        So a digest the planner omits is derived here, and a digest it supplies
+        is left exactly as sent. A wrong digest must still fail: that is the
+        tamper signal, and silently overwriting it would turn evidence into a
+        shrug.
+        """
+        if not isinstance(item, Mapping) or "contract_digest" in item:
+            return item
+        contract = item.get("contract")
+        if not isinstance(contract, Mapping):
+            return item
+        try:
+            derived = contract_digest(Contract.from_dict(dict(contract)))
+        except Exception:
+            # Let Assignment.from_dict report the real problem with the
+            # contract, rather than masking it as a digest failure.
+            return item
+        return {**item, "contract_digest": derived}
+
     def _parse_proposal(self, response: str, request: PlanningRequest) -> PlanRevision:
         if not isinstance(response, str):
             raise InvalidPlannerOutput("planner transport must return JSON text")
@@ -1990,7 +2150,7 @@ class CentralPlanner:
                 if raw[name] != expected[name]:
                     raise ValueError(f"proposal {name} does not echo the exact request")
             assignments = tuple(
-                Assignment.from_dict(item)
+                Assignment.from_dict(self._with_derived_digest(item))
                 for item in _array(raw["assignments"], "PlannerProposal.assignments")
             )
             if not isinstance(raw["complete"], bool):

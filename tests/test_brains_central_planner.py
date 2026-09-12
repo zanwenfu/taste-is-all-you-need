@@ -1523,3 +1523,97 @@ def test_current_plan_history_rejects_deletion_rewrite_or_valid_rollback(
 
     with pytest.raises(PlannerStateError, match="current plan history"):
         central.current_plan(goal.goal_id)
+
+
+def test_an_omitted_contract_digest_is_derived_but_a_wrong_one_still_fails() -> None:
+    """A planner cannot compute a sha256 by hand, so the parser derives it.
+
+    Measured: the first real planner call returned a well-formed proposal and
+    was rejected for five missing fields, ``contract_digest`` among them. The
+    prompt had asked for "the complete taste.brains/Assignment/1 wire schema"
+    and shown an empty list, so the model was guessing a strict schema from its
+    name -- and one of the fields it had to guess was a hash.
+
+    Deriving it keeps the integrity property rather than trading it away: a
+    digest the planner *supplies* is left exactly as sent, so a wrong one still
+    fails. Silently correcting it would turn a tamper signal into a shrug.
+    """
+    contract = Contract(
+        identity="worker-derived",
+        task="produce derived.py",
+        outputs=("derived.py",),
+        success_criteria=("derived.py exists",),
+    )
+    base = {
+        "schema": Assignment.SCHEMA,
+        "assignment_id": "derived-assignment",
+        "generation": 1,
+        "attempt": 0,
+        "contract": contract.to_dict(),
+        "base_state_id": "0" * 40,
+        "depends_on": [],
+        "inputs": [],
+        "outputs": [
+            {
+                "schema": "taste.brains/ArtifactSpec/1",
+                "artifact_id": "derived",
+                "path": "derived.py",
+                "kind": "file",
+                "description": "",
+                "required": True,
+                "disposition": "present",
+                "metadata": {},
+            }
+        ],
+        "model": "claude-sonnet-5",
+        "resources": {},
+        "metadata": {},
+    }
+    exact = contract_digest(contract)
+    fill = CentralPlanner._with_derived_digest
+
+    filled = fill(dict(base))
+    assert filled["contract_digest"] == exact
+    assert Assignment.from_dict(filled).contract_digest == exact
+
+    supplied = fill({**base, "contract_digest": exact})
+    assert supplied["contract_digest"] == exact
+
+    forged = "sha256:" + "0" * 64
+    kept = fill({**base, "contract_digest": forged})
+    assert kept["contract_digest"] == forged, "a supplied digest is never rewritten"
+    with pytest.raises(ValueError):
+        Assignment.from_dict(kept)
+
+
+def test_the_prompt_shows_the_assignment_shape_instead_of_naming_it(
+    store: Store, goal: Goal
+) -> None:
+    """Naming a strict schema is not the same as showing it.
+
+    The first real planner call omitted ``attempt``, ``contract_digest``,
+    ``depends_on``, ``model`` and ``resources`` -- five of eleven fields --
+    because the prompt said "use the complete wire schema" and then showed
+    ``"assignments": []``.
+    """
+    captured: dict[str, Any] = {}
+
+    def capture(_request_id: str, _system: str, prompt: str) -> str:
+        captured.update(json.loads(prompt))
+        request = request_from_prompt(prompt)
+        return proposal(prompt, assignment_for(request))
+
+    central = CentralPlanner(store, transport=FakeTransport(capture))
+    central.plan(goal)
+
+    exemplar = captured["required_output_shape"]["assignments"][0]
+    required = set(captured["assignment_schema"]["required"])
+
+    assert required <= set(exemplar), "the exemplar must satisfy the schema it ships with"
+    for field_name in ("attempt", "depends_on", "model", "resources", "metadata"):
+        assert field_name in exemplar, f"{field_name} was guessed wrong for want of an example"
+    # The parser derives it, so the model is told not to send one.
+    assert "contract_digest" not in required
+    # ``worker`` is a property of the contract, not a wire field: naming it as
+    # one is how a plan acquires a key that parsing then refuses.
+    assert "worker" not in exemplar
