@@ -34,6 +34,37 @@ _STOP_REASONS = {
 
 ANTHROPIC_TIMEOUT_S = 900.0
 
+#: Model families whose wire API refuses ``temperature`` outright.
+#:
+#: Measured against the live API: ``claude-opus-4-7`` and ``claude-opus-5``
+#: answer a request carrying ``temperature`` with HTTP 400, "`temperature` is
+#: deprecated for this model" -- non-retryable, so it is a hard failure on the
+#: first call rather than a degraded one. The same request without the
+#: parameter succeeds. ``claude-sonnet-4-6`` and ``claude-haiku-4-5`` accept it.
+#:
+#: This was found because the central planner pins ``claude-opus-4-7`` and its
+#: transport hardcodes ``temperature=0.0``: every planner call this system has
+#: ever attempted failed at the provider, and no test caught it because every
+#: planner test injects a fake LLM.
+_NO_TEMPERATURE_PREFIXES = ("claude-opus-",)
+
+
+def _rejects_temperature(model: str) -> bool:
+    return model.startswith(_NO_TEMPERATURE_PREFIXES)
+
+
+def _effective_sampling(
+    request: CompletionRequest, dropped: list[str] | None
+) -> dict[str, Any]:
+    """What actually went on the wire, which is not always what was asked for."""
+    sampling: dict[str, Any] = {
+        "temperature": None if dropped and "temperature" in dropped
+        else request.sampling.temperature
+    }
+    if dropped:
+        sampling["dropped"] = list(dropped)
+    return sampling
+
 
 class AnthropicProvider:
     name = "anthropic"
@@ -77,11 +108,21 @@ class AnthropicProvider:
         }
         if request.tools:
             kwargs["tools"] = request.tools
+
+        # A model that refuses ``temperature`` refuses the whole request, so
+        # the choice is between dropping the parameter and never calling the
+        # model at all. Dropping it silently would leave the manifest claiming
+        # a setting that never applied, so the drop is recorded instead --
+        # see ``Completion.effective_sampling``.
+        dropped: list[str] = []
         if request.sampling.temperature is not None:
-            kwargs["temperature"] = request.sampling.temperature
+            if _rejects_temperature(request.model):
+                dropped.append("temperature")
+            else:
+                kwargs["temperature"] = request.sampling.temperature
 
         message = client.messages.create(**kwargs)
-        return self._to_completion(message, request)
+        return self._to_completion(message, request, dropped)
 
     def is_retryable(self, exc: Exception) -> bool:
         import anthropic
@@ -94,7 +135,12 @@ class AnthropicProvider:
 
     # ------------------------------------------------------------ translation
 
-    def _to_completion(self, message: Any, request: CompletionRequest) -> Completion:
+    def _to_completion(
+        self,
+        message: Any,
+        request: CompletionRequest,
+        dropped: list[str] | None = None,
+    ) -> Completion:
         texts: list[str] = []
         calls: list[ToolCall] = []
         transcript: list[dict[str, Any]] = []
@@ -131,7 +177,7 @@ class AnthropicProvider:
             provider=self.name,
             usage=self._to_usage(message.usage),
             transcript_blocks=tuple(transcript),
-            effective_sampling={"temperature": request.sampling.temperature},
+            effective_sampling=_effective_sampling(request, dropped),
             raw=message,
         )
 
