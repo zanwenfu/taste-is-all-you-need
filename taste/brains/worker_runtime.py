@@ -59,7 +59,7 @@ from taste.brains.communication import (
     InboxMessage,
 )
 from taste.brains.contract import CONTRACT_PATH, Contract
-from taste.brains.delivery import validate_artifact_path
+from taste.brains.delivery import is_control_path, validate_artifact_path
 from taste.brains.records import ArtifactRef, Assignment, WorkerReport, contract_digest
 from taste.brains.subbrain import SubBrain, SubBrainResult, Waking
 from taste.pricing import call_cost, ensure_priced, table_sha
@@ -2530,6 +2530,49 @@ class WorkerRuntime:
             )
         return failures
 
+    def _advertise_outputs(self) -> None:
+        """Publish this assignment's products, so the world can see them.
+
+        ``publish`` records a pending manifest entry that the *next* checkpoint
+        folds in, so this must run before the terminal work checkpoint -- that
+        is the state delivery projects from (``final_state_id``).
+
+        Why it matters beyond this branch: ``deliver_product`` builds the
+        projection's manifest by filtering the *source* manifest, and
+        ``Branch.merge`` unions manifests into the target. The whole chain
+        worker -> projection -> integration already exists; it carried nothing
+        because no worker ever published. Measured consequence: a central run
+        delivered ``adder.py`` to integration, the planner was shown
+        ``integration: ... artifacts=0`` with no file list anywhere in its
+        observation, correctly concluded "the artifact has not been
+        integrated", and reissued the same assignment three times.
+
+        Three guards, each for a failure this would otherwise cause:
+
+        * ``disposition == "absent"`` specs name something that must *not*
+          exist, so there is nothing to advertise.
+        * A path missing from the worktree is left unpublished. ``publish``
+          raises ``PublishError`` at checkpoint for an absent path, which would
+          turn a missing required output -- an ordinary, reportable failure
+          that ``_artifact_outputs`` already describes -- into a crash that
+          wedges the branch against ever committing again.
+        * Control plumbing is skipped. ``_manifest`` filters it out of the
+          projection anyway; advertising it would still pollute this worker's
+          own catalog with its assignment and report files.
+        """
+        if self.assignment is None:
+            return
+        for spec in self.assignment.outputs:
+            if spec.disposition != "present" or is_control_path(spec.path):
+                continue
+            if not self.brain.branch.path(spec.path).is_file():
+                continue
+            self.brain.branch.publish(
+                spec.artifact_id,
+                spec.path,
+                description=spec.description,
+            )
+
     def _artifact_outputs(self, work_state: Any) -> tuple[tuple[ArtifactRef, ...], list[str]]:
         if self.assignment is None:
             return (), []
@@ -2729,6 +2772,11 @@ class WorkerRuntime:
         latest = self._latest_relevant or sdk_result
         claim = self._completion_claim
         claim_status = str(claim.get("status")) if claim else ""
+
+        # Advertise the products before the state that carries them exists:
+        # publication is pending until the next checkpoint, and this is the
+        # state delivery projects from.
+        self._advertise_outputs()
 
         # Capture worker-created control corruption as evidence in the immutable
         # work state before replacing worker-report.json with the host report.

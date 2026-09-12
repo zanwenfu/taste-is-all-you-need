@@ -2926,3 +2926,62 @@ def test_runtime_refuses_contract_other_than_checkpointed_one(store: Store) -> N
     assert made_clients == 0
     reopened = store.branch(wrong.identity)
     reopened.close()
+
+
+def test_a_worker_advertises_its_products_so_the_world_can_see_them(
+    store: Store,
+) -> None:
+    """Delivery carries the manifest; nothing ever filled it.
+
+    ``deliver_product`` builds the projection manifest by filtering the source
+    manifest, and ``Branch.merge`` unions manifests into the target -- so the
+    chain worker -> projection -> integration was complete and carried nothing,
+    because no worker published.
+
+    Measured consequence: a central run delivered ``adder.py`` to integration,
+    the planner's observation of that branch reported ``artifacts=0`` with no
+    file list anywhere in it, and the planner correctly concluded the artifact
+    "has not been integrated" and reissued the same assignment three times.
+    """
+    assignment = scaffold_assignment(store, output="parser.py")
+    brain = SubBrain(store, assignment.contract, model=assignment.model)
+    try:
+        runtime = runtime_for(store, assignment.contract, ScriptedClient(None), QuietMonitor(),
+                              assignment=assignment, brain=brain)
+        runtime.assignment = assignment
+        brain.branch.write("parser.py", "def parse(text):\n    return text\n")
+
+        runtime._advertise_outputs()
+        state = brain.checkpoint("terminal work")
+
+        entry = state.manifest.entries["parser"]
+        assert entry.path == "parser.py", "published under its ArtifactSpec id"
+        assert entry.blob == state.blob("parser.py")
+    finally:
+        brain.close()
+
+
+def test_a_missing_output_is_reported_not_a_crash(store: Store) -> None:
+    """``publish`` raises at checkpoint for a path that is not there.
+
+    A missing required output is an ordinary failure that
+    ``_artifact_outputs`` already reports. Publishing it unconditionally would
+    turn that into a ``PublishError`` that wedges the branch against ever
+    committing again -- losing the evidence of what went wrong.
+    """
+    assignment = scaffold_assignment(store, output="never-written.py")
+    brain = SubBrain(store, assignment.contract, model=assignment.model)
+    try:
+        runtime = runtime_for(store, assignment.contract, ScriptedClient(None), QuietMonitor(),
+                              assignment=assignment, brain=brain)
+        runtime.assignment = assignment
+
+        runtime._advertise_outputs()
+        state = brain.checkpoint("terminal work without the product")
+
+        assert state.manifest.entries == {}, "nothing to advertise, nothing advertised"
+        outputs, failures = runtime._artifact_outputs(state)
+        assert outputs == ()
+        assert any("missing never-written.py" in item for item in failures)
+    finally:
+        brain.close()
