@@ -451,3 +451,100 @@ def test_a_branch_with_a_foreign_head_can_still_be_read(store: Store) -> None:
     # And what this layer did build is still exactly where it was.
     assert last_good.read("out/result.json") == "{}"
     assert set(last_good.manifest.entries) == {"result"}
+
+
+def _git(worktree, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", "-c", "user.name=w", "-c", "user.email=w@w.local", *args],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_every_way_a_worker_can_take_its_branch_is_refused(store: Store) -> None:
+    """Four shapes, and the first version of this guard caught one of them.
+
+    ``ForeignHead`` originally asked one question -- does the head carry state
+    metadata -- which names ``git commit``, ``--amend`` and ``revert``, because
+    all three land on a commit this layer never made.
+
+    It cannot see the other two. ``reset --hard`` lands on a commit that *does*
+    carry notes, so the branch silently forks backwards; measured, three states
+    became one and a delivery then projected an orphaned state into the shared
+    integration branch, which ended up advertising bytes the worker's own
+    history no longer contained. ``checkout --detach`` never moves the ref at
+    all: the tree leaves the branch, and the next checkpoint stages that tree
+    and moves the ref onto it, publishing another commit's content as this
+    branch's work.
+    """
+    for shape, mutate in (
+        ("commit", lambda b, first: (b.write("extra.py", "x\n"),
+                                     _git(b.worktree, "add", "-A"),
+                                     _git(b.worktree, "commit", "-qm", "mine"))),
+        ("amend", lambda b, first: _git(b.worktree, "commit", "--amend", "-qm", "amended")),
+        ("revert", lambda b, first: _git(b.worktree, "revert", "--no-edit", "HEAD")),
+        ("reset", lambda b, first: _git(b.worktree, "reset", "--hard", first.id)),
+        ("detach", lambda b, first: _git(b.worktree, "checkout", "--detach", first.id)),
+    ):
+        branch = store.branch(f"w-{shape}")
+        branch.write("f", "1")
+        first = branch.checkpoint("first")
+        branch.write("f", "2")
+        branch.checkpoint("second")
+
+        mutate(branch, first)
+
+        with pytest.raises(ForeignHead):
+            branch.checkpoint(f"after {shape}")
+        branch.close()
+
+
+def test_the_guard_leaves_every_legitimate_move_alone(store: Store) -> None:
+    """A false refusal here wedges a branch, so forward motion must be free.
+
+    ``rollback`` is the one that looks like a rewind and is not: it *appends*,
+    keeping the superseded head as its parent, so the previous value stays an
+    ancestor of the new one. ``merge`` likewise moves forward.
+    """
+    a = store.branch("a")
+    a.write("f", "1")
+    first = a.checkpoint("one")
+    a.write("f", "2")
+    a.checkpoint("two")
+
+    back = a.rollback(first, "undo two")
+    assert back.meta.kind == "rollback"
+    a.write("f", "3")
+    assert a.checkpoint("after rollback").read("f") == "3"
+
+    b = store.branch("b")
+    b.write("g", "B")
+    b.checkpoint("b work")
+    merged = a.merge(b, reason="take b")
+    assert not merged.conflicts
+    a.write("f", "4")
+    assert a.checkpoint("after merge").read("f") == "4"
+
+
+def test_a_missing_reflog_does_not_wedge_an_old_branch(store: Store) -> None:
+    """The rewind check reads the reflog, which is evidence, not a guarantee.
+
+    An expired or pruned reflog means "cannot tell". Failing closed on it would
+    refuse work on a branch whose only sin is being old.
+    """
+    import subprocess
+
+    a = store.branch("a")
+    a.write("f", "1")
+    a.checkpoint("one")
+    subprocess.run(
+        ["git", "reflog", "expire", "--expire=now", "--all"],
+        cwd=store.root,
+        check=True,
+        capture_output=True,
+    )
+    a.write("f", "2")
+    assert a.checkpoint("still works").read("f") == "2"

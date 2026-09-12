@@ -54,7 +54,41 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-__all__ = ["MUTATING_TOOLS", "JailDenial", "WorktreeJail"]
+__all__ = ["GIT_REF_MOVERS", "MUTATING_TOOLS", "JailDenial", "WorktreeJail", "git_subcommands"]
+
+GIT_REF_MOVERS = frozenset(
+    {
+        "commit", "reset", "checkout", "switch", "restore", "revert",
+        "merge", "rebase", "cherry-pick", "am", "stash", "branch", "tag",
+        "update-ref", "worktree", "gc", "prune", "reflog", "filter-branch",
+        "notes", "clean", "push",
+    }
+)
+"""Git verbs that move a ref, rewrite history, or touch shared plumbing.
+
+A sub-brain's worktree *is* a memstore branch head, so a worker that runs any
+of these takes the branch out from under the layer that owns it. Measured, all
+of it live:
+
+* ``git commit`` puts the ref on a commit with no state notes. The next
+  checkpoint used to die as ``NoSuchState`` from six frames deep; it is now
+  ``ForeignHead``.
+* ``git reset --hard`` and ``git checkout --detach`` are worse, because they
+  land on a commit that *does* carry notes. Detection by "does the head have
+  metadata" cannot see them: the branch silently forks backwards, and a
+  delivery then projected an orphaned state into the shared integration
+  branch, which ended up advertising bytes the worker's own history no longer
+  contained.
+
+``add`` is deliberately absent -- staging moves no ref -- as is every reader in
+``guardrails._GIT_READERS``. A coding worker legitimately runs ``git status``,
+``git diff`` and ``git log``, and refusing those buys nothing.
+
+This duplicates the vocabulary in :mod:`taste.guardrails` rather than importing
+it: that module pulls in ``taste.cores`` and the whole kernel stack, and this
+gate runs on the SDK's hot path. ``test_brains_jail`` asserts the two stay in
+agreement so they cannot drift apart silently.
+"""
 
 MUTATING_TOOLS = ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit")
 """Tools that can change the world, and so must pass the jail.
@@ -67,6 +101,56 @@ latency, and a read cannot escape anything.
 # A redirection needs no whitespace before it: `echo x >../sib/f` is valid.
 _REDIRECT = re.compile(r"(?:\d*>>?|<)\s*([^\s;|&<>]+)")
 _PATHLIKE = re.compile(r"(?:^|[\s=:'\"])((?:\.\.|~|/)[^\s'\";|&)]*)")
+
+# Shell separators that begin a new command. A newline is one of them, which
+# a start-of-string anchor misses.
+_SEGMENTS = re.compile(r"\|\||&&|[;&|\n]|\$\(|`")
+
+# Global flags that consume the following token, so the subcommand is not the
+# next word: `git -C . reset` must resolve to "reset", not to "-C" or ".".
+_GIT_FLAGS_WITH_ARG = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+)
+
+
+def git_subcommands(command: str) -> list[str]:
+    """Every git subcommand invoked in a shell string.
+
+    Two properties, and both were wrong in the original of this in
+    :mod:`taste.guardrails`. ``git`` must be in *command* position -- otherwise
+    ``echo use git commit`` reads as an invocation -- and global flags must be
+    consumed with their arguments. Newline counts as a separator, so
+    ``pytest\\ngit reset`` does not slip through.
+    """
+    found: list[str] = []
+    for segment in _SEGMENTS.split(command):
+        try:
+            tokens = shlex.split(segment, comments=False, posix=True)
+        except ValueError:
+            tokens = segment.split()
+        if not tokens:
+            continue
+
+        index = 0
+        # Leading VAR=value assignments precede the command itself.
+        while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
+            index += 1
+        # Strip any path prefix, so /usr/bin/git is still git.
+        if index >= len(tokens) or tokens[index].rsplit("/", 1)[-1] != "git":
+            continue
+
+        cursor = index + 1
+        while cursor < len(tokens):
+            token = tokens[cursor]
+            if token in _GIT_FLAGS_WITH_ARG:
+                cursor += 2
+                continue
+            if token.startswith("-"):
+                cursor += 1
+                continue
+            found.append(token.lower())
+            break
+    return found
 
 
 class JailDenial(Exception):
@@ -179,6 +263,15 @@ class WorktreeJail:
         """
         if not command.strip():
             return None
+        for verb in git_subcommands(command):
+            if verb in GIT_REF_MOVERS:
+                return (
+                    f"`git {verb}` is not yours to run: this worktree is a memstore "
+                    "branch, and the harness commits your work for you when it "
+                    "checkpoints. Running it moves the branch out from under the "
+                    "layer that owns it. Just edit files; reading git "
+                    "(status, diff, log, show) is fine."
+                )
         for target in _REDIRECT.findall(command):
             cleaned = target.strip("'\"")
             if cleaned and not cleaned.startswith("/dev/") and not self.contains(cleaned):

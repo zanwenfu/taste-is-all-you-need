@@ -297,6 +297,41 @@ class GitBackend:
         except (BadName, BadObject, TypeError, ValueError):
             return None
 
+    @_serialized_object_read
+    def ref_history(self, ref: str, limit: int = 2) -> list[str]:
+        """The ref's own recent values, newest first, from its reflog.
+
+        Git records every ref movement here, including ones this layer did not
+        make -- which is exactly what makes it the evidence for detecting a
+        worker that moved its own branch. A freshly seeded branch has one
+        entry, so "no prior value" is the ordinary base case rather than an
+        error.
+
+        Returns ``[]`` when the reflog is missing or expired. A guard reading
+        this must treat that as "cannot tell" and let the operation proceed:
+        losing the reflog is not itself evidence of corruption, and failing
+        closed on it would wedge branches that are merely old.
+        """
+        try:
+            raw = self.repo.git.reflog("show", "--format=%H", f"-{max(1, limit)}", ref)
+        except GitCommandError:
+            return []
+        return [line.strip() for line in raw.splitlines() if line.strip()]
+
+    @_serialized_object_read
+    def worktree_branch_ref(self) -> str | None:
+        """The ref this working tree is checked out on, or ``None`` if detached.
+
+        ``git worktree add`` binds a tree to one branch, and every checkpoint
+        assumes that binding still holds: it stages *this* tree and moves
+        *that* ref. A detached HEAD breaks the pair without touching the ref,
+        so no amount of looking at the branch can see it.
+        """
+        try:
+            return self.repo.git.symbolic_ref("HEAD").strip() or None
+        except GitCommandError:
+            return None  # Detached HEAD exits non-zero; that is the answer.
+
     def cas_update_ref(self, ref: str, new: str, old: str | None) -> bool:
         """Move ``ref`` to ``new`` only if it currently points at ``old``.
 

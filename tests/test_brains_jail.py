@@ -56,7 +56,7 @@ def test_an_absolute_path_inside_the_worktree_is_allowed(jail: WorktreeJail) -> 
     [
         "pytest -q",
         "git status",
-        "git add -A && git commit -m 'work'",
+        "git add -A",
         "echo hello > out.txt",
         "cat keep.txt",
         "ls -la sub/",
@@ -186,7 +186,7 @@ def test_the_gate_is_fast_enough_to_sit_in_the_event_loop(jail: WorktreeJail) ->
 
     commands = [
         "pytest -q tests/",
-        "git add -A && git commit -m x",
+        "git add -A && git diff --stat",
         "echo hello > out.txt",
         "python -c 'print(1)'",
     ]
@@ -330,7 +330,7 @@ def test_a_brain_cannot_switch_off_its_own_sandbox(jail: WorktreeJail) -> None:
     [
         "pytest -q --maxfail=1",
         "git log --format=%H -n 5",
-        "git add -A && git commit -m 'work'",
+        "git add -A && git status --short",
         "echo hi >out.txt",
         "python -m pytest tests/ -k test_x",
         "grep -rn 'def foo' src/",
@@ -339,3 +339,82 @@ def test_a_brain_cannot_switch_off_its_own_sandbox(jail: WorktreeJail) -> None:
 def test_hardening_did_not_break_ordinary_flags(jail: WorktreeJail, command: str) -> None:
     """Checking the value half of ``--flag=value`` must not deny every flag."""
     assert jail.check("Bash", {"command": command}) is None, command
+
+
+# ------------------------------------------------- git is the harness's, not the worker's
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -am wip",
+        "git reset --hard HEAD~1",
+        "git checkout --detach HEAD",
+        "git revert --no-edit HEAD",
+        "git rebase -i HEAD~2",
+        "git stash",
+        "git update-ref refs/heads/mem/s/x HEAD",
+        "git gc --prune=now",
+        "pytest && git reset --hard",
+        "git -C . reset --hard",
+        "/usr/bin/git commit -m x",
+        "FOO=1 git commit -m x",
+        "echo start\ngit reset --hard",
+    ],
+)
+def test_a_worker_cannot_move_its_own_branch(jail: WorktreeJail, command: str) -> None:
+    """A sub-brain's worktree *is* a memstore branch head.
+
+    Measured live, all of it: ``git commit`` put the ref on a commit with no
+    state notes and the next checkpoint died six frames deep. ``git reset
+    --hard`` was worse -- it lands on a commit that *does* carry notes, so
+    "does the head have metadata" cannot see it. The branch silently forked
+    backwards, and a delivery then projected an orphaned state into the shared
+    integration branch, which ended up advertising bytes the worker's own
+    history no longer contained.
+
+    These were all ALLOWED before. ``guardrails`` has listed them as dangerous
+    since it was written; the jail simply never consulted that knowledge.
+    """
+    reason = jail.check("Bash", {"command": command})
+    assert reason is not None, f"{command} moves the branch and must be refused"
+    assert "harness commits your work" in reason, "the denial must say what to do instead"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status",
+        "git diff --stat",
+        "git log --oneline -5",
+        "git show HEAD",
+        "git add -A",
+        "grep -rn 'git commit' docs/",
+        "echo use git commit to save",
+        "pytest -q",
+    ],
+)
+def test_reading_git_and_staging_stay_allowed(jail: WorktreeJail, command: str) -> None:
+    """A false deny costs a confused worker an explained retry.
+
+    ``add`` stages and moves no ref. The readers are how a coding brain orients
+    itself, and the last two are the quoting trap: git named inside a string or
+    an echo is not an invocation.
+    """
+    assert jail.check("Bash", {"command": command}) is None, command
+
+
+def test_the_jail_and_the_kernel_agree_on_what_is_dangerous() -> None:
+    """The vocabulary is duplicated, so it needs a test that it cannot drift.
+
+    ``jail`` is stdlib-only on purpose -- it runs inside the SDK's hot path,
+    and importing ``taste.guardrails`` would drag the whole kernel stack
+    (cores -> agent, llm, memory, tools) along with it.
+    """
+    from taste.brains.jail import GIT_REF_MOVERS
+    from taste.guardrails import _GIT_MUTATORS, _GIT_READERS
+
+    assert set(_GIT_MUTATORS) >= GIT_REF_MOVERS, (
+        "the jail must not refuse a verb the kernel considers safe"
+    )
+    assert not (GIT_REF_MOVERS & set(_GIT_READERS)), "readers must stay allowed"
