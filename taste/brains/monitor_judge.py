@@ -21,7 +21,12 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from taste.brains.contract import CONTRACT_PATH, Contract
-from taste.brains.monitor import Judgement, Severity, TerminalDecision
+from taste.brains.monitor import (
+    UNJUDGED_MESSAGE_TYPES,
+    Judgement,
+    Severity,
+    TerminalDecision,
+)
 from taste.brains.records import Assignment, contract_digest
 from taste.llm import MODEL_MONITOR
 from taste.pricing import call_cost
@@ -451,7 +456,15 @@ def build_terminal_observation(
                     "output_artifacts": _terminal_artifacts(
                         head, durable_contract, assignment
                     ),
-                    "transcript": list(head.transcript.turns),
+                    # The same events the monitor judged, not every recorded
+                    # turn: a certifier handed 1,708 token deltas pays for them
+                    # in latency and context, and the finished messages beside
+                    # them already carry the work. See UNJUDGED_MESSAGE_TYPES.
+                    "transcript": [
+                        turn
+                        for turn in head.transcript.turns
+                        if turn.get("message_type") not in UNJUDGED_MESSAGE_TYPES
+                    ],
                 },
                 "terminal_context": terminal_context,
                 "historical_findings": historical_findings,

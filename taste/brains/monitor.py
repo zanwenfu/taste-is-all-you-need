@@ -1333,8 +1333,12 @@ class MonitorBrain:
                     )
                 return existing
 
+            # Narrowed the same way the monitor's own reading is, or this
+            # comparison is between two different vocabularies and can never
+            # hold: the saved prefix counts judgeable events, the state counts
+            # every recorded turn including the token deltas nobody judges.
             exact_fingerprints = tuple(
-                _fingerprint(event) for event in exact.transcript.turns
+                _fingerprint(event) for event in self._judgeable(*exact.transcript.turns)
             )
             if self.state.pending_action_ids:
                 preflight_failure = preflight_failure or "monitor actions remain pending"

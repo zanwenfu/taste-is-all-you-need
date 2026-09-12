@@ -1220,3 +1220,38 @@ def test_narrowing_does_not_rewind_a_restarted_monitors_cursor(store: Store) -> 
     assert restarted.state.fingerprints == judged
     assert restarted.unjudged() == [], "a narrowed stream must not look like a rollback"
     brain.close()
+
+
+def test_certification_is_not_blocked_by_events_the_monitor_never_judges(
+    store: Store,
+) -> None:
+    """The preflight compares two fingerprint lists; both must be narrowed.
+
+    Regression. When the monitor stopped reading token deltas, its saved
+    prefix counted judgeable events while the preflight still counted every
+    recorded turn -- 67 against 1,775 on the run that caught it. Those can
+    never be equal, so terminal certification failed closed on every run and
+    the judge was never even called.
+    """
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.wal.intent("Bash", "reviewed", {})
+    for i in range(12):
+        brain.branch.turn(kind="sdk_message", message_type="StreamEvent", seq=i)
+    brain.branch.turn(kind="sdk_message", message_type="AssistantMessage", seq="done")
+
+    judge = ScriptedTerminalJudge()
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=100)
+    # Drained, not merely ticked: ``tick`` publishes a judgement together with
+    # a pending action, and an undrained action fails the preflight on its own
+    # -- correctly, and before the comparison this test is about.
+    assert asyncio.run(monitor.drain(FakeClient(), final=True))
+
+    work_state = brain.checkpoint("terminal work with deltas in it")
+    assessment = asyncio.run(monitor.certify_terminal(work_state, context={}))
+
+    assert assessment.failure == "", f"certification failed closed: {assessment.failure}"
+    assert judge.terminal_calls, "the terminal judge was never consulted"
+    brain.close()
