@@ -13,6 +13,7 @@ import pytest
 
 from taste.memstore import (
     BranchBusy,
+    ForeignHead,
     NotAnAncestor,
     ObjectType,
     PublishError,
@@ -373,3 +374,80 @@ def test_branches_are_isolated_working_trees(store: Store) -> None:
     a.checkpoint("a writes")
     assert not (b.worktree / "only-a.txt").exists()
     assert b.head.read("only-a.txt") is None
+
+
+# ------------------------------------------------- a head this layer did not make
+
+
+def _commit_inside_the_worktree(worktree, message: str) -> str:
+    """What a coding brain does without being told not to: commit its work."""
+    import subprocess
+
+    subprocess.run(["git", "add", "-A"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=w", "-c", "user.email=w@w.local", "commit", "-qm", message],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_a_head_memstore_did_not_create_is_named_not_guessed_at(store: Store) -> None:
+    """A worker's own ``git commit`` moves the branch out from under the layer.
+
+    ``Bash`` is in the worker tool set and the worktree *is* a branch head, so
+    this is an ordinary thing for a brain to do and fatal here. Measured live:
+    5 of 7 runs corrupted their branch this way -- exactly the runs where the
+    model got far enough to have something to commit.
+
+    Before this, the next checkpoint died as ``NoSuchState`` from six frames
+    deep in the transcript walk, naming a commit id and nothing else. An
+    orchestrator cannot course-correct a condition that has no name.
+    """
+    a = store.branch("a")
+    a.write("f", "1")
+    last_good = a.checkpoint("the last state this layer built")
+
+    a.write("add.py", "def add(x, y): return x + y\n")
+    foreign = _commit_inside_the_worktree(a.worktree, "Add add.py with add(x, y)")
+    assert foreign != last_good.id
+
+    for attempt in (
+        lambda: a.checkpoint("terminal work"),
+        lambda: a.build("terminal work"),
+        lambda: a.rollback(last_good, "undo"),
+    ):
+        with pytest.raises(ForeignHead, match=foreign[:10]):
+            attempt()
+
+
+def test_a_branch_with_a_foreign_head_can_still_be_read(store: Store) -> None:
+    """Detection sits on the write paths for a reason.
+
+    Whoever repairs this -- a monitor, a dashboard, the central brain deciding
+    whether to re-plan -- has to be able to look at the branch first. A read
+    that raised would turn one worker's corrupted branch into a crash for
+    every observer of it.
+    """
+    a = store.branch("a")
+    a.write("out/result.json", "{}")
+    a.publish("result", "out/result.json", type=ObjectType.RECORD)
+    last_good = a.checkpoint("the last state this layer built")
+
+    a.write("add.py", "def add(x, y): return x + y\n")
+    foreign = _commit_inside_the_worktree(a.worktree, "Add add.py with add(x, y)")
+
+    view = store.view("a")
+    assert view.exists()
+    assert view.head.id == foreign
+    assert store.heads()["a"].id == foreign
+    # The catalog answers from the head's manifest note, which a foreign head
+    # has none of: the branch's published work becomes invisible rather than
+    # raising. That silence is why detection has to live on the write paths.
+    assert store.catalog() == []
+    # And what this layer did build is still exactly where it was.
+    assert last_good.read("out/result.json") == "{}"
+    assert set(last_good.manifest.entries) == {"result"}

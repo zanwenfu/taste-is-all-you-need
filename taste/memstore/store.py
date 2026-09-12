@@ -41,6 +41,7 @@ from taste.memstore.objects import (
     BadName,
     BranchBusy,
     Conflict,
+    ForeignHead,
     Manifest,
     ManifestEntry,
     Meta,
@@ -922,6 +923,7 @@ class Branch:
         """
         for rel, value in (records or {}).items():
             self.write(rel, json.dumps(value, indent=1, sort_keys=True) + "\n")
+        self._require_memstore_head()
         head = self.head
         self.backend.stage_all()
         tree = self.backend.write_tree()
@@ -955,6 +957,7 @@ class Branch:
         the state it is returning to; the failed context is one parent away.
         """
         self._capture("rollback", reason)
+        self._require_memstore_head()
         head = self.head
         # Ancestry alone is too weak once this branch has merged another: the
         # other branch's states become git ancestors, so rolling "back" to one
@@ -997,6 +1000,30 @@ class Branch:
         from taste.memstore.merge import merge_branches
 
         return merge_branches(self, other, reason=reason, resolved=resolved)
+
+    def _require_memstore_head(self) -> None:
+        """Refuse to build on a head this layer did not create.
+
+        Every state carries a ``meta`` note; a commit without one was put on
+        the ref by something else. Checked on the write paths only -- reads
+        must keep working, because whoever repairs this has to look at it
+        first.
+
+        The note is read through the backend rather than through
+        ``State.meta``, which raises ``NoSuchState`` for exactly this case:
+        the point here is to name the condition, not to re-raise it.
+        """
+        sha = self.store.backend.ref_sha(self.ref)
+        if sha is None:
+            return  # No head at all is a different failure; let it surface as one.
+        if self.backend.note_get(NOTES["meta"], sha) is not None:
+            return
+        raise ForeignHead(
+            f"{self.name} points at {sha[:10]}, which memstore did not create: "
+            "it carries no state metadata. A commit made inside the worktree "
+            "(git commit, reset, checkout) moves the branch out from under this "
+            "layer. The last memstore state is still reachable in the reflog."
+        )
 
     def _capture(self, op: str, reason: str) -> None:
         """Checkpoint uncommitted work before an operation that would discard it.

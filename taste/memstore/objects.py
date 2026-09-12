@@ -48,6 +48,22 @@ class StaleBranch(RuntimeError):
     """
 
 
+class ForeignHead(RuntimeError):
+    """This branch's head was not created by memstore.
+
+    Something moved the ref to a commit that carries none of the layer's
+    notes -- in practice a worker running ``git commit`` inside its own
+    worktree, which is an ordinary thing for a coding brain to do and fatal
+    here, because the worktree *is* a branch head.
+
+    Raised by the write paths rather than by reads: a monitor, a dashboard or
+    the central brain must still be able to look at a corrupted branch in
+    order to act on it. Without this the condition surfaced as ``NoSuchState``
+    from six frames deep inside the transcript walk, naming a commit id and
+    nothing else, which is not a thing an orchestrator can course-correct.
+    """
+
+
 class NoSuchState(KeyError):
     """No state with that id is reachable in this store."""
 
