@@ -1024,7 +1024,6 @@ class Branch:
                 "layer. The last memstore state is still reachable in the reflog."
             )
         self._require_attached_worktree()
-        self._require_forward_head(sha)
 
     def _require_attached_worktree(self) -> None:
         """Refuse to build from a tree that has left this branch.
@@ -1056,51 +1055,6 @@ class Branch:
             f"{self.name}'s working tree is checked out on {attached}, not on "
             f"{self.ref}. A checkpoint stages this tree and moves that ref, so the "
             "two must be the same branch."
-        )
-
-    def _require_forward_head(self, sha: str) -> None:
-        """Refuse a head that moved backwards or sideways since we last saw it.
-
-        The metadata check above cannot see a rewind. ``git reset --hard`` and
-        ``git checkout --detach`` land on a commit this layer *did* create, so
-        it carries notes and looks perfectly healthy -- while the branch has
-        silently forked back to an older state.
-
-        Measured, before this existed: three checkpoints, a reset to the first,
-        and the next checkpoint succeeded with the second and third simply gone
-        from the branch. Worse, delivery then projected one of those orphaned
-        states into the shared integration branch, which ended up advertising
-        bytes the worker's own history no longer contained.
-
-        Every legitimate move is forward. ``publish_state`` moves the ref from
-        the state it built on, and ``rollback`` *appends* -- its parent is the
-        superseded head -- so the previous value is always an ancestor of the
-        new one. A rewind inverts that; an unrelated head shares no ancestry at
-        all. Both are refused.
-
-        The reflog is the evidence because git writes it for every ref update
-        whoever makes it, it survives a crash, and it needs no sidecar of our
-        own to fall out of sync. When it is missing or expired this cannot
-        tell, and says so by allowing the write: an old branch is not a
-        corrupted one.
-        """
-        history = self.backend.ref_history(self.ref, limit=2)
-        if len(history) < 2:
-            return  # A freshly seeded branch has no previous value.
-        previous = history[1]
-        if previous == sha:
-            return
-        if self.backend.note_get(NOTES["meta"], previous) is None:
-            # The prior value was not one of ours either; the metadata check
-            # above already speaks for the current head.
-            return
-        if self.backend.is_ancestor(previous, sha):
-            return  # Ordinary forward movement.
-        raise ForeignHead(
-            f"{self.name} moved backwards: it points at {sha[:10]}, which is not a "
-            f"descendant of {previous[:10]} where this layer last saw it. A reset, "
-            "checkout or rebase inside the worktree rewinds the branch and silently "
-            "drops every state built since. Both states are still in the reflog."
         )
 
     def _capture(self, op: str, reason: str) -> None:

@@ -13,21 +13,31 @@ So the seam between them was never exercised: nothing checked that the argv
 validates, or that a process launched this way binds to the exact prepared
 assignment.
 
-**What these tests deliberately do not claim.** A worker cannot certify
-completion without a model, so these prove the launch seam and the durable
-binding, not a finished run. Proving completion needs a live model and belongs
-in a separate, paid test.
+**What these tests claim, and what they do not.** The subject is the seam, not
+the outcome: that the argv starts, that the environment the launcher exports is
+the one the entrypoint validates, and that the process binds to its exact
+prepared assignment. How far the worker then gets depends on the machine.
 
-A worker that cannot certify completion stops at one of two boundaries, and
-which one depends on whether a credential is reachable:
+An earlier version of this file asserted that a worker *cannot* certify
+completion here, on the reasoning that certification needs a live model. That
+stopped being true: with a credential reachable, this test now routinely exits
+0 with a completed report. The premise was not wrong when written -- the
+monitor could not parse a verdict, so no run had ever finished -- and leaving
+it in place would have been a stale rationale outliving its evidence.
 
-* ``INFRA_FAILURE`` (71) -- ``ensure_ready`` cannot validate the monitor
-  provider, so the run stops before the lease and publishes no report;
-* ``INCOMPLETE`` (10) -- the provider validated, the runtime ran, and it
-  published a durable ``WorkerReport`` with ``completed=False``.
+So three exits are all consistent with a healthy seam, and which one occurs is
+a property of the machine:
 
-Both mean *failed closed*. Only ``INPUT_REJECTED`` (65) would indict the seam,
-because it means the process could not bind to its own durable assignment.
+* ``COMPLETED`` (0) -- a credential was reachable and the run finished. This is
+  the *strongest* evidence for the seam, because reaching completion means
+  every earlier step worked;
+* ``INCOMPLETE`` (10) -- the provider validated, the runtime ran, and published
+  a durable ``WorkerReport`` declining completion;
+* ``INFRA_FAILURE`` (71) -- ``ensure_ready`` could not validate the monitor
+  provider, so the run stopped before the lease and published no report.
+
+Only ``INPUT_REJECTED`` (65) indicts the seam, because it means the process
+could not bind to its own durable assignment.
 
 An earlier draft asserted 10 alone, having measured it here. That measurement
 was contaminated: ``LLM`` calls ``load_dotenv(_find_env(...))``, which walks up
@@ -63,13 +73,18 @@ from taste.brains.worker_entrypoint import (
 )
 from taste.brains.worker_runtime import ASSIGNMENT_PATH, WORKER_REPORT_PATH
 
-FAILED_CLOSED = frozenset(
-    {int(WorkerExitCode.INCOMPLETE), int(WorkerExitCode.INFRA_FAILURE)}
+SEAM_INTACT = frozenset(
+    {
+        int(WorkerExitCode.COMPLETED),
+        int(WorkerExitCode.INCOMPLETE),
+        int(WorkerExitCode.INFRA_FAILURE),
+    }
 )
-"""Exits that mean the worker declined to certify completion.
+"""Exits that are all consistent with a working launch seam.
 
 Which one occurs depends on whether a model credential is reachable, which is a
-property of the machine rather than of the launch seam.
+property of the machine rather than of the seam. ``INPUT_REJECTED`` is
+deliberately absent: it is the one exit that indicts the seam itself.
 """
 
 pytestmark = pytest.mark.skipif(
@@ -187,11 +202,11 @@ def test_a_real_launcher_runs_the_real_entrypoint_against_its_assignment(
 ) -> None:
     """The seam itself: production argv, production launcher, real process.
 
-    The assertion is that the process got far enough to publish a durable
-    report and decline completion -- not that it crashed in some particular
-    way. A bad argv, a missing module, or an environment the entrypoint rejects
-    would all fail earlier and leave no report at all, which is exactly what
-    this distinguishes.
+    The assertion is that the process got far enough for its exit and its
+    durable report to agree -- not that it stopped in one particular place. A
+    bad argv, a missing module, or an environment the entrypoint rejects would
+    all fail earlier and leave no report at all, which is what this
+    distinguishes.
     """
     launcher = SubprocessLauncher(
         worker_command_factory(store.root, "session-1"),
@@ -207,24 +222,38 @@ def test_a_real_launcher_runs_the_real_entrypoint_against_its_assignment(
     handle = launcher.recover(supervisor._spec(observed))
     assert handle is not None, "the launcher did not produce process evidence"
 
-    deadline = time.monotonic() + 90
+    # Wide on purpose. This deadline exists to tell "never started" from
+    # "still working", not to assert a speed. When the worker could not reach a
+    # model it died in seconds and 90s was generous; now that it completes,
+    # measured single-worker runs land at 35-80s and the same 90s straddled the
+    # distribution, making this test flaky by construction. 240s is roughly
+    # three times the slowest completion observed and still fails fast when the
+    # seam is genuinely broken.
+    deadline = time.monotonic() + 240
     while time.monotonic() < deadline and handle.poll() is None:
         time.sleep(0.05)
     exit_code = handle.poll()
 
-    assert exit_code is not None, "the worker process never exited"
+    assert exit_code is not None, (
+        "the worker process never exited; the seam started it but nothing "
+        "terminated it within the deadline"
+    )
     observed = exit_code.exit_code
-    assert observed in FAILED_CLOSED, (
-        f"expected a classified fail-closed exit, got {exit_code}. "
+    assert observed in SEAM_INTACT, (
+        f"expected an exit consistent with a working seam, got {exit_code}. "
         f"INPUT_REJECTED ({int(WorkerExitCode.INPUT_REJECTED)}) means the process "
         "could not bind to its own durable assignment, which is the seam this "
         "test exists to check; anything else means it never ran at all."
     )
 
-    # Whether a report exists follows from WHERE it stopped, and asserting that
-    # correspondence is stronger than asserting either code alone.
+    # Whether a report exists, and what it says, follows from WHERE the run
+    # stopped. Asserting that correspondence is stronger than asserting any
+    # one exit code, and it is what survives the machine changing underneath.
     report = store.view(assignment.contract.identity).head.read(WORKER_REPORT_PATH)
-    if observed == int(WorkerExitCode.INCOMPLETE):
+    if observed == int(WorkerExitCode.COMPLETED):
+        assert report is not None, "a completed run published no durable report"
+        assert json.loads(report)["completed"] is True
+    elif observed == int(WorkerExitCode.INCOMPLETE):
         assert report is not None, "a validated runtime published no durable report"
         assert json.loads(report)["completed"] is False
     else:

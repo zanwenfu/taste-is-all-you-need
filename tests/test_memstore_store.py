@@ -471,14 +471,20 @@ def test_every_way_a_worker_can_take_its_branch_is_refused(store: Store) -> None
     metadata -- which names ``git commit``, ``--amend`` and ``revert``, because
     all three land on a commit this layer never made.
 
-    It cannot see the other two. ``reset --hard`` lands on a commit that *does*
-    carry notes, so the branch silently forks backwards; measured, three states
-    became one and a delivery then projected an orphaned state into the shared
-    integration branch, which ended up advertising bytes the worker's own
-    history no longer contained. ``checkout --detach`` never moves the ref at
-    all: the tree leaves the branch, and the next checkpoint stages that tree
-    and moves the ref onto it, publishing another commit's content as this
-    branch's work.
+    ``checkout --detach`` never moves the ref at all: the tree leaves the
+    branch, and the next checkpoint stages that tree and moves the ref onto it,
+    publishing another commit's content as this branch's work. That one is
+    caught by the worktree-attachment check.
+
+    **``reset --hard`` is deliberately absent and still undetected.** It lands
+    on a commit this layer did create, so the metadata question answers
+    "healthy" while the branch has silently forked backwards. A forward-only
+    check on the ref catches it -- and also refuses the coordinator's own
+    recovery from a rewound control branch, which
+    ``test_raw_control_ref_rewind_cannot_erase_cost_or_repeat_provider_call``
+    and its siblings exist to prove works. Detection has to be something a
+    repair path can opt out of, and that is a contract decision this test will
+    be extended to cover once it is made.
     """
     for shape, mutate in (
         ("commit", lambda b, first: (b.write("extra.py", "x\n"),
@@ -486,7 +492,6 @@ def test_every_way_a_worker_can_take_its_branch_is_refused(store: Store) -> None
                                      _git(b.worktree, "commit", "-qm", "mine"))),
         ("amend", lambda b, first: _git(b.worktree, "commit", "--amend", "-qm", "amended")),
         ("revert", lambda b, first: _git(b.worktree, "revert", "--no-edit", "HEAD")),
-        ("reset", lambda b, first: _git(b.worktree, "reset", "--hard", first.id)),
         ("detach", lambda b, first: _git(b.worktree, "checkout", "--detach", first.id)),
     ):
         branch = store.branch(f"w-{shape}")
@@ -527,24 +532,3 @@ def test_the_guard_leaves_every_legitimate_move_alone(store: Store) -> None:
     assert not merged.conflicts
     a.write("f", "4")
     assert a.checkpoint("after merge").read("f") == "4"
-
-
-def test_a_missing_reflog_does_not_wedge_an_old_branch(store: Store) -> None:
-    """The rewind check reads the reflog, which is evidence, not a guarantee.
-
-    An expired or pruned reflog means "cannot tell". Failing closed on it would
-    refuse work on a branch whose only sin is being old.
-    """
-    import subprocess
-
-    a = store.branch("a")
-    a.write("f", "1")
-    a.checkpoint("one")
-    subprocess.run(
-        ["git", "reflog", "expire", "--expire=now", "--all"],
-        cwd=store.root,
-        check=True,
-        capture_output=True,
-    )
-    a.write("f", "2")
-    assert a.checkpoint("still works").read("f") == "2"
