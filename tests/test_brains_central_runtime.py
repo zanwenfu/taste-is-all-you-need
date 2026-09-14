@@ -173,11 +173,20 @@ def proposal(
 ) -> str:
     payload = json.loads(prompt)
     response = dict(payload["required_output_shape"])
+    # Completion has to account for every standing obligation, so the default
+    # mirrors what a real planner would have to state rather than letting a
+    # scripted transport declare completion for free.
+    verdict = "met" if complete else "not_met"
+    evidence = "satisfied by the delivered work" if complete else "work is in flight"
     response.update(
         assignments=[item.to_dict() for item in assignments],
         rationale="mechanically testable plan",
         complete=complete,
         completion_reason="all goal criteria are durably satisfied" if complete else "",
+        assessment=[
+            {"criterion_id": item["criterion_id"], "verdict": verdict, "evidence": evidence}
+            for item in payload.get("standing_criteria", ())
+        ],
         metadata={},
     )
     return json.dumps(response, sort_keys=True)

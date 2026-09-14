@@ -151,15 +151,27 @@ def proposal(
     *assignments: Assignment,
     complete: bool = False,
     completion_reason: str = "",
+    assessment: list[dict[str, Any]] | None = None,
     changes: dict[str, Any] | None = None,
 ) -> str:
     payload = json.loads(prompt)
     result = dict(payload["required_output_shape"])
+    if assessment is None:
+        # A completion claim has to account for every standing obligation, so
+        # the default mirrors what a real planner would have to state rather
+        # than letting tests declare completion for free.
+        verdict = "met" if complete else "not_met"
+        evidence = "satisfied by the delivered work" if complete else "work has not started"
+        assessment = [
+            {"criterion_id": item["criterion_id"], "verdict": verdict, "evidence": evidence}
+            for item in payload.get("standing_criteria", ())
+        ]
     result.update(
         assignments=[item.to_dict() for item in assignments],
         rationale="decompose by independently owned product artifacts",
         complete=complete,
         completion_reason=completion_reason,
+        assessment=assessment,
         metadata={"confidence": 0.8},
     )
     result.update(changes or {})
@@ -1740,3 +1752,111 @@ def test_criteria_cannot_be_dropped_through_the_planner(store: Store, goal: Goal
             (Criterion.derive(goal_id=goal.goal_id, text=base.criteria[0].text),),
             reason="restate the first obligation as if it were new",
         )
+
+
+def _live_ids(prompt: str) -> list[str]:
+    payload = json.loads(prompt)
+    return [item["criterion_id"] for item in payload["standing_criteria"]]
+
+
+def _assessed(prompt: str, verdict: str = "met", evidence: str = "parser.py is present") -> list[dict[str, Any]]:
+    return [
+        {"criterion_id": cid, "verdict": verdict, "evidence": evidence}
+        for cid in _live_ids(prompt)
+    ]
+
+
+def test_the_prompt_shows_every_standing_criterion_with_its_parentage(
+    store: Store, goal: Goal
+) -> None:
+    prompts: list[str] = []
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        prompts.append(prompt)
+        request = request_from_prompt(prompt)
+        return proposal(prompt, assignment_for(request), assessment=_assessed(prompt, "not_met", "not started"))
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    planner.plan(goal)
+
+    payload = json.loads(prompts[0])
+    standing = payload["standing_criteria"]
+    assert [item["text"] for item in standing] == list(goal.success_criteria)
+    assert all("criterion_id" in item and "parent_id" in item for item in standing)
+    assert payload["rules"]["criteria_are_append_only"] is True
+
+
+def test_completion_requires_every_standing_criterion_to_be_assessed(
+    store: Store, goal: Goal
+) -> None:
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        partial = _assessed(prompt)[:1]
+        return proposal(
+            prompt,
+            complete=True,
+            completion_reason="the parser is built",
+            assessment=partial,
+        )
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    with pytest.raises(InvalidPlannerOutput):
+        planner.plan(goal)
+
+
+def test_completion_is_refused_while_any_criterion_is_unmet(store: Store, goal: Goal) -> None:
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        items = _assessed(prompt)
+        items[-1] = {**items[-1], "verdict": "not_met", "evidence": "tests still fail"}
+        return proposal(
+            prompt,
+            complete=True,
+            completion_reason="calling it done",
+            assessment=items,
+        )
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    with pytest.raises(InvalidPlannerOutput):
+        planner.plan(goal)
+
+
+def test_an_assessment_of_an_unknown_criterion_is_refused(store: Store, goal: Goal) -> None:
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        items = _assessed(prompt)
+        items.append(
+            {
+                "criterion_id": "sha256:" + "0" * 64,
+                "verdict": "met",
+                "evidence": "a criterion nobody set",
+            }
+        )
+        return proposal(
+            prompt, complete=True, completion_reason="done", assessment=items
+        )
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    with pytest.raises(InvalidPlannerOutput):
+        planner.plan(goal)
+
+
+def test_a_fully_assessed_completion_is_accepted(store: Store, goal: Goal) -> None:
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        return proposal(
+            prompt,
+            complete=True,
+            completion_reason="every standing criterion is met",
+            assessment=_assessed(prompt),
+        )
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    plan = planner.plan(goal)
+    assert plan.complete
+    assert plan.assessment is not None
+    assert {item["criterion_id"] for item in plan.assessment} == set(
+        item.criterion_id for item in planner.criteria(goal.goal_id).criteria
+    )
+
+
+def test_an_active_plan_may_leave_criteria_unassessed(store: Store, goal: Goal) -> None:
+    planner = CentralPlanner(store, transport=FakeTransport(one_assignment_response))
+    plan = planner.plan(goal)
+    assert not plan.complete

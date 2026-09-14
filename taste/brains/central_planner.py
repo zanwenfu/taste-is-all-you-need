@@ -1901,6 +1901,7 @@ class CentralPlanner:
             "rationale": "",
             "complete": False,
             "completion_reason": "",
+            "assessment": [],
             "metadata": {},
         }
 
@@ -2028,11 +2029,27 @@ class CentralPlanner:
     def _prompt(self, request: PlanningRequest) -> str:
         template = self._proposal_template(request)
         template["assignments"] = [self._assignment_exemplar(request)]
+        standing = () if request.criteria is None else request.criteria.criteria
         payload = {
             "request": request.to_dict(),
+            "standing_criteria": [
+                {
+                    "criterion_id": item.criterion_id,
+                    "text": item.text,
+                    "parent_id": item.parent_id,
+                }
+                for item in standing
+            ],
             "required_output_shape": template,
             "assignment_schema": self._assignment_schema(request),
             "rules": {
+                # A refinement may only make satisfaction harder, so a parent
+                # is never retired.  Declaring completion therefore means
+                # accounting for every standing obligation, including the ones
+                # a later, sharper criterion was built on top of.
+                "criteria_are_append_only": True,
+                "complete_requires_every_standing_criterion_met": True,
+                "assessment_verdicts": ["met", "not_met"],
                 "non_complete_requires_assignments": True,
                 "complete_requires_no_assignments": True,
                 "assignment_generation": request.generation,
@@ -2052,6 +2069,59 @@ class CentralPlanner:
             },
         }
         return _pretty(payload)
+
+    @staticmethod
+    def _validate_assessment(
+        value: Any, request: PlanningRequest, complete: bool
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Account for the standing obligations, before completion is allowed.
+
+        The planner both proposes revisions to the criteria and is judged
+        against them, so ``complete`` cannot be a bare assertion.  A complete
+        plan must name every standing criterion and find it met; an active
+        plan may report progress without being held to that.
+        """
+        standing = {} if request.criteria is None else {
+            item.criterion_id: item for item in request.criteria.criteria
+        }
+        items: list[Mapping[str, Any]] = []
+        seen: set[str] = set()
+        for entry in _array(value, "PlannerProposal.assessment"):
+            raw = _mapping(entry, "assessment entry")
+            # An assessment entry is an inline sub-object, not a schema'd
+            # record, so the strict field check is spelled out here rather
+            # than borrowed from ``_fields``, which requires a schema key.
+            wanted = {"criterion_id", "verdict", "evidence"}
+            if raw.keys() != wanted:
+                raise ValueError(
+                    "assessment entry fields differ; "
+                    f"missing={sorted(wanted - raw.keys())}, unknown={sorted(raw.keys() - wanted)}"
+                )
+            criterion_id = _text(raw["criterion_id"], "assessment.criterion_id")
+            if criterion_id not in standing:
+                raise ValueError(
+                    f"assessment names criterion {criterion_id!r}, which is not standing"
+                )
+            if criterion_id in seen:
+                raise ValueError(f"criterion {criterion_id!r} is assessed more than once")
+            seen.add(criterion_id)
+            verdict = _text(raw["verdict"], "assessment.verdict")
+            if verdict not in {"met", "not_met"}:
+                raise ValueError("assessment verdict must be 'met' or 'not_met'")
+            evidence = _text(raw["evidence"], "assessment.evidence")
+            items.append({"criterion_id": criterion_id, "verdict": verdict, "evidence": evidence})
+        if complete:
+            missing = sorted(set(standing) - seen)
+            if missing:
+                raise ValueError(
+                    f"a complete plan must assess every standing criterion; {len(missing)} unassessed"
+                )
+            unmet = [item["criterion_id"] for item in items if item["verdict"] != "met"]
+            if unmet:
+                raise ValueError(
+                    f"a plan cannot be complete while {len(unmet)} standing criterion(s) are not met"
+                )
+        return tuple(items)
 
     @staticmethod
     def _validate_assignment_budget_caps(assignment: Assignment, request: PlanningRequest) -> None:
@@ -2155,6 +2225,7 @@ class CentralPlanner:
                 "rationale",
                 "complete",
                 "completion_reason",
+                "assessment",
                 "metadata",
             }
             _fields(raw, PROPOSAL_SCHEMA, required)
@@ -2179,6 +2250,7 @@ class CentralPlanner:
                 raise ValueError(
                     "complete plans must be empty and active plans must have assignments"
                 )
+            assessment = self._validate_assessment(raw["assessment"], request, raw["complete"])
             for assignment in assignments:
                 self._validate_assignment_budget_caps(assignment, request)
             metadata = _mapping(raw["metadata"], "PlannerProposal.metadata")
@@ -2197,6 +2269,7 @@ class CentralPlanner:
                 rationale=_text(raw["rationale"], "rationale", empty=True),
                 complete=raw["complete"],
                 completion_reason=_text(raw["completion_reason"], "completion_reason", empty=True),
+                assessment=assessment,
                 metadata={
                     "operation_id": request.operation_id,
                     "request_id": request.request_id,

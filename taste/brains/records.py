@@ -630,6 +630,7 @@ class PlanRevision(_JsonRecord):
     rationale: str = ""
     complete: bool = False
     completion_reason: str = ""
+    assessment: tuple[Mapping[str, Any], ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -681,6 +682,13 @@ class PlanRevision(_JsonRecord):
         )
         if self.complete != bool(self.completion_reason.strip()):
             raise ValueError("complete and completion_reason must be set together")
+        if not isinstance(self.assessment, tuple):
+            raise ValueError("assessment must be a tuple")
+        object.__setattr__(
+            self,
+            "assessment",
+            tuple(_freeze_map(item, "assessment[]") for item in self.assessment),
+        )
         object.__setattr__(self, "metadata", _freeze_map(self.metadata, "metadata"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -697,6 +705,7 @@ class PlanRevision(_JsonRecord):
             "rationale": self.rationale,
             "complete": self.complete,
             "completion_reason": self.completion_reason,
+            "assessment": [_thaw_json(item) for item in self.assessment],
             "metadata": _thaw_json(self.metadata),
         }
 
@@ -718,6 +727,7 @@ class PlanRevision(_JsonRecord):
                 "rationale",
                 "complete",
                 "completion_reason",
+                "assessment",
                 "metadata",
             },
         )
@@ -737,6 +747,7 @@ class PlanRevision(_JsonRecord):
             rationale=raw["rationale"],
             complete=raw["complete"],
             completion_reason=raw["completion_reason"],
+            assessment=tuple(_expect_array(raw["assessment"], "assessment")),
             metadata=raw["metadata"],
         )
 
