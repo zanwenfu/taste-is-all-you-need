@@ -34,6 +34,8 @@ from taste.brains.records import (
     ArtifactRef,
     ArtifactSpec,
     Assignment,
+    CriteriaRevision,
+    Criterion,
     WorkerReport,
     contract_digest,
 )
@@ -1617,3 +1619,124 @@ def test_the_prompt_shows_the_assignment_shape_instead_of_naming_it(
     # ``worker`` is a property of the contract, not a wire field: naming it as
     # one is how a plan acquires a key that parsing then refuses.
     assert "worker" not in exemplar
+
+# ------------------------------------------------------ append-only criteria
+#
+# The planner is judged against the criteria it is handed, and it is also the
+# party that proposes revisions to them.  That is exactly the shape where a
+# stop condition can be talked down: reach ``complete`` by releasing whatever
+# was not met.  These tests pin the seam where that becomes impossible --
+# criteria are carried *inside* the request identity, so a plan is
+# cryptographically bound to the obligations it was judged against.
+
+
+def test_planning_a_goal_seeds_its_genesis_criteria(store: Store, goal: Goal) -> None:
+    planner = CentralPlanner(store, transport=FakeTransport(one_assignment_response))
+    planner.plan(goal)
+    revision = planner.criteria(goal.goal_id)
+    assert revision is not None
+    assert revision.sequence == 0
+    assert tuple(item.text for item in revision.criteria) == goal.success_criteria
+    assert all(item.parent_id is None for item in revision.criteria)
+
+
+def test_live_criteria_are_inside_the_request_identity(store: Store, goal: Goal) -> None:
+    seen: list[PlanningRequest] = []
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        request = request_from_prompt(prompt)
+        seen.append(request)
+        return proposal(prompt, assignment_for(request))
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    planner.plan(goal)
+
+    request = seen[0]
+    assert request.criteria is not None
+    assert tuple(item.text for item in request.criteria.criteria) == goal.success_criteria
+    # The digest covers them: the same request with different obligations is a
+    # different request, so a plan cannot be moved onto a weaker bar.
+    other = Goal(
+        goal_id=goal.goal_id,
+        task=goal.task,
+        success_criteria=("parser.py exists",),
+        budget_usd=goal.budget_usd,
+        metadata=goal.metadata,
+    )
+    weaker = CriteriaRevision.genesis(other, at=request.created_at)
+    moved = PlanningRequest.create(
+        operation_id=request.operation_id,
+        generation=request.generation,
+        created_at=request.created_at,
+        goal=request.goal,
+        world=request.world,
+        parent_plan=request.parent_plan,
+        criteria=weaker,
+    )
+    assert moved.request_id != request.request_id
+
+
+def test_a_recovered_request_replays_the_same_identity(store: Store, goal: Goal) -> None:
+    planner = CentralPlanner(store, transport=FakeTransport(one_assignment_response))
+    first = planner.plan(goal)
+    reopened = CentralPlanner(store, transport=FakeTransport(one_assignment_response))
+    again = reopened.plan(goal)
+    assert again.plan_id == first.plan_id
+
+
+def test_a_request_whose_criteria_were_swapped_fails_its_own_digest(
+    store: Store, goal: Goal
+) -> None:
+    seen: list[PlanningRequest] = []
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        request = request_from_prompt(prompt)
+        seen.append(request)
+        return proposal(prompt, assignment_for(request))
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    planner.plan(goal)
+    raw = seen[0].to_dict()
+    weaker = Goal(
+        goal_id=goal.goal_id,
+        task=goal.task,
+        success_criteria=("parser.py exists",),
+        budget_usd=goal.budget_usd,
+        metadata=goal.metadata,
+    )
+    raw["criteria"] = CriteriaRevision.genesis(weaker, at=seen[0].created_at).to_dict()
+    with pytest.raises(ValueError, match="request_id"):
+        PlanningRequest.from_dict(raw)
+
+
+def test_a_refinement_is_carried_and_keeps_its_parent(store: Store, goal: Goal) -> None:
+    planner = CentralPlanner(store, transport=FakeTransport(one_assignment_response))
+    planner.plan(goal)
+    base = planner.criteria(goal.goal_id)
+    assert base is not None
+    parent = base.criteria[1]
+    child = Criterion.derive(
+        goal_id=goal.goal_id,
+        text="`pytest -q tests/test_parser.py` exits 0",
+        parent_id=parent.criterion_id,
+    )
+    revised = planner.refine_criteria(
+        goal.goal_id, (child,), reason="name the exact command"
+    )
+    assert revised.sequence == 1
+    ids = {item.criterion_id for item in revised.criteria}
+    assert parent.criterion_id in ids and child.criterion_id in ids
+    assert planner.criteria(goal.goal_id) == revised
+
+
+def test_criteria_cannot_be_dropped_through_the_planner(store: Store, goal: Goal) -> None:
+    planner = CentralPlanner(store, transport=FakeTransport(one_assignment_response))
+    planner.plan(goal)
+    base = planner.criteria(goal.goal_id)
+    assert base is not None
+    with pytest.raises(ValueError, match=r"append-only|already standing|parent"):
+        planner.refine_criteria(
+            goal.goal_id,
+            (Criterion.derive(goal_id=goal.goal_id, text=base.criteria[0].text),),
+            reason="restate the first obligation as if it were new",
+        )

@@ -50,6 +50,8 @@ from taste.brains.planner_transport import (
 )
 from taste.brains.records import (
     Assignment,
+    CriteriaRevision,
+    Criterion,
     PlanRevision,
     WorkerReport,
     contract_digest,
@@ -313,6 +315,10 @@ def _goal_path(goal_id: str) -> str:
 
 def _operation_root(goal_id: str, operation_id: str) -> str:
     return f"{PLANNER_ROOT}/operations/{_key(goal_id + chr(0) + operation_id)}"
+
+
+def _criteria_path(goal_id: str) -> str:
+    return f"{PLANNER_ROOT}/criteria/{_key(goal_id)}.json"
 
 
 def _plan_path(plan_id: str) -> str:
@@ -779,6 +785,7 @@ class PlanningRequest:
     goal: Goal
     world: WorldSnapshot
     parent_plan: PlanRevision | None = None
+    criteria: CriteriaRevision | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_id", _checked_digest(self.request_id, "request_id"))
@@ -808,6 +815,7 @@ class PlanningRequest:
             "goal": self.goal.to_dict(),
             "world": self.world.to_dict(),
             "parent_plan": None if self.parent_plan is None else self.parent_plan.to_dict(),
+            "criteria": None if self.criteria is None else self.criteria.to_dict(),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -826,6 +834,7 @@ class PlanningRequest:
         goal: Goal,
         world: WorldSnapshot,
         parent_plan: PlanRevision | None,
+        criteria: CriteriaRevision | None = None,
     ) -> PlanningRequest:
         identity = {
             "operation_id": operation_id,
@@ -834,6 +843,7 @@ class PlanningRequest:
             "goal": goal.to_dict(),
             "world": world.to_dict(),
             "parent_plan": None if parent_plan is None else parent_plan.to_dict(),
+            "criteria": None if criteria is None else criteria.to_dict(),
         }
         return cls(
             request_id=_digest(_canonical(identity)),
@@ -843,6 +853,7 @@ class PlanningRequest:
             goal=goal,
             world=world,
             parent_plan=parent_plan,
+            criteria=criteria,
         )
 
     @classmethod
@@ -859,6 +870,7 @@ class PlanningRequest:
                 "goal",
                 "world",
                 "parent_plan",
+                "criteria",
             },
         )
         return cls(
@@ -870,6 +882,9 @@ class PlanningRequest:
             world=WorldSnapshot.from_dict(raw["world"]),
             parent_plan=(
                 None if raw["parent_plan"] is None else PlanRevision.from_dict(raw["parent_plan"])
+            ),
+            criteria=(
+                None if raw["criteria"] is None else CriteriaRevision.from_dict(raw["criteria"])
             ),
         )
 
@@ -1016,6 +1031,10 @@ class CentralPlanner:
             return
         records: dict[str, Any] = {}
         self._immutable_record(path, goal.to_dict(), records)
+        # Sequence 0 is derived verbatim from the goal, so the goal record is
+        # never rewritten when criteria are later refined.
+        genesis = CriteriaRevision.genesis(goal, at=_iso(self.clock()))
+        self._immutable_record(_criteria_path(goal.goal_id), genesis.to_dict(), records)
         self._checkpoint(f"planner goal: {goal.goal_id}", records)
 
     def _load_plan_path(self, path: str, digest: str | None = None) -> PlanRevision:
@@ -1763,6 +1782,7 @@ class CentralPlanner:
             goal=goal,
             world=world,
             parent_plan=parent,
+            criteria=self.criteria(goal.goal_id),
         )
         root = _operation_root(goal.goal_id, operation_id)
         request_path = f"{root}/request.json"
@@ -2373,6 +2393,39 @@ class CentralPlanner:
         records[current_path] = current
         self._checkpoint(f"planner accepted: {request.request_id}", records)
         return plan
+
+    def criteria(self, goal_id: str) -> CriteriaRevision | None:
+        """The obligations currently standing for this goal."""
+        raw = self.control.head.read(_criteria_path(_stable_id(goal_id, "goal_id")))
+        if raw is None:
+            return None
+        try:
+            return CriteriaRevision.from_json(raw)
+        except ValueError as exc:
+            raise PlannerStateError("durable criteria record is malformed") from exc
+
+    def refine_criteria(
+        self, goal_id: str, additions: tuple[Criterion, ...], *, reason: str
+    ) -> CriteriaRevision:
+        """Append obligations.  Nothing already standing can be released.
+
+        A refinement names the criterion it sharpens and that parent stays
+        live, so a revision can only ever make satisfaction harder.  There is
+        no operation here that retires an obligation, which is what makes a
+        regression unrepresentable rather than merely detected.
+        """
+        goal_id = _stable_id(goal_id, "goal_id")
+        with self.mutation_lock:
+            current = self.criteria(goal_id)
+            if current is None:
+                raise PlannerStateError("no goal criteria are recorded for this goal")
+            revised = current.extend(additions, reason=reason, at=_iso(self.clock()))
+            records: dict[str, Any] = {}
+            # The chain is append-only, so a revision overwrites the pointer
+            # while every superseded revision stays reachable in history.
+            records[_criteria_path(goal_id)] = revised.to_dict()
+            self._checkpoint(f"planner criteria: {revised.revision_id}", records)
+            return revised
 
     def plan(self, goal: Goal, *, operation_id: str = "initial") -> PlanRevision:
         """Create the first plan, or replay the already-promoted first plan."""
