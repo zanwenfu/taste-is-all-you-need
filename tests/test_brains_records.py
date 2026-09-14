@@ -12,6 +12,8 @@ from taste.brains.records import (
     ArtifactRef,
     ArtifactSpec,
     Assignment,
+    CriteriaRevision,
+    Criterion,
     LifecycleEvent,
     PlanRevision,
     WorkerReport,
@@ -159,9 +161,42 @@ def report(**changes) -> WorkerReport:
     return WorkerReport(**{**values, **changes})
 
 
+def criterion(**changes) -> Criterion:
+    values = {"goal_id": "goal-1", "text": "the parser tests pass", "parent_id": None}
+    return Criterion.derive(**{**values, **changes})
+
+
+def criteria_revision(**changes) -> CriteriaRevision:
+    base = CriteriaRevision(
+        revision_id="criteria.goal-1.0",
+        goal_id="goal-1",
+        sequence=0,
+        criteria=(criterion(),),
+        reason="derived from the goal",
+        at=NOW,
+    )
+    if not changes:
+        return base
+    return base.extend(
+        (criterion(text="the changelog names the field"),),
+        reason=changes.get("reason", "changelog"),
+        at=NOW,
+    )
+
+
 @pytest.mark.parametrize(
     "record",
-    [spec(), ref(), assignment(), plan(), event(), report()],
+    [
+        spec(),
+        ref(),
+        assignment(),
+        plan(),
+        event(),
+        report(),
+        criterion(),
+        criteria_revision(),
+        criteria_revision(reason="changelog"),
+    ],
     ids=lambda value: type(value).__name__,
 )
 def test_every_record_round_trips_exactly(record) -> None:

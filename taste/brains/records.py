@@ -32,6 +32,8 @@ __all__ = [
     "ArtifactRef",
     "ArtifactSpec",
     "Assignment",
+    "CriteriaRevision",
+    "Criterion",
     "LifecycleEvent",
     "PlanRevision",
     "WorkerReport",
@@ -1020,5 +1022,282 @@ class WorkerReport(_JsonRecord):
                 raw["uncertainty_reasons"], "WorkerReport.uncertainty_reasons"
             ),
             summary=raw["summary"],
+            metadata=raw["metadata"],
+        )
+
+
+# --------------------------------------------------------------- criteria
+
+
+def _criterion_id(goal_id: str, text: str, parent_id: str | None) -> str:
+    """Derive a criterion's identity from the obligation it states.
+
+    Supplied ids cannot be trusted.  A model asked to "refine" one criterion
+    can emit a different obligation under the same id, and a retention check
+    over ids would then pass on a set that no longer holds the original.  A
+    derived id is unforgeable in the only sense that matters here: the same
+    obligation always yields the same id, and altered text yields a different
+    one that fails retention.
+    """
+    payload = json.dumps(
+        {"goal_id": goal_id, "text": text, "parent_id": parent_id},
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class Criterion(_JsonRecord):
+    """One obligation the goal is judged against, identified by its content.
+
+    ``parent_id`` is the criterion this one refines.  A refinement may only
+    make satisfaction harder, so the parent is never retired: whatever the
+    child claims, the parent is still evaluated.  That is what makes a
+    mislabelled regression inert rather than merely detected.
+    """
+
+    SCHEMA: ClassVar[str] = _schema("Criterion")
+
+    goal_id: str
+    text: str
+    parent_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    criterion_id: str = field(init=False, default="")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "goal_id", _stable_id(self.goal_id, "goal_id"))
+        object.__setattr__(self, "text", _stable_id(self.text, "text"))
+        if self.parent_id is not None:
+            object.__setattr__(self, "parent_id", _checked_digest(self.parent_id, "parent_id"))
+        object.__setattr__(self, "metadata", _freeze_map(self.metadata, "metadata"))
+        object.__setattr__(
+            self, "criterion_id", _criterion_id(self.goal_id, self.text, self.parent_id)
+        )
+
+    @classmethod
+    def derive(
+        cls,
+        *,
+        goal_id: str,
+        text: str,
+        parent_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Criterion:
+        return cls(goal_id=goal_id, text=text, parent_id=parent_id, metadata=metadata or {})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.SCHEMA,
+            "criterion_id": self.criterion_id,
+            "goal_id": self.goal_id,
+            "text": self.text,
+            "parent_id": self.parent_id,
+            "metadata": _thaw_json(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> Criterion:
+        raw = _expect_object(value, "Criterion")
+        _check_fields(
+            raw,
+            schema=cls.SCHEMA,
+            required={"criterion_id", "goal_id", "text", "parent_id", "metadata"},
+        )
+        item = cls(
+            goal_id=raw["goal_id"],
+            text=raw["text"],
+            parent_id=raw["parent_id"],
+            metadata=raw["metadata"],
+        )
+        if raw["criterion_id"] != item.criterion_id:
+            raise ValueError("Criterion.criterion_id is derived and does not match its content")
+        return item
+
+
+@dataclass(frozen=True, slots=True)
+class CriteriaRevision(_JsonRecord):
+    """The standing criteria for one goal, at one revision.
+
+    Append-only by construction.  ``extend`` is the only way forward and it
+    cannot drop anything, so "the bar moved" is not a state this record can
+    represent.  Sequence 0 is derived verbatim from the immutable ``Goal``, so
+    the goal record itself is never rewritten.
+    """
+
+    SCHEMA: ClassVar[str] = _schema("CriteriaRevision")
+
+    revision_id: str
+    goal_id: str
+    sequence: int
+    criteria: tuple[Criterion, ...]
+    reason: str
+    at: str
+    parent_revision_id: str | None = None
+    retained_ids: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "revision_id", _stable_id(self.revision_id, "revision_id"))
+        object.__setattr__(self, "goal_id", _stable_id(self.goal_id, "goal_id"))
+        object.__setattr__(self, "sequence", _expect_int(self.sequence, "sequence"))
+        if not isinstance(self.criteria, tuple) or not self.criteria:
+            raise ValueError("criteria must be a non-empty tuple")
+        for item in self.criteria:
+            if not isinstance(item, Criterion):
+                raise ValueError("criteria must contain Criterion records")
+            if item.goal_id != self.goal_id:
+                raise ValueError(f"criterion {item.criterion_id!r} belongs to another goal")
+        ids = [item.criterion_id for item in self.criteria]
+        if len(set(ids)) != len(ids):
+            raise ValueError("criteria must not repeat a criterion_id")
+        known = set(ids)
+        for item in self.criteria:
+            if item.parent_id is not None and item.parent_id not in known:
+                raise ValueError(
+                    f"criterion {item.criterion_id!r} refines a parent that is not present"
+                )
+        if self.sequence == 0:
+            if self.parent_revision_id is not None:
+                raise ValueError("the genesis revision has no parent")
+            if self.retained_ids:
+                raise ValueError("the genesis revision retains nothing earlier")
+        elif self.parent_revision_id is None:
+            raise ValueError("a later revision must name its parent revision")
+        # Append-only has to be a property of the record, not only of the
+        # operation that built it.  ``extend`` cannot drop anything, but a
+        # record decoded from the wire never went through ``extend``, and the
+        # parent is not reachable from the child to compare against.  So the
+        # child carries the exact id set that was standing in its parent and
+        # proves it still holds every one of them.
+        retained = tuple(
+            _checked_digest(item, "retained_ids") for item in _string_tuple(self.retained_ids, "retained_ids")
+        )
+        object.__setattr__(self, "retained_ids", retained)
+        if self.sequence > 0 and not retained:
+            raise ValueError("a later revision must record what it retains")
+        missing = [item for item in retained if item not in known]
+        if missing:
+            raise ValueError(
+                "criteria are append-only: this revision drops "
+                f"{len(missing)} standing criterion(s)"
+            )
+        object.__setattr__(self, "reason", _expect_str(self.reason, "reason"))
+        if not self.reason.strip():
+            raise ValueError("a criteria revision must state a reason")
+        object.__setattr__(self, "at", _timestamp(self.at, "at"))
+        if self.parent_revision_id is not None:
+            object.__setattr__(
+                self, "parent_revision_id", _stable_id(self.parent_revision_id, "parent_revision_id")
+            )
+        object.__setattr__(self, "metadata", _freeze_map(self.metadata, "metadata"))
+
+    # ------------------------------------------------------------ building
+
+    @classmethod
+    def genesis(cls, goal: Any, *, at: str) -> CriteriaRevision:
+        """Derive sequence 0 verbatim from an immutable goal."""
+        goal_id = _stable_id(getattr(goal, "goal_id", None), "goal.goal_id")
+        texts = getattr(goal, "success_criteria", ())
+        if not isinstance(texts, tuple) or not texts:
+            raise ValueError("goal.success_criteria must be a non-empty tuple")
+        criteria = tuple(
+            Criterion.derive(goal_id=goal_id, text=text, parent_id=None) for text in texts
+        )
+        return cls(
+            revision_id=f"criteria.{goal_id}.0",
+            goal_id=goal_id,
+            sequence=0,
+            criteria=criteria,
+            reason="derived from the goal",
+            at=at,
+        )
+
+    def extend(
+        self, additions: tuple[Criterion, ...], *, reason: str, at: str
+    ) -> CriteriaRevision:
+        """Append obligations.  Nothing already standing may be released."""
+        if not isinstance(additions, tuple) or not additions:
+            raise ValueError("a revision must add at least one criterion")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("a criteria revision must state a reason")
+        known = {item.criterion_id for item in self.criteria}
+        for item in additions:
+            if not isinstance(item, Criterion):
+                raise ValueError("additions must be Criterion records")
+            if item.goal_id != self.goal_id:
+                raise ValueError(f"criterion {item.criterion_id!r} belongs to another goal")
+            if item.criterion_id in known:
+                raise ValueError(f"criterion {item.criterion_id!r} is already standing")
+            if item.parent_id is not None and item.parent_id not in known:
+                raise ValueError(
+                    f"criterion {item.criterion_id!r} refines a parent that is not standing"
+                )
+        sequence = self.sequence + 1
+        return CriteriaRevision(
+            revision_id=f"criteria.{self.goal_id}.{sequence}",
+            goal_id=self.goal_id,
+            sequence=sequence,
+            criteria=self.criteria + additions,
+            reason=reason,
+            at=at,
+            parent_revision_id=self.revision_id,
+            retained_ids=tuple(item.criterion_id for item in self.criteria),
+        )
+
+    def retains(self, earlier: CriteriaRevision) -> bool:
+        """Whether every obligation standing in ``earlier`` still stands."""
+        mine = {item.criterion_id for item in self.criteria}
+        return all(item.criterion_id in mine for item in earlier.criteria)
+
+    # ---------------------------------------------------------------- wire
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.SCHEMA,
+            "revision_id": self.revision_id,
+            "goal_id": self.goal_id,
+            "sequence": self.sequence,
+            "criteria": [item.to_dict() for item in self.criteria],
+            "reason": self.reason,
+            "at": self.at,
+            "parent_revision_id": self.parent_revision_id,
+            "retained_ids": list(self.retained_ids),
+            "metadata": _thaw_json(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> CriteriaRevision:
+        raw = _expect_object(value, "CriteriaRevision")
+        _check_fields(
+            raw,
+            schema=cls.SCHEMA,
+            required={
+                "revision_id",
+                "goal_id",
+                "sequence",
+                "criteria",
+                "reason",
+                "at",
+                "parent_revision_id",
+                "retained_ids",
+                "metadata",
+            },
+        )
+        criteria = tuple(
+            Criterion.from_dict(item)
+            for item in _expect_array(raw["criteria"], "CriteriaRevision.criteria")
+        )
+        return cls(
+            revision_id=raw["revision_id"],
+            goal_id=raw["goal_id"],
+            sequence=raw["sequence"],
+            criteria=criteria,
+            reason=raw["reason"],
+            at=raw["at"],
+            parent_revision_id=raw["parent_revision_id"],
+            retained_ids=tuple(_expect_array(raw["retained_ids"], "retained_ids")),
             metadata=raw["metadata"],
         )
