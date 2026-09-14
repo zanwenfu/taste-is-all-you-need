@@ -213,7 +213,8 @@ reproduces the original kernel's event stream and commit chain exactly —
 ```python
 Kernel(workspace=ws, config=HarnessConfig.arm("full"))   # everything on
 Kernel(workspace=ws)                                      # the original kernel
-compose_central_runtime(repo, session, goal).cycle()     # the multi-process runtime; library only, no CLI yet
+compose_central_runtime(repo, session, goal).run(          # the multi-process runtime; library only, no CLI yet
+    max_generations=8, wall_clock_seconds=900.0)           # bounds are required; an unbudgeted goal has no other limit
 ```
 
 ## Quickstart with a real Claude
@@ -322,7 +323,6 @@ Everything on the "held back" list can be added without breaking the kernel's pu
 **Known, not yet fixed:**
 
 - **`git reset --hard` inside a worker worktree is undetected.** It lands on a commit memstore did create, so the metadata check passes while the branch forks backwards. A forward-only ref check catches it and also refuses the coordinator's own recovery from a rewound control branch (three tests prove that recovery), so it was backed out until repair paths can opt out.
-- **No give-up guard.** An impossible goal is replanned until the cycle cap; the invalid-report trigger fires and the assignment is reissued anyway. Budget exhaustion raises `BudgetBlocked` out of `cycle()` instead of returning a status.
 - **`memstore.Store` is one process wide.** The repo lock is `flock`, re-entrant within a process, so it excludes other processes and not other threads; two threads checkpointing different branches on one `Store` lose git notes. Production runs one worker per process. The API does not say so yet.
 
 ## Run this against your own agent

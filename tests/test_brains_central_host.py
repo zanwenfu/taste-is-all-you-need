@@ -11,7 +11,7 @@ pytest.importorskip("claude_agent_sdk", reason="the central host imports the wor
 
 from taste.brains.central_communication import CentralCommunication
 from taste.brains.central_host import CentralRuntimeHost, compose_central_runtime
-from taste.brains.central_planner import CentralPlanner, Goal
+from taste.brains.central_planner import CentralPlanner, Goal, PlannerTransportError
 from taste.brains.central_runtime import CentralRuntime
 from taste.brains.communication import Communicator
 from taste.brains.planner_transport import PLANNER_RECEIPT_BRANCH, LLMPlannerTransport
@@ -401,3 +401,63 @@ def test_partial_composition_failure_releases_new_branches(tmp_path: Path) -> No
     assert store.view("integration").holder is None
     other_store.close()
     store.close()
+
+
+def test_host_run_reaches_the_composed_planner(tmp_path: Path) -> None:
+    """``run()`` is wired to the real composed stack, not a stub.
+
+    ``cycle()`` advances one step, so a caller holding only the host had no
+    way to reach a conclusion; this is the seam that makes
+    ``compose_central_runtime(...).run(...)`` the whole interface. The
+    composition refuses an injected transport beside a planner llm, so the
+    reachable claim here is that the driver arrives at the genuine planner
+    boundary -- where this llm declines -- rather than short-circuiting.
+    """
+    root = repository(tmp_path)
+    host = compose_central_runtime(
+        root,
+        "host-run",
+        goal(),
+        planner_llm=NoCallPlannerLLM(),
+        launcher=NoLaunchLauncher(),
+    )
+    try:
+        with pytest.raises(PlannerTransportError) as caught:
+            host.run(max_generations=1, wall_clock_seconds=5.0)
+        assert "composition must not call the planner model" in str(caught.value)
+        # Nothing was concluded, so no ending was recorded.
+        assert host.outcome() is None
+    finally:
+        host.close()
+
+
+def test_a_closed_host_refuses_to_run_or_report(tmp_path: Path) -> None:
+    root = repository(tmp_path)
+    host = compose_central_runtime(
+        root,
+        "host-closed",
+        goal(),
+        planner_llm=NoCallPlannerLLM(),
+        launcher=NoLaunchLauncher(),
+    )
+    host.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        host.run(max_generations=1, wall_clock_seconds=5.0)
+    with pytest.raises(RuntimeError, match="closed"):
+        host.outcome()
+
+
+def test_host_bounds_are_required(tmp_path: Path) -> None:
+    root = repository(tmp_path)
+    host = compose_central_runtime(
+        root,
+        "host-bounds",
+        goal(),
+        planner_llm=NoCallPlannerLLM(),
+        launcher=NoLaunchLauncher(),
+    )
+    try:
+        with pytest.raises(TypeError):
+            host.run()  # type: ignore[call-arg]
+    finally:
+        host.close()

@@ -23,7 +23,7 @@ from typing import Any
 
 from taste.brains.central_communication import CentralCommunication
 from taste.brains.central_planner import CentralPlanner, Goal, PlannerTransport
-from taste.brains.central_runtime import CentralRuntime, CycleOutcome
+from taste.brains.central_runtime import CentralRuntime, CycleOutcome, GoalOutcome
 from taste.brains.communication import Communicator
 from taste.brains.planner_transport import PLANNER_RECEIPT_BRANCH, LLMPlannerTransport
 from taste.brains.supervisor import (
@@ -123,6 +123,37 @@ class CentralRuntimeHost:
             if self._closed:
                 raise RuntimeError("central runtime host is closed")
             return self.runtime.cycle()
+
+    def run(
+        self,
+        *,
+        max_generations: int,
+        wall_clock_seconds: float,
+        between_cycles: Any = None,
+        monotonic: Any = None,
+    ) -> GoalOutcome:
+        """Drive the goal to an ending and return the durable record of it.
+
+        The bounds are required here for the same reason they are required on
+        the runtime: an unbudgeted goal has no other limit, and a default
+        would choose a stopping policy on the caller's behalf.
+        """
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("central runtime host is closed")
+            return self.runtime.run(
+                max_generations=max_generations,
+                wall_clock_seconds=wall_clock_seconds,
+                between_cycles=between_cycles,
+                monotonic=monotonic,
+            )
+
+    def outcome(self) -> GoalOutcome | None:
+        """The recorded ending for this goal, if the run already finished."""
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("central runtime host is closed")
+            return self.runtime.outcome()
 
     def close(self) -> None:
         """Release exactly the resources opened by the composition factory."""
