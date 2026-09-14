@@ -22,8 +22,10 @@ from taste.brains.central_runtime import (
     CentralRuntime,
     CoordinatorCorruption,
     ExternalSignal,
+    GoalOutcome,
     RuntimeTrigger,
     SharedRuntimeStateError,
+    _outcome_path,
 )
 from taste.brains.contract import Contract
 from taste.brains.monitor import Judgement, MonitorBrain, Severity, TerminalDecision
@@ -190,6 +192,10 @@ def proposal(
         metadata={},
     )
     return json.dumps(response, sort_keys=True)
+
+
+def one_assignment_response_runtime(request: PlanningRequest, prompt: str):
+    return (assignment_for(request, "build", "worker-build", "product.txt"),)
 
 
 def complete_response(_request: PlanningRequest, prompt: str) -> str:
@@ -1225,3 +1231,222 @@ def test_three_worker_restart_failure_conflict_and_completion_acceptance(store: 
             reachable = store.state(state_id)
             assert reachable.id == state_id
             assert store.backend.tree_of(reachable.id)
+
+
+def settle(runtime: CentralRuntime, launcher: FakeLauncher, assignment_id: str) -> None:
+    """Report and reap ``assignment_id`` if, and only if, it is live now."""
+    plan = runtime.planner.current_plan(runtime.goal.goal_id)
+    if plan is None:
+        return
+    live = [
+        item
+        for item in runtime.supervisor.runs()
+        if item.assignment.assignment_id == assignment_id
+        and item.assignment.generation == plan.generation
+    ]
+    if not live:
+        return
+    run = live[0]
+    handle = launcher.handles.get(run.run_id)
+    if handle is None or handle.exit is not None:
+        return
+    install_report(runtime, assignment_id)
+    handle.exit = ProcessExit(exit_code=0, reaped=True)
+
+
+
+# ------------------------------------------------------------ run() and exit
+#
+# cycle() advances one step and returns; nothing in the repository drove it to
+# a conclusion, so a goal had no ending and no record of one.  run() is that
+# driver, and GoalOutcome is the durable answer to "what was asked, what was
+# delivered, and on what evidence did it stop".
+#
+# Being stuck is not an ending.  A blocked dependency or an invalid report is
+# a reason to replan -- that is what the central brain is for -- so the only
+# stops are completion, a hard bound, and a budget that can no longer be
+# proven.
+
+
+def test_run_drives_cycles_until_the_plan_is_complete(store: Store) -> None:
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            return (assignment_for(request, "build", "worker-build", "product.txt"),)
+        return complete_response(request, prompt)
+
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(), ScriptedTransport(respond), launcher)
+
+    def advance() -> None:
+        settle(runtime, launcher, "build")
+
+    outcome = runtime.run(max_generations=5, wall_clock_seconds=60.0, between_cycles=advance)
+    assert outcome.stop_reason == "complete"
+    assert outcome.complete
+    assert outcome.generations >= 2
+
+
+def test_the_outcome_is_durable_and_names_every_criterion(store: Store) -> None:
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            return (assignment_for(request, "build", "worker-build", "product.txt"),)
+        return complete_response(request, prompt)
+
+    launcher = FakeLauncher()
+    goal = simple_goal()
+    runtime, _ = stack(store, goal, ScriptedTransport(respond), launcher)
+
+    def advance() -> None:
+        settle(runtime, launcher, "build")
+
+    outcome = runtime.run(max_generations=5, wall_clock_seconds=60.0, between_cycles=advance)
+
+    # Read it back through the accessor rather than a hand-built path: the
+    # goal key is a digest the layer owns, and the claim under test is that
+    # the outcome survives the round trip, not where it happens to live.
+    restored = runtime.outcome()
+    assert restored is not None
+    assert restored == outcome
+    reopened, _ = stack(store, goal, ScriptedTransport(respond), launcher, shared=None)
+    assert GoalOutcome.from_json(
+        reopened.control.head.read(_outcome_path(goal.goal_id))
+    ) == outcome
+    standing = runtime.planner.criteria(goal.goal_id)
+    assert {item["criterion_id"] for item in restored.assessment} == {
+        item.criterion_id for item in standing.criteria
+    }
+    assert all(item["verdict"] == "met" for item in restored.assessment)
+    assert restored.criteria == standing
+
+
+def test_run_stops_at_the_generation_bound_without_claiming_completion(store: Store) -> None:
+    def respond(request: PlanningRequest, prompt: str):
+        return (
+            assignment_for(
+                request, f"build-{request.generation}", f"worker-{request.generation}", "product.txt"
+            ),
+        )
+
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(), ScriptedTransport(respond), launcher)
+
+    def advance() -> None:
+        for run in runtime.supervisor.runs():
+            handle = launcher.handles.get(run.run_id)
+            if handle is not None:
+                handle.exit = ProcessExit(exit_code=1, reaped=True)
+
+    outcome = runtime.run(max_generations=3, wall_clock_seconds=60.0, between_cycles=advance)
+    assert outcome.stop_reason == "generation_bound"
+    assert not outcome.complete
+    assert outcome.generations == 3
+
+
+def test_run_stops_on_the_wall_clock(store: Store) -> None:
+    def respond(request: PlanningRequest, prompt: str):
+        return (
+            assignment_for(
+                request, f"build-{request.generation}", f"worker-{request.generation}", "product.txt"
+            ),
+        )
+
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(), ScriptedTransport(respond), launcher)
+    ticks = iter([0.0, 0.0, 1.0, 99.0, 99.0, 99.0, 99.0, 99.0])
+
+    outcome = runtime.run(
+        max_generations=50,
+        wall_clock_seconds=10.0,
+        monotonic=lambda: next(ticks, 99.0),
+    )
+    assert outcome.stop_reason == "wall_clock"
+    assert not outcome.complete
+
+
+def test_a_budget_that_cannot_be_proven_stops_the_run(store: Store) -> None:
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            return (
+                assignment_for(
+                    request, "build", "worker-build", "product.txt", budget_usd=1.0,
+                ),
+            )
+        return complete_response(request, prompt)
+
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(budget_usd=5.0), ScriptedTransport(respond), launcher)
+
+    def advance() -> None:
+        plan = runtime.planner.current_plan(runtime.goal.goal_id)
+        if plan is None:
+            return
+        live = [
+            item
+            for item in runtime.supervisor.runs()
+            if item.assignment.assignment_id == "build"
+            and item.assignment.generation == plan.generation
+        ]
+        if not live:
+            return
+        handle = launcher.handles.get(live[0].run_id)
+        if handle is None or handle.exit is not None:
+            return
+        install_report(runtime, "build", cost_usd=None)
+        handle.exit = ProcessExit(exit_code=0, reaped=True)
+
+    outcome = runtime.run(max_generations=5, wall_clock_seconds=60.0, between_cycles=advance)
+    assert outcome.stop_reason == "budget_blocked"
+    assert not outcome.complete
+
+
+def test_being_stuck_replans_rather_than_stopping(store: Store) -> None:
+    seen: list[int] = []
+
+    def respond(request: PlanningRequest, prompt: str):
+        seen.append(request.generation)
+        if request.generation >= 3:
+            return complete_response(request, prompt)
+        return (
+            assignment_for(
+                request, f"build-{request.generation}", f"worker-{request.generation}", "product.txt"
+            ),
+        )
+
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(), ScriptedTransport(respond), launcher)
+
+    def advance() -> None:
+        for run in runtime.supervisor.runs():
+            handle = launcher.handles.get(run.run_id)
+            if handle is not None and handle.exit is None:
+                handle.exit = ProcessExit(exit_code=1, reaped=True)
+
+    outcome = runtime.run(max_generations=6, wall_clock_seconds=60.0, between_cycles=advance)
+    # A failed worker is a reason to replan, not a reason to give up.
+    assert len(seen) >= 3
+    assert outcome.stop_reason in {"complete", "generation_bound"}
+
+
+def test_bounds_are_required(store: Store) -> None:
+    runtime, _ = stack(
+        store, simple_goal(), ScriptedTransport(one_assignment_response_runtime), FakeLauncher()
+    )
+    with pytest.raises(TypeError):
+        runtime.run()  # type: ignore[call-arg]
+
+
+def test_a_second_run_replays_the_recorded_outcome(store: Store) -> None:
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            return (assignment_for(request, "build", "worker-build", "product.txt"),)
+        return complete_response(request, prompt)
+
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(), ScriptedTransport(respond), launcher)
+
+    def advance() -> None:
+        settle(runtime, launcher, "build")
+
+    first = runtime.run(max_generations=5, wall_clock_seconds=60.0, between_cycles=advance)
+    again = runtime.run(max_generations=5, wall_clock_seconds=60.0)
+    assert again == first

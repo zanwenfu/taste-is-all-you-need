@@ -20,6 +20,7 @@ import json
 import math
 import re
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -35,7 +36,7 @@ from taste.brains.central_planner import (
     StalePlanningWorld,
 )
 from taste.brains.delivery import DeliveryIdentityConflict, DeliveryRecoveryRequired
-from taste.brains.records import Assignment, PlanRevision, WorkerReport
+from taste.brains.records import Assignment, CriteriaRevision, PlanRevision, WorkerReport
 from taste.brains.supervisor import (
     CentralSupervisor,
     DeliveryRejected,
@@ -55,6 +56,7 @@ __all__ = [
     "CoordinatorError",
     "CycleOutcome",
     "ExternalSignal",
+    "GoalOutcome",
     "RuntimeTrigger",
     "SharedRuntimeStateError",
 ]
@@ -165,6 +167,10 @@ def _goal_root(goal_id: str) -> str:
 
 def _cycle_root(goal_id: str, sequence: int, cycle_id: str) -> str:
     return f"{_goal_root(goal_id)}/cycles/{sequence:08d}-{_key(cycle_id)}"
+
+
+def _outcome_path(goal_id: str) -> str:
+    return f"{_goal_root(goal_id)}/outcome.json"
 
 
 def _index_path(goal_id: str) -> str:
@@ -331,6 +337,96 @@ class BudgetState:
             "worker_spent_usd": self.worker_spent_usd,
             "planner_spent_usd": self.planner_spent_usd,
         }
+
+
+GOAL_OUTCOME_SCHEMA = "taste.brains/GoalOutcome/1"
+
+
+@dataclass(frozen=True, slots=True)
+class GoalOutcome:
+    """Why a goal stopped, and what it owes its answer to.
+
+    ``cycle()`` advances one step; nothing said when a goal was over.  This is
+    that answer, written once and durably: the obligations that were standing,
+    the verdict on each with its evidence, and the exact reason the loop
+    ended.  A run that stopped at a bound says so rather than implying success
+    by omission.
+    """
+
+    goal_id: str
+    stop_reason: str
+    complete: bool
+    generations: int
+    cycles: int
+    completion_reason: str = ""
+    criteria: CriteriaRevision | None = None
+    assessment: tuple[Mapping[str, Any], ...] = ()
+    delivered_assignment_ids: tuple[str, ...] = ()
+    budget: BudgetState = BudgetState(None, 0.0, 0.0)
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": GOAL_OUTCOME_SCHEMA,
+            "goal_id": self.goal_id,
+            "stop_reason": self.stop_reason,
+            "complete": self.complete,
+            "generations": self.generations,
+            "cycles": self.cycles,
+            "completion_reason": self.completion_reason,
+            "criteria": None if self.criteria is None else self.criteria.to_dict(),
+            "assessment": [_thaw(dict(item)) for item in self.assessment],
+            "delivered_assignment_ids": list(self.delivered_assignment_ids),
+            "budget": {
+                "limit_usd": self.budget.limit_usd,
+                "known_spent_usd": self.budget.known_spent_usd,
+                "reserved_usd": self.budget.reserved_usd,
+                "unknown_run_ids": list(self.budget.unknown_run_ids),
+                "unbounded_live_run_ids": list(self.budget.unbounded_live_run_ids),
+                "unknown_planner_attempt_ids": list(self.budget.unknown_planner_attempt_ids),
+                "worker_spent_usd": self.budget.worker_spent_usd,
+                "planner_spent_usd": self.budget.planner_spent_usd,
+            },
+            "detail": self.detail,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False, indent=1, sort_keys=True) + "\n"
+
+    @classmethod
+    def from_dict(cls, value: Any) -> GoalOutcome:
+        raw = dict(value)
+        if raw.get("schema") != GOAL_OUTCOME_SCHEMA:
+            raise ValueError("GoalOutcome.schema is wrong")
+        budget = raw["budget"]
+        return cls(
+            goal_id=raw["goal_id"],
+            stop_reason=raw["stop_reason"],
+            complete=raw["complete"],
+            generations=raw["generations"],
+            cycles=raw["cycles"],
+            completion_reason=raw["completion_reason"],
+            criteria=(
+                None if raw["criteria"] is None else CriteriaRevision.from_dict(raw["criteria"])
+            ),
+            assessment=tuple(MappingProxyType(dict(item)) for item in raw["assessment"]),
+            delivered_assignment_ids=tuple(raw["delivered_assignment_ids"]),
+            budget=BudgetState(
+                budget["limit_usd"],
+                budget["known_spent_usd"],
+                budget["reserved_usd"],
+                tuple(budget["unknown_run_ids"]),
+                tuple(budget["unbounded_live_run_ids"]),
+                tuple(budget["unknown_planner_attempt_ids"]),
+                budget["worker_spent_usd"],
+                budget["planner_spent_usd"],
+            ),
+            detail=raw["detail"],
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> GoalOutcome:
+        return cls.from_dict(json.loads(text))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1704,6 +1800,102 @@ class CentralRuntime:
             raise
         self._finish_planner_operation(base_id, operation_id, "applied")
         return plan
+
+    def run(
+        self,
+        *,
+        max_generations: int,
+        wall_clock_seconds: float,
+        between_cycles: Any = None,
+        monotonic: Any = None,
+    ) -> GoalOutcome:
+        """Drive cycles until the goal is answered, then record why it stopped.
+
+        The bounds are required.  An unbudgeted goal has no other limit, and a
+        default here would quietly choose a policy on the caller's behalf.
+
+        Being stuck is not a stop.  A blocked dependency or a rejected report
+        is a reason to replan, which is what the central brain exists to do,
+        so the loop keeps going until the plan is complete, a hard bound is
+        reached, or the budget can no longer be proven.
+        """
+        if not isinstance(max_generations, int) or max_generations < 1:
+            raise ValueError("max_generations must be a positive integer")
+        wall_clock_seconds = float(wall_clock_seconds)
+        if not math.isfinite(wall_clock_seconds) or wall_clock_seconds <= 0:
+            raise ValueError("wall_clock_seconds must be a positive finite number")
+        clock = monotonic or time.monotonic
+
+        with self._lock:
+            recorded = self.outcome()
+            if recorded is not None:
+                return recorded
+
+        started = clock()
+        cycles = 0
+        last: CycleOutcome | None = None
+        stop_reason = "generation_bound"
+        detail = ""
+        while True:
+            if clock() - started >= wall_clock_seconds:
+                stop_reason = "wall_clock"
+                detail = f"the run reached its {wall_clock_seconds:g}s bound"
+                break
+            outcome = self.cycle()
+            cycles += 1
+            last = outcome
+            if outcome.status == "budget_blocked":
+                stop_reason = "budget_blocked"
+                detail = "the budget could no longer be proven"
+                break
+            if outcome.complete:
+                stop_reason = "complete"
+                detail = outcome.plan.completion_reason
+                break
+            if outcome.plan.generation >= max_generations:
+                stop_reason = "generation_bound"
+                detail = f"the run reached its {max_generations} generation bound"
+                break
+            if between_cycles is not None:
+                between_cycles()
+        return self._record_outcome(last, stop_reason, detail, cycles)
+
+    def outcome(self) -> GoalOutcome | None:
+        """The recorded answer for this goal, if the run already ended."""
+        raw = self.control.head.read(_outcome_path(self.goal.goal_id))
+        if raw is None:
+            return None
+        try:
+            return GoalOutcome.from_json(raw)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise CoordinatorCorruption("durable goal outcome is malformed") from exc
+
+    def _record_outcome(
+        self, last: CycleOutcome | None, stop_reason: str, detail: str, cycles: int
+    ) -> GoalOutcome:
+        plan = None if last is None else last.plan
+        criteria = self.planner.criteria(self.goal.goal_id)
+        outcome = GoalOutcome(
+            goal_id=self.goal.goal_id,
+            stop_reason=stop_reason,
+            complete=bool(last is not None and last.complete),
+            generations=0 if plan is None else plan.generation,
+            cycles=cycles,
+            completion_reason="" if plan is None else plan.completion_reason,
+            criteria=criteria,
+            assessment=() if plan is None else tuple(plan.assessment),
+            delivered_assignment_ids=(
+                () if last is None else tuple(last.delivered_assignment_ids)
+            ),
+            budget=BudgetState(None, 0.0, 0.0) if last is None else last.budget,
+            detail=detail,
+        )
+        with self._lock:
+            self.control.checkpoint(
+                f"central outcome: {self.goal.goal_id}",
+                records={_outcome_path(self.goal.goal_id): outcome.to_dict()},
+            )
+        return outcome
 
     def cycle(self) -> CycleOutcome:
         """Advance or recover one coordinator cycle without waiting for workers.
