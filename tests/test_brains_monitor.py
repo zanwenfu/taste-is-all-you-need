@@ -27,6 +27,7 @@ pytest.importorskip("claude_agent_sdk", reason="the brain layer needs claude-age
 
 from taste.brains.contract import Contract
 from taste.brains.monitor import (
+    _STATE_SCHEMA,
     Judgement,
     MonitorBrain,
     Severity,
@@ -526,7 +527,7 @@ def test_a_legacy_integer_cursor_is_not_trusted_after_upgrade(store: Store) -> N
     assert not legacy_path.exists()
     assert monitor._state_path().exists()
     migrated = json.loads(monitor._state_path().read_text())
-    assert migrated["schema"] == "taste.brains/MonitorState/3"
+    assert migrated["schema"] == _STATE_SCHEMA
     assert migrated["contract_digest"] == monitor.contract_digest
     assert migrated["terminal_assessments"] == []
     brain.close()
@@ -1064,7 +1065,7 @@ def test_schema_two_sidecar_is_atomically_upgraded_without_inventing_a_current_r
 
     restarted = MonitorBrain(store, brain.contract, ScriptedTerminalJudge())
     migrated = json.loads(path.read_text())
-    assert migrated["schema"] == "taste.brains/MonitorState/3"
+    assert migrated["schema"] == _STATE_SCHEMA
     assert migrated["terminal_assessments"] == []
     assert restarted.report()["current"] is None
     brain.close()
@@ -1254,4 +1255,69 @@ def test_certification_is_not_blocked_by_events_the_monitor_never_judges(
 
     assert assessment.failure == "", f"certification failed closed: {assessment.failure}"
     assert judge.terminal_calls, "the terminal judge was never consulted"
+    brain.close()
+
+
+def test_a_budget_receipt_written_after_the_final_drain_does_not_block_certification(
+    store: Store,
+) -> None:
+    """The runtime keeps writing its own ledger after the monitor stops.
+
+    Measured live, every budgeted run: the runtime drains the monitor, then
+    ``_disconnect_and_collect_tail`` records the ``connection_outcome`` budget
+    receipt, then certifies. The monitor had judged 39 judgeable turns and the
+    state carried 40, so the preflight failed closed with "terminal State
+    contains events that were not completely judged" -- severity LOST, on a
+    worker that had written its artifact correctly.
+
+    This is the same defect as
+    ``test_certification_is_not_blocked_by_events_the_monitor_never_judges``,
+    one layer over: there the two sides counted different vocabularies, here
+    they count the same vocabulary at different times. A receipt is the
+    harness recording its own bookkeeping, not the worker's work, so it is
+    not judgeable and cannot move the comparison.
+    """
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.wal.intent("Bash", "reviewed", {})
+    brain.branch.turn(kind="sdk_message", message_type="AssistantMessage", seq="work")
+
+    judge = ScriptedTerminalJudge()
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=100)
+    assert asyncio.run(monitor.drain(FakeClient(), final=True))
+
+    # Exactly what the runtime does between the final drain and certification.
+    brain.branch.turn(
+        kind="runtime_budget_receipt",
+        run_id="run-1",
+        event="connection_outcome",
+        receipt_sha256="sha256:" + "0" * 64,
+        sequence=5,
+    )
+    work_state = brain.checkpoint("terminal work with a post-drain receipt")
+    assessment = asyncio.run(monitor.certify_terminal(work_state, context={}))
+
+    assert assessment.failure == "", f"certification failed closed: {assessment.failure}"
+    assert judge.terminal_calls, "the terminal judge was never consulted"
+    brain.close()
+
+
+def test_the_workers_own_actions_remain_judgeable(store: Store) -> None:
+    """Narrowing must not quietly stop judging what the worker actually did."""
+    import asyncio
+
+    brain = SubBrain(store, a_contract())
+    brain.install_contract()
+    brain.wal.intent("Bash", "t1", {"command": "pytest"})
+    brain.wal.result("Bash", "t1", ok=True, summary="ok")
+
+    judge = ScriptedTerminalJudge()
+    monitor = MonitorBrain(store, brain.contract, judge, batch_size=100)
+    asyncio.run(monitor.drain(FakeClient(), final=True))
+
+    # A tool intent and its result are the worker's behaviour, not bookkeeping.
+    seen = [event["kind"] for event in monitor.observations()]
+    assert "tool_intent" in seen and "tool_result" in seen
     brain.close()

@@ -35,6 +35,7 @@ import os
 import re
 import signal
 import sys
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
@@ -419,6 +420,7 @@ async def execute_worker(
         try:
             opened = store_factory(config.repo_root, config.session)
         except Exception:
+            traceback.print_exc()
             return WorkerExitCode.INFRA_FAILURE
     elif opened.root != config.repo_root or opened.session != config.session:
         return WorkerExitCode.INPUT_REJECTED
@@ -431,7 +433,12 @@ async def execute_worker(
                 raise EntrypointInputError(
                     "budgeted workers cannot use an injected SDK client factory"
                 )
-        except EntrypointInputError:
+        except EntrypointInputError as exc:
+            # The reason is the whole value of this check. Measured: a live
+            # worker exited 65 and 70 with zero bytes on any stream and no
+            # durable record, so diagnosing it meant calling this loader by
+            # hand from a saved repository. An exit code is not evidence.
+            print(f"worker input rejected: {exc}", file=sys.stderr, flush=True)
             outcome = WorkerExitCode.INPUT_REJECTED
         else:
             # Credential/pricing validation precedes the worker lease. A
@@ -516,6 +523,11 @@ async def execute_worker(
                             except ContractMismatch:
                                 outcome = WorkerExitCode.INPUT_REJECTED
                             except Exception:
+                                # Same reason: this bare catch turned every
+                                # worker fault into an opaque 70 with nothing
+                                # written anywhere. The supervisor inherits
+                                # stderr precisely so this is visible.
+                                traceback.print_exc()
                                 outcome = WorkerExitCode.RUNTIME_FAILURE
                             else:
                                 outcome = (

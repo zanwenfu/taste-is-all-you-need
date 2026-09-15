@@ -77,6 +77,7 @@ from taste.memstore import Store, Verdict
 
 __all__ = [
     "BATCH_SIZE",
+    "UNJUDGED_KINDS",
     "UNJUDGED_MESSAGE_TYPES",
     "Judgement",
     "MonitorAction",
@@ -93,6 +94,44 @@ Batched because a persistent per-event monitor re-reads its whole transcript
 each turn, so its cost climbs with the event count. Judging N events in one
 stateless call was measured 10.6x cheaper and 2.9x faster than one call per
 event, and it stays flat instead of climbing.
+"""
+
+UNJUDGED_KINDS = frozenset(
+    {
+        "runtime_budget_receipt",
+        "runtime_budget_connection_intent",
+        "runtime_session_bound",
+        "runtime_query_intent",
+        "runtime_query_submitted",
+        "runtime_query_failed",
+        "runtime_interrupt_requested",
+        "inbox_delivery_intent",
+        "inbox_cursor_reconciled",
+        "monitor_feedback_submitted",
+        "monitor_feedback_accepted",
+        "sdk_message_rejected",
+    }
+)
+"""Turn kinds the monitor does not judge: the harness talking to itself.
+
+A ``runtime_budget_receipt`` records that *we* appended a line to our own
+spend ledger. It carries no worker behaviour, so judging it spends monitor
+tokens to review our bookkeeping -- and worse, it made terminal certification
+impossible. Measured on every budgeted live run: the runtime drains the
+monitor, then ``_disconnect_and_collect_tail`` writes the
+``connection_outcome`` receipt, then certifies. The monitor had judged 39
+judgeable turns; the state carried 40. The preflight compares those two
+numbers, so it failed closed every time -- severity ``LOST`` on a worker that
+had written its artifact correctly and spent $0.034 of $8.25.
+
+What stays judgeable is what the worker did: ``sdk_message``, ``tool_intent``,
+``tool_result``, ``runtime_error``, ``durability_alarm``, and the inbox
+messages it actually accepted.
+
+Like :data:`UNJUDGED_MESSAGE_TYPES` this must stay a constant, for the same
+reason: ``_cursor`` compares content fingerprints, so a monitor that filtered
+one way and resumed filtering another would truncate its saved prefix and
+re-judge work it had already judged.
 """
 
 UNJUDGED_MESSAGE_TYPES = frozenset({"StreamEvent"})
@@ -118,8 +157,16 @@ fingerprints, so a monitor that filtered on one run and not on its restart
 would see its saved prefix rewind and re-judge work it had already judged.
 """
 
-_STATE_SCHEMA = "taste.brains/MonitorState/3"
-_LEGACY_STATE_SCHEMAS = {None, "taste.brains/MonitorState/2"}
+_STATE_SCHEMA = "taste.brains/MonitorState/4"
+_LEGACY_STATE_SCHEMAS = {
+    None,
+    "taste.brains/MonitorState/2",
+    # /3 saved fingerprints for turns /4 no longer judges. ``_cursor`` takes
+    # the common prefix, so such a state truncates and re-judges rather than
+    # misreading -- noisy, never wrong, and the schema records which
+    # vocabulary produced the prefix.
+    "taste.brains/MonitorState/3",
+}
 
 
 class Severity(StrEnum):
@@ -757,11 +804,17 @@ class MonitorBrain:
 
     @staticmethod
     def _judgeable(*turns: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-        """The recorded turns worth spending a model call on."""
+        """The recorded turns worth spending a model call on.
+
+        Narrowed on both dimensions: SDK transport by ``message_type``, and
+        the harness's own bookkeeping by ``kind``. Both sides of the terminal
+        preflight run through here, so they cannot count different things.
+        """
         return tuple(
             turn
             for turn in turns
             if turn.get("message_type") not in UNJUDGED_MESSAGE_TYPES
+            and turn.get("kind") not in UNJUDGED_KINDS
         )
 
     def observations(self) -> list[dict[str, Any]]:

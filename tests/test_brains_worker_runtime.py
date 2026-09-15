@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -42,7 +43,7 @@ from taste.brains.worker_runtime import (
     ShutdownUnconfirmed,
     WorkerRuntime,
 )
-from taste.pricing import ensure_priced, max_call_cost_usd
+from taste.pricing import call_cost, ensure_priced, max_call_cost_usd
 
 POLL = 0.001
 QUIET = 0.005
@@ -160,6 +161,23 @@ def result_message(
         uuid=uuid,
         model_usage=model_usage,
     )
+
+
+def model_usage_entry(model: str, *, cost: float, output_tokens: int) -> dict[str, Any]:
+    """One per-model usage row, priced consistently with its own model."""
+    window = ensure_priced(model).context_window
+    return {
+        "inputTokens": 0,
+        "outputTokens": output_tokens,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": cost,
+        "contextWindow": window,
+        "maxOutputTokens": window,
+        "canonicalModel": model,
+        "provider": "firstParty",
+    }
 
 
 def auditable_result_message(
@@ -2985,3 +3003,146 @@ def test_a_missing_output_is_reported_not_a_crash(store: Store) -> None:
         assert any("missing never-written.py" in item for item in failures)
     finally:
         brain.close()
+
+
+# ------------------------------------------------- CLI-billed foreign models
+#
+# ``model_usage`` reports every model the CLI billed, not the one we asked
+# for. Claude Code spends a few tenths of a cent of Haiku generating a session
+# title, so a real budgeted Result carries an entry no contract requested.
+#
+# Measured live, twice: the worker wrote its artifact correctly and spent
+# $0.034 of an $8.25 budget, and the run failed at the reporting boundary
+# because 13 Haiku tokens of session title were read as an identity
+# violation. The guarantee worth keeping is that our model did our work and
+# every dollar is accounted for -- not that the CLI billed nothing else.
+
+TITLE_MODEL = "claude-haiku-4-5-20251001"
+WORKER_MODEL = "claude-sonnet-5"
+
+
+def priced_entry(model: str, *, output_tokens: int) -> dict[str, Any]:
+    """One usage row whose cost is this model's own price for its tokens."""
+    billed, _work = call_cost(model, input_tokens=0, output_tokens=output_tokens)
+    window = ensure_priced(model).context_window
+    return {
+        "inputTokens": 0,
+        "outputTokens": output_tokens,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": billed,
+        "contextWindow": window,
+        "maxOutputTokens": window,
+        "canonicalModel": model,
+        "provider": "firstParty",
+    }
+
+
+def multi_model_result(usage: dict[str, Any], *, uuid: str) -> ResultMessage:
+    total = math.fsum(float(item["costUSD"]) for item in usage.values())
+    return result_message(cost=total, uuid=uuid, model_usage=usage)
+
+
+def drive(store: Store, message: ResultMessage):
+    assignment = scaffold_assignment(store, budget_usd=reset_safe_budget())
+
+    class OneResultClient(ScriptedClient):
+        def abort_now(self) -> None:
+            self.disconnected.set()
+
+        async def wait_reaped(self) -> bool:
+            return True
+
+    runtime = runtime_for(
+        store,
+        assignment.contract,
+        OneResultClient(None, [message]),
+        assignment=assignment,
+    )
+    return asyncio.run(runtime.run())
+
+
+def test_a_cli_billed_foreign_model_is_not_an_identity_violation(store: Store) -> None:
+    outcome = drive(
+        store,
+        multi_model_result(
+            {
+                WORKER_MODEL: priced_entry(WORKER_MODEL, output_tokens=25_000),
+                TITLE_MODEL: priced_entry(TITLE_MODEL, output_tokens=13),
+            },
+            uuid="result-foreign-ok",
+        ),
+    )
+    assert outcome.error is None or "canonical model" not in outcome.error
+
+
+def test_a_foreign_model_cost_counts_against_the_contract(store: Store) -> None:
+    """Its tokens are real spend on our key, so the ceiling must see them."""
+    usage = {
+        WORKER_MODEL: priced_entry(WORKER_MODEL, output_tokens=25_000),
+        TITLE_MODEL: priced_entry(TITLE_MODEL, output_tokens=13),
+    }
+    message = multi_model_result(usage, uuid="result-foreign-cost")
+    outcome = drive(store, message)
+    assert outcome.error is None or "canonical model" not in outcome.error
+    worker_only = float(usage[WORKER_MODEL]["costUSD"])
+    assert float(message.total_cost_usd) > worker_only
+
+
+def test_an_unpriced_foreign_model_fails_closed(store: Store) -> None:
+    unpriced = {
+        "inputTokens": 0,
+        "outputTokens": 10,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.01,
+        "contextWindow": 200_000,
+        "maxOutputTokens": 200_000,
+        "canonicalModel": "some-unreleased-model",
+        "provider": "firstParty",
+    }
+    outcome = drive(
+        store,
+        multi_model_result(
+            {
+                WORKER_MODEL: priced_entry(WORKER_MODEL, output_tokens=25_000),
+                "some-unreleased-model": unpriced,
+            },
+            uuid="result-unpriced",
+        ),
+    )
+    assert outcome.error is not None
+    assert "some-unreleased-model" in outcome.error
+
+
+def test_a_result_without_the_workers_own_model_is_refused(store: Store) -> None:
+    """Somebody else's work is not this worker's work."""
+    outcome = drive(
+        store,
+        multi_model_result(
+            {TITLE_MODEL: priced_entry(TITLE_MODEL, output_tokens=13)},
+            uuid="result-no-worker",
+        ),
+    )
+    assert outcome.error is not None
+    assert WORKER_MODEL in outcome.error
+
+
+def test_a_foreign_model_is_priced_by_its_own_rates(store: Store) -> None:
+    """Pricing every entry as the worker's model would misprice the rest."""
+    haiku = priced_entry(TITLE_MODEL, output_tokens=13)
+    as_sonnet, _ = call_cost(WORKER_MODEL, input_tokens=0, output_tokens=13)
+    assert not math.isclose(float(haiku["costUSD"]), as_sonnet, rel_tol=1e-9)
+    outcome = drive(
+        store,
+        multi_model_result(
+            {
+                WORKER_MODEL: priced_entry(WORKER_MODEL, output_tokens=25_000),
+                TITLE_MODEL: haiku,
+            },
+            uuid="result-own-rates",
+        ),
+    )
+    assert outcome.error is None or "priced token usage" not in outcome.error

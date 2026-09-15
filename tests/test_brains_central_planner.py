@@ -1860,3 +1860,145 @@ def test_an_active_plan_may_leave_criteria_unassessed(store: Store, goal: Goal) 
     planner = CentralPlanner(store, transport=FakeTransport(one_assignment_response))
     plan = planner.plan(goal)
     assert not plan.complete
+
+
+def test_an_unusable_worker_identity_says_so(store: Store, goal: Goal) -> None:
+    """A contract that cannot be built must report its own reason.
+
+    Measured live: the planner named a worker ``worker/live-adder/gen1``.
+    The identity is the branch name, so ``Contract`` refused it -- and the
+    digest helper swallowed that ``BadName`` and returned the assignment
+    undigested, so the parser reported ``missing required fields:
+    ['contract_digest']``. The model was told a field was missing when the
+    real problem was a character in a name it chose.
+    """
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        request = request_from_prompt(prompt)
+        item = assignment_for(request).to_dict()
+        item["contract"]["identity"] = "worker/with/slashes"
+        del item["contract_digest"]
+        payload = json.loads(prompt)
+        result = dict(payload["required_output_shape"])
+        result.update(
+            assignments=[item],
+            rationale="one worker",
+            complete=False,
+            completion_reason="",
+            assessment=[],
+            metadata={},
+        )
+        return json.dumps(result, sort_keys=True)
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    # memstore calls it a branch, because that is what the identity becomes.
+    with pytest.raises(InvalidPlannerOutput, match="unusable") as caught:
+        planner.plan(goal)
+    assert "worker/with/slashes" in str(caught.value)
+
+
+def test_the_prompt_states_the_identity_charset(store: Store, goal: Goal) -> None:
+    prompts: list[str] = []
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        prompts.append(prompt)
+        request = request_from_prompt(prompt)
+        return proposal(prompt, assignment_for(request))
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    planner.plan(goal)
+    rules = json.loads(prompts[0])["rules"]
+    assert "worker_identity_charset" in rules
+
+
+def test_a_budgeted_exemplar_satisfies_the_rules_it_ships_with(store: Store, goal: Goal) -> None:
+    """The example must obey the prompt's own rules.
+
+    Measured live twice: the exemplar showed ``budget_usd: None`` and
+    ``resources: {"wall_timeout_seconds": 600}`` while the rules beside it
+    demanded a positive contract cap and a separate positive
+    ``monitor_budget_usd`` for a budgeted goal. The model copied the example
+    and was rejected. This is the same defect ``_assignment_exemplar``
+    already documents for ``contract_digest``: naming a requirement in prose
+    and then showing an example that violates it.
+    """
+    prompts: list[str] = []
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        prompts.append(prompt)
+        request = request_from_prompt(prompt)
+        return proposal(prompt, assignment_for(request))
+
+    assert goal.budget_usd is not None
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    planner.plan(goal)
+
+    payload = json.loads(prompts[0])
+    exemplar = payload["required_output_shape"]["assignments"][0]
+    assert exemplar["contract"]["budget_usd"] is not None
+    assert exemplar["contract"]["budget_usd"] > 0
+    assert exemplar["resources"]["monitor_budget_usd"] > 0
+
+    # No round trip here: every other value in the exemplar is a literal
+    # placeholder ("<fresh execution-branch name, ...>"), so it cannot be a
+    # valid Assignment and was never meant to be. The claim under test is
+    # narrower and is the one that failed live -- the example must not
+    # contradict the rules printed beside it.
+
+
+def test_an_unbudgeted_exemplar_does_not_invent_caps(store: Store) -> None:
+    unbudgeted = Goal(
+        goal_id="no-budget",
+        task="produce one file",
+        success_criteria=("the file exists",),
+    )
+    prompts: list[str] = []
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        prompts.append(prompt)
+        request = request_from_prompt(prompt)
+        return proposal(prompt, assignment_for(request, target_budget_usd=None, monitor_budget_usd=None))
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    planner.plan(unbudgeted)
+    exemplar = json.loads(prompts[0])["required_output_shape"]["assignments"][0]
+    assert exemplar["contract"]["budget_usd"] is None
+    assert "monitor_budget_usd" not in exemplar["resources"]
+
+
+def test_the_assessment_exemplar_shows_its_required_shape(store: Store, goal: Goal) -> None:
+    """An empty list teaches nothing, and the model guesses the keys.
+
+    Measured live: the planner sent ``{"criterion_id", "verdict",
+    "rationale"}`` against a validator demanding ``evidence``. The template
+    showed ``"assessment": []``.
+
+    This is the third instance of one defect in this prompt --
+    ``contract_digest`` first, then the budget caps, now this. The rule the
+    exemplar docstring already states: show a filled example, because a model
+    cannot infer a strict shape from a field name and an empty list.
+    """
+    prompts: list[str] = []
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        prompts.append(prompt)
+        request = request_from_prompt(prompt)
+        return proposal(prompt, assignment_for(request))
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    planner.plan(goal)
+
+    payload = json.loads(prompts[0])
+    shape = payload["required_output_shape"]["assessment"]
+    assert shape, "an empty assessment list teaches the model nothing"
+    entry = shape[0]
+    assert set(entry) == {"criterion_id", "verdict", "evidence"}
+
+    # The example must be accepted by the validator it is an example for.
+    request = request_from_prompt(prompts[0])
+    standing = payload["standing_criteria"]
+    filled = [
+        {"criterion_id": item["criterion_id"], "verdict": "not_met", "evidence": "not started"}
+        for item in standing
+    ]
+    CentralPlanner._validate_assessment(filled, request, False)

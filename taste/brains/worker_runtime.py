@@ -62,7 +62,7 @@ from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.delivery import is_control_path, validate_artifact_path
 from taste.brains.records import ArtifactRef, Assignment, WorkerReport, contract_digest
 from taste.brains.subbrain import SubBrain, SubBrainResult, Waking
-from taste.pricing import call_cost, ensure_priced, table_sha
+from taste.pricing import PRICES, PricingError, call_cost, ensure_priced, table_sha
 
 __all__ = [
     "ASSIGNMENT_PATH",
@@ -1441,8 +1441,8 @@ class WorkerRuntime:
         usage_by_model = message.model_usage
         if not isinstance(usage_by_model, Mapping) or not usage_by_model:
             return "budgeted Result has no complete per-model usage"
-        expected_window = ensure_priced(self.brain.model).context_window
         summed_cost = 0.0
+        saw_worker_model = False
         required_counts = {
             "inputTokens",
             "outputTokens",
@@ -1452,28 +1452,64 @@ class WorkerRuntime:
             "contextWindow",
             "maxOutputTokens",
         }
-        for usage in usage_by_model.values():
+        # ``model_usage`` reports every model the CLI billed, not the one this
+        # contract asked for: Claude Code bills a little Haiku for a session
+        # title on every session. Measured live, twice -- a worker wrote its
+        # artifact correctly, spent $0.034 of $8.25, and the run was failed at
+        # the reporting boundary because 13 tokens of title were read as an
+        # identity violation.
+        #
+        # So the claim narrows to what it should always have been: our model
+        # did our work, every entry is priced by *its own* rates, and every
+        # dollar lands against this contract. An unknown model still fails
+        # closed, because an unpriced entry cannot be accounted for at all.
+        for name, usage in usage_by_model.items():
             if not isinstance(usage, Mapping):
                 return "budgeted Result model usage is malformed"
-            if usage.get("canonicalModel") != self.brain.model:
-                return "budgeted Result used a different canonical model"
+            canonical = usage.get("canonicalModel")
+            if not isinstance(canonical, str) or not canonical:
+                return "budgeted Result model usage has no canonical model"
             if usage.get("provider") != "firstParty":
-                return "budgeted Result used a different provider"
+                return (
+                    "budgeted Result used a different provider: "
+                    f"{usage.get('provider')!r}"
+                )
+            # The key names the exact snapshot billed; the canonical name may
+            # be the family it belongs to. Price by whichever one is priced,
+            # and refuse when neither is.
+            billed_model = name if name in PRICES else canonical
+            try:
+                entry_price = ensure_priced(billed_model)
+            except PricingError:
+                return (
+                    "budgeted Result billed an unpriced model: "
+                    f"{name!r} (canonical {canonical!r})"
+                )
+            if canonical == self.brain.model or name == self.brain.model:
+                saw_worker_model = True
             for field in required_counts:
                 value = usage.get(field)
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     return f"budgeted Result has invalid {field}"
             if usage["webSearchRequests"] != 0:
                 return "budgeted Result contains separately billed web searches"
-            if usage["contextWindow"] > expected_window:
-                return "budgeted Result exceeded the priced context window"
-            if usage["maxOutputTokens"] > expected_window:
-                return "budgeted Result exceeded the priced output bound"
+            if usage["contextWindow"] > entry_price.context_window:
+                return (
+                    f"budgeted Result exceeded the priced context window for "
+                    f"{billed_model!r}: {usage['contextWindow']} > "
+                    f"{entry_price.context_window}"
+                )
+            if usage["maxOutputTokens"] > entry_price.context_window:
+                return (
+                    f"budgeted Result exceeded the priced output bound for "
+                    f"{billed_model!r}: {usage['maxOutputTokens']} > "
+                    f"{entry_price.context_window}"
+                )
             cost = usage.get("costUSD")
             if not _valid_billed_cost(cost):
                 return "budgeted Result has invalid per-model cost"
             priced_cost, _work_cost = call_cost(
-                self.brain.model,
+                billed_model,
                 input_tokens=usage["inputTokens"],
                 output_tokens=usage["outputTokens"],
                 cache_read_tokens=usage["cacheReadInputTokens"],
@@ -1485,8 +1521,16 @@ class WorkerRuntime:
                 rel_tol=1e-9,
                 abs_tol=1e-9,
             ):
-                return "budgeted Result per-model cost disagrees with priced token usage"
+                return (
+                    f"budgeted Result per-model cost disagrees with priced token "
+                    f"usage for {billed_model!r}"
+                )
             summed_cost = math.fsum((summed_cost, float(cost)))
+        if not saw_worker_model:
+            return (
+                "budgeted Result never billed this worker's own model "
+                f"{self.brain.model!r}; billed {sorted(usage_by_model)}"
+            )
         if not math.isclose(
             summed_cost,
             float(message.total_cost_usd),
@@ -1500,6 +1544,11 @@ class WorkerRuntime:
     def _record_budget_identity_violation(self, message: Any, detail: str) -> None:
         self._accounting_unknown = True
         encoded = json.dumps(_jsonable(message), sort_keys=True, separators=(",", ":"))
+        # The digest proves which bytes were rejected; it cannot say what was
+        # wrong with them. Measured: a live worker died here and the durable
+        # record held only "used a different canonical model" and a sha256, so
+        # the offending value could not be recovered from the evidence at all.
+        # A rejection that destroys its own subject is not evidence.
         self._record_budget_event(
             "identity_violation",
             {
@@ -1508,6 +1557,8 @@ class WorkerRuntime:
                 "message_sha256": _record_digest(encoded),
                 "session_id": getattr(message, "session_id", None),
                 "uuid": getattr(message, "uuid", None),
+                "model_usage": _jsonable(getattr(message, "model_usage", None)),
+                "requested_model": self.brain.model,
             },
         )
         self.brain.branch.turn(
@@ -1515,6 +1566,7 @@ class WorkerRuntime:
             run_id=self.run_id,
             message_type=type(message).__name__,
             detail=detail,
+            message=_jsonable(message),
         )
 
     @staticmethod

@@ -58,7 +58,9 @@ from taste.brains.records import (
 )
 from taste.brains.supervisor import RUN_ROOT, SupervisorRun
 from taste.brains.worker_runtime import WORKER_REPORT_PATH
+from taste.llm import MODEL_MONITOR, MODEL_WORKER
 from taste.memstore import Branch, State, Store
+from taste.pricing import ensure_priced, max_call_cost_usd
 
 __all__ = [
     "BranchObservation",
@@ -315,6 +317,22 @@ def _goal_path(goal_id: str) -> str:
 
 def _operation_root(goal_id: str, operation_id: str) -> str:
     return f"{PLANNER_ROOT}/operations/{_key(goal_id + chr(0) + operation_id)}"
+
+
+def _minimum_viable_budget_usd(model: str) -> float:
+    """The smallest cap a brain on ``model`` will accept, rounded up.
+
+    ``SubBrain.options`` solves ``2*(threshold + exposure) <= remaining`` and
+    refuses a non-positive threshold. Exposure prices one full context window,
+    so the floor is well above a plausible-looking cap: $5.00 for the worker
+    model at the time of writing, against the $1.00 an earlier exemplar
+    taught. The planner cannot infer that, so it is computed and stated.
+    """
+    price = ensure_priced(model)
+    exposure = max_call_cost_usd(
+        model, max_output_tokens=price.context_window, max_attempts=1, cap_on="billed"
+    )
+    return math.ceil(exposure * 2.0 * 1.1 * 100.0) / 100.0
 
 
 def _criteria_path(goal_id: str) -> str:
@@ -1889,6 +1907,24 @@ class CentralPlanner:
 
     @staticmethod
     def _proposal_template(request: PlanningRequest) -> dict[str, Any]:
+        """The shape a proposal must fill, with the assessment shown filled.
+
+        ``"assessment": []`` was the same mistake this module already made
+        with ``contract_digest`` and then with the budget caps: a strict
+        shape named in prose beside an empty example. Measured live, the
+        model sent ``rationale`` where the validator requires ``evidence``.
+        One entry per standing criterion is shown, keyed by the real ids, so
+        the model copies the shape rather than inferring it.
+        """
+        standing = () if request.criteria is None else request.criteria.criteria
+        assessment = [
+            {
+                "criterion_id": item.criterion_id,
+                "verdict": "<met|not_met>",
+                "evidence": "<what in the observed world shows this>",
+            }
+            for item in standing
+        ]
         return {
             "schema": PROPOSAL_SCHEMA,
             "request_id": request.request_id,
@@ -1901,7 +1937,7 @@ class CentralPlanner:
             "rationale": "",
             "complete": False,
             "completion_reason": "",
-            "assessment": [],
+            "assessment": assessment,
             "metadata": {},
         }
 
@@ -1918,7 +1954,22 @@ class CentralPlanner:
 
         ``generation`` and ``base_state_id`` are the request's real values so
         the model copies rather than invents them; everything else is shaped.
+
+        The budget caps follow the same rule, and for the same measured
+        reason. A budgeted goal requires a positive ``contract.budget_usd``
+        and a separate positive ``resources.monitor_budget_usd``; an exemplar
+        showing ``None`` and omitting the monitor cap contradicted the rules
+        printed beside it, and the model copied the example. An example that
+        violates its own schema teaches the violation.
         """
+        budgeted = request.goal.budget_usd is not None
+        # A cap below the reset-safe floor is refused when the worker builds
+        # its provider options, after the process exists -- measured, that is
+        # exit 70 with no reason recorded. Show caps that can actually run.
+        contract_budget = _minimum_viable_budget_usd(MODEL_WORKER) if budgeted else None
+        resources: dict[str, Any] = {"wall_timeout_seconds": 600}
+        if budgeted:
+            resources["monitor_budget_usd"] = _minimum_viable_budget_usd(MODEL_MONITOR)
         return {
             "schema": Assignment.SCHEMA,
             "assignment_id": "<unique id for this assignment>",
@@ -1932,7 +1983,7 @@ class CentralPlanner:
                 "success_criteria": ["<how the monitor will know it is done>"],
                 "issued_by": "central",
                 "notes": "",
-                "budget_usd": None,
+                "budget_usd": contract_budget,
                 "max_turns": None,
             },
             "base_state_id": request.world.integration_state_id,
@@ -1950,8 +2001,8 @@ class CentralPlanner:
                     "metadata": {},
                 }
             ],
-            "model": "claude-sonnet-5",
-            "resources": {"wall_timeout_seconds": 600},
+            "model": MODEL_WORKER,
+            "resources": resources,
             "metadata": {},
         }
 
@@ -2055,6 +2106,19 @@ class CentralPlanner:
                 "assignment_generation": request.generation,
                 "assignment_base_state_id": request.world.integration_state_id,
                 "fresh_worker_execution_branch": True,
+                # The identity *is* the branch name, so memstore's rule binds
+                # it. Naming the constraint without stating it is how a model
+                # reasonably produces a path-like name and fails.
+                "minimum_contract_budget_usd": _minimum_viable_budget_usd(MODEL_WORKER),
+                "minimum_monitor_budget_usd": _minimum_viable_budget_usd(MODEL_MONITOR),
+                "budget_floor_reason": (
+                    "a worker refuses to start unless its cap exceeds twice the one-call "
+                    "exposure for its model; a smaller cap is rejected after the process spawns"
+                ),
+                "worker_identity_charset": (
+                    "letters, digits, dot, dash or underscore; start with a letter or digit; "
+                    "no slashes"
+                ),
                 "same_plan_dependencies_do_not_transfer_future_artifacts": True,
                 "unique_output_artifact_ids_and_paths": True,
                 "contract_io_must_equal_structured_artifact_paths": True,
@@ -2203,10 +2267,17 @@ class CentralPlanner:
             return item
         try:
             derived = contract_digest(Contract.from_dict(dict(contract)))
-        except Exception:
-            # Let Assignment.from_dict report the real problem with the
-            # contract, rather than masking it as a digest failure.
-            return item
+        except Exception as exc:
+            # Measured live: a planner named a worker "worker/live-adder/gen1".
+            # The identity is the branch name, so Contract refused it -- and
+            # returning the item undigested here turned that into "missing
+            # required fields: ['contract_digest']", telling the model a field
+            # was absent when the real fault was a character in a name it
+            # chose. Assignment.from_dict cannot recover the reason, because
+            # by then the contract is gone. Say it here, where it is known.
+            raise InvalidPlannerOutput(
+                f"assignment contract is unusable: {type(exc).__name__}: {exc}"
+            ) from exc
         return {**item, "contract_digest": derived}
 
     def _parse_proposal(self, response: str, request: PlanningRequest) -> PlanRevision:
