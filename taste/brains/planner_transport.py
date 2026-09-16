@@ -1054,6 +1054,18 @@ class LLMPlannerTransport:
         return None
 
     def _mirror_authority(self, request_id: str) -> None:
+        # The transport is reached directly as well as through CentralPlanner,
+        # so it is its own first touch of a control branch this coordinator
+        # owns. Same act, same declaration: the receipt journal lives on
+        # another branch and survives the rewind, which is what makes this a
+        # repair rather than a worker publishing over its own lost states.
+        self.control.adopt_rewind_if_any(
+            evidence=f"{self.journal.name}:{request_id}",
+            reason=(
+                "control branch was rewound; replaying planner transport "
+                f"authority for {request_id} from the receipt journal"
+            ),
+        )
         for path, reason in (
             (
                 planner_transport_intent_path(request_id),

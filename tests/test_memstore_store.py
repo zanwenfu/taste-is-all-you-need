@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from taste.memstore import (
+    Branch,
     BranchBusy,
     ForeignHead,
     NotAnAncestor,
@@ -532,3 +533,140 @@ def test_the_guard_leaves_every_legitimate_move_alone(store: Store) -> None:
     assert not merged.conflicts
     a.write("f", "4")
     assert a.checkpoint("after merge").read("f") == "4"
+
+
+# ------------------------------------------------------------ silent rewind
+#
+# `git reset --hard` lands on a commit memstore *did* create, carrying every
+# note, so the metadata guard sees a healthy branch while two states have left
+# it. Measured on a scratch repo: three checkpoints, a reset to the first, and
+# the next checkpoint was accepted with states 2 and 3 simply gone. Delivery
+# then projected an orphan into the shared integration branch, so integration
+# advertised bytes the worker's own history no longer contained.
+#
+# "Nothing is lost" is this layer's first rule, so the gap matters more than
+# its rarity. The layer could not see it because it kept no record of how far
+# a branch had ever got: history() walks back from the current head, so after
+# a rewind the short history *is* the whole history.
+
+
+def test_a_silent_rewind_is_refused(store: Store) -> None:
+    branch = store.branch("worker", producer="worker")
+    ids = []
+    for index in (1, 2, 3):
+        branch.write("f.txt", f"{index}\n")
+        ids.append(branch.checkpoint(f"state {index}").id)
+
+    branch.backend.repo.git.reset("--hard", ids[0])
+
+    branch.write("f.txt", "4\n")
+    with pytest.raises(ForeignHead) as caught:
+        branch.checkpoint("after the reset")
+    message = str(caught.value)
+    assert ids[2][:10] in message, "the refusal must name what went missing"
+    assert "reset" in message.lower()
+    branch.close()
+
+
+def test_an_ordinary_advance_is_untouched(store: Store) -> None:
+    branch = store.branch("worker", producer="worker")
+    for index in range(4):
+        branch.write("f.txt", f"{index}\n")
+        branch.checkpoint(f"state {index}")
+    assert len(branch.history()) == 5
+    branch.close()
+
+
+def test_a_rollback_is_not_a_rewind(store: Store) -> None:
+    """Rollback appends: the superseded state stays reachable, so the tip
+    never moves backwards and the guard must not fire."""
+    branch = store.branch("worker", producer="worker")
+    branch.write("f.txt", "one\n")
+    first = branch.checkpoint("one")
+    branch.write("f.txt", "two\n")
+    branch.checkpoint("two")
+
+    branch.rollback(first, "back to one")
+    branch.write("f.txt", "three\n")
+    branch.checkpoint("three")
+    assert branch.head.read("f.txt") == "three\n"
+    branch.close()
+
+
+def test_a_branch_with_no_recorded_tip_still_works(tmp_path: Path) -> None:
+    """A branch this layer did not record must keep working.
+
+    Failing closed on a missing tip would make memstore unusable against any
+    repository it did not create from scratch, which is a worse failure than
+    the one being prevented.
+    """
+    store = Store.open(tmp_path / "repo", "no-tip")
+    branch = store.branch("worker", producer="worker")
+    branch.write("f.txt", "one\n")
+    branch.checkpoint("one")
+    store.sidecar("tip", "worker").unlink()
+
+    branch.write("f.txt", "two\n")
+    assert branch.checkpoint("two")
+    branch.close()
+    store.close()
+
+
+def _rewound(store: Store, name: str = "control") -> tuple[Branch, list[str]]:
+    """A branch whose ref was moved back behind what it published."""
+    branch = store.branch(name, producer="coordinator")
+    ids = []
+    for index in (1, 2, 3):
+        branch.write("f.txt", f"{index}\n")
+        ids.append(branch.checkpoint(f"state {index}").id)
+    store.backend.cas_update_ref(branch.ref, ids[0], ids[2])
+    branch.backend.reset_hard_to_head()
+    return branch, ids
+
+
+def test_a_repair_may_accept_the_rewind_with_evidence(store: Store) -> None:
+    """The coordinator repairs a branch it owns, so refusal alone is not
+    enough -- there has to be a way through that records itself."""
+    branch, ids = _rewound(store)
+    with pytest.raises(ForeignHead):
+        branch.checkpoint("blocked until accepted")
+
+    accepted = branch.accept_rewind(
+        evidence="planner-receipts:request-1",
+        reason="control ref was rewound; replaying from the receipt journal",
+    )
+    assert accepted == ids[0]
+    # And the branch works normally afterwards.
+    branch.write("f.txt", "four\n")
+    assert branch.checkpoint("four")
+    branch.close()
+
+
+def test_accepting_a_rewind_must_present_evidence(store: Store) -> None:
+    branch, _ = _rewound(store)
+    with pytest.raises(ValueError, match="evidence"):
+        branch.accept_rewind(evidence="   ", reason="no evidence")
+    with pytest.raises(ValueError, match="reason"):
+        branch.accept_rewind(evidence="planner-receipts:r1", reason="  ")
+    branch.close()
+
+
+def test_an_accepted_rewind_records_what_stopped_being_claimed(store: Store) -> None:
+    branch, ids = _rewound(store)
+    branch.accept_rewind(
+        evidence="planner-receipts:request-1",
+        reason="replaying from the receipt journal",
+    )
+    entries = [
+        json.loads(line)
+        for line in store.sidecar("rewinds", "control").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(entries) == 1
+    recorded = entries[0]
+    assert recorded["evidence"] == "planner-receipts:request-1"
+    assert recorded["accepted_head"] == ids[0]
+    assert set(recorded["orphaned"]) == {ids[1], ids[2]}
+    # Nothing was deleted: the orphans are still in the object store.
+    assert store.state(ids[2]).read("f.txt") == "3\n"
+    branch.close()

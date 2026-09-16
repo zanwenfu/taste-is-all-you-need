@@ -2002,3 +2002,32 @@ def test_the_assessment_exemplar_shows_its_required_shape(store: Store, goal: Go
         for item in standing
     ]
     CentralPlanner._validate_assessment(filled, request, False)
+
+
+def test_the_planner_is_told_what_a_worker_cannot_do(store: Store, goal: Goal) -> None:
+    """Measured live: the planner wrote "Commit the file so it is present on
+    the integration branch" into a contract. Committing is exactly what the
+    jail refuses and what the harness does for the worker, so the task was
+    impossible, and the monitor then correctly failed the worker for not
+    doing it. Two workers, both rejected, budget exhausted.
+
+    The worker had been taught the rules by then; the planner had not. A
+    coordinator that writes impossible contracts is a dead loop no amount of
+    worker intelligence escapes.
+    """
+    prompts: list[str] = []
+
+    def respond(_call_id: str, _system: str, prompt: str) -> str:
+        prompts.append(prompt)
+        request = request_from_prompt(prompt)
+        return proposal(prompt, assignment_for(request))
+
+    planner = CentralPlanner(store, transport=FakeTransport(respond))
+    planner.plan(goal)
+    rules = json.loads(prompts[0])["rules"]
+    assert "worker_capabilities" in rules
+    capabilities = json.dumps(rules["worker_capabilities"]).lower()
+    assert "commit" in capabilities, "the planner is not told the worker cannot commit"
+    assert "integration" in capabilities, (
+        "the planner is not told who moves work to the integration branch"
+    )

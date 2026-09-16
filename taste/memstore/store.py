@@ -73,6 +73,12 @@ TRANSCRIPT_SNAPSHOT_EVERY = 64
 
 VERDICT_LOOKBACK = 64
 
+#: Written beside the repository on every publish; see ``Branch._record_tip``.
+TIP_SCHEMA = "taste.memstore/BranchTip/1"
+
+#: One line per accepted rewind; see ``Branch.accept_rewind``.
+REWIND_SCHEMA = "taste.memstore/AcceptedRewind/1"
+
 
 def _read_holder(path: Path) -> dict[str, Any] | None:
     """Who holds a lease, or None if it is free.
@@ -1024,6 +1030,187 @@ class Branch:
                 "layer. The last memstore state is still reachable in the reflog."
             )
         self._require_attached_worktree()
+        self._require_no_silent_rewind()
+
+    def _tip_path(self) -> Path:
+        return self.store.sidecar("tip", self.name)
+
+    def _record_tip(self, sha: str) -> None:
+        """Write down how far this branch has got.
+
+        Beside the repository, not inside the tree: ``git reset --hard``
+        rewrites the tree and moves the ref, and cannot touch this. It is the
+        only durable answer to "was this branch ever further along", because
+        ``history()`` walks back from the current head -- so after a rewind the
+        short history *is* the whole history and the loss is invisible.
+        """
+        path = self._tip_path()
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temporary.write_text(
+            json.dumps({"schema": TIP_SCHEMA, "state": sha, "at": now_iso()}) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+
+    def _recorded_tip(self) -> str | None:
+        """The furthest state this branch published, or None if unrecorded."""
+        try:
+            raw = self._tip_path().read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        try:
+            record = json.loads(raw)
+            state = record["state"]
+        except (ValueError, KeyError, TypeError):
+            # A torn or foreign tip record cannot prove anything was lost, and
+            # refusing on it would strand a branch over its own bookkeeping.
+            return None
+        return state if isinstance(state, str) and state else None
+
+    def _require_no_silent_rewind(self) -> None:
+        """Refuse a head that is behind a state this branch published.
+
+        The metadata guard cannot see this. ``git reset --hard`` lands on a
+        commit this layer *did* create, carrying every note, so the branch
+        looks perfectly healthy while states have silently left it. Measured:
+        three checkpoints, a reset to the first, and the next checkpoint was
+        accepted with two states gone -- after which delivery projected one of
+        the orphans into the shared integration branch, advertising bytes the
+        worker's own history no longer contained.
+
+        A branch with no recorded tip proceeds. Failing closed there would
+        make the layer unusable against any repository it did not create,
+        which is a worse failure than the one being prevented.
+        """
+        tip = self._recorded_tip()
+        if tip is None:
+            return
+        head = self.store.backend.ref_sha(self.ref)
+        if head is None or head == tip:
+            return
+        if self.backend.is_ancestor(tip, head):
+            return  # ordinary advance, or a rollback, which appends
+        if not self.backend.is_ancestor(head, tip):
+            return  # diverged rather than rewound; a different failure
+        orphans = [
+            sha
+            for sha in self.backend.rev_list_first_parent(tip)
+            if not self.backend.is_ancestor(sha, head)
+        ]
+        lost = ", ".join(sha[:10] for sha in orphans[:5])
+        raise ForeignHead(
+            f"{self.name} is at {head[:10]}, behind {tip[:10]}, which this branch "
+            f"published. {len(orphans)} state(s) are no longer reachable: {lost}. "
+            "A `git reset --hard` inside the worktree moves the branch back onto "
+            "a commit this layer did create, so it carries every note and looks "
+            "healthy while the states after it are gone. Nothing was deleted -- "
+            "they are still in the object store -- but this branch no longer "
+            "claims them, and building here would publish work as if they never "
+            "existed. A writer that is repairing this deliberately should use "
+            "`accept_rewind(evidence=..., reason=...)` instead."
+        )
+
+    def rewound_past(self) -> tuple[str, ...]:
+        """States this branch published that its head no longer claims.
+
+        Empty for a healthy branch, which is the ordinary case. A caller that
+        owns a branch and may legitimately be repairing it asks this rather
+        than reaching for the tip file: the question is the layer's to answer,
+        and the answer is what ``accept_rewind`` is for.
+        """
+        tip = self._recorded_tip()
+        if tip is None:
+            return ()
+        head = self.store.backend.ref_sha(self.ref)
+        if head is None or head == tip or not self.backend.is_ancestor(head, tip):
+            return ()
+        return tuple(
+            sha
+            for sha in self.backend.rev_list_first_parent(tip)
+            if not self.backend.is_ancestor(sha, head)
+        )
+
+    def adopt_rewind_if_any(self, *, evidence: str, reason: str) -> tuple[str, ...]:
+        """Accept a rewind if there is one, and say nothing if there is not.
+
+        The common shape for a writer that owns a branch and may be resuming
+        over damage: it cannot know in advance whether the last process died
+        mid-write. Returns the states that stopped being claimed, empty when
+        the branch was healthy, so a caller can surface a real loss without
+        having to ask twice.
+        """
+        orphaned = self.rewound_past()
+        if orphaned:
+            self.accept_rewind(evidence=evidence, reason=reason)
+        return orphaned
+
+    def accept_rewind(self, *, evidence: str, reason: str) -> str:
+        """Accept a rewound head as this branch's truth, recording why.
+
+        A rewound ref is ambiguous: a worker corrupting itself, or an owner
+        repairing damage. From the ref alone the two are identical, which is
+        why an earlier forward-only guard had to be backed out -- it refused
+        the coordinator's own recovery from a rewound control branch.
+
+        The difference is evidence. A worker that ran ``git reset --hard`` has
+        none; a coordinator replaying from a journal on another branch names
+        it. So the way through is explicit and it writes itself down.
+
+        Deliberately not ``rollback(to)``. The repairing writer is already
+        where it means to be -- it does not want to move the branch further,
+        it wants to stop being refused and carry on. Measured: after the raw
+        rewind the tests perform, the head is an *ancestor* of the tip, so
+        there is no state to roll back to and a move-shaped primitive has
+        nothing to do. What is stale is this layer's record of how far the
+        branch got, and that is what this corrects.
+
+        Returns the state ids that stop being claimed, so a caller can log or
+        surface them rather than discovering the loss later.
+        """
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError("accept_rewind requires evidence naming what this repair replays")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("accept_rewind requires a reason")
+        head = self.store.backend.ref_sha(self.ref)
+        if head is None:
+            raise ForeignHead(f"{self.name} has no head to accept")
+        tip = self._recorded_tip()
+        orphans: tuple[str, ...] = ()
+        if tip is not None and tip != head and self.backend.is_ancestor(head, tip):
+            orphans = tuple(
+                sha
+                for sha in self.backend.rev_list_first_parent(tip)
+                if not self.backend.is_ancestor(sha, head)
+            )
+        self._record_tip(head)
+        self._record_rewind_acceptance(head, orphans, evidence.strip(), reason.strip())
+        return head
+
+    def _record_rewind_acceptance(
+        self, head: str, orphans: tuple[str, ...], evidence: str, reason: str
+    ) -> None:
+        """Append the acceptance beside the branch, so it is not only a gap.
+
+        The tip file alone would say the branch is healthy again and nothing
+        would say why it moved. A reader six months later should find the
+        claim, its evidence, and what stopped being claimed -- in the store,
+        not in git's reflog, which prunes.
+        """
+        path = self.store.sidecar("rewinds", self.name)
+        entry = json.dumps(
+            {
+                "schema": REWIND_SCHEMA,
+                "accepted_head": head,
+                "orphaned": list(orphans),
+                "evidence": evidence,
+                "reason": reason,
+                "at": now_iso(),
+            }
+        )
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(entry + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def _require_attached_worktree(self) -> None:
         """Refuse to build from a tree that has left this branch.
@@ -1211,6 +1398,7 @@ class Branch:
             if built.expected_head is not None:
                 with contextlib.suppress(FileNotFoundError):
                     self._turns_path(built.expected_head).unlink()
+        self._record_tip(built.sha)
         self._pending.clear()
         self._unpublish.clear()
         self._pending_sources.clear()

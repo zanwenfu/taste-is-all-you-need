@@ -3146,3 +3146,31 @@ def test_a_foreign_model_is_priced_by_its_own_rates(store: Store) -> None:
         ),
     )
     assert outcome.error is None or "priced token usage" not in outcome.error
+
+
+def test_a_denial_keeps_the_reason_not_the_payload(store: Store) -> None:
+    """Measured live: the report carried the raw tool-input dict as the
+    reason -- file path, full file content, tool_use_id -- and the jail's
+    explanatory sentence was nowhere. The coordinator replans from this, so
+    it needs the guidance the worker got, not a dump of what it tried.
+    """
+    from taste.brains.worker_runtime import WorkerRuntime
+
+    message = result_message(cost=0.1, uuid="r1")
+    object.__setattr__(
+        message,
+        "permission_denials",
+        [
+            {
+                "tool_name": "Write",
+                "tool_use_id": "toolu_1",
+                "tool_input": {"file_path": "/adder.py", "content": "x"},
+            }
+        ],
+    )
+    pairs = WorkerRuntime._permission_denials([message])
+    assert len(pairs) == 1
+    tool, reason = pairs[0]
+    assert tool == "Write"
+    assert "content" not in reason, f"the file content leaked into the report: {reason!r}"
+    assert "/adder.py" in reason, "the refused path is what makes the denial actionable"

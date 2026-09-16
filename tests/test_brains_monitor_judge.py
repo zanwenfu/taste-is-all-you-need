@@ -427,3 +427,35 @@ def test_terminal_observation_rejects_a_split_durable_assignment(store: Store) -
     with pytest.raises(MonitorObservationError, match="Assignment and Contract disagree"):
         build_terminal_observation(brain.contract, split_state, {}, [])
     brain.close()
+
+
+def test_a_null_suggestion_is_not_a_crash() -> None:
+    """Measured live: a terminal judge returned no suggestion and the
+    certifier failed closed with "monitor response suggestion must be a
+    string", so a worker that had written its artifact correctly was recorded
+    as LOST. Having no suggestion is a legitimate answer -- especially for a
+    passing judgement -- and the schema asking for a string does not oblige a
+    model to invent advice it does not have.
+    """
+    raw = {
+        "schema": JUDGEMENT_SCHEMA,
+        "severity": "fine",
+        "reason": "the artifact matches the contract",
+        "evidence": ["adder.py defines add(a, b)"],
+        "suggestion": None,
+    }
+    judgement = parse_monitor_response(json.dumps(raw))
+    assert judgement.suggestion == ""
+
+
+def test_a_non_string_suggestion_is_still_refused() -> None:
+    """Coercing None must not become coercing anything."""
+    raw = {
+        "schema": JUDGEMENT_SCHEMA,
+        "severity": "fine",
+        "reason": "ok",
+        "evidence": [],
+        "suggestion": {"do": "something"},
+    }
+    with pytest.raises(MonitorResponseError, match="suggestion"):
+        parse_monitor_response(json.dumps(raw))

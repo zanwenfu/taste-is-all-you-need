@@ -2528,13 +2528,40 @@ class WorkerRuntime:
         return errors, durability_ok
 
     @staticmethod
+    def _denial_subject(denial: Mapping[str, Any]) -> str:
+        """What the call reached for, without what it carried.
+
+        A refused Write names a path; a refused Bash names a command. Both are
+        what a reader needs to act. The content beside them is the worker's
+        payload and has no place in a durable record the coordinator reads.
+        """
+        raw_input = denial.get("tool_input")
+        if isinstance(raw_input, Mapping):
+            for key in ("file_path", "path", "notebook_path", "command"):
+                value = raw_input.get(key)
+                if isinstance(value, str) and value.strip():
+                    return f"refused: {key}={value[:200]}"
+        return "refused, with no reason recorded by the provider"
+
+    @staticmethod
     def _permission_denials(messages: list[ResultMessage]) -> tuple[tuple[str, str], ...]:
         out: list[tuple[str, str]] = []
         for message in messages:
             for denial in message.permission_denials or ():
                 if isinstance(denial, Mapping):
                     tool = str(denial.get("tool_name") or denial.get("name") or "unknown")
-                    reason = str(denial.get("reason") or denial.get("message") or denial)
+                    # Measured live: the CLI's denial record carries the tool
+                    # input, not the hook's sentence, so falling back to
+                    # str(denial) put the refused file's entire content into a
+                    # durable report the coordinator reads. Keep what makes the
+                    # refusal actionable -- which tool, and the path or command
+                    # it reached for -- and never the payload.
+                    reason = str(
+                        denial.get("reason")
+                        or denial.get("message")
+                        or denial.get("permissionDecisionReason")
+                        or WorkerRuntime._denial_subject(denial)
+                    )
                 else:
                     tool, reason = "unknown", str(denial)
                 pair = (tool, reason)

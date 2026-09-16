@@ -515,6 +515,14 @@ def parse_monitor_response(
     evidence = raw["evidence"]
     if not isinstance(reason, str) or not reason.strip():
         raise MonitorResponseError("monitor response reason must be a non-empty string")
+    if suggestion is None:
+        # Measured live: a terminal judge returned no suggestion and the
+        # certifier failed closed, so a worker that had written its artifact
+        # correctly was recorded LOST. Having nothing to suggest is a real
+        # answer, especially for a passing judgement; the schema asking for a
+        # string does not oblige a model to invent advice it does not have.
+        # Any *other* non-string is still a malformed response.
+        suggestion = ""
     if not isinstance(suggestion, str):
         raise MonitorResponseError("monitor response suggestion must be a string")
     if not isinstance(evidence, list) or not all(

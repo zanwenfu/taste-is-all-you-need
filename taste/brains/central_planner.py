@@ -38,6 +38,7 @@ from typing import Any, Protocol, runtime_checkable
 from taste.brains.contract import Contract
 from taste.brains.delivery import validate_artifact_path
 from taste.brains.planner_transport import (
+    PLANNER_RECEIPT_BRANCH,
     PLANNER_TRANSPORT_ROOT,
     LLMPlannerTransport,
     PlannerCompletion,
@@ -1034,7 +1035,35 @@ class CentralPlanner:
             return self.control.head
         return self.control.checkpoint(reason, records=records)
 
+    def _adopt_rewound_control(self) -> None:
+        """Take up a control branch that was rewound under this coordinator.
+
+        The memory layer refuses writes to a branch whose head is behind what
+        it published: a worker's ``git reset --hard`` lands on a commit that
+        layer did create, so without the refusal it would publish work as if
+        the states after it never existed. That refusal is right, and it also
+        lands on the coordinator, which owns this branch and repairs it -- a
+        crash or a hostile operator rewinds the ref, and recovery is exactly
+        the write that follows.
+
+        The two are distinguishable only by evidence. A worker has none. This
+        replays from the planner receipt journal, which lives on a different
+        branch and therefore survives the rewind, so it says so and the
+        acceptance is recorded rather than inferred later from git's reflog.
+
+        A healthy branch reports nothing rewound, so this costs one ancestry
+        check per planning call.
+        """
+        self.control.adopt_rewind_if_any(
+            evidence=f"{PLANNER_RECEIPT_BRANCH}:{self.control.name}",
+            reason=(
+                "control branch was rewound beneath the coordinator; planning "
+                "continues from the durable receipt journal"
+            ),
+        )
+
     def _ensure_goal(self, goal: Goal) -> None:
+        self._adopt_rewound_control()
         path = _goal_path(goal.goal_id)
         raw = self.control.head.read(path)
         if raw is not None:
@@ -2115,6 +2144,33 @@ class CentralPlanner:
                     "a worker refuses to start unless its cap exceeds twice the one-call "
                     "exposure for its model; a smaller cap is rejected after the process spawns"
                 ),
+                # Measured live: the planner wrote "Commit the file so it is
+                # present on the integration branch" into a contract. That is
+                # exactly what the jail refuses and what the harness does for
+                # the worker, so the task was impossible and the monitor then
+                # correctly failed the worker for not doing it. The worker had
+                # been taught the rules; the coordinator writing its contract
+                # had not.
+                "worker_capabilities": {
+                    "can": [
+                        "create, edit and read files inside its own worktree",
+                        "read git history: status, diff, log, show",
+                    ],
+                    "cannot": [
+                        "commit, push, merge, reset, checkout, rebase or stash",
+                        "write outside its own worktree",
+                        "move its own work to the integration branch",
+                    ],
+                    "harness_does_for_it": (
+                        "checkpoints the worktree, certifies the result, and delivers "
+                        "the named outputs into the integration branch"
+                    ),
+                    "so_a_contract_must_not": (
+                        "ask a worker to commit, push, merge, or place files on the "
+                        "integration branch: name the files it must produce in its own "
+                        "worktree and let delivery move them"
+                    ),
+                },
                 "worker_identity_charset": (
                     "letters, digits, dot, dash or underscore; start with a letter or digit; "
                     "no slashes"
