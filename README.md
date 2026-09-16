@@ -273,7 +273,7 @@ def python_refactor_agent(task: str) -> str:
 pytest -v
 ```
 
-1,498 tests, none of which need an API key; the brain-layer tests skip without the `brains` extra. The load-bearing ones:
+1,576 tests, none of which need an API key; the brain-layer tests skip without the `brains` extra. The load-bearing ones:
 
 ```
 tests/test_kernel_rollback.py   step-87 rollback story (real pytest as Monitor)
@@ -322,8 +322,8 @@ Everything on the "held back" list can be added without breaking the kernel's pu
 
 **Known, not yet fixed:**
 
-- **`git reset --hard` inside a worker worktree is undetected.** It lands on a commit memstore did create, so the metadata check passes while the branch forks backwards. A forward-only ref check catches it and also refuses the coordinator's own recovery from a rewound control branch (three tests prove that recovery), so it was backed out until repair paths can opt out.
-- **`memstore.Store` is one process wide.** The repo lock is `flock`, re-entrant within a process, so it excludes other processes and not other threads; two threads checkpointing different branches on one `Store` lose git notes. Production runs one worker per process. The API does not say so yet.
+- **Proven on one shape of goal.** The end-to-end run writes one small file. Whether a planner that has been told what a worker can do keeps writing achievable contracts for genuinely multi-step work is untested, and it is the next thing that would break.
+- **No CLI for the multi-process layer.** `taste run` drives the kernel line; the central brain is a library, composed in Python.
 
 ## Run this against your own agent
 
