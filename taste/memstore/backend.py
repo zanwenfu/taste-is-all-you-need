@@ -42,8 +42,23 @@ from git.objects import Blob, Commit, Tree
 from git.refs import SymbolicReference
 
 # One held description per lock path, process-wide; see ``GitBackend.lock``.
-_HELD: dict[Path, tuple[IO[str], int]] = {}
+# Keyed by thread as well as path: the description is what ``flock`` acts on,
+# so a second thread that found it already open would skip the syscall and
+# walk straight into the critical section.
+_HELD: dict[tuple[Path, int], tuple[IO[str], int]] = {}
 _REGISTRY_LOCK = threading.RLock()
+# Held across the ``flock`` so two threads of one process serialise here
+# rather than both reaching a syscall that cannot tell them apart.
+_PROCESS_LOCKS: dict[Path, threading.RLock] = {}
+
+
+def _process_lock(path: Path) -> threading.RLock:
+    with _REGISTRY_LOCK:
+        lock = _PROCESS_LOCKS.get(path)
+        if lock is None:
+            lock = threading.RLock()
+            _PROCESS_LOCKS[path] = lock
+        return lock
 
 ZERO_SHA = "0" * 40
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -260,29 +275,46 @@ class GitBackend:
     def lock(self) -> Iterator[None]:
         """Repo-wide exclusive lock, shared by every worktree of this repo.
 
-        Re-entrant within a process. ``flock`` is per open file description,
-        so a nested ``lock()`` that opened the file again would block on
-        itself; instead one description per lock path is held for the
-        duration of the outermost holder, and nested holders only count.
+        Exclusive at both levels, and re-entrant on one thread at either.
+
+        Across processes ``flock`` does the work, which is the architecture:
+        one OS process per worker, each with its own worktree. Within a
+        process it does nothing on its own -- ``flock`` acts on an open file
+        description, so a second thread that found the description already
+        open skipped the syscall entirely and counted itself in beside the
+        holder. Measured: two threads checkpointing different branches of one
+        ``Store`` produced a head whose meta note was missing, which the next
+        write refused as a ``ForeignHead``. "Nothing is lost" is this layer's
+        first rule, so the gap mattered more than its rarity.
+
+        So a process-local lock is taken first and the description is kept per
+        thread. Nesting on one thread still never blocks: the ``RLock``
+        re-enters and the depth counter rises, exactly as before.
         """
         lock_path = self.common_dir / "memstore.lock"
-        with _REGISTRY_LOCK:
-            fh, depth = _HELD.get(lock_path, (None, 0))
-            if fh is None:
-                fh = open(lock_path, "a+")  # noqa: SIM115  held past this block by design
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            _HELD[lock_path] = (fh, depth + 1)
+        key = (lock_path, threading.get_ident())
+        process_lock = _process_lock(lock_path)
+        process_lock.acquire()
         try:
-            yield
-        finally:
             with _REGISTRY_LOCK:
-                fh, depth = _HELD[lock_path]
-                if depth == 1:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                    fh.close()
-                    del _HELD[lock_path]
-                else:
-                    _HELD[lock_path] = (fh, depth - 1)
+                fh, depth = _HELD.get(key, (None, 0))
+                if fh is None:
+                    fh = open(lock_path, "a+")  # noqa: SIM115  held past this block by design
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                _HELD[key] = (fh, depth + 1)
+            try:
+                yield
+            finally:
+                with _REGISTRY_LOCK:
+                    fh, depth = _HELD[key]
+                    if depth == 1:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                        fh.close()
+                        del _HELD[key]
+                    else:
+                        _HELD[key] = (fh, depth - 1)
+        finally:
+            process_lock.release()
 
     # ---------------------------------------------------------------- refs
 
