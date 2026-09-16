@@ -151,12 +151,17 @@ def test_the_wal_costs_almost_nothing_per_call(store: Store) -> None:
 # ------------------------------------------------------------------ waking
 
 
-def test_a_fresh_brain_is_told_only_its_contract(store: Store) -> None:
+def test_a_fresh_brain_is_told_its_contract_and_no_interrupted_past(store: Store) -> None:
     brain = SubBrain(store, a_contract())
     waking = brain.wake()
     assert waking.fresh and not waking.uncertain
     assert waking.briefing() == ""
-    assert brain.opening_prompt() == brain.contract.brief()
+    prompt = brain.opening_prompt()
+    # The contract leads; the environment paragraph follows it.
+    assert prompt.startswith(brain.contract.brief())
+    assert brain.ENVIRONMENT_BRIEFING in prompt
+    # Nothing about resuming, because there is nothing to resume.
+    assert "resuming work that was interrupted" not in prompt
     brain.close()
 
 
@@ -445,7 +450,9 @@ def test_its_own_contract_does_not_make_a_new_brain_look_interrupted(
     waking = brain.wake()
     assert waking.fresh, f"a new brain looked interrupted: {waking.dirty_paths}"
     assert waking.briefing() == ""
-    assert brain.opening_prompt() == brain.contract.brief()
+    prompt = brain.opening_prompt()
+    assert prompt.startswith(brain.contract.brief())
+    assert "resuming work that was interrupted" not in prompt
     brain.close()
 
 
@@ -609,3 +616,36 @@ def test_the_wal_stays_cheap_enough_for_a_hook(store: Store) -> None:
     median = times[len(times) // 2]
     assert median < 2.0, f"{median:.3f} ms per append is too slow for a hook"
     brain.close()
+
+
+# ------------------------------------------------- what the worker is told
+#
+# The worker ran with no system prompt at all: its whole briefing was the
+# contract -- task, inputs, outputs, criteria. Nothing said that its worktree
+# is a memstore branch head, that the harness checkpoints for it, or that
+# ref-moving git is refused. So it learned the rules only by breaking one and
+# reading the denial, which costs a turn every time and, for a model that does
+# not generalise from the first refusal, costs all of them.
+
+
+def test_the_worker_is_told_the_rules_before_it_breaks_one(store: Store) -> None:
+    brain = SubBrain(store, a_contract())
+    prompt = brain.opening_prompt()
+    lowered = prompt.lower()
+    assert "memstore" in lowered or "branch" in lowered, (
+        "the worker is never told its worktree is a branch head"
+    )
+    assert "checkpoint" in lowered or "commits your work" in lowered, (
+        "the worker is never told the harness commits for it"
+    )
+    assert "git" in lowered, "the worker is never told which git is off limits"
+
+
+def test_the_briefing_does_not_bury_the_contract(store: Store) -> None:
+    """The task must still lead. Rules are context, not the job."""
+    brain = SubBrain(store, a_contract())
+    prompt = brain.opening_prompt()
+    assert prompt.startswith(f"You are {brain.contract.identity}."), (
+        "the environment briefing must not displace the contract"
+    )
+    assert brain.contract.task in prompt

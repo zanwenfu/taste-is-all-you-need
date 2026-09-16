@@ -3104,6 +3104,10 @@ class WorkerRuntime:
                 monitor_severity=monitor_severity,
                 uncertain=bool(uncertainty),
                 uncertainty_reasons=tuple(uncertainty),
+                # The coordinator replans from this record. Without the
+                # refusals in it, a planner cannot see that the last worker
+                # spent its turns against a wall the next one will hit too.
+                denials=self._permission_denials(self._results),
                 summary=summary,
                 metadata={
                     "durability_ok": durability_ok,

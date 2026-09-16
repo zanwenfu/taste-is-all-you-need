@@ -418,3 +418,71 @@ def test_the_jail_and_the_kernel_agree_on_what_is_dangerous() -> None:
         "the jail must not refuse a verb the kernel considers safe"
     )
     assert not (GIT_REF_MOVERS & set(_GIT_READERS)), "readers must stay allowed"
+
+
+# --------------------------------------------------------------- repetition
+#
+# The reason reaches the model verbatim and a live worker read it and adapted.
+# But nothing counted repeats: a worker that reissued the same refused call got
+# the identical sentence back, forever, until max_turns. The same words that
+# failed to land the first time will not land the fifth. So a repeat says
+# something different -- that this has been tried, that it will keep failing,
+# and that the way forward is a different route.
+
+
+def test_a_repeated_denial_says_more_than_the_first(jail: WorktreeJail) -> None:
+    import asyncio
+
+    call = {"tool_name": "Bash", "tool_input": {"command": "git commit -am wip"}}
+    first = asyncio.run(jail.hook(call, "t1", None))["hookSpecificOutput"]
+    second = asyncio.run(jail.hook(call, "t2", None))["hookSpecificOutput"]
+
+    assert first["permissionDecision"] == "deny"
+    assert second["permissionDecision"] == "deny"
+    assert second["permissionDecisionReason"] != first["permissionDecisionReason"], (
+        "a repeat returned the identical sentence, which already did not work"
+    )
+    assert "again" in second["permissionDecisionReason"].lower()
+
+
+def test_persistent_repetition_is_named_by_count(jail: WorktreeJail) -> None:
+    import asyncio
+
+    call = {"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}}
+    reasons = [
+        asyncio.run(jail.hook(call, f"t{i}", None))["hookSpecificOutput"][
+            "permissionDecisionReason"
+        ]
+        for i in range(4)
+    ]
+    assert "3 times" in reasons[-1] or "3 more" in reasons[-1] or "4 times" in reasons[-1], (
+        f"a fourth identical attempt was not named as repetition: {reasons[-1]!r}"
+    )
+    # The underlying rule is still stated: escalation adds, it does not replace.
+    assert "not yours to run" in reasons[-1]
+
+
+def test_a_different_refusal_starts_its_own_count(jail: WorktreeJail) -> None:
+    import asyncio
+
+    git = {"tool_name": "Bash", "tool_input": {"command": "git commit -am wip"}}
+    outside = {"tool_name": "Write", "tool_input": {"file_path": "../sibling/theirs.txt"}}
+    asyncio.run(jail.hook(git, "t1", None))
+    asyncio.run(jail.hook(git, "t2", None))
+    fresh = asyncio.run(jail.hook(outside, "t3", None))["hookSpecificOutput"]
+
+    assert "again" not in fresh["permissionDecisionReason"].lower(), (
+        "an unrelated first refusal was escalated as if it were a repeat"
+    )
+    assert "outside your worktree" in fresh["permissionDecisionReason"]
+
+
+def test_every_denial_is_still_recorded_for_the_report(jail: WorktreeJail) -> None:
+    """Escalation must not collapse the record the coordinator replans from."""
+    import asyncio
+
+    call = {"tool_name": "Bash", "tool_input": {"command": "git commit -am wip"}}
+    for index in range(3):
+        asyncio.run(jail.hook(call, f"t{index}", None))
+    assert len(jail.denials) == 3
+    assert all(tool == "Bash" for tool, _ in jail.denials)

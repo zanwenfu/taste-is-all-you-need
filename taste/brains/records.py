@@ -916,6 +916,15 @@ class WorkerReport(_JsonRecord):
     monitor_severity: str = "unknown"
     uncertain: bool = False
     uncertainty_reasons: tuple[str, ...] = ()
+    denials: tuple[tuple[str, str], ...] = ()
+    """What the worker was refused, as ``(tool, reason)``, in order.
+
+    The jail already tells the worker why, verbatim, and a live worker read
+    that and adapted. This is the other direction: the coordinator replans
+    from this record, and without it a planner cannot see that the last
+    worker spent its turns against a wall it will hit again. Repetition is
+    the signal -- the same pair twice is a worker that did not adapt.
+    """
     summary: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -954,6 +963,19 @@ class WorkerReport(_JsonRecord):
         if self.uncertain != bool(reasons):
             raise ValueError("uncertain and uncertainty_reasons must be set together")
         object.__setattr__(self, "uncertainty_reasons", reasons)
+        if not isinstance(self.denials, tuple):
+            raise ValueError("denials must be a tuple")
+        pairs: list[tuple[str, str]] = []
+        for index, item in enumerate(self.denials):
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise ValueError(f"denials[{index}] must be a (tool, reason) pair")
+            tool, reason = item
+            if not isinstance(tool, str) or not tool.strip():
+                raise ValueError(f"denials[{index}] tool must be a non-empty string")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError(f"denials[{index}] reason must be a non-empty string")
+            pairs.append((tool, reason))
+        object.__setattr__(self, "denials", tuple(pairs))
         object.__setattr__(self, "summary", _expect_str(self.summary, "summary", empty=True))
         object.__setattr__(self, "metadata", _freeze_map(self.metadata, "metadata"))
 
@@ -978,6 +1000,7 @@ class WorkerReport(_JsonRecord):
             "monitor_severity": self.monitor_severity,
             "uncertain": self.uncertain,
             "uncertainty_reasons": list(self.uncertainty_reasons),
+            "denials": [[tool, reason] for tool, reason in self.denials],
             "summary": self.summary,
             "metadata": _thaw_json(self.metadata),
         }
@@ -1004,6 +1027,7 @@ class WorkerReport(_JsonRecord):
             "monitor_severity",
             "uncertain",
             "uncertainty_reasons",
+            "denials",
             "summary",
             "metadata",
         }
@@ -1031,6 +1055,10 @@ class WorkerReport(_JsonRecord):
             uncertain=raw["uncertain"],
             uncertainty_reasons=_strings_from_wire(
                 raw["uncertainty_reasons"], "WorkerReport.uncertainty_reasons"
+            ),
+            denials=tuple(
+                tuple(item) if isinstance(item, (list, tuple)) else item
+                for item in _expect_array(raw["denials"], "WorkerReport.denials")
             ),
             summary=raw["summary"],
             metadata=raw["metadata"],

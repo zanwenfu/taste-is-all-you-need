@@ -329,6 +329,10 @@ class WorktreeJail:
             reason = f"the guard could not evaluate this call ({type(exc).__name__}), so it was refused."
         if reason is None:
             return {}
+        repeats = sum(
+            1 for prior_tool, prior_reason in self.denials
+            if prior_tool == tool_name and prior_reason == reason
+        )
         self.denials.append((tool_name, reason))
         return {
             "hookSpecificOutput": {
@@ -337,6 +341,36 @@ class WorktreeJail:
                 # The reason reaches the model verbatim as an is_error result,
                 # so it reads as guidance and the model adapts instead of
                 # retrying the same call.
-                "permissionDecisionReason": reason,
+                "permissionDecisionReason": self._escalate(reason, repeats),
             }
         }
+
+    @staticmethod
+    def _escalate(reason: str, repeats: int) -> str:
+        """Say something new when the same refusal comes back.
+
+        The first reason is good guidance and a live worker read it and
+        adapted. But nothing counted repeats, so a worker that did not adapt
+        got the identical sentence until ``max_turns`` -- and the words that
+        failed to land the first time do not land the fifth.
+
+        Keyed on the exact ``(tool, reason)`` pair rather than the command,
+        because two different forbidden commands that earn the same refusal
+        are the same lesson unlearned. Escalation adds to the rule; it never
+        replaces it, or a worker arriving late would be told it is repeating
+        itself without being told what the rule is.
+        """
+        if repeats == 0:
+            return reason
+        if repeats == 1:
+            return (
+                f"{reason}\n\nYou have tried this again. The answer will not "
+                "change -- take a different route."
+            )
+        return (
+            f"{reason}\n\nThis is attempt {repeats + 1}: you have been refused "
+            f"this exact call {repeats} times already. It will keep failing. "
+            "Stop retrying it and do the work another way; if there is no other "
+            "way, say so plainly and stop rather than spending the rest of your "
+            "turns here."
+        )

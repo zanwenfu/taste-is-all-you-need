@@ -289,11 +289,39 @@ class SubBrain:
         ):
             self.branch.write(CONTRACT_PATH, self.contract.to_json())
 
+    ENVIRONMENT_BRIEFING = """\
+About where you are working:
+
+  - This directory is a git worktree owned by the harness, and it *is* a
+    branch head in the memory layer. The harness checkpoints your work for
+    you -- you never commit.
+  - So `git commit`, `reset`, `checkout`, `rebase`, `stash` and friends are
+    refused. They would move the branch out from under the layer that owns
+    it. Reading git is fine and often useful: `status`, `diff`, `log`, `show`.
+  - Edit files directly. That is the whole job; the harness handles history.
+  - Stay inside this directory. Writes outside it are refused.
+
+If something is refused, the refusal says why. Read it and take another
+route rather than reissuing the same call -- a second identical attempt
+fails the same way and costs you a turn."""
+
     def opening_prompt(self, waking: Waking | None = None) -> str:
-        """The contract, plus anything an interrupted past requires."""
+        """The contract, the environment, plus anything an interrupted past requires.
+
+        The contract leads: the task is the job and the rest is context.
+
+        The environment paragraph exists because the worker ran with no system
+        prompt at all. Its entire briefing was the contract, so it learned the
+        rules only by breaking one and reading the denial -- which costs a turn
+        each time, and for a model that does not generalise from the first
+        refusal, costs all of them. The jail's message is good feedback; it
+        should not be the first time a worker hears the rule.
+        """
         waking = waking or self.wake()
-        brief = self.contract.brief()
-        return f"{brief}\n\n{waking.briefing()}".strip() if not waking.fresh else brief
+        parts = [self.contract.brief(), self.ENVIRONMENT_BRIEFING]
+        if not waking.fresh:
+            parts.append(waking.briefing())
+        return "\n\n".join(part for part in parts if part.strip()).strip()
 
     # ------------------------------------------------------------------ hooks
 

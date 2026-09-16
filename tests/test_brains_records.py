@@ -502,3 +502,46 @@ def test_report_rejects_invalid_cost_and_monitor_severity() -> None:
         report(cost_usd=float("nan"))
     with pytest.raises(ValueError, match="monitor_severity"):
         report(monitor_severity="probably-fine")
+
+
+# ------------------------------------------------------------------ denials
+#
+# A worker that keeps reaching for a forbidden call burns its turns and its
+# budget. The jail already tells *it* why, verbatim, and a live worker adapted
+# and finished. What was missing is the other direction: the coordinator
+# replans from the durable report, and the report said nothing about refusals,
+# so a planner could reissue the same contract to a worker that had just spent
+# itself fighting the same wall.
+
+
+def test_a_report_carries_what_the_worker_was_refused() -> None:
+    refused = report(
+        denials=(
+            ("Bash", "`git commit` is not yours to run: this worktree is a memstore branch"),
+            ("Bash", "`git commit` is not yours to run: this worktree is a memstore branch"),
+        )
+    )
+    restored = WorkerReport.from_json(refused.to_json())
+    assert restored == refused
+    assert restored.denials[0][0] == "Bash"
+    assert "not yours to run" in restored.denials[0][1]
+
+
+def test_denials_default_to_none_for_a_clean_run() -> None:
+    assert report().denials == ()
+
+
+def test_a_denial_must_name_a_tool_and_a_reason() -> None:
+    with pytest.raises(ValueError, match="denials"):
+        report(denials=(("Bash",),))
+    with pytest.raises(ValueError, match="denials"):
+        report(denials=(("", "a reason with no tool"),))
+    with pytest.raises(ValueError, match="denials"):
+        report(denials=(("Bash", ""),))
+
+
+def test_the_wire_shape_is_a_pair_per_denial() -> None:
+    refused = report(denials=(("Bash", "no git for you"),))
+    raw = json.loads(refused.to_json())
+    assert raw["denials"] == [["Bash", "no git for you"]]
+    assert WorkerReport.from_dict(raw) == refused
