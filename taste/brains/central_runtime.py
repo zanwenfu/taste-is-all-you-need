@@ -548,6 +548,8 @@ class CentralRuntime:
         self._remaining_wall: Callable[[], float] | None = None
         self._deadline_at: datetime | None = None
         self._running = False
+        self._cycle_audit_head: str | None = None
+        self._cycle_audit_entries: list[Any] = []
 
     def _fault(self, boundary: str, payload: Mapping[str, Any]) -> None:
         if self.fault_injector is not None:
@@ -593,14 +595,27 @@ class CentralRuntime:
         with self.control_lock:
             head = self.control.head
             index = head.record(index_path)
+            # Reuse only history already audited on this exact first-parent
+            # chain. Ordinary ancestry is insufficient: a merge can contain
+            # the audited head only through its second parent.
+            revision = head.id
+            if self._cycle_audit_head is not None:
+                revision = f"{self._cycle_audit_head}..{head.id}"
+                if head.id != self._cycle_audit_head:
+                    appended = self.store.backend.repo.git.rev_list("--first-parent", revision).splitlines()
+                    parents = self.store.backend.repo.commit(appended[-1]).parents if appended else ()
+                    if not parents or parents[0].hexsha != self._cycle_audit_head:
+                        raise CoordinatorCorruption(
+                            "cycle index control history is not a first-parent extension of the audited head"
+                        )
             changed = self.store.backend.repo.git.rev_list(
-                "--first-parent", head.id, "--", index_path
+                "--first-parent", revision, "--", index_path
             )
             historical_indexes: list[dict[str, Any]] = []
             for commit in changed.splitlines():
                 text = self.store.backend.show(commit, index_path)
                 if text is None:
-                    continue
+                    raise CoordinatorCorruption("durable cycle index was deleted from its history")
                 try:
                     item = json.loads(text)
                 except json.JSONDecodeError as exc:
@@ -623,17 +638,26 @@ class CentralRuntime:
                 ):
                     raise CoordinatorCorruption("durable cycle index is malformed")
                 expected_entries = index["cycles"]
+                newer = expected_entries
                 for historical in historical_indexes:
                     old = historical.get("cycles")
                     if (
-                        historical.get("schema") != INDEX_SCHEMA
+                        set(historical) != {"schema", "goal_id", "cycles"}
+                        or historical.get("schema") != INDEX_SCHEMA
                         or historical.get("goal_id") != self.goal.goal_id
                         or not isinstance(old, list)
-                        or expected_entries[: len(old)] != old
+                        or newer[: len(old)] != old
                     ):
                         raise CoordinatorCorruption(
                             "durable cycle index was rolled back or rewritten"
                         )
+                    newer = old
+
+            # A transient shrink followed by restoration is also a rollback.
+            # Anchor the oldest newly inspected prefix to our previous audit.
+            oldest = historical_indexes[-1]["cycles"] if historical_indexes else expected_entries
+            if oldest[: len(self._cycle_audit_entries)] != self._cycle_audit_entries:
+                raise CoordinatorCorruption("durable cycle index was rolled back or rewritten")
 
             indexed_paths: set[str] = set()
             records: list[tuple[int, str, Mapping[str, Any], str]] = []
@@ -676,6 +700,10 @@ class CentralRuntime:
             }
             if actual_paths != indexed_paths:
                 raise CoordinatorCorruption("cycle intents and durable cycle index disagree")
+            # Publish cache state only after every index/intent check passed.
+            # JSON copying prevents caller-owned record mutations reaching it.
+            self._cycle_audit_entries = json.loads(json.dumps(expected_entries))
+            self._cycle_audit_head = head.id
         return records
 
     def _append_cycle_intent(
