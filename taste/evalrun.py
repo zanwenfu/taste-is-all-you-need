@@ -40,6 +40,7 @@ from typing import Any
 
 from taste.config import HarnessConfig, kernel_kwargs
 from taste.kernel import Kernel, RunResult
+from taste.ledger_costs import lifetime_billed_usd
 
 CellStatus = str  # "completed" | "failed" | "infra" | "budget" | "error" | "aborted"
 
@@ -107,20 +108,11 @@ class CellResult:
 
     @property
     def total_billed_usd(self) -> float:
-        if isinstance(self.attempts_made, bool) or not isinstance(self.attempts_made, int) or self.attempts_made < 1:
-            raise ValueError("cell attempt count must be a positive integer")
-        if len(self.prior_attempts) != self.attempts_made - 1:
-            raise ValueError("cell is missing earlier attempt costs; refusing to assume zero")
-        costs = [self.billed_usd]
-        for number, item in enumerate(self.prior_attempts, 1):
-            if (not isinstance(item, dict) or item.get("attempts_made") != number
-                    or (item.get("task"), item.get("arm"), item.get("trial")) != (self.task, self.arm, self.trial)):
-                raise ValueError("cell attempt history has inconsistent identity")
-            costs.append(item.get("billed_usd"))
-        if any(isinstance(v, bool) or not isinstance(v, (int, float))
-               or not math.isfinite(v) or v < 0 for v in costs):
-            raise ValueError("cell attempt costs must be finite and non-negative")
-        return math.fsum(costs)
+        return lifetime_billed_usd({
+            "task": self.task, "arm": self.arm, "trial": self.trial,
+            "attempts_made": self.attempts_made, "prior_attempts": self.prior_attempts,
+            "billed_usd": self.billed_usd,
+        })
 
     @property
     def counts_toward_success(self) -> bool:

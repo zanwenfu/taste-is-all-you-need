@@ -16,6 +16,8 @@ import json
 import math
 from pathlib import Path
 
+from taste.ledger_costs import lifetime_billed_usd, read_cost_rows
+
 
 def clopper_pearson(k: int, n: int, alpha: float = 0.05) -> tuple[float, float]:
     """Exact binomial CI, pure stdlib — the box's venv has no scipy."""
@@ -58,11 +60,7 @@ def main() -> int:
     args = ap.parse_args()
     root = Path(args.root)
 
-    rows = []
-    for f in sorted((root / "ledger").glob("*.json")):
-        d = json.loads(f.read_text())
-        if isinstance(d, dict) and "status" in d:
-            rows.append(d)
+    rows = read_cost_rows(root / "ledger")
     evidence = {}
     # Re-scored sidecars win over originals: rescore.py never overwrites, so
     # without this the arm-level stats would keep reporting pre-fix numbers
@@ -81,7 +79,7 @@ def main() -> int:
     by_status: dict[str, int] = {}
     for r in rows:
         by_status[r["status"]] = by_status.get(r["status"], 0) + 1
-    spend = sum(r.get("billed_usd") or 0 for r in rows)
+    spend = math.fsum(lifetime_billed_usd(r) for r in rows)
 
     graded = [r for r in rows if r.get("score") is not None]
     resolved = [r for r in graded if r["score"] == 1.0]

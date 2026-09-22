@@ -17,6 +17,8 @@ import json
 import sys
 from pathlib import Path
 
+from taste.ledger_costs import ledger_billed_usd
+
 
 def load(root: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
@@ -27,12 +29,7 @@ def load(root: Path) -> dict[str, dict]:
 
 
 def spend(root: Path) -> float:
-    total = 0.0
-    for f in glob.glob(str(root / "ledger" / "*.json")):
-        d = json.loads(Path(f).read_text())
-        if isinstance(d, dict) and d.get("task") and d.get("billed_usd") is not None:
-            total += d["billed_usd"]
-    return total
+    return ledger_billed_usd(root / "ledger")
 
 
 def row(label: str, root: Path, slice_size: int = 40) -> str:

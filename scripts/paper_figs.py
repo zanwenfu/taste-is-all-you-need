@@ -4,6 +4,9 @@ import matplotlib.font_manager as fm
 import matplotlib.ticker
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
+
+from taste.ledger_costs import ledger_billed_usd
 
 # ---- typography and style: match the paper (Times) and keep the ink restrained
 for f in ("/usr/share/fonts/opentype/urw-base35/NimbusRoman-Regular.otf",
@@ -71,10 +74,7 @@ def arm_stats(root):
         if g.get("pass_to_pass"):
             pa, to = (int(v) for v in g["pass_to_pass"].split("/"))
             if to - pa - len(d.get("never_passed", [])) > 0: contam += 1
-    spend = 0.0
-    for f in glob.glob(f"{root}/ledger/*.json"):
-        d = json.load(open(f))
-        if isinstance(d, dict) and d.get("task") and d.get("billed_usd") is not None: spend += d["billed_usd"]
+    spend = ledger_billed_usd(Path(root) / "ledger")
     return res, contam, spend, len(graded)
 arm_roots = [("rollback", "/root/pilot40d"), ("gated", "/root/contrast40_A3reg"), ("split", "/root/contrast40_A3reg2"),
              ("repair", "/root/contrast40_A2"), ("none", "/root/contrast40_A0")]

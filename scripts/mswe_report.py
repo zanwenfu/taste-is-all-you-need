@@ -16,6 +16,8 @@ import json
 import sys
 from pathlib import Path
 
+from taste.ledger_costs import lifetime_billed_usd, read_cost_rows
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from substrate_table import load, row_from, spend
 
@@ -30,10 +32,8 @@ def manifests(root: Path) -> dict[str, dict]:
 
 def ledger(root: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    for f in glob.glob(str(root / "ledger" / "*.json")):
-        d = json.loads(Path(f).read_text())
-        if isinstance(d, dict) and d.get("task"):
-            out[d["task"]] = d
+    for d in read_cost_rows(root / "ledger"):
+        out[d["task"]] = d
     return out
 
 
@@ -84,7 +84,9 @@ def main() -> int:
             events = int(d.get("contamination_events_declared") or 0)
             vis = visible_failures(d) if d else None
             res = d.get("resolved")
-            usd = float(r.get("billed_usd") or m.get("cost_usd") or 0.0)
+            # The manifest describes one execution. It cannot stand in for
+            # a missing lifetime ledger, even when its last cost was zero.
+            usd = lifetime_billed_usd(r)
             totals["cmds"] += int(m.get("commands") or 0)
             totals["obs"] += int(m.get("observations") or 0)
             totals["events"] += events
