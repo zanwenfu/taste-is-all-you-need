@@ -357,37 +357,47 @@ def run_sweep(
 
         started = time.time()
         context: Any = None
+        result: RunResult | None = None
+        execution_record: CellResult | None = None
         phase = "prepare"
         try:
             context = prepare(cell)
             phase = "execute"
             result = execute(cell, context)
+            # Capture execution's costs and provenance before a fallible
+            # grader can mutate its inputs or discard the completed result.
+            execution_record = _record_from(cell, result, None, context)
+            execution_record.attempts_made = attempt_number
             phase = "score"
             value = score(cell, context, result) if score else None
-            record = _record_from(cell, result, value, context)
-            record.attempts_made = attempt_number
+            record = execution_record
+            record.score = value
+            record.report_path = str(getattr(context, "report_path", "") or "")
         except Exception as exc:
-            # A crash is data too — recorded so the cell is not silently
-            # retried forever, and excluded from success rates. The spend is
-            # read off the context rather than zeroed: a crash in score()
-            # arrives AFTER the agent phase was paid for, and writing
-            # billed_usd=0 made that money vanish from the ledger — with the
-            # cell recorded as retryable, so a resume re-executed the paid
-            # phase. The phase prefix is what lets a human tell "the agent
-            # run is intact, only the measurement failed" from "nothing ran".
-            stats = getattr(context, "llm_stats", None)
-            record = CellResult(
-                task=cell.task,
-                arm=cell.arm,
-                trial=cell.trial,
-                status="error",
-                config_hash="",
-                billed_usd=round(getattr(stats, "total_cost_usd", 0.0) or 0.0, 6),
-                work_usd=round(getattr(stats, "total_work_usd", 0.0) or 0.0, 6),
-                elapsed_s=round(time.time() - started, 2),
-                error=f"{phase}: {type(exc).__name__}: {exc}",
-                attempts_made=attempt_number,
-            )
+            # A grading failure does not erase the execution phase, its
+            # returned costs, or the immutable state needed to investigate it.
+            # Context statistics are a fallback for adapters that raise before
+            # returning their result; they are not a required second receipt.
+            if execution_record is not None:
+                record = execution_record
+                record.status = "error"
+                record.score = None
+                record.report_path = str(getattr(context, "report_path", "") or "")
+            else:
+                stats = _execution_stats(result, context)
+                record = CellResult(
+                    task=cell.task,
+                    arm=cell.arm,
+                    trial=cell.trial,
+                    status="error",
+                    config_hash="",
+                    billed_usd=round(getattr(stats, "total_cost_usd", 0.0) or 0.0, 6),
+                    work_usd=round(getattr(stats, "total_work_usd", 0.0) or 0.0, 6),
+                    cache_delta_usd=round(getattr(stats, "cache_delta_usd", 0.0) or 0.0, 6),
+                    attempts_made=attempt_number,
+                )
+            record.elapsed_s = round(time.time() - started, 2)
+            record.error = f"{phase}: {type(exc).__name__}: {exc}"
             record.failure_reason = traceback.format_exc(limit=3)
 
         ledger.write(record)
@@ -408,8 +418,13 @@ def run_sweep(
     return report
 
 
+def _execution_stats(result: RunResult | None, context: Any) -> Any:
+    stats = getattr(result, "stats", None)
+    return stats if stats is not None else getattr(context, "llm_stats", None)
+
+
 def _record_from(cell: Cell, result: RunResult, score: float | None, context: Any) -> CellResult:
-    stats = result.stats
+    stats = _execution_stats(result, context)
     status: CellStatus = result.status
     if result.failure_kind in ("infra", "budget"):
         status = result.failure_kind
@@ -429,7 +444,7 @@ def _record_from(cell: Cell, result: RunResult, score: float | None, context: An
         score=score,
         billed_usd=round(stats.total_cost_usd, 6) if stats else 0.0,
         work_usd=round(stats.total_work_usd, 6) if stats else 0.0,
-        cache_delta_usd=round(stats.cache_delta_usd, 6) if stats else 0.0,
+        cache_delta_usd=round(getattr(stats, "cache_delta_usd", 0.0), 6) if stats else 0.0,
         elapsed_s=result.elapsed_seconds,
         failure_reason=result.failure_reason,
         split_id=getattr(context, "split_id", "") or "",
