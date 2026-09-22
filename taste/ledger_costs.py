@@ -48,6 +48,8 @@ def read_cost_rows(directory: Path) -> list[dict[str, Any]]:
     directory = Path(directory)
     if not directory.is_dir():
         raise FileNotFoundError(f"cell ledger directory is missing: {directory}")
+    if (directory / ".sweep-journal" / "pending.json").exists():
+        raise ValueError("a sweep attempt is pending; final lifetime spending is not settled")
     rows = []
     for path in sorted(directory.glob("*.json")):
         try:

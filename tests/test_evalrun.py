@@ -11,9 +11,12 @@ import contextlib
 import json
 from pathlib import Path
 
+import pytest
+
 from taste.cores import Plan, Step, Verification
 from taste.evalrun import Cell, CellResult, Ledger, SweepReport, cells, run_sweep
 from taste.kernel import RunResult
+from taste.sweep_journal import UnsettledSweepAttempt
 
 
 def _run_result(
@@ -79,7 +82,7 @@ def test_a_completed_cell_is_never_re_run(tmp_path: Path) -> None:
     assert len(executed) == 2, "an interrupted sweep must not redo finished work"
 
 
-def test_a_partial_sweep_resumes_where_it_stopped(tmp_path: Path) -> None:
+def test_a_partial_sweep_preserves_finished_cells_and_blocks_the_unknown_attempt(tmp_path: Path) -> None:
     ledger_dir = tmp_path / "ledger"
     calls = {"n": 0}
 
@@ -98,12 +101,13 @@ def test_a_partial_sweep_resumes_where_it_stopped(tmp_path: Path) -> None:
     done = len(list(ledger_dir.glob("*.json")))
     assert done == 1, "only the completed cell should be on disk"
 
-    resumed = run_sweep(
-        tasks=["lib"], arms=["A0", "A3", "A3prime"], trials=1,
-        ledger_dir=ledger_dir, prepare=lambda c: None, execute=lambda c, x: _run_result(),
-    )
-    assert resumed.skipped == 1
-    assert len(resumed.results) == 2
+    with pytest.raises(UnsettledSweepAttempt, match="automatic retry is blocked"):
+        run_sweep(
+            tasks=["lib"], arms=["A0", "A3", "A3prime"], trials=1,
+            ledger_dir=ledger_dir, prepare=lambda c: pytest.fail("must not prepare"),
+            execute=lambda c, x: _run_result(),
+        )
+    assert Ledger(ledger_dir).read(Cell("lib", "A0", 1)).status == "completed"
 
 
 def test_ledger_writes_are_atomic(tmp_path: Path) -> None:

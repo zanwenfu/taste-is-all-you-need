@@ -6,19 +6,18 @@ be stopped by a rate limit, a laptop lid, or a mistake, and the failure mode
 that ruins a study is not losing work — it is *silently double-counting* the
 work done twice.
 
-So the unit of progress is a **cell**, keyed by (task, arm, trial), and the
-ledger is the filesystem: one JSON file per completed cell. A cell that has a
-file is done and is never re-run; a cell that does not is pending. Resume is
-therefore the default behaviour rather than a mode, and it needs no state
-beyond what is already on disk.
+The unit of progress is a **cell**, keyed by (task, arm, trial). Completed
+results live in the ledger; each potentially paid attempt first receives a
+durable admission identity under ``.sweep-journal``. A missing final result
+is not permission to repeat an interrupted attempt. One driver owns the ledger
+at a time, and restart replays complete receipts or blocks on unsettled work.
 
 Three things this refuses to do, each because it would quietly corrupt the
 resulting numbers:
 
 * **Pool failure kinds.** A trial killed by a rate limit is not evidence about
-  the agent. Infra and budget outcomes are recorded and excluded from success
-  rates rather than counted as failures — which would bias against whichever
-  arm makes more API calls, i.e. the one under test.
+  the agent. Infrastructure faults are recorded separately. Budget exhaustion
+  counts as an unsuccessful task outcome; its spending is still real.
 * **Share a workspace.** Every trial materializes its own copy. Two trials in
   one directory means one run's edits become another's starting state.
 * **Report a cap as a cost.** What a trial was *allowed* to spend and what it
@@ -41,6 +40,7 @@ from typing import Any
 from taste.config import HarnessConfig, kernel_kwargs
 from taste.kernel import Kernel, RunResult
 from taste.ledger_costs import lifetime_billed_usd
+from taste.sweep_journal import SweepJournal
 
 CellStatus = str  # "completed" | "failed" | "infra" | "budget" | "error" | "aborted"
 
@@ -99,6 +99,8 @@ class CellResult:
     attempts_made: int = 1
     """How many times this cell has been executed, including retries after
     infrastructure faults. Reported as attrition, never hidden."""
+    attempt_id: str = ""
+    """Durable pre-effect admission identity; empty only in historical rows."""
     ts: float = field(default_factory=time.time)
     prior_attempts: tuple[dict[str, Any], ...] = ()
     """Flat immutable snapshots of earlier attempts, including their costs."""
@@ -220,8 +222,8 @@ class Ledger:
             raise ValueError(f"cell ledger filename does not match its identity: {path.name}")
         return result
 
-    def write(self, result: CellResult) -> None:
-        """Atomic: a partial file on interruption would read as a done cell."""
+    def _prepare_write(self, result: CellResult) -> Path | None:
+        """Bind prior history before either a journal receipt or result is written."""
         cell = Cell(result.task, result.arm, result.trial)
         target = self.path_for(cell)
         previous = self.read(cell)
@@ -242,6 +244,13 @@ class Ledger:
             prior.pop("prior_attempts")
             result.prior_attempts = (*previous.prior_attempts, prior)
         _ = result.total_billed_usd
+        return target
+
+    def write(self, result: CellResult) -> None:
+        """Atomic: a partial file on interruption would read as a done cell."""
+        target = self._prepare_write(result)
+        if target is None:
+            return
         tmp: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", dir=self.root, suffix=".tmp", delete=False) as handle:
@@ -292,6 +301,42 @@ def run_sweep(
     retry_budget: int = 0,
     max_consecutive_failures: int | None = None,
     sweep_budget_usd: float | None = None,
+) -> SweepReport:
+    """Run a ledger under one owner, journaling admission before external work.
+
+    The work queue may be a filtered resume subset; its budget always covers
+    the whole ledger. A killed attempt without a durable ending blocks more
+    work until its execution/grading evidence is reconciled. A complete ending
+    is replayed into the ledger without preparing or executing the cell again.
+    """
+    ledger = Ledger(ledger_dir)
+    with SweepJournal(ledger_dir) as journal:
+        ending = journal.ending()
+        if ending is not None:
+            ledger.write(CellResult(**ending))
+            journal.finish()
+        return _run_sweep(
+            tasks=tasks, arms=arms, trials=trials, ledger_dir=ledger_dir,
+            prepare=prepare, execute=execute, score=score, on_cell=on_cell,
+            retry_budget=retry_budget, max_consecutive_failures=max_consecutive_failures,
+            sweep_budget_usd=sweep_budget_usd, journal=journal,
+        )
+
+
+def _run_sweep(
+    *,
+    tasks: list[str],
+    arms: list[str],
+    trials: int,
+    ledger_dir: Path,
+    prepare: Callable[[Cell], Any],
+    execute: Callable[[Cell, Any], RunResult],
+    score: Callable[[Cell, Any, RunResult], float | None] | None,
+    on_cell: Callable[[CellResult], None] | None,
+    retry_budget: int,
+    max_consecutive_failures: int | None,
+    sweep_budget_usd: float | None,
+    journal: SweepJournal,
 ) -> SweepReport:
     """Run the grid, skipping cells already on disk.
 
@@ -355,6 +400,7 @@ def run_sweep(
             break
         previous = ledger.read(cell)
         attempt_number = (previous.attempts_made + 1) if previous else 1
+        attempt_id = journal.begin(asdict(cell), attempt_number)
 
         started = time.time()
         context: Any = None
@@ -369,6 +415,9 @@ def run_sweep(
             # grader can mutate its inputs or discard the completed result.
             execution_record = _record_from(cell, result, None, context)
             execution_record.attempts_made = attempt_number
+            execution_record.attempt_id = attempt_id
+            ledger._prepare_write(execution_record)
+            journal.record("execution", asdict(execution_record))
             phase = "score"
             value = score(cell, context, result) if score else None
             record = execution_record
@@ -401,7 +450,11 @@ def run_sweep(
             record.error = f"{phase}: {type(exc).__name__}: {exc}"
             record.failure_reason = traceback.format_exc(limit=3)
 
+        record.attempt_id = attempt_id
+        ledger._prepare_write(record)
+        journal.record("ending", asdict(record))
         ledger.write(record)
+        journal.finish()
         report.results.append(record)
         notify(record)
 
