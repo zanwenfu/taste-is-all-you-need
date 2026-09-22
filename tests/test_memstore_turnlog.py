@@ -105,15 +105,13 @@ def test_a_consumed_journal_never_replays(tmp_path: Path) -> None:
     s = Store.open(root, "s1")
     b = s.branch("worker")
     b.turn(role="assistant", content="only once")
+    old_journal = s.sidecar("turns", "worker", f".{b.head.id}")
     st = b.checkpoint("published")
     assert [t["content"] for t in st.transcript.turns] == ["only once"]
     s.close()
 
     # Simulate the crash window: the ref moved, but cleanup never ran.
-    common = Store.open(root, "s1").backend.common_dir
-    leftovers = list(common.glob("memstore.turns.*"))
-    for stale in leftovers:
-        stale.write_text('{"role": "assistant", "content": "only once"}\n')
+    old_journal.write_text('{"role": "assistant", "content": "only once"}\n')
 
     s = Store.open(root, "s1")
     b = s.branch("worker")
@@ -146,11 +144,11 @@ def test_publishing_clears_the_journal(tmp_path: Path) -> None:
     s = Store.open(root, "s1")
     b = s.branch("worker")
     b.turn(role="assistant", content="pending")
-    common = s.backend.common_dir
-    assert list(common.glob("memstore.turns.s1.worker.*"))
+    journal = s.sidecar("turns", "worker", f".{b.head.id}")
+    assert journal.exists()
 
     b.checkpoint("done")
-    assert not list(common.glob("memstore.turns.s1.worker.*"))
+    assert not journal.exists()
     s.close()
 
 
@@ -181,15 +179,17 @@ def test_gc_sweeps_journals_that_no_branch_can_still_be_holding(tmp_path: Path) 
     s = Store.open(root, "s1")
     b = s.branch("worker")
     b.turn(role="assistant", content="live")
-    common = s.backend.common_dir
-    (common / "memstore.turns.s1.worker.deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").write_text(
-        '{"role": "assistant", "content": "stale"}\n'
-    )
+    stale = s.sidecar("turns", "worker", "." + "d" * 40)
+    stale.write_text('{"role": "assistant", "content": "stale"}\n')
 
     s.gc()
 
     assert [t["content"] for t in b.resume().recovered_turns] == ["live"]
-    assert not list(common.glob("*deadbeef*"))
+    assert stale.exists(), "a writer can still be handing off this journal"
+    b.close()
+    s.gc()
+    assert not stale.exists()
+    assert s.view("worker").pending_turns()[0]["content"] == "live"
     s.close()
 
 

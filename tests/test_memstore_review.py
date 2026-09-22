@@ -92,7 +92,7 @@ def test_a_new_branch_never_exists_pointing_at_another_branchs_state(
 
 
 def test_a_checkpoint_is_not_broken_by_a_gc_in_another_process(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``gc`` prunes unreachable objects, and a state being built is briefly
     unreachable. It must not be able to land inside a checkpoint."""
@@ -100,13 +100,25 @@ def test_a_checkpoint_is_not_broken_by_a_gc_in_another_process(
     writer = Store.open(root, "s1")
     b = writer.branch("worker")
     b.write("f.txt", "work\n")
+    built = b.build("the work that must not be lost")
+    b.turn(content="late reasoning")
 
-    tidier = Store.open(root, "s1")
+    tidier = Store.open(root, "another-session")
     tidier.gc()
 
-    st = b.checkpoint("the work that must not be lost")
+    original_cas = b.backend.cas_update_ref
+
+    def collect_during_publication(ref, new, expected):
+        # The new-head journal now exists, but the branch still points to the
+        # old state. GC must preserve both the build and its late turns.
+        tidier.gc()
+        return original_cas(ref, new, expected)
+
+    monkeypatch.setattr(b.backend, "cas_update_ref", collect_during_publication)
+    st = b.publish_state(built)
     assert st.read("f.txt") == "work\n"
     assert b.head.id == st.id
+    assert b.resume().recovered_turns[0]["content"] == "late reasoning"
     tidier.close()
     writer.close()
 

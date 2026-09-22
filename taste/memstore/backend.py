@@ -19,7 +19,8 @@ Two rules learned from an audit that broke the first version of this file:
 * **Nothing is excluded.** The first version imported the legacy harness's
   ``.git/info/exclude`` writer, so caches and bytecode were silently never
   checkpointed by a layer whose first invariant is that nothing is lost. A
-  caller that wants exclusions now has to ask for them.
+  task's ignore rules remain available to its Git tools, but do not exclude
+  files from memory checkpoints.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import contextlib
 import fcntl
 import hashlib
 import os
+import stat
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
@@ -40,6 +42,8 @@ from git import Repo
 from git.exc import BadName, BadObject, GitCommandError
 from git.objects import Blob, Commit, Tree
 from git.refs import SymbolicReference
+
+from taste.memstore.objects import UnsafeCapture
 
 # One held description per lock path, process-wide; see ``GitBackend.lock``.
 # Keyed by thread as well as path: the description is what ``flock`` acts on,
@@ -67,6 +71,7 @@ MODE_FILE = "100644"
 MODE_EXEC = "100755"
 MODE_SYMLINK = "120000"
 MODE_GITLINK = "160000"
+BLOB_MODES = frozenset({MODE_FILE, MODE_EXEC, MODE_SYMLINK})
 #: Modes whose content is not a plain file, so a content merge is meaningless.
 UNMERGEABLE_MODES = frozenset({MODE_SYMLINK, MODE_GITLINK})
 
@@ -385,7 +390,67 @@ class GitBackend:
     # ---------------------------------------------------------------- objects
 
     def stage_all(self) -> None:
-        self.repo.git.add("--all", ".")
+        self.check_capture_safe()
+        self.repo.git.add("--force", "--all", "--", ".")
+        # A worker can create a nested repo after the filesystem scan. Never
+        # publish the resulting gitlink as though it captured those files.
+        self._check_index_capture_safe()
+
+    def _check_index_capture_safe(self) -> None:
+        entries = self.repo.git.ls_files(
+            "--stage", "-z", stdout_as_string=False, strip_newline_in_stdout=False,
+        )
+        for entry in entries.split(b"\0"):
+            if entry.startswith(b"160000 "):
+                relative = _dec(entry.split(b"\t", 1)[1])
+                path = self.path / relative
+                # Removing a gitlink entirely is representable. An existing
+                # checkout behind that pointer is not a file snapshot.
+                if path.exists() or path.is_symlink():
+                    raise UnsafeCapture(
+                        f"nested repository in Git index at {relative}; "
+                        "the worktree must be retained"
+                    )
+
+    def check_capture_safe(self) -> None:
+        """Refuse filesystem shapes that a Git tree would omit or misrepresent.
+
+        A nested repo becomes a gitlink, which does not preserve its working
+        files or object database. FIFOs/devices/sockets likewise cannot be
+        reconstructed from this store. Keep their original worktree available
+        for explicit recovery instead of claiming a complete snapshot.
+        """
+        self._check_index_capture_safe()
+
+        def unreadable(error: OSError) -> None:
+            raise error
+
+        for directory, dirs, files in os.walk(self.path, followlinks=False, onerror=unreadable):
+            parent = Path(directory)
+            if parent == self.path:
+                dirs[:] = [name for name in dirs if name != ".git"]
+                files = [name for name in files if name != ".git"]
+            elif ".git" in dirs or ".git" in files:
+                relative = parent.relative_to(self.path)
+                raise UnsafeCapture(
+                    f"nested repository at {relative!s} cannot be preserved by a Git file "
+                    "snapshot; the worktree must be retained"
+                )
+            for name in (*dirs, *files):
+                path = parent / name
+                mode = path.lstat().st_mode
+                if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+                    raise UnsafeCapture(
+                        f"unsupported filesystem entry at {path.relative_to(self.path)!s}; "
+                        "the worktree must be retained"
+                    )
+
+    def stage_entry(self, path: str, mode: str, content: bytes) -> None:
+        """Pin an adopted file's exact mode, even with core.filemode=false."""
+        if mode not in BLOB_MODES:
+            raise ValueError(f"cannot stage file mode {mode}")
+        blob = self.hash_blob(content)
+        self.repo.git.update_index("--add", "--cacheinfo", f"{mode},{blob},{path}")
 
     def write_tree(self) -> str:
         return self.repo.git.write_tree()
@@ -451,6 +516,13 @@ class GitBackend:
                 maximum=_PARENTS_CACHE_MAX_ENTRIES,
             )
         return list(parents)
+
+    @_serialized_object_read
+    def blob_size(self, blob_id: str) -> int:
+        """Read object size without loading its contents into memory."""
+        if not _is_full_object_id(blob_id):
+            raise ValueError("blob size requires an exact object id")
+        return int(self.repo.git.cat_file("-s", blob_id))
 
     @_serialized_object_read
     def entry_at(self, treeish: str, path: str) -> TreeEntry | None:
@@ -862,6 +934,7 @@ class GitBackend:
             "--porcelain",
             "-z",
             "--untracked-files=all",
+            "--ignored=traditional",
             stdout_as_string=False,
             strip_newline_in_stdout=False,
         )
@@ -887,6 +960,7 @@ class GitBackend:
             "--porcelain",
             "-z",
             "--untracked-files=all",
+            "--ignored=traditional",
             stdout_as_string=False,
             strip_newline_in_stdout=False,
         )
@@ -901,7 +975,7 @@ class GitBackend:
             xy, path = entry[:2], entry[3:]
             if b"R" in xy or b"C" in xy:
                 i += 1
-            if xy == b"??":
+            if xy in {b"??", b"!!"}:
                 paths.append(_dec(path))
         return paths
 
@@ -958,10 +1032,11 @@ class GitBackend:
             self.repo.git.worktree("add", str(path), ref)
 
     def worktree_remove(self, path: Path) -> None:
-        with contextlib.suppress(GitCommandError):
+        if path.exists() or path.is_symlink():
             self.repo.git.worktree("remove", "--force", str(path))
-        with contextlib.suppress(GitCommandError):
-            self.repo.git.worktree("prune")
+            if path.exists() or path.is_symlink():
+                raise OSError(f"Git did not remove worktree {path}")
+        self.repo.git.worktree("prune")
 
     def write_excludes(self, patterns: list[str]) -> None:
         """Set this repository's local excludes. Empty means exclude nothing."""

@@ -795,6 +795,10 @@ def test_gc_collects_what_a_lost_race_left_behind(store: Store) -> None:
     assert store.backend.note_get(NOTES["meta"], orphan.sha) is not None
     assert store.backend.show_bytes(orphan.sha, "f") == b"2"  # warm the exact-id cache
 
+    # An unpublished build remains usable while its writer holds the lease.
+    store.gc()
+    assert store.backend.show_bytes(orphan.sha, "f") == b"2"
+    a.release()
     store.gc()
     assert store.backend.note_get(NOTES["meta"], orphan.sha) is None
     assert store.backend.show_bytes(orphan.sha, "f") is None

@@ -7,6 +7,7 @@ these stop holding, everything built above the layer is standing on sand.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -298,6 +299,7 @@ def test_everything_is_reconstructible_from_refs_and_notes(tmp_path: Path) -> No
                 p.unlink()
     for lock in (root / ".git").glob("memstore.*"):
         lock.unlink()
+    shutil.rmtree(root / ".git" / "memstore-sidecars")
 
     s = Store.open(root, "s1")
     a = s.branch("a")

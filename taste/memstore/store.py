@@ -30,13 +30,16 @@ import json
 import os
 import re
 import socket
+import tempfile
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from taste.memstore.backend import EMPTY_TREE, GitBackend
+from git.exc import InvalidGitRepositoryError, NoSuchPathError
+
+from taste.memstore.backend import BLOB_MODES, EMPTY_TREE, MODE_EXEC, MODE_SYMLINK, GitBackend
 from taste.memstore.objects import (
     BadName,
     BranchBusy,
@@ -55,9 +58,11 @@ from taste.memstore.objects import (
     StateKind,
     Transcript,
     Verdict,
+    WorktreeUnavailable,
     conflict_digest,
     now_iso,
 )
+from taste.memstore.sidecars import TURN_SUFFIX, Sidecars, _fsync_directory, _mkdir_durable
 
 NOTES = {
     "meta": "refs/notes/taste/meta",
@@ -359,6 +364,11 @@ class State:
     def read_bytes(self, path: str) -> bytes | None:
         return self._store.backend.show_bytes(self.id, path)
 
+    def byte_size(self, path: str) -> int | None:
+        """Size of one immutable artifact without reading the complete blob."""
+        blob_id = self.blob(path)
+        return None if blob_id is None else self._store.backend.blob_size(blob_id)
+
     def blob(self, path: str) -> str | None:
         return self._store.backend.blob_at(self.id, path)
 
@@ -426,9 +436,8 @@ class BranchView:
     def history(self, limit: int | None = None) -> list[State]:
         """This branch's own states, newest first, stopping where it began."""
         out: list[State] = []
-        for sha in self.store.backend.rev_list_first_parent(self.head.id):
-            st = self.store.state(sha)
-            if st.meta.branch != self.name:
+        for st in self.store._state_lineage(self.head):
+            if st.meta.branch != self.name or st.meta.session != self.store.session:
                 break
             out.append(st)
             if limit is not None and len(out) >= limit:
@@ -500,16 +509,27 @@ class BranchView:
 class Branch:
     """One brain's execution context: a branch, its working tree, its lease."""
 
-    def __init__(self, store: Store, name: str, *, producer: str = "") -> None:
+    def __init__(
+        self, store: Store, name: str, *, producer: str = "", repair: bool = True,
+    ) -> None:
         self.store = store
         self.name = name
         self.producer = producer or name
         self.ref = store.ref_for(name)
         self.short_ref = store.short_ref_for(name)
         self.worktree = store.worktree_path_for(name)
-        self.backend = GitBackend(self.worktree)
-        self._assert_same_repo()
         self._lease: IO[str] | None = self._acquire_lease()
+        try:
+            # Acquire the lease before even inspecting/repairing a damaged
+            # checkout: a live owner may still be using its remaining files.
+            self.backend = store._open_worktree(name, repair=repair)
+            self._assert_same_repo()
+            self._require_attached_worktree()
+        except BaseException:
+            self.release()
+            if hasattr(self, "backend"):
+                self.backend.close()
+            raise
         self._pending: dict[str, ManifestEntry] = {}
         self._unpublish: set[str] = set()
         self._pending_sources: list[Source] = []
@@ -679,7 +699,7 @@ class Branch:
     def _recent_verdicts(self) -> list[tuple[str, list[Verdict]]]:
         """Verdicts on the head and its recent ancestors, newest state first."""
         found: list[tuple[str, list[Verdict]]] = []
-        for state in self.store.provenance(self.head)[:VERDICT_LOOKBACK]:
+        for state in self.store.provenance(self.head, limit=VERDICT_LOOKBACK):
             verdicts = state.verdicts
             if verdicts:
                 found.append((state.id, verdicts))
@@ -813,7 +833,7 @@ class Branch:
     def adopt(self, source: State | Hit, path: str | None = None, *, as_: str | None = None) -> str:
         """Take another branch's artifact, recording where it came from.
 
-        Copies the bytes into this working tree and records the source in the
+        Copies bytes and mode into this working tree and records the source in the
         next state's provenance, so ``store.origin`` can cross branches. This
         is the read half of the communicator: A finds B's artifact and adopts
         it rather than re-deriving it.
@@ -830,16 +850,41 @@ class Branch:
             state = source
         if path is None:
             raise ValueError("adopt needs a path when given a state")
-        blob = state.blob(path)
+        entry = state._store.backend.entry_at(state.id, path)
+        if entry is None or entry.mode not in BLOB_MODES:
+            raise PublishError(f"{path} in state {state.id[:10]} is not an adoptable file")
+        blob = entry.sha
         if advertised_blob is not None and blob != advertised_blob:
             raise PublishError(
                 f"{path} in state {state.id[:10]} does not match its advertised blob"
             )
         raw = state.read_bytes(path)
-        if raw is None or blob is None:
+        if raw is None:
             raise PublishError(f"{path} is not in state {state.id[:10]}")
         target = as_ or path
-        self.write(target, raw)
+        relative = Path(target)
+        if (relative.is_absolute() or not relative.parts or ".." in relative.parts
+                or any(part.lower() == ".git" for part in relative.parts)):
+            raise PublishError(f"unsafe adoption destination {target!r}")
+        destination = self.worktree / relative
+        for parent in destination.parents:
+            if parent == self.worktree:
+                break
+            if parent.is_symlink():
+                raise PublishError(f"adoption destination {target!r} traverses a symlink")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # Replacing the final entry never follows a pre-existing symlink and
+        # never changes a hard-linked target's contents. Keep scratch on the
+        # destination filesystem so replacement remains atomic.
+        with tempfile.TemporaryDirectory(prefix=".memstore-adopt-", dir=destination.parent) as tmp:
+            staged = Path(tmp) / "entry"
+            if entry.mode == MODE_SYMLINK:
+                staged.symlink_to(os.fsdecode(raw))
+            else:
+                staged.write_bytes(raw)
+                staged.chmod(0o755 if entry.mode == MODE_EXEC else 0o644)
+            os.replace(staged, destination)
+        self.backend.stage_entry(target, entry.mode, raw)
         self._pending_sources.append(
             Source(
                 branch=state.meta.branch,
@@ -1251,6 +1296,9 @@ class Branch:
         version protected rollback alone, so merge and worktree removal threw
         away work the layer promised to keep.
         """
+        # Git status can call an ignored nested repo or special node clean.
+        # Check representability even when no regular-file diff is reported.
+        self.backend.check_capture_safe()
         if self.is_dirty():
             self.checkpoint(f"capture before {op}: {reason}")
 
@@ -1443,6 +1491,11 @@ class Store:
         self.root = Path(root).resolve()
         self.session = _check_name(session, "session")
         self.backend = GitBackend.init(self.root)
+        try:
+            self._sidecars = Sidecars(self.backend)
+        except BaseException:
+            self.backend.close()
+            raise
         self._branches: dict[str, Branch] = {}
 
     @classmethod
@@ -1470,9 +1523,8 @@ class Store:
         they describe work in flight rather than work that happened, so they
         are not history and must not be committed as if they were.
         """
-        return (
-            self.backend.common_dir
-            / f"memstore.{kind}.{self.session}.{_check_name(branch, 'branch')}{suffix}"
+        return self._sidecars.path(
+            self.session, _check_name(branch, "branch"), kind, suffix
         )
 
     def worktree_path_for(self, name: str) -> Path:
@@ -1492,52 +1544,130 @@ class Store:
     # ---------------------------------------------------------- session root
 
     def _session_root(self) -> str:
-        """The commit every branch of this session descends from."""
+        """A session-owned state importing the current repository tree.
+
+        Git retains the imported commit as an ancestor, but the root has no
+        *state* parents. Ordinary Git history is not brain execution history.
+        Existing roots remain readable, including the old layout that wrote
+        root notes directly onto the imported commit.
+        """
         ref = f"{self.ROOT_REF}/{self.session}/root"
-        sha = self.backend.ref_sha(ref)
-        if sha:
-            return sha
-        base = self.backend.head_commit()
-        if base is None:
-            base = self.backend.commit_tree(EMPTY_TREE, [], f"memstore root: {self.session}")
         with self.backend.lock():
             sha = self.backend.ref_sha(ref)
             if sha:
                 return sha
-            if self.backend.note_get(NOTES["meta"], base) is None:
-                meta = Meta(
-                    branch="",
-                    kind="root",
-                    reason=f"session root: {self.session}",
-                    producer="",
-                    parents=(),
-                    created_at=now_iso(),
-                    session=self.session,
-                )
-                self.backend.note_set(NOTES["meta"], base, meta.to_json())
-                self.backend.note_set(NOTES["manifest"], base, Manifest().to_json())
-                self.backend.note_set(NOTES["transcript"], base, "")
+            imported = self.backend.head_commit()
+            now = now_iso()
+            base = self.backend.commit_tree(
+                self.backend.tree_of(imported) if imported is not None else EMPTY_TREE,
+                [imported] if imported is not None else [],
+                f"memstore root: {self.session}\n\nTaste-Created: {now}\n",
+            )
+            meta = Meta(
+                branch="",
+                kind="root",
+                reason=f"session root: {self.session}",
+                producer="",
+                parents=(),
+                created_at=now,
+                session=self.session,
+            )
+            self.backend.note_set(NOTES["meta"], base, meta.to_json())
+            self.backend.note_set(NOTES["manifest"], base, Manifest().to_json())
+            self.backend.note_set(NOTES["transcript"], base, "")
             self.backend.cas_update_ref(ref, base, None)
         return base
 
     # ---------------------------------------------------------- branches
 
-    def branch(self, name: str, *, from_state: State | None = None, producer: str = "") -> Branch:
-        """Open ``name`` for writing, creating it if it does not exist."""
+    def branch(
+        self, name: str, *, from_state: State | None = None, producer: str = "", repair: bool = True,
+    ) -> Branch:
+        """Open ``name`` for writing, creating it if it does not exist.
+
+        ``repair=False`` requires the original checkout. Supervisors use it
+        before capturing a dead worker: recreating its committed files cannot
+        establish what was left uncommitted in a lost or damaged checkout.
+        """
         name = _check_name(name, "branch")
         cached = self._branches.get(name)
         if cached is not None and cached._lease is not None:
             return cached
-        ref = self.ref_for(name)
-        if self.backend.ref_sha(ref) is None:
-            base = from_state.id if from_state is not None else self._session_root()
-            self._seed(name, ref, base, from_state, producer)
-        wt = self.worktree_path_for(name)
-        if not wt.exists():
-            self.backend.worktree_add(wt, self.short_ref_for(name))
-        b = Branch(self, name, producer=producer)
-        self._branches[name] = b
-        return b
+        # Protect the initially unreferenced seed until the branch exists and
+        # owns a lease. GC uses the same lock before inspecting every lease.
+        with self.backend.lock():
+            cached = self._branches.get(name)
+            if cached is not None and cached._lease is not None:
+                return cached
+            ref = self.ref_for(name)
+            if self.backend.ref_sha(ref) is None:
+                if not repair:
+                    raise WorktreeUnavailable(
+                        f"Missing worker branch ref {ref}; the original capture lineage is unavailable"
+                    )
+                base = from_state.id if from_state is not None else self._session_root()
+                self._seed(name, ref, base, from_state, producer)
+            b = Branch(self, name, producer=producer, repair=repair)
+            self._branches[name] = b
+            return b
+
+    def _open_worktree(self, name: str, *, repair: bool = True) -> GitBackend:
+        """Open or repair a checkout while holding its lease and repo lock."""
+        path = self.worktree_path_for(name)
+        if path.is_symlink():
+            raise BadName(f"worktree path is a symlink: {path}")
+        if path.exists():
+            try:
+                return GitBackend(path)
+            except (InvalidGitRepositoryError, NoSuchPathError):
+                if not repair:
+                    raise WorktreeUnavailable(
+                        f"Invalid Git worktree at {path}; original files retained for explicit recovery"
+                    ) from None
+                # A task workspace may have been recreated at the same path,
+                # or Git may have removed .git before failing on read-only
+                # contents. Neither condition licenses deleting those files.
+                self._preserve_worktree(name, path)
+        elif not repair:
+            raise WorktreeUnavailable(f"Missing worktree at {path}; its uncommitted work cannot be verified")
+        self.backend.worktree_add(path, self.short_ref_for(name))
+        return GitBackend(path)
+
+    def _preserve_worktree(self, name: str, path: Path) -> None:
+        root = path.parent / ".recovery" / name
+        _mkdir_durable(root)
+        container = Path(tempfile.mkdtemp(prefix="saved-", dir=root))
+        _fsync_directory(root)
+        # Persist a locator before the rename. A crash leaves either the
+        # original directory or an intact copy beside this record. A failed
+        # checkout after the rename can be retried without moving that copy.
+        record = {
+            "schema": "taste.memstore/WorktreeRecovery/1",
+            "source": str(path),
+            "ref": self.ref_for(name),
+            "reason": "invalid Git worktree; original files retained",
+            "created_at": now_iso(),
+        }
+        with (container / "recovery.json").open("x", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(container)
+        path.rename(container / "worktree")
+        _fsync_directory(container)
+        _fsync_directory(path.parent)
+
+    def worktree_recoveries(self, name: str) -> tuple[Path, ...]:
+        """Original files retained when a stale checkout had to be recreated.
+
+        These copies are never garbage-collected. Their adjacent recovery.json
+        records explain where they came from, including after the source Git
+        repository itself was replaced. Inspect them before manual removal.
+        """
+        path = self.worktree_path_for(name)
+        root = path.parent / ".recovery" / name
+        return tuple(sorted(root.glob("saved-*/worktree")))
 
     def view(self, name: str) -> BranchView:
         """A lease-free read-only window: what a monitor or dashboard uses."""
@@ -1596,19 +1726,30 @@ class Store:
         name = _check_name(name, "branch")
         worktree = self.worktree_path_for(name)
         b = self._branches.get(name)
+        if not worktree.exists() and not worktree.is_symlink():
+            # Nothing to remove. A later branch open prunes stale Git admin
+            # entries before recreating its checkout, under the branch lease.
+            return
         opened_here = False
-        if worktree.exists() and (b is None or b._lease is None):
+        if b is None or b._lease is None:
             b = self.branch(name)
             opened_here = True
-        if b is not None:
+        with b._mutation_lock:
             try:
                 b._capture("worktree removal", name)
             except Exception:
                 if opened_here:
                     b.close()
                 raise
-            b.close()
-        self.backend.worktree_remove(worktree)
+            # Keep the writer lease until removal has finished. Releasing it
+            # before Git cleanup allows a new writer to open a tree that is
+            # about to be destroyed. Do not hide partial-removal failures.
+            try:
+                b.backend.close()
+                with self.backend.lock():
+                    self.backend.worktree_remove(worktree)
+            finally:
+                b.release()
 
     # ---------------------------------------------------------- housekeeping
 
@@ -1617,34 +1758,49 @@ class Store:
 
         A checkpoint that loses its compare-and-swap, or a state that is
         built and never published, leaves a commit and its notes behind. No
-        ref reaches them, so nothing can read them and no answer changes;
-        they are simply still on disk. This is the explicit way to collect
-        them. Nothing calls it automatically because pruning is not free and
-        a store is allowed to be untidy.
+        ref reaches them once the writer releases its lease. A live writer
+        may still publish an unreferenced build, so object pruning is deferred
+        while any session has a writer. Nothing calls this automatically.
         """
-        self.backend.prune_unreachable()
-        for ns in NOTES.values():
-            self.backend.note_prune(ns)
+        with self.backend.lock(), contextlib.ExitStack() as leases:
+            prefix = f"{self.REF_ROOT}/"
+            for ref, _ in self.backend.for_each_ref(prefix):
+                session, name = ref.removeprefix(prefix).split("/", 1)
+                path = self._sidecars.path(session, name, "lease")
+                handle = leases.enter_context(path.open("a+"))
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    break
+            else:
+                self.backend.prune_unreachable()
+                for ns in NOTES.values():
+                    self.backend.note_prune(ns)
         self._sweep_turn_journals()
 
     def _sweep_turn_journals(self) -> None:
         """Drop turn journals that no branch can still be extending.
 
-        A journal is live only while it names its branch's current head; once
-        the branch moves on, the turns in it were either folded into that move
-        or belong to a state that was never published. Either way no brain can
-        still be adding to it. Journals for a head that is still current are
-        untouched, so collecting is never a way to lose pending reasoning.
+        Publication copies late turns to the future head before moving the
+        ref. The lease prevents GC from deleting that copy during the handoff.
+        Once no writer holds the branch, only its current journal is live.
+        Unknown filenames are retained rather than guessed to be garbage.
         """
-        live = set()
         for name in self.branches():
-            sha = self.backend.ref_sha(self.ref_for(name))
-            if sha is not None:
-                live.add(f"memstore.turns.{self.session}.{name}.{sha}")
-        for path in self.backend.common_dir.glob(f"memstore.turns.{self.session}.*"):
-            if path.name not in live:
-                with contextlib.suppress(FileNotFoundError):
-                    path.unlink()
+            with self.sidecar("lease", name).open("a+") as lease:
+                try:
+                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                with self.backend.lock():
+                    sha = self.backend.ref_sha(self.ref_for(name))
+                    if sha is None:
+                        continue
+                    for path in self.sidecar("turns", name).parent.glob("turns.*"):
+                        suffix = path.name.removeprefix("turns")
+                        if TURN_SUFFIX.fullmatch(suffix) and suffix != f".{sha}":
+                            with contextlib.suppress(FileNotFoundError):
+                                path.unlink()
 
     # ---------------------------------------------------------- states
 
@@ -1788,9 +1944,30 @@ class Store:
 
     # ---------------------------------------------------------- provenance
 
-    def provenance(self, state: State) -> list[State]:
+    def _state_lineage(self, state: State, limit: int | None = None) -> Iterator[State]:
+        """Walk real first parents, stopping at the explicit state boundary.
+
+        Do not skip commits with missing metadata: that would hide corruption
+        inside a brain's history. Only an explicit root ends state ancestry.
+        Walking incrementally also avoids loading all imported Git ancestors
+        when a caller only needs a few recent verdicts.
+        """
+        count = 0
+        current = state
+        while limit is None or count < limit:
+            meta = current.meta
+            yield current
+            count += 1
+            if meta.kind == "root":
+                return
+            parents = self.backend.parents_of(current.id)
+            if not parents:
+                return
+            current = self.state(parents[0])
+
+    def provenance(self, state: State, *, limit: int | None = None) -> list[State]:
         """The chain of states that produced ``state``, newest first."""
-        return [self.state(s) for s in self.backend.rev_list_first_parent(state.id)]
+        return list(self._state_lineage(state, limit))
 
     def origin(self, state: State, path: str) -> State | None:
         """The state in which the artifact at ``path`` took its current form.
@@ -1801,10 +1978,12 @@ class Store:
         target = state.blob(path)
         if target is None:
             return None
+        target_entry = self.backend.entry_at(state.id, path)
+        if target_entry is None:
+            return None
         origin = state
-        for sha in self.backend.rev_list_first_parent(state.id):
-            s = self.state(sha)
-            if s.blob(path) != target:
+        for s in self._state_lineage(state):
+            if self.backend.entry_at(s.id, path) != target_entry:
                 break
             origin = s
             # Most recent adoption wins when a path was adopted more than once.
@@ -1818,6 +1997,9 @@ class Store:
                 if src.session and upstream.meta.session != src.session:
                     continue
                 if upstream.blob(src.path) != src.blob:
+                    continue
+                upstream_entry = self.backend.entry_at(upstream.id, src.path)
+                if upstream_entry is None or upstream_entry.mode != target_entry.mode:
                     continue
                 return self.origin(upstream, src.path) or upstream
         return origin

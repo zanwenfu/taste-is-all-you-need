@@ -76,6 +76,14 @@ class PublishError(ValueError):
     """A published path must exist in the checkpoint that publishes it."""
 
 
+class UnsafeCapture(RuntimeError):
+    """Git cannot preserve this worktree completely; it must not be discarded."""
+
+
+class WorktreeUnavailable(UnsafeCapture):
+    """An exact existing checkout is missing or invalid; capture is unproven."""
+
+
 class BadName(ValueError):
     """A branch name that cannot be used verbatim.
 

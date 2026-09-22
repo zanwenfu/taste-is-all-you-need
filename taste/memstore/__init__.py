@@ -36,7 +36,9 @@ from taste.memstore.objects import (
     Source,
     StaleBranch,
     Transcript,
+    UnsafeCapture,
     Verdict,
+    WorktreeUnavailable,
 )
 from taste.memstore.store import (
     Branch,
@@ -77,5 +79,7 @@ __all__ = [
     "Store",
     "Transcript",
     "TypedDiff",
+    "UnsafeCapture",
     "Verdict",
+    "WorktreeUnavailable",
 ]
