@@ -381,7 +381,12 @@ def _run_cell(ctx, config: dict, session_id: str, started: float, model_name: st
             with contextlib.suppress(Exception):
                 exit_status = str(agent.messages[-1].get("extra", {}).get("exit_status", "")) or type(exc).__name__
         finally:
-            env.cost_box["usd"] = float(agent.cost)
+            # Publish the paid receipt before collecting metadata or writing
+            # artifacts: any of those fallible steps may prevent a RunResult
+            # from returning to the sweep's error path.
+            cost = float(agent.cost)
+            ctx.llm_stats = ScaffoldStats(total_cost_usd=cost, total_work_usd=cost)
+            env.cost_box["usd"] = cost
             with contextlib.suppress(Exception):
                 shadow.observe(step_id="final", attempt=0, trigger="final", dedupe=False)
             # Grading diffs the host tree against the root commit, and a new
@@ -405,16 +410,15 @@ def _run_cell(ctx, config: dict, session_id: str, started: float, model_name: st
                 "pricing_table_sha": _pricing_table_sha(),
                 "exit_status": exit_status,
                 "submission_chars": len(submission),
-                "cost_usd": agent.cost,
+                "cost_usd": cost,
                 "api_calls": agent.n_calls,
                 "created_at": started,
             }
             (Path(ctx.gitdir) / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
-            ctx.llm_stats = ScaffoldStats(total_cost_usd=agent.cost, total_work_usd=agent.cost)
         final_sha = memory.head().sha
         return build_run_result(
             task=ctx.instance.problem_statement, session_id=session_id, branch=memory.branch, final_sha=final_sha,
-            started=started, exit_status=exit_status, cost=agent.cost, exception=exception,
+            started=started, exit_status=exit_status, cost=cost, exception=exception,
         )
     finally:
         memory.close()
