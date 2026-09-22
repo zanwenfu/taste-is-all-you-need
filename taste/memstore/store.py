@@ -36,6 +36,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
+from weakref import WeakSet
 
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
 
@@ -489,7 +490,7 @@ class BranchView:
         if not worktree.exists():
             return None
         if self._backend is None:
-            self._backend = GitBackend(worktree)
+            self._backend = self.store._new_worktree_backend(worktree)
         return self._backend
 
     def dirty_paths(self) -> list[str]:
@@ -1497,6 +1498,10 @@ class Store:
             self.backend.close()
             raise
         self._branches: dict[str, Branch] = {}
+        # A released branch remains readable, so its backend outlives its
+        # writer lease. Track resource ownership independently of that lease;
+        # monitoring views can also own read-only worktree backends.
+        self._worktree_backends: WeakSet[GitBackend] = WeakSet()
 
     @classmethod
     def open(cls, root: Path, session: str) -> Store:
@@ -1506,6 +1511,8 @@ class Store:
         for b in list(self._branches.values()):
             b.close()
         self._branches.clear()
+        for backend in list(self._worktree_backends):
+            backend.close()
         self.backend.close()
 
     # ---------------------------------------------------------- naming
@@ -1618,7 +1625,7 @@ class Store:
             raise BadName(f"worktree path is a symlink: {path}")
         if path.exists():
             try:
-                return GitBackend(path)
+                return self._new_worktree_backend(path)
             except (InvalidGitRepositoryError, NoSuchPathError):
                 if not repair:
                     raise WorktreeUnavailable(
@@ -1631,7 +1638,12 @@ class Store:
         elif not repair:
             raise WorktreeUnavailable(f"Missing worktree at {path}; its uncommitted work cannot be verified")
         self.backend.worktree_add(path, self.short_ref_for(name))
-        return GitBackend(path)
+        return self._new_worktree_backend(path)
+
+    def _new_worktree_backend(self, path: Path) -> GitBackend:
+        backend = GitBackend(path)
+        self._worktree_backends.add(backend)
+        return backend
 
     def _preserve_worktree(self, name: str, path: Path) -> None:
         root = path.parent / ".recovery" / name

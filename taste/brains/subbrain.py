@@ -575,4 +575,4 @@ fails the same way and costs you a turn."""
         return state
 
     def close(self) -> None:
-        self.branch.release()
+        self.branch.close()
