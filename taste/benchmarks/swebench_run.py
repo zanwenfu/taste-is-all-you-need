@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -177,58 +178,61 @@ def make_prepare(
         )
 
     def prepare(cell: Cell) -> CellContext:
-        instance = instances[cell.task]
-        # Fresh per cell — see the module docstring; this is not reusable.
-        workspace = Path(root) / cell.task / cell.arm / f"t{cell.trial}"
-        agent_sandbox = None
-        if route_execution:
-            agent_sandbox = provider.open(key=f"agent:{cell.key}", image=instance.image)
-            swebench.materialize_from_image(agent_sandbox, instance, workspace)
-            check = parity_check or swebench.environment_parity_check
-            reason = check(agent_sandbox, instance)
-            if reason is not None:
-                # Refused at $0. The alternative is paying for a full agent
-                # run whose every command fails somewhere the benchmark never
-                # grades, then reading that as the agent's incompetence.
-                agent_sandbox.close()
-                raise RuntimeError(f"environment parity: {reason}")
-        elif repo_cache is not None:
-            swebench.materialize_from_repo(instance, workspace, cache=Path(repo_cache))
-        else:
-            source = Path(source_root) / instance.instance_id if source_root else None
-            swebench.materialize(instance, workspace, source=source)
+        with ExitStack() as resources:
+            instance = instances[cell.task]
+            # Fresh per cell — see the module docstring; this is not reusable.
+            workspace = Path(root) / cell.task / cell.arm / f"t{cell.trial}"
+            agent_sandbox = None
+            if route_execution:
+                agent_sandbox = provider.open(key=f"agent:{cell.key}", image=instance.image)
+                resources.callback(agent_sandbox.close)
+                swebench.materialize_from_image(agent_sandbox, instance, workspace)
+                check = parity_check or swebench.environment_parity_check
+                reason = check(agent_sandbox, instance)
+                if reason is not None:
+                    # Refused at $0. The alternative is paying for a full agent
+                    # run whose every command fails somewhere the benchmark never
+                    # grades, then reading that as the agent's incompetence.
+                    raise RuntimeError(f"environment parity: {reason}")
+            elif repo_cache is not None:
+                swebench.materialize_from_repo(instance, workspace, cache=Path(repo_cache))
+            else:
+                source = Path(source_root) / instance.instance_id if source_root else None
+                swebench.materialize(instance, workspace, source=source)
 
-        # max_parallel=1 for every measured arm. The shadow log is bound to
-        # the primary session memory, so a parallel worker's edits are not
-        # visible to the observation stamped with that worker's step -- which
-        # would make the recorded file set wrong exactly where attribution
-        # reads it.
-        overrides: dict = {"max_parallel": 1, "observe_tools": observe_tools}
-        if planner_model is not None:
-            # A different planner is a different harness configuration, and
-            # the config hash says so — two model families must never share
-            # an identity in the ledger.
-            overrides["planner_model"] = planner_model
-        config = HarnessConfig.arm(cell.arm, **overrides)
-        probe_cov, monitor_cov = (coverage or {}).get(instance.instance_id, (None, None))
-        return CellContext(
-            instance=instance,
-            config=config,
-            workspace=workspace,
-            gitdir=workspace / ".git" / "taste",
-            split_id=instance.repo_short,
-            budget_usd=budget_usd,
-            probe_coverage=probe_cov,
-            monitor_coverage=monitor_cov,
-            # No fallback provider. Defaulting to a local sandbox would point
-            # probes at an empty directory, every execution would fail to
-            # start, and the resulting all-holes timeline reads as a clean
-            # run rather than as a broken one. Absent means "replay in a
-            # worktree"; the image must be passed deliberately.
-            provider=provider,
-            agent_sandbox=agent_sandbox,
-            routed=agent_sandbox is not None,
-        )
+            # max_parallel=1 for every measured arm. The shadow log is bound to
+            # the primary session memory, so a parallel worker's edits are not
+            # visible to the observation stamped with that worker's step -- which
+            # would make the recorded file set wrong exactly where attribution
+            # reads it.
+            overrides: dict = {"max_parallel": 1, "observe_tools": observe_tools}
+            if planner_model is not None:
+                # A different planner is a different harness configuration, and
+                # the config hash says so — two model families must never share
+                # an identity in the ledger.
+                overrides["planner_model"] = planner_model
+            config = HarnessConfig.arm(cell.arm, **overrides)
+            probe_cov, monitor_cov = (coverage or {}).get(instance.instance_id, (None, None))
+            context = CellContext(
+                instance=instance,
+                config=config,
+                workspace=workspace,
+                gitdir=workspace / ".git" / "taste",
+                split_id=instance.repo_short,
+                budget_usd=budget_usd,
+                probe_coverage=probe_cov,
+                monitor_coverage=monitor_cov,
+                # No fallback provider. Defaulting to a local sandbox would point
+                # probes at an empty directory, every execution would fail to
+                # start, and the resulting all-holes timeline reads as a clean
+                # run rather than as a broken one. Absent means "replay in a
+                # worktree"; the image must be passed deliberately.
+                provider=provider,
+                agent_sandbox=agent_sandbox,
+                routed=agent_sandbox is not None,
+            )
+            resources.pop_all()  # Ownership transfers to execute only after setup succeeds.
+            return context
 
     return prepare
 
@@ -266,65 +270,66 @@ def make_execute(
     """
 
     def execute(cell: Cell, ctx: CellContext) -> RunResult:
-        llm = llm_factory(ctx) if llm_factory else None
-        # The kernel runs the config `prepare` built, not one rebuilt from the
-        # arm name. Rebuilding drops anything prepare decided -- the
-        # observation grid, the parallelism pin -- while the ledger still
-        # records prepare's config_hash, so the manifest would describe a run
-        # that never happened. A reproducibility claim rests on those being
-        # the same object.
-        allowance = (retry_allowance or {}).get(ctx.instance.instance_id)
-        router = None
-        if ctx.agent_sandbox is not None:
-            from taste.routing import SandboxRouter
-
-            # The sandbox's own workdir, never the default: a router aimed
-            # at a path the sandbox does not use syncs into nowhere while the
-            # commands run somewhere else — and the very first dry run of
-            # this wiring proved it, by silently creating a real /testbed on
-            # the development host.
-            router = SandboxRouter(
-                ctx.agent_sandbox, ctx.workspace, workdir=ctx.agent_sandbox.workdir
-            )
-            ctx.router = router
-        gate = None
-        if getattr(ctx.config, "regression_gate", False):
-            if router is None:
-                # An arm that claims the gate must not quietly run the
-                # planner's check instead: that is the verifier being
-                # compared against, under the label of the one being tested.
-                raise RuntimeError(
-                    "regression_gate requires routed execution (a container to run the suite in)"
-                )
-            from taste.regression_gate import RegressionGate
-
-            gate = RegressionGate(
-                instance=ctx.instance, run=router.exec,
-                split=getattr(ctx.config, "gate_split", "all"),
-                **dict(gate_adapter or {}),
-            )
-            # Ids under a half split (the held-out half is every other
-            # previously-passing id); files under the full gate.
-            ids = gate.watched_ids()
-            ctx.gate_watched = sorted(ids) if ids is not None else gate.watched_files()
-        kernel = Kernel(
-            workspace=ctx.workspace, llm=llm,
-            **kernel_kwargs(ctx.config), config=ctx.config,
-            retry_pool=RetryPool(total=allowance) if allowance is not None else None,
-            router=router,
-            regression_gate=gate,
-        )
-        agent = spec or AgentSpec(
-            name="swe",
-            description="Resolve the reported issue.",
-            system_prompt=(
-                "You are fixing a bug in an existing repository. Make the "
-                "smallest change that resolves the report without breaking "
-                "behaviour that already works."
-            ),
-        )
-        extra = run_overrides(cell, ctx) if run_overrides else {}
+        llm = None
         try:
+            llm = llm_factory(ctx) if llm_factory else None
+            # The kernel runs the config `prepare` built, not one rebuilt from the
+            # arm name. Rebuilding drops anything prepare decided -- the
+            # observation grid, the parallelism pin -- while the ledger still
+            # records prepare's config_hash, so the manifest would describe a run
+            # that never happened. A reproducibility claim rests on those being
+            # the same object.
+            allowance = (retry_allowance or {}).get(ctx.instance.instance_id)
+            router = None
+            if ctx.agent_sandbox is not None:
+                from taste.routing import SandboxRouter
+
+                # The sandbox's own workdir, never the default: a router aimed
+                # at a path the sandbox does not use syncs into nowhere while the
+                # commands run somewhere else — and the very first dry run of
+                # this wiring proved it, by silently creating a real /testbed on
+                # the development host.
+                router = SandboxRouter(
+                    ctx.agent_sandbox, ctx.workspace, workdir=ctx.agent_sandbox.workdir
+                )
+                ctx.router = router
+            gate = None
+            if getattr(ctx.config, "regression_gate", False):
+                if router is None:
+                    # An arm that claims the gate must not quietly run the
+                    # planner's check instead: that is the verifier being
+                    # compared against, under the label of the one being tested.
+                    raise RuntimeError(
+                        "regression_gate requires routed execution (a container to run the suite in)"
+                    )
+                from taste.regression_gate import RegressionGate
+
+                gate = RegressionGate(
+                    instance=ctx.instance, run=router.exec,
+                    split=getattr(ctx.config, "gate_split", "all"),
+                    **dict(gate_adapter or {}),
+                )
+                # Ids under a half split (the held-out half is every other
+                # previously-passing id); files under the full gate.
+                ids = gate.watched_ids()
+                ctx.gate_watched = sorted(ids) if ids is not None else gate.watched_files()
+            kernel = Kernel(
+                workspace=ctx.workspace, llm=llm,
+                **kernel_kwargs(ctx.config), config=ctx.config,
+                retry_pool=RetryPool(total=allowance) if allowance is not None else None,
+                router=router,
+                regression_gate=gate,
+            )
+            agent = spec or AgentSpec(
+                name="swe",
+                description="Resolve the reported issue.",
+                system_prompt=(
+                    "You are fixing a bug in an existing repository. Make the "
+                    "smallest change that resolves the report without breaking "
+                    "behaviour that already works."
+                ),
+            )
+            extra = run_overrides(cell, ctx) if run_overrides else {}
             result = kernel.run(
                 task=swebench.task_text(ctx.instance), spec=agent, base_ref="HEAD", **extra
             )
@@ -334,14 +339,16 @@ def make_execute(
             # the sidecar write, a dead container) happens with the agent
             # phase already paid, and the sweep driver's error row reads the
             # spend from here so it cannot vanish from the ledger.
-            ctx.llm_stats = llm.stats if llm is not None else None
-            if ctx.agent_sandbox is not None:
-                # The cell's container dies with the cell. Scoring opens its
-                # own probe container under a different key; keeping this one
-                # alive would only offer the next cell a stale tree to
-                # inherit.
-                ctx.agent_sandbox.close()
-                ctx.agent_sandbox = None
+            try:
+                ctx.llm_stats = llm.stats if llm is not None else None
+            finally:
+                if ctx.agent_sandbox is not None:
+                    # The cell's container dies with the cell. Scoring opens its
+                    # own probe container under a different key; keeping this one
+                    # alive would only offer the next cell a stale tree to
+                    # inherit.
+                    ctx.agent_sandbox.close()
+                    ctx.agent_sandbox = None
         ctx.session = result.session_id
         ctx.shadow_ref = f"{SHADOW_HEAD}_{result.session_id.upper().replace('-', '_')}"
         return result
@@ -411,87 +418,86 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
     build_suite = suite_factory or swebench.pass_to_pass_suite
 
     def score(cell: Cell, ctx: CellContext, result: RunResult) -> float | None:
-        memory = Memory.open_session(ctx.workspace, ctx.session or result.session_id)
-        session = ctx.session or result.session_id
-        timeline = load_timeline(ctx.gitdir, session)
+        with ExitStack() as resources:
+            memory = resources.enter_context(Memory.open_session(ctx.workspace, ctx.session or result.session_id))
+            session = ctx.session or result.session_id
+            timeline = load_timeline(ctx.gitdir, session)
 
-        events_path = ctx.gitdir / "events.jsonl"
-        events = read_events(events_path) if events_path.exists() else []
-        failures = harness_failures(events, timeline, session=session)
+            events_path = ctx.gitdir / "events.jsonl"
+            events = read_events(events_path) if events_path.exists() else []
+            failures = harness_failures(events, timeline, session=session)
 
-        suite = build_suite(ctx.instance)
-        sandbox = None
-        executor = None
-        if ctx.provider is not None:
-            sandbox = ctx.provider.open(key=ctx.instance.instance_id, image=ctx.instance.image)
-            executor = SandboxProbeExecutor(sandbox, memory, ctx.instance.base_commit)
+            suite = build_suite(ctx.instance)
+            sandbox = None
+            executor = None
+            if ctx.provider is not None:
+                sandbox = ctx.provider.open(key=ctx.instance.instance_id, image=ctx.instance.image)
+                resources.callback(sandbox.close)
+                executor = SandboxProbeExecutor(sandbox, memory, ctx.instance.base_commit)
 
-        attribution = None
-        if ctx.probe_coverage and ctx.monitor_coverage:
-            attribution = attribution_map(
-                failures=failures,
-                probe_tests=list(ctx.instance.pass_to_pass),
-                monitor_coverage=ctx.monitor_coverage,
-                probe_coverage=ctx.probe_coverage,
-                modified_files_at={c.seq: frozenset(c.files) for c in timeline},
+            attribution = None
+            if ctx.probe_coverage and ctx.monitor_coverage:
+                attribution = attribution_map(
+                    failures=failures,
+                    probe_tests=list(ctx.instance.pass_to_pass),
+                    monitor_coverage=ctx.monitor_coverage,
+                    probe_coverage=ctx.probe_coverage,
+                    modified_files_at={c.seq: frozenset(c.files) for c in timeline},
+                )
+
+            report = reconstruct(
+                memory,
+                timeline,
+                [suite],
+                harness_failed_at=failed_at(failures),
+                attribution=attribution.by_seq if attribution else None,
+                session=session,
+                executor=executor,
             )
 
-        report = reconstruct(
-            memory,
-            timeline,
-            [suite],
-            harness_failed_at=failed_at(failures),
-            attribution=attribution.by_seq if attribution else None,
-            session=session,
-            executor=executor,
-        )
+            silence = summarise_silence(
+                report.episodes,
+                attribution
+                or attribution_map(
+                    failures=[], probe_tests=[],
+                    monitor_coverage=CoverageMap("", "", "none"),
+                    probe_coverage=CoverageMap("", "", "none"),
+                    modified_files_at={},
+                ),
+                method=ctx.probe_coverage.method if ctx.probe_coverage else "none",
+            )
 
-        silence = summarise_silence(
-            report.episodes,
-            attribution
-            or attribution_map(
-                failures=[], probe_tests=[],
-                monitor_coverage=CoverageMap("", "", "none"),
-                probe_coverage=CoverageMap("", "", "none"),
-                modified_files_at={},
-            ),
-            method=ctx.probe_coverage.method if ctx.probe_coverage else "none",
-        )
+            graded = grade(ctx, result) if grade else None
+            evidence = CellEvidence(
+                instance_id=ctx.instance.instance_id,
+                arm=cell.arm,
+                routed=ctx.routed,
+                trial=cell.trial,
+                session=session,
+                observations=report.observations,
+                episodes=[asdict(e) for e in report.episodes],
+                contamination_events_declared=report.contamination_events_declared,
+                never_passed=list(report.never_passed),
+                unknown_transitions=report.unknown_transitions,
+                replays=report.replays,
+                monitor_failures=len(failures),
+                monitor_failures_unindexed=sum(1 for f in failures if f.seq is None),
+                silence=asdict(silence),
+                resolved=graded,
+                grade={
+                    "fail_to_pass": f"{ctx.grade_report.fail_to_pass_passed}/{ctx.grade_report.fail_to_pass_total}",
+                    "pass_to_pass": f"{ctx.grade_report.pass_to_pass_passed}/{ctx.grade_report.pass_to_pass_total}",
+                } if ctx.grade_report is not None else {},
+                grade_failed=sorted(
+                    t for t in ctx.instance.pass_to_pass
+                    if ctx.grade_report.per_test.get(t) not in swebench.PASSING_STATUSES
+                ) if ctx.grade_report is not None else [],
+                gate_watched=list(ctx.gate_watched or []),
+            )
+            ctx.report_path = str(
+                evidence.write(Path(ledger_dir) / "evidence" / f"{cell.key}.json")
+            )
 
-        graded = grade(ctx, result) if grade else None
-        evidence = CellEvidence(
-            instance_id=ctx.instance.instance_id,
-            arm=cell.arm,
-            routed=ctx.routed,
-            trial=cell.trial,
-            session=session,
-            observations=report.observations,
-            episodes=[asdict(e) for e in report.episodes],
-            contamination_events_declared=report.contamination_events_declared,
-            never_passed=list(report.never_passed),
-            unknown_transitions=report.unknown_transitions,
-            replays=report.replays,
-            monitor_failures=len(failures),
-            monitor_failures_unindexed=sum(1 for f in failures if f.seq is None),
-            silence=asdict(silence),
-            resolved=graded,
-            grade={
-                "fail_to_pass": f"{ctx.grade_report.fail_to_pass_passed}/{ctx.grade_report.fail_to_pass_total}",
-                "pass_to_pass": f"{ctx.grade_report.pass_to_pass_passed}/{ctx.grade_report.pass_to_pass_total}",
-            } if ctx.grade_report is not None else {},
-            grade_failed=sorted(
-                t for t in ctx.instance.pass_to_pass
-                if ctx.grade_report.per_test.get(t) not in swebench.PASSING_STATUSES
-            ) if ctx.grade_report is not None else [],
-            gate_watched=list(ctx.gate_watched or []),
-        )
-        ctx.report_path = str(
-            evidence.write(Path(ledger_dir) / "evidence" / f"{cell.key}.json")
-        )
-
-        if executor is not None:
-            executor.close()
-        memory.close()
-        return None if graded is None else float(graded)
+            return None if graded is None else float(graded)
 
     return score
