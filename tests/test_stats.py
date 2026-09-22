@@ -24,9 +24,9 @@ from taste.stats import (
 )
 
 
-def _blocks(diffs: list[float], repo: str = "r1") -> list[PairedBlock]:
+def _blocks(diffs: list[float], repo: str | None = None) -> list[PairedBlock]:
     return [
-        PairedBlock(instance=f"i{i}", trial=1, repo=repo, a=d, b=0.0)
+        PairedBlock(instance=f"i{i}", trial=1, repo=repo or f"r{i}", a=d, b=0.0)
         for i, d in enumerate(diffs)
     ]
 
@@ -115,9 +115,10 @@ def test_bootstrap_resamples_clusters_not_blocks() -> None:
     lo_same, hi_same = paired_bootstrap_ci(same_repo, resamples=2000, seed=3)
     lo_spread, hi_spread = paired_bootstrap_ci(spread, resamples=2000, seed=3)
 
-    # One cluster: every resample redraws the same block set, so the interval
-    # collapses. Many clusters: genuine variation survives.
-    assert (hi_same - lo_same) < (hi_spread - lo_spread)
+    # One cluster supplies no between-cluster uncertainty estimate. Reporting
+    # a zero-width interval would falsely imply perfect precision.
+    assert (lo_same, hi_same) == (None, None)
+    assert hi_spread > lo_spread
 
 
 def test_bootstrap_interval_brackets_the_effect() -> None:

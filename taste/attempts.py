@@ -76,10 +76,14 @@ def retries_in(events: Iterable[Mapping[str, object]]) -> int:
     """
     total = 0
     for event in events:
-        if event.get("type") != "step.begin":
+        kind = event.get("kind", event.get("type"))
+        if kind != "step.begin":
             continue
-        attempt = event.get("attempt")
-        if isinstance(attempt, int) and attempt >= 2:
+        payload = event.get("payload", event)
+        if not isinstance(payload, Mapping):
+            continue
+        attempt = payload.get("attempt")
+        if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 2:
             total += 1
     return total
 

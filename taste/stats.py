@@ -30,6 +30,7 @@ import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from statistics import NormalDist
 
 # Fixed so an analysis rerun reproduces exactly. Published in the manifest.
 DEFAULT_SEED = 20260815
@@ -126,28 +127,30 @@ def paired_permutation(
     seed: int = DEFAULT_SEED,
     name: str = "primary",
 ) -> TestResult:
-    """Exact stratified paired permutation test on the mean difference.
+    """Paired permutation test on the mean difference, flipping clusters.
 
-    Under the null, the arm label within a block is exchangeable, so each
-    block's difference is equally likely to carry either sign. Sampling sign
-    flips (stratification is implicit — flips happen *within* blocks, and
-    blocks nest inside repositories) gives a p-value with no distributional
-    assumption and no cluster asymptotics.
+    Under the null, arm labels are exchangeable within each independent
+    cluster. Every repetition/instance in that cluster receives the same
+    sign. For Terminal Bench, pass task identity as ``PairedBlock.repo``;
+    repeated trials on one task are not independent experimental units.
 
-    When the number of blocks is small enough to enumerate exhaustively
+    When the number of clusters is small enough to enumerate exhaustively
     (2^n ≤ permutations), every arrangement is evaluated and the p-value is
     exact rather than estimated.
     """
-    differences = [b.difference for b in blocks]
-    n = len(differences)
-    clusters = len({b.repo for b in blocks})
+    by_cluster: dict[str, list[float]] = {}
+    for block in blocks:
+        by_cluster.setdefault(block.repo, []).append(block.difference)
+    differences = [math.fsum(by_cluster[key]) for key in sorted(by_cluster)]
+    n = len(blocks)
+    clusters = len(differences)
     if n == 0:
         return TestResult(name, 0, 0, 0.0, 1.0, method="no blocks", note="nothing to test")
 
     observed = sum(differences) / n
 
-    if n <= 20 and 2**n <= permutations:
-        total = 2**n
+    if clusters <= 20 and 2**clusters <= permutations:
+        total = 2**clusters
         extreme = 0
         for mask in range(total):
             flipped = sum(
@@ -156,7 +159,7 @@ def paired_permutation(
             if abs(flipped) >= abs(observed) - 1e-12:
                 extreme += 1
         p = extreme / total
-        method = f"exact permutation ({total} arrangements)"
+        method = f"exact cluster permutation ({total} arrangements)"
     else:
         rng = random.Random(seed)
         extreme = 0
@@ -167,7 +170,7 @@ def paired_permutation(
         # Add-one smoothing: a sampled p-value of exactly 0 is not credible
         # and would overstate certainty.
         p = (extreme + 1) / (permutations + 1)
-        method = f"sampled permutation ({permutations:,})"
+        method = f"sampled cluster permutation ({permutations:,})"
 
     low, high = paired_bootstrap_ci(blocks, seed=seed)
     return TestResult(name, n, clusters, observed, p, low, high, method)
@@ -192,6 +195,8 @@ def paired_bootstrap_ci(
     for block in blocks:
         by_repo.setdefault(block.repo, []).append(block.difference)
     repos = list(by_repo)
+    if len(repos) < 2:
+        return None, None  # One independent unit cannot estimate between-unit uncertainty.
 
     rng = random.Random(seed)
     means: list[float] = []
@@ -271,10 +276,12 @@ def minimum_detectable_effect(
     "no power" are indistinguishable, and a reviewer is right to assume the
     second.
     """
+    if not 0 < alpha < 1 or not 0 < power < 1:
+        raise ValueError("alpha and power must be strictly between zero and one")
     if n_blocks <= 1 or sd_difference <= 0:
         return float("inf")
-    z_alpha = 1.959963985  # two-sided 0.05
-    z_power = 0.8416212336  # 80%
+    z_alpha = -NormalDist().inv_cdf(alpha / 2)
+    z_power = NormalDist().inv_cdf(power)
     return (z_alpha + z_power) * sd_difference / math.sqrt(n_blocks)
 
 
@@ -302,13 +309,15 @@ class ArmSummary:
     mean: float | None
     sd: float
     values: list[float] = field(default_factory=list)
+    n_missing_score: int = 0
 
     def render(self) -> str:
         mean = "n/a" if self.mean is None else f"{self.mean:.4f}"
         return (
             f"{self.arm:<18} run={self.n_run:>3} usable={self.n_usable:>3} "
             f"mean={mean:>8} sd={self.sd:>7.4f} "
-            f"[infra={self.n_infra} budget={self.n_budget} error={self.n_error}]"
+            f"[infra={self.n_infra} budget={self.n_budget} error={self.n_error} "
+            f"missing_score={self.n_missing_score}]"
         )
 
 
@@ -329,9 +338,13 @@ def summarise_arm(arm: str, records: Sequence) -> ArmSummary:
         n_infra=sum(1 for r in records if getattr(r, "status", "") == "infra"),
         n_budget=sum(1 for r in records if getattr(r, "status", "") == "budget"),
         n_error=sum(1 for r in records if getattr(r, "status", "") == "error"),
-        mean=(sum(values) / len(values)) if values else None,
+        # A missing budget/failure score must not disappear from the mean's
+        # denominator. The scorer owns the endpoint (including any zero for
+        # failure); until every usable outcome is measured, no mean is valid.
+        mean=(sum(values) / len(values)) if values and len(values) == len(usable) else None,
         sd=stdev(values),
         values=list(values),
+        n_missing_score=len(usable) - len(values),
     )
 
 

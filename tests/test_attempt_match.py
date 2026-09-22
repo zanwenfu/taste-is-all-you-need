@@ -233,8 +233,11 @@ def test_spend_equals_what_harvest_would_report(refactor_workspace: Path) -> Non
     result = kernel.run(
         task="unit", spec=_spec(), plan_override=_plan(), worker_override=_worker_for(ws)
     )
-    as_dicts = [{"type": e.kind, **e.payload} for e in events]
+    as_dicts = [e.to_json() for e in events]
     assert retries_in(as_dicts) == pool.spent
+    log = ws / "actual-kernel-events.jsonl"
+    log.write_text("".join(json.dumps(e.to_json()) + "\n" for e in events))
+    assert harvest_retries(log) == pool.spent
     assert pool.spent == _retries(result)
 
 
