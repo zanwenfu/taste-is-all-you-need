@@ -36,6 +36,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import IO, Concatenate, ParamSpec, TypeVar, cast
 
 from git import Repo
@@ -1115,13 +1116,15 @@ class GitBackend:
         plain files. Done through a throwaway index so the real index and
         working tree are never touched.
         """
-        index_path = self.common_dir / f"memstore.index.{os.getpid()}.{threading.get_ident()}"
-        env = {"GIT_INDEX_FILE": str(index_path)}
-        try:
-            with self.repo.git.custom_environment(**env):
-                self.repo.git.read_tree(tree)
-                self.repo.git.update_index("--add", "--cacheinfo", f"{mode},{blob},{path}")
-                return self.repo.git.write_tree()
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                index_path.unlink()
+        # Every operation owns a fresh namespace. A killed Git writer can
+        # leave index.lock behind; PID/thread reuse cannot establish that a
+        # previous lock is ours to delete or safe to reuse. Cleanup is limited
+        # to this private directory, including this operation's lock file.
+        with TemporaryDirectory(prefix="memstore.index.", dir=self.common_dir) as directory:
+            env = {"GIT_INDEX_FILE": str(Path(directory) / "index")}
+            # custom_environment mutates the shared Git client. Another
+            # command on this backend could otherwise read/write our index.
+            # Per-command overrides never redirect unrelated operations.
+            self.repo.git.read_tree(tree, env=env)
+            self.repo.git.update_index("--add", "--cacheinfo", f"{mode},{blob},{path}", env=env)
+            return self.repo.git.write_tree(env=env)
