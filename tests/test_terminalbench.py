@@ -135,10 +135,9 @@ def test_the_probe_runs_the_tasks_own_verification(task_dir: Path) -> None:
     suite = tb.TerminalBenchProbe(tb.load_task(task_dir)).suite()
     assert "tests/test.sh" in suite.command
     assert suite.members == ("tb::wasm-render",)
-    assert suite.parse is None, (
-        "Harbor has no common per-test grammar, so this is an exit-code probe; "
-        "a parser here would invent structure the benchmark does not provide"
-    )
+    assert callable(suite.parse)
+    assert "/logs/verifier/reward.json" in suite.command
+    assert "/tests/test.sh" in suite.command
 
 
 # ------------------------------------------------------------------ scale

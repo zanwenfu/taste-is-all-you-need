@@ -32,7 +32,10 @@ Check :attr:`HarborTask.is_long_running` before committing a budget to one.
 
 from __future__ import annotations
 
+import json
+import math
 import re
+import shlex
 import shutil
 import subprocess
 import tomllib
@@ -42,6 +45,43 @@ from pathlib import Path
 from taste.replay import SuiteProbe
 
 CANARY = re.compile(r"<!--\s*harbor-canary[^>]*-->\s*", re.I)
+
+
+def parse_harbor_reward(payload: str, *, format: str) -> dict[str, float]:
+    """Decode Harbor's reward file, independently of the verifier exit code.
+
+    JSON takes precedence when both files exist. The caller retains the
+    resulting metrics; a Terminal Bench binary pass specifically requires
+    ``reward == 1``. Missing/malformed evidence is infrastructure failure.
+    """
+    if not payload.strip() or len(payload.encode("utf-8")) > 65536:
+        raise ValueError("Harbor reward is empty or exceeds 64 KiB")
+
+    def unique(pairs):
+        values = {}
+        for key, value in pairs:
+            if key in values:
+                raise ValueError("Harbor reward has duplicate JSON keys")
+            values[key] = value
+        return values
+
+    if format == "json":
+        rewards = json.loads(payload, object_pairs_hook=unique)
+    elif format == "text":
+        rewards = {"reward": float(payload)}
+    else:
+        raise ValueError("Harbor reward file is missing")
+    if not isinstance(rewards, dict) or not rewards:
+        raise ValueError("Harbor JSON reward must be a non-empty metric object")
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in rewards.values()):
+        raise ValueError("Harbor rewards must be finite numbers")
+    try:
+        numeric = {key: float(value) for key, value in rewards.items()}
+    except OverflowError as exc:
+        raise ValueError("Harbor rewards must be finite numbers") from exc
+    if not all(math.isfinite(value) for value in numeric.values()):
+        raise ValueError("Harbor rewards must be finite numbers")
+    return numeric
 
 DEPENDENCY_IGNORES = """\
 # Installed dependencies and build output are not the agent's work, and
@@ -255,21 +295,50 @@ class TerminalBenchProbe:
     workdir: str = "/app"
     timeout: int = 3600
     members: tuple[str, ...] = field(default_factory=tuple)
+    tests_dir: str = "/tests"
+    verifier_dir: str = "/logs/verifier"
 
     def suite(self) -> SuiteProbe:
-        """One command, one verdict.
+        """Run the separately installed grader and read its fresh reward file.
 
-        Harbor's ``test.sh`` reports through its exit code and has no common
-        per-test grammar across tasks, so this is an exit-code probe with a
-        single member. That is coarser than the SWE-bench path — a suite-level
-        verdict cannot say *which* test broke, so coverage attribution is not
-        available here and silence can only be reported in its unattributed
-        form.
+        Task tests belong in /tests; reward and verifier logs belong in
+        /logs/verifier, matching Harbor. Remove old rewards before every replay
+        so a crashed grader cannot inherit an earlier successful result.
         """
         members = self.members or (f"tb::{self.task.slug}",)
+        marker = "TASTE_HARBOR_REWARD_V1 "
+        directory = shlex.quote(self.verifier_dir)
+        json_path = shlex.quote(str(Path(self.verifier_dir) / "reward.json"))
+        text_path = shlex.quote(str(Path(self.verifier_dir) / "reward.txt"))
+        log_path = shlex.quote(str(Path(self.verifier_dir) / "test-stdout.txt"))
+        test_path = shlex.quote(str(Path(self.tests_dir) / "test.sh"))
+        command = (
+            f"cd {shlex.quote(self.workdir)} || exit 70\n"
+            f"mkdir -p {directory} || exit 70\n"
+            f"rm -f -- {json_path} {text_path} || exit 70\n"
+            f"bash {test_path} > {log_path} 2>&1\n"
+            "taste_verifier_exit=$?\n"
+            f"if [ -f {json_path} ]; then\n"
+            f"  printf '{marker}json\\n'; head -c 65537 {json_path}\n"
+            f"elif [ -f {text_path} ]; then\n"
+            f"  printf '{marker}text\\n'; head -c 65537 {text_path}\n"
+            f"else printf '{marker}missing\\n'; fi\n"
+            'exit "$taste_verifier_exit"'
+        )
+
+        def parse(output: str):
+            header, separator, payload = output.partition("\n")
+            if not separator or not header.startswith(marker):
+                raise ValueError("verifier produced no Harbor reward envelope")
+            rewards = parse_harbor_reward(payload, format=header[len(marker):])
+            if "reward" not in rewards:
+                raise ValueError("Terminal Bench reward metric is missing")
+            return dict.fromkeys(members, "PASSED" if rewards["reward"] == 1 else "FAILED")
+
         return SuiteProbe(
             name=f"tb::{self.task.slug}",
-            command=f"cd {self.workdir} && bash tests/test.sh",
+            command=command,
             members=members,
             timeout=self.timeout,
+            parse=parse,
         )
