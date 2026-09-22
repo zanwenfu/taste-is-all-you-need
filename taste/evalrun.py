@@ -516,7 +516,7 @@ def _run_sweep(
                 # Preparing only materializes the workspace; paid work belongs
                 # in execute. Once execute starts, lack of a complete receipt
                 # cannot establish that it spent nothing before raising.
-                costs = _failed_execution_costs(stats) if phase == "execute" else (0.0, 0.0, 0.0)
+                costs = _receipt_costs(stats) if phase == "execute" else (0.0, 0.0, 0.0)
                 if costs is None:
                     journal.record("failure", {
                         **asdict(cell), "attempt_id": attempt_id, "attempts_made": attempt_number,
@@ -570,8 +570,8 @@ def _execution_stats(result: RunResult | None, context: Any) -> Any:
     return stats if stats is not None else getattr(context, "llm_stats", None)
 
 
-def _failed_execution_costs(stats: Any) -> tuple[float, float, float] | None:
-    """Require both currencies on failure; a missing receipt is not zero."""
+def _receipt_costs(stats: Any) -> tuple[float, float, float] | None:
+    """Validate both currencies without rounding real charges into free work."""
     values = (getattr(stats, "total_cost_usd", None), getattr(stats, "total_work_usd", None),
               getattr(stats, "cache_delta_usd", 0.0))
     if any(isinstance(value, bool) or not isinstance(value, (int, float))
@@ -579,11 +579,16 @@ def _failed_execution_costs(stats: Any) -> tuple[float, float, float] | None:
         return None
     if values[0] < 0 or values[1] < 0:
         return None
-    return tuple(round(value, 6) for value in values)
+    return tuple(float(value) for value in values)
 
 
 def _record_from(cell: Cell, result: RunResult, score: float | None, context: Any) -> CellResult:
     stats = _execution_stats(result, context)
+    # A completed synthetic RunResult can explicitly have no statistics.
+    # Supplied receipts must validate before normalization, on success too.
+    costs = _receipt_costs(stats) if stats is not None else (0.0, 0.0, 0.0)
+    if costs is None:
+        raise ValueError("execution cost receipt is invalid")
     status: CellStatus = result.status
     if result.failure_kind in ("infra", "budget"):
         status = result.failure_kind
@@ -601,9 +606,9 @@ def _record_from(cell: Cell, result: RunResult, score: float | None, context: An
         attempts=sum(o.attempts for o in result.outcomes),
         rollbacks=sum(1 for o in result.outcomes if o.rolled_back),
         score=score,
-        billed_usd=round(stats.total_cost_usd, 6) if stats else 0.0,
-        work_usd=round(stats.total_work_usd, 6) if stats else 0.0,
-        cache_delta_usd=round(getattr(stats, "cache_delta_usd", 0.0), 6) if stats else 0.0,
+        billed_usd=costs[0],
+        work_usd=costs[1],
+        cache_delta_usd=costs[2],
         elapsed_s=result.elapsed_seconds,
         failure_reason=result.failure_reason,
         split_id=getattr(context, "split_id", "") or "",
