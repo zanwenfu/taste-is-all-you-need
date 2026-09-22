@@ -198,13 +198,15 @@ class PlannerTelemetry:
                 raise ValueError("known planner cost requires billed and work costs")
             object.__setattr__(self, "billed_usd", _cost(self.billed_usd, "billed_usd"))
             object.__setattr__(self, "work_usd", _cost(self.work_usd, "work_usd"))
-            if self.source in {"legacy_string_zero", "not_called_zero"}:
+            if self.source in {"legacy_string_zero", "not_called_zero", "not_dispatched_zero"}:
                 if self.usage != PlannerUsage(0, 0, 0, 0, 0):
                     raise ValueError("synthetic zero telemetry must contain zero usage")
+                if self.source == "not_dispatched_zero" and self.requested_model is None:
+                    raise ValueError("not-dispatched telemetry requires the requested model")
                 if any(
                     value is not None
                     for value in (
-                        self.requested_model,
+                        self.requested_model if self.source != "not_dispatched_zero" else None,
                         self.model,
                         self.provider,
                         self.pricing_table_sha,
@@ -238,6 +240,12 @@ class PlannerTelemetry:
             billed_usd=0.0,
             work_usd=0.0,
         )
+
+    @classmethod
+    def not_dispatched(cls, requested_model: str) -> PlannerTelemetry:
+        """An admitted call stopped locally before invoking the LLM facade."""
+        return cls(source="not_dispatched_zero", cost_known=True, requested_model=requested_model,
+                   usage=PlannerUsage(0, 0, 0, 0, 0), billed_usd=0.0, work_usd=0.0)
 
     @classmethod
     def unknown(
@@ -670,6 +678,10 @@ class LLMPlannerTransport:
     publication. A process death releases the kernel lock but leaves its
     pending intent. The next process reports that attempt as cost-unknown and
     does not guess whether the provider charged it by calling again.
+
+    ``max_prompt_bytes`` bounds combined serialized system/user input before
+    dispatch. It is an admission guard; observation construction and paged
+    evidence access have separate resource requirements.
     """
 
     def __init__(
@@ -682,6 +694,7 @@ class LLMPlannerTransport:
         mutation_lock: threading.RLock,
         model: str = MODEL_PLANNER,
         max_tokens: int = 8192,
+        max_prompt_bytes: int = 192 * 1024,
     ) -> None:
         if not isinstance(store, Store):
             raise TypeError("planner transport store must be a Store")
@@ -699,12 +712,15 @@ class LLMPlannerTransport:
         self.model = _text(model, "planner model")
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
             raise ValueError("planner max_tokens must be a positive integer")
+        if type(max_prompt_bytes) is not int or max_prompt_bytes < 1:
+            raise ValueError("planner max_prompt_bytes must be a positive integer")
         self.llm = llm
         self.store = store
         self.control = control
         self.journal = journal
         self.mutation_lock = mutation_lock
         self.max_tokens = max_tokens
+        self.max_prompt_bytes = max_prompt_bytes
         self.journal_branch = journal.name
         self._ensure_ready = ensure_ready
         self._bound_remaining_usd: float | None = None
@@ -786,6 +802,7 @@ class LLMPlannerTransport:
         return {
             "model": self.model,
             "max_tokens": self.max_tokens,
+            "max_prompt_bytes": self.max_prompt_bytes,
             "temperature": 0.0,
             "tools": None,
             "role": "planner",
@@ -1227,11 +1244,23 @@ class LLMPlannerTransport:
                 assert evidence is not None
                 return self._replay(evidence, binding=binding)
 
+            input_bytes = len(system.encode("utf-8")) + len(prompt.encode("utf-8"))
+            if input_bytes > self.max_prompt_bytes:
+                raise PlannerCompletionError(
+                    f"planner input is {input_bytes} bytes; limit is {self.max_prompt_bytes} bytes",
+                    telemetry=PlannerTelemetry.synthetic_zero("not_called_zero"),
+                )
             scope = self._attempt_scope(request_id, prompt)
             admission = self._admission()
             # Preflight is non-billable and intentionally precedes the
             # intent. A failed credential check remains safe to retry.
-            self._ensure_ready(self.model)
+            try:
+                self._ensure_ready(self.model)
+            except Exception as exc:
+                raise PlannerCompletionError(
+                    f"planner preflight failed: {type(exc).__name__}: {exc}",
+                    telemetry=PlannerTelemetry.synthetic_zero("not_called_zero"),
+                ) from exc
             intent_path = planner_transport_intent_path(request_id)
             intent_raw = self._commit_authoritative_pair(
                 intent_path,
@@ -1239,6 +1268,7 @@ class LLMPlannerTransport:
                 f"planner transport intent: {request_id}",
             )
 
+            dispatched = False
             try:
                 call_options: dict[str, Any] = {}
                 if self._deadline is not None:
@@ -1246,6 +1276,7 @@ class LLMPlannerTransport:
                     if remaining <= 0:
                         raise TimeoutError("planner deadline elapsed before provider dispatch")
                     call_options["timeout_seconds"] = remaining
+                dispatched = True
                 completion = self.llm.call(
                     model=self.model,
                     system=system,
@@ -1257,15 +1288,15 @@ class LLMPlannerTransport:
                     **call_options,
                 )
             except Exception as exc:
-                telemetry = PlannerTelemetry.unknown(
-                    source="provider_exception",
-                    requested_model=self.model,
+                telemetry = (
+                    PlannerTelemetry.unknown(source="provider_exception", requested_model=self.model)
+                    if dispatched else PlannerTelemetry.not_dispatched(self.model)
                 )
                 detail = f"{type(exc).__name__}: {exc}"
                 outcome = self._terminal_receipt(
                     request_id,
                     intent_raw,
-                    status="ambiguous",
+                    status="ambiguous" if dispatched else "invalid",
                     telemetry=telemetry,
                     response=None,
                     error=detail,
