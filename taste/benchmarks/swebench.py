@@ -39,8 +39,10 @@ from __future__ import annotations
 import functools
 import json
 import re
+import shlex
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -850,13 +852,16 @@ def materialize_from_image(
         raise FileExistsError(f"workspace {workspace} already exists; refusing to overwrite")
     workspace.mkdir(parents=True, exist_ok=True)
 
-    tar_path = "/tmp/taste_ws.tar"
-    packed = sandbox.exec(
-        f"tar -C {sandbox.workdir} --exclude=.git -cf {tar_path} .", timeout=600
-    )
-    if packed.exit_code != 0:
-        raise RuntimeError(f"could not pack /testbed: {packed.stderr or packed.stdout}")
-    payload = sandbox.get_bytes(tar_path)
+    tar_path = f"/tmp/taste-ws-{uuid.uuid4().hex}.tar"
+    try:
+        packed = sandbox.exec(
+            f"tar -C {shlex.quote(sandbox.workdir)} --exclude=.git -cf {tar_path} .", timeout=600
+        )
+        if packed.exit_code != 0:
+            raise RuntimeError(f"could not pack /testbed: {packed.stderr or packed.stdout}")
+        payload = sandbox.get_bytes(tar_path)
+    finally:
+        sandbox.exec(f"rm -f -- {tar_path}", timeout=30)
     import io
     import tarfile
 

@@ -32,7 +32,10 @@ episodes rather than a single verdict.
 
 from __future__ import annotations
 
+import contextlib
 import re
+import shlex
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
@@ -445,6 +448,7 @@ class SandboxProbeExecutor:
             return hole(f"diff failed: {exc!r}")
 
         workdir = self.sandbox.workdir
+        patch_path = f"/tmp/taste-{uuid.uuid4().hex}.diff"
         try:
             if self._reset_target is None:
                 from taste.routing import prepare_container_tree
@@ -455,7 +459,7 @@ class SandboxProbeExecutor:
                 self._reset_target = prepare_container_tree(
                     self.sandbox, workdir=workdir, hide_upstream=False
                 )
-            self.sandbox.put_text("/tmp/taste.diff", (patch or "") + "\n")
+            self.sandbox.put_text(patch_path, (patch or "") + "\n")
             reset = self.sandbox.exec(
                 f"cd {workdir} && git checkout -q {self._reset_target} -- . "
                 f"&& git clean -qfd",
@@ -465,13 +469,18 @@ class SandboxProbeExecutor:
                 return hole(f"reset failed: {reset.output[-400:]}")
             if patch.strip():
                 applied = self.sandbox.exec(
-                    f"cd {workdir} && git apply -v /tmp/taste.diff", timeout=180
+                    f"cd {shlex.quote(workdir)} && git apply -v {patch_path}", timeout=180
                 )
                 if not applied.ok:
                     return hole(f"patch failed: {applied.output[-400:]}")
             result = self.sandbox.exec(suite.command, timeout=suite.timeout)
         except Exception as exc:
             return hole(f"sandbox failed: {exc!r}")
+        finally:
+            # Temporary bytes live outside the graded tree; cleanup failure
+            # must not mask the original typed infrastructure result.
+            with contextlib.suppress(Exception):
+                self.sandbox.exec(f"rm -f -- {patch_path}", timeout=30)
 
         return verdicts_from(suite, result)
 

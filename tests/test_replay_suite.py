@@ -149,7 +149,9 @@ def test_the_tree_is_patched_into_the_image_in_the_right_order(tmp_path: Path) -
     executor.run(base, SuiteProbe(name="s", command="run-tests", members=("t_a",),
                                   parse=_parse_pairs))
 
-    assert "/tmp/taste.diff" in sandbox.files
+    uploaded = [name for name in sandbox.files if name.startswith("/tmp/taste-") and name.endswith(".diff")]
+    assert len(uploaded) == 1
+    assert f"rm -f -- {uploaded[0]}" in sandbox.commands
     joined = " || ".join(sandbox.commands)
     assert joined.index("git checkout") < joined.index("run-tests")
     assert "git clean" in joined
