@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -19,9 +21,15 @@ from claude_agent_sdk import ResultMessage
 
 from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.monitor_judge import JUDGEMENT_SCHEMA, TERMINAL_JUDGEMENT_SCHEMA
-from taste.brains.records import ArtifactSpec, Assignment, WorkerReport, contract_digest
+from taste.brains.records import (
+    ArtifactRef,
+    ArtifactSpec,
+    Assignment,
+    WorkerReport,
+    contract_digest,
+)
 from taste.brains.subbrain import SubBrain, SubBrainResult
-from taste.brains.supervisor import LaunchSpec
+from taste.brains.supervisor import CentralSupervisor, LaunchSpec
 from taste.brains.worker_entrypoint import (
     EntrypointConfig,
     WorkerExitCode,
@@ -217,6 +225,90 @@ def _client_factory(client: ScriptedClient):
         return client
 
     return factory
+
+
+@pytest.mark.parametrize("kind", ["executable", "symlink"])
+@pytest.mark.parametrize("damage_mode", [False, True])
+def test_supervisor_input_modes_reach_the_worker_or_reject_before_any_model(
+    tmp_path: Path, kind: str, damage_mode: bool,
+) -> None:
+    root = tmp_path / "repo"
+    store = Store.open(root, "session-1")
+
+    class UnusedLauncher:
+        def launch(self, _spec):
+            raise AssertionError("the test invokes the worker entrypoint directly")
+
+        def recover(self, _spec):
+            raise AssertionError("no process has been launched")
+
+    supervisor = CentralSupervisor(store, launcher=UnusedLauncher())
+    producer = store.branch("producer")
+    producer.write("input", "#!/bin/sh\nprintf adopted\n")
+    if kind == "executable":
+        producer.path("input").chmod(0o755)
+    else:
+        producer.path("input").unlink()
+        producer.path("input").symlink_to("missing-target")
+    source = producer.checkpoint("publish input with exact mode")
+    producer.close()
+    contract = Contract(identity="worker-1", task="write the parser", inputs=("input",),
+                        outputs=("parser.py",), success_criteria=("parser.py is correct",))
+    artifact = ArtifactRef("input", "producer", source.id, "input", source.blob("input"))
+    assignment = Assignment(
+        assignment_id="parser-assignment", generation=1, attempt=0,
+        contract=contract, contract_digest=contract_digest(contract),
+        base_state_id=supervisor.integration.head.id, inputs=(artifact,),
+        outputs=(ArtifactSpec("parser-output", "parser.py"),), model="claude-sonnet-5",
+    )
+    prepared = supervisor.prepare(assignment, wall_timeout_seconds=30).prepared_state_id
+    if damage_mode:
+        # Exact same blob, different file semantics. Supply the new exact
+        # state ID so only validating the launch head cannot catch this.
+        worker = store.branch("worker-1")
+        worker.path("input").unlink()
+        worker.write("input", source.read_bytes("input"))
+        worker.path("input").chmod(0o644)
+        prepared = worker.checkpoint("mode accidentally stripped in preparation").id
+        assert store.state(prepared).blob("input") == artifact.blob_id
+        worker.close()
+
+    class InputCheckingClient(ScriptedClient):
+        async def query(self, prompt: str) -> None:
+            path = Path(self.options.cwd, "input")
+            if kind == "executable":
+                result = subprocess.run([str(path)], capture_output=True, check=True, text=True)
+                assert result.stdout == "adopted"
+            else:
+                assert path.is_symlink() and os.readlink(path) == "missing-target"
+            await super().query(prompt)
+
+    client = InputCheckingClient()
+    created = {"sdk": 0, "monitor": 0}
+
+    def client_factory(options):
+        created["sdk"] += 1
+        return _client_factory(client)(options)
+
+    def llm_factory(**kwargs):
+        created["monitor"] += 1
+        return FakeMonitorLLM(**kwargs)
+
+    try:
+        code = asyncio.run(execute_worker(
+            _config(root, prepared), store=store, environ=_environment(store, assignment),
+            llm_factory=llm_factory, client_factory=client_factory, ready_callback=lambda: None,
+        ))
+        if damage_mode:
+            assert code is WorkerExitCode.INPUT_REJECTED
+            assert created == {"sdk": 0, "monitor": 0}
+        else:
+            assert code is WorkerExitCode.COMPLETED
+            assert created == {"sdk": 1, "monitor": 1}
+            assert "query" in client.calls
+    finally:
+        supervisor.close()
+        store.close()
 
 
 @pytest.mark.parametrize(
@@ -689,7 +781,8 @@ def test_launcher_command_is_exact_argv_without_credentials(tmp_path: Path) -> N
         python_executable=sys.executable,
     )
 
-    assert argv[:3] == (sys.executable, "-m", "taste.brains.worker_entrypoint")
+    assert argv[:3] == (sys.executable, "-I", "-c")
+    assert "taste.brains.worker_entrypoint" in argv[3]
     assert argv[argv.index("--worker") + 1] == assignment.worker
     assert argv[argv.index("--model") + 1] == assignment.model
     assert argv[argv.index("--prepared-state") + 1] == prepared

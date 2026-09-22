@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -28,7 +29,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -36,9 +37,13 @@ from typing import Any, Protocol, runtime_checkable
 from taste.brains.contract import CONTRACT_PATH
 from taste.brains.delivery import DeliveryResult, deliver_product, validate_artifact_path
 from taste.brains.monitor import TerminalAssessment
+from taste.brains.python_process import isolated_python_argv
 from taste.brains.records import Assignment, LifecycleEvent, WorkerReport, contract_digest
+from taste.brains.worker_environment import PROVIDER_OVERRIDE_ENV
 from taste.brains.worker_runtime import ASSIGNMENT_PATH, WORKER_REPORT_PATH
-from taste.memstore import Branch, BranchBusy, State, Store
+from taste.memstore import Branch, State, Store
+from taste.memstore.backend import BLOB_MODES
+from taste.memstore.objects import WorktreeUnavailable
 
 __all__ = [
     "AssignmentIdentityConflict",
@@ -58,7 +63,8 @@ __all__ = [
     "mark_worker_ready",
 ]
 
-RUN_SCHEMA = "taste.brains/SupervisorRun/1"
+RUN_SCHEMA = "taste.brains/SupervisorRun/2"
+_LEGACY_RUN_SCHEMA = "taste.brains/SupervisorRun/1"
 RUN_INDEX_SCHEMA = "taste.brains/SupervisorRunIndex/1"
 RUN_ROOT = ".taste/supervisor/runs"
 RUN_INDEX_PATH = f"{RUN_ROOT}/index.json"
@@ -160,12 +166,16 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _assert_safe_write_destination(root: Path, relative: str) -> None:
-    """Refuse every symlink/special node on a host-owned write path.
+def _assert_safe_write_destination(
+    root: Path, relative: str, *, replace_symlink_leaf: bool = False,
+) -> None:
+    """Refuse symlink ancestors and special nodes on a host-owned write path.
 
     Preparation owns the branch lease, so after this preflight there is no
     legitimate concurrent writer.  Checking all paths before the first write
     also means a bad second input cannot leave a partial projection behind.
+    An input's final symlink may be atomically replaced; control files never
+    permit symlinks, since their ordinary write path would follow the target.
     """
     parts = Path(relative).parts
     if not parts or Path(relative).is_absolute() or ".." in parts:
@@ -179,6 +189,8 @@ def _assert_safe_write_destination(root: Path, relative: str) -> None:
             # No deeper component can exist without this ancestor.
             return
         if stat.S_ISLNK(mode):
+            if replace_symlink_leaf and index == len(parts) - 1:
+                return  # Branch.adopt replaces this entry without following it.
             raise AssignmentIdentityConflict(
                 f"worker destination {relative!r} traverses symlink {current.relative_to(root)!s}"
             )
@@ -213,14 +225,25 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 
 
 @contextlib.contextmanager
-def _file_lock(path: Path):
+def _file_lock(path: Path, *, timeout: float | None = None):
     """Cross-process lock used only around the short fork handshake."""
     import fcntl
 
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise SupervisorError("launcher cancellation fence is still held") from None
+                    time.sleep(0.01)
         yield
     finally:
         with contextlib.suppress(OSError):
@@ -410,6 +433,14 @@ class ProcessLauncher(Protocol):
 
     def recover(self, spec: LaunchSpec) -> ProcessHandle | None: ...
 
+    def cancel(self, spec: LaunchSpec, grace_seconds: float) -> ProcessExit:
+        """Durably forbid launch, stop all owned processes, and verify cleanup.
+
+        Raise if live processes remain or the cancellation fence is unproven.
+        A missing PID record is not evidence that a pending launch is absent.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class SupervisorRun:
@@ -434,12 +465,17 @@ class SupervisorRun:
     signal: int | None = None
     reaped: bool = False
     recovery_state_id: str | None = None
+    recovery_status: str = "not_started"
+    recovery_error: str = ""
     report_id: str | None = None
     report_state_id: str | None = None
     integration_state_id: str | None = None
     conflict_paths: tuple[str, ...] = ()
     uncertain: bool = False
     uncertainty_reasons: tuple[str, ...] = ()
+    # Keep legacy records byte-for-byte serializable inside immutable planner
+    # observations. Only a new transition upgrades their wire representation.
+    _schema: str = field(default=RUN_SCHEMA, repr=False, compare=False)
 
     @property
     def terminal(self) -> bool:
@@ -448,11 +484,20 @@ class SupervisorRun:
     @property
     def ready(self) -> bool:
         """Readiness is current only while the process phase is live."""
-        return self.phase == "ready" and self.ready_at is not None
+        return self.phase == "ready" and self.ready_at is not None and self.stop_reason is None
+
+    @property
+    def stop_reason(self) -> str | None:
+        # The existing durable uncertainty field keeps old run/observation
+        # wire identities intact while representing an unresolved stop intent.
+        for reason in self.uncertainty_reasons:
+            if reason.startswith("stop_requested:"):
+                return reason.partition(":")[2]
+        return None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema": RUN_SCHEMA,
+        value = {
+            "schema": self._schema,
             "run_id": self.run_id,
             "assignment": self.assignment.to_dict(),
             "assignment_digest": self.assignment_digest,
@@ -479,10 +524,13 @@ class SupervisorRun:
             "uncertain": self.uncertain,
             "uncertainty_reasons": list(self.uncertainty_reasons),
         }
+        if self._schema == RUN_SCHEMA:
+            value.update(recovery_status=self.recovery_status, recovery_error=self.recovery_error)
+        return value
 
     @classmethod
     def from_dict(cls, raw: Any) -> SupervisorRun:
-        if not isinstance(raw, dict) or raw.get("schema") != RUN_SCHEMA:
+        if not isinstance(raw, dict) or raw.get("schema") not in {RUN_SCHEMA, _LEGACY_RUN_SCHEMA}:
             raise ValueError("invalid supervisor run record")
         required = {
             "schema",
@@ -512,6 +560,8 @@ class SupervisorRun:
             "uncertain",
             "uncertainty_reasons",
         }
+        if raw["schema"] == RUN_SCHEMA:
+            required.update(("recovery_status", "recovery_error"))
         if set(raw) != required:
             raise ValueError("supervisor run record has missing or unknown fields")
         assignment = Assignment.from_dict(raw["assignment"])
@@ -544,12 +594,17 @@ class SupervisorRun:
             signal=raw["signal"],
             reaped=raw["reaped"],
             recovery_state_id=raw["recovery_state_id"],
+            recovery_status=raw.get(
+                "recovery_status", "complete" if raw["phase"] in _TERMINAL_PHASES else "not_started"
+            ),
+            recovery_error=raw.get("recovery_error", ""),
             report_id=raw["report_id"],
             report_state_id=raw["report_state_id"],
             integration_state_id=raw["integration_state_id"],
             conflict_paths=tuple(raw["conflict_paths"]),
             uncertain=raw["uncertain"],
             uncertainty_reasons=tuple(raw["uncertainty_reasons"]),
+            _schema=raw["schema"],
         )
         record._validate()
         if record.sequence < 1:
@@ -702,10 +757,28 @@ class SupervisorRun:
             raise ValueError("non-terminal phase contains terminal process evidence")
         if not terminal and self.reaped:
             raise ValueError("a non-terminal process cannot be reaped")
-        if terminal and self.recovery_state_id is None:
-            raise ValueError("terminal phase requires an exact recovery state")
+        if self.recovery_status not in {
+            "not_started", "pending", "capture_failed", "cleanup_pending",
+            "cleanup_failed", "unavailable", "complete",
+        }:
+            raise ValueError("unknown recovery status")
+        if (self.recovery_status == "not_started") == terminal:
+            raise ValueError("recovery status and process phase disagree")
+        captured = self.recovery_status in {"cleanup_pending", "cleanup_failed", "complete"}
+        if captured != (self.recovery_state_id is not None):
+            raise ValueError("captured recovery status requires an exact recovery state")
+        failed = self.recovery_status in {"capture_failed", "cleanup_failed", "unavailable"}
+        if not isinstance(self.recovery_error, str) or len(self.recovery_error) > 2048:
+            raise ValueError("recovery error must be a bounded diagnostic")
+        if failed != bool(self.recovery_error):
+            raise ValueError("recovery error and failure status disagree")
+        incomplete = terminal and self.recovery_status != "complete"
+        if incomplete != ("worker_recovery_incomplete" in self.uncertainty_reasons):
+            raise ValueError("incomplete recovery must remain explicitly uncertain")
 
         reported = self.phase in {"report_accepted", "delivered", "conflict"}
+        if reported and self.recovery_status != "complete":
+            raise ValueError("report phase requires complete worker recovery")
         if reported != (self.report_id is not None and self.report_state_id is not None):
             raise ValueError("report phase and exact report identity disagree")
         if (self.report_id is None) != (self.report_state_id is None):
@@ -1008,6 +1081,8 @@ def _linux_process_info(pid: int) -> tuple[int, int, str] | None:
     try:
         raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         fields = raw[raw.rindex(")") + 2 :].split()
+        if fields[0] in {"Z", "X"}:
+            return None  # Dead, awaiting its parent: cannot execute or fork.
         parent = int(fields[1])
         group = int(fields[2])
         start_ticks = fields[19]
@@ -1272,8 +1347,8 @@ def _signal_exact(members: Mapping[int, str], sig: int) -> None:
 
 
 def _terminate_tree(handle: _SubprocessHandle, grace_seconds: float) -> ProcessExit:
-    if grace_seconds < 0:
-        raise ValueError("termination grace must not be negative")
+    if not math.isfinite(grace_seconds) or grace_seconds < 0:
+        raise ValueError("termination grace must be finite and non-negative")
     allow_orphaned = handle._popen is not None or _lock_is_held(
         handle.spec.launch_path.with_name(
             f"{handle.spec.launch_path.name}.bootstrap.lock"
@@ -1322,7 +1397,7 @@ def _terminate_tree(handle: _SubprocessHandle, grace_seconds: float) -> ProcessE
         try:
             result = _exit_from_returncode(handle._popen.wait(timeout=5), reaped=True)
         except subprocess.TimeoutExpired:
-            return handle._cleanup_result(ProcessExit(reaped=False))
+            raise SupervisorError("worker root is still alive after SIGKILL") from None
         end = time.monotonic() + 5
         while time.monotonic() < end:
             # The root or another child can create and detach a final process
@@ -1344,7 +1419,7 @@ def _terminate_tree(handle: _SubprocessHandle, grace_seconds: float) -> ProcessE
                 return handle._cleanup_result(result)
             _signal_exact(remaining, signal.SIGKILL)
             time.sleep(0.02)
-        return handle._cleanup_result(replace(result, reaped=False))
+        raise SupervisorError("worker descendants are still alive after SIGKILL")
     # A restarted supervisor is not the orphan's parent and cannot waitpid it.
     # Still verify and repeatedly signal every persisted birth; after the root
     # vanishes, repeat marker discovery so a final detached child is not
@@ -1366,10 +1441,26 @@ def _terminate_tree(handle: _SubprocessHandle, grace_seconds: float) -> ProcessE
         handle._remember_members(remaining)
         members.update(remaining)
         if not root_live and not remaining:
-            break
+            return handle._cleanup_result(ProcessExit(reaped=False))
         _signal_exact(remaining, signal.SIGKILL)
         time.sleep(0.02)
-    return handle._cleanup_result(ProcessExit(reaped=False))
+    raise SupervisorError("recovered worker processes are still alive after SIGKILL")
+
+
+def _cancellation_path(launch_path: Path) -> Path:
+    return launch_path.with_name(f"{launch_path.name}.cancelled.json")
+
+
+def _launch_cancelled(launch_path: Path, run_id: str) -> bool:
+    try:
+        raw = json.loads(_cancellation_path(launch_path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SupervisorError("launcher cancellation evidence is unreadable") from exc
+    if raw != {"schema": "taste.brains/LaunchCancelled/1", "run_id": run_id}:
+        raise SupervisorError("launcher cancellation evidence is malformed")
+    return True
 
 
 class SubprocessLauncher:
@@ -1402,13 +1493,13 @@ class SubprocessLauncher:
         env: Mapping[str, str] | None = None,
         handshake_timeout: float = 5.0,
     ) -> None:
-        if handshake_timeout <= 0:
+        if not math.isfinite(handshake_timeout) or handshake_timeout <= 0:
             raise ValueError("handshake_timeout must be positive")
         self.command = command
         self.env = dict(env or {})
         self.handshake_timeout = handshake_timeout
         self._owned: dict[str, _SubprocessHandle] = {}
-        self._bootstraps: dict[str, subprocess.Popen[bytes]] = {}
+        self._bootstraps: dict[str, list[subprocess.Popen[bytes]]] = {}
         self._lock = threading.RLock()
 
     def _command(self, spec: LaunchSpec) -> list[str]:
@@ -1420,79 +1511,83 @@ class SubprocessLauncher:
 
     def launch(self, spec: LaunchSpec) -> ProcessHandle:
         guard = spec.launch_path.with_name(f"{spec.launch_path.name}.guard.lock")
-        with self._lock, _file_lock(guard):
-            recovered = self.recover(spec)
+        with self._lock:
+            with _file_lock(guard, timeout=self.handshake_timeout):
+                process, token, recovered = self._spawn(spec)
             if recovered is not None:
                 return recovered
-            claim = _read_launch_record(spec.launch_path, spec.run_id)
-            if claim is None:
-                token = uuid.uuid4().hex
-                _atomic_json(
-                    spec.launch_path,
-                    {
-                        "schema": "taste.brains/SubprocessPrelaunch/1",
-                        "run_id": spec.run_id,
-                        "launch_token": token,
-                    },
-                )
-            else:
-                # ``recover`` returned None, so the only valid record here is
-                # a parent that died before its bootstrap published a PID.
-                token = claim["launch_token"]
-            with contextlib.suppress(FileNotFoundError):
-                spec.readiness_path.unlink()
-            environment = dict(os.environ)
-            environment.update(self.env)
-            environment.update(
-                {
-                    _RUN_ID_ENV: spec.run_id,
-                    _LAUNCH_TOKEN_ENV: token,
-                    _READY_PATH_ENV: str(spec.readiness_path),
-                }
-            )
-            worker_command = self._command(spec)
-            bootstrap = (
-                "import sys; from taste.brains.supervisor import _subprocess_bootstrap; "
-                "_subprocess_bootstrap(sys.argv[1:])"
-            )
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-c",
-                    bootstrap,
-                    str(spec.launch_path),
-                    spec.run_id,
-                    token,
-                    *worker_command,
-                ],
-                cwd=spec.worktree,
-                env=environment,
-                start_new_session=True,
-            )
-            self._bootstraps[spec.run_id] = process
+            assert process is not None
+            # The child uses the same guard around its final cancellation
+            # check and exec. Never hold that guard while waiting for the PID.
             raw = _await_launch_evidence(
-                spec.launch_path,
-                spec.run_id,
-                token,
-                process,
-                self.handshake_timeout,
+                spec.launch_path, spec.run_id, token, process, self.handshake_timeout,
             )
             owned_process = process if raw["pid"] == process.pid else None
             if owned_process is None:
-                # This bootstrap lost the token lock to the child of a parent
-                # that died.  It performs no worker work and is safe to reap.
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=2)
             handle = _SubprocessHandle(
-                spec=spec,
-                pid=raw["pid"],
-                process_group_id=raw["process_group_id"],
-                launch_token=token,
-                process_identity=raw["process_identity"],
-                popen=owned_process,
+                spec=spec, pid=raw["pid"], process_group_id=raw["process_group_id"],
+                launch_token=token, process_identity=raw["process_identity"], popen=owned_process,
             )
             self._owned[spec.run_id] = handle
             return handle
+
+    def _spawn(self, spec: LaunchSpec):
+        if _launch_cancelled(spec.launch_path, spec.run_id):
+            raise SupervisorError("worker launch was durably cancelled")
+        recovered = self.recover(spec)
+        if recovered is not None:
+            return None, recovered.launch_token, recovered
+        claim = _read_launch_record(spec.launch_path, spec.run_id)
+        if claim is None:
+            token = uuid.uuid4().hex
+            _atomic_json(
+                spec.launch_path,
+                {
+                    "schema": "taste.brains/SubprocessPrelaunch/1",
+                    "run_id": spec.run_id,
+                    "launch_token": token,
+                },
+            )
+        else:
+            # ``recover`` returned None, so the only valid record here is
+            # a parent that died before its bootstrap published a PID.
+            token = claim["launch_token"]
+        with contextlib.suppress(FileNotFoundError):
+            spec.readiness_path.unlink()
+        environment = dict(os.environ)
+        environment.update(self.env)
+        # Filtering options.env alone is ineffective: the SDK merges it over
+        # its own inherited environment. Remove overrides at the actual worker
+        # process boundary, before either the worker or the SDK can inherit them.
+        for name in PROVIDER_OVERRIDE_ENV:
+            environment.pop(name, None)
+        environment.update(
+            {
+                _RUN_ID_ENV: spec.run_id,
+                _LAUNCH_TOKEN_ENV: token,
+                _READY_PATH_ENV: str(spec.readiness_path),
+            }
+        )
+        worker_command = self._command(spec)
+        bootstrap = (
+            "import sys; from taste.brains.supervisor import _subprocess_bootstrap; "
+            "_subprocess_bootstrap(sys.argv[1:])"
+        )
+        process = subprocess.Popen(
+            isolated_python_argv(sys.executable, bootstrap, [
+                str(spec.launch_path),
+                spec.run_id,
+                token,
+                *worker_command,
+            ]),
+            cwd=spec.worktree,
+            env=environment,
+            start_new_session=True,
+        )
+        self._bootstraps.setdefault(spec.run_id, []).append(process)
+        return process, token, None
 
     def recover(self, spec: LaunchSpec) -> ProcessHandle | None:
         with self._lock:
@@ -1502,8 +1597,8 @@ class SubprocessLauncher:
             raw = _read_launch_record(spec.launch_path, spec.run_id)
             if raw is None or raw["schema"] == "taste.brains/SubprocessPrelaunch/1":
                 return None
-            bootstrap = self._bootstraps.get(spec.run_id)
-            owned_process = bootstrap if bootstrap is not None and bootstrap.pid == raw["pid"] else None
+            owned_process = next((p for p in self._bootstraps.get(spec.run_id, ())
+                                  if p.pid == raw["pid"]), None)
             return _SubprocessHandle(
                 spec=spec,
                 pid=raw["pid"],
@@ -1512,6 +1607,47 @@ class SubprocessLauncher:
                 process_identity=raw["process_identity"],
                 popen=owned_process,
             )
+
+    def cancel(self, spec: LaunchSpec, grace_seconds: float) -> ProcessExit:
+        with self._lock:
+            # Publish first, even if cleanup or lock acquisition subsequently
+            # fails. No recovered/new bootstrap may cross this durable fence.
+            _atomic_json(_cancellation_path(spec.launch_path), {
+                "schema": "taste.brains/LaunchCancelled/1", "run_id": spec.run_id,
+            })
+            handle = self.recover(spec)
+            result = ProcessExit(reaped=True)
+            if handle is not None:
+                result = handle.terminate_tree(grace_seconds)
+            else:
+                # A bootstrap can be alive before PID publication and can
+                # already hold the exec guard. Kill exact inherited markers
+                # before acquiring the guard, including after parent restart.
+                raw = _read_launch_record(spec.launch_path, spec.run_id)
+                if raw is not None:
+                    marked, available = _marked_run_members(
+                        _process_table(), run_id=spec.run_id, launch_token=raw["launch_token"],
+                    )
+                    if not available:
+                        raise SupervisorError("pending bootstrap discovery is unavailable")
+                    _signal_exact(marked, signal.SIGKILL)
+            guard = spec.launch_path.with_name(f"{spec.launch_path.name}.guard.lock")
+            with _file_lock(guard, timeout=self.handshake_timeout):
+                # Parent Popen and child check/record/exec are serialized with
+                # this acquisition. No unpublished worker can execute later.
+                later = self.recover(spec)
+            if later is not None and handle is None:
+                result = later.terminate_tree(grace_seconds)
+            for process in self._bootstraps.get(spec.run_id, ()):
+                if process.poll() is None:
+                    process.kill()  # Owned Popen has not been reaped/reused.
+                try:
+                    code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    raise SupervisorError("cancelled bootstrap is still alive") from None
+                if handle is None and later is None:
+                    result = _exit_from_returncode(code, reaped=True)
+            return result
 
 
 def _read_launch_record(path: Path, run_id: str) -> dict[str, Any] | None:
@@ -1589,32 +1725,36 @@ def _subprocess_bootstrap(arguments: Sequence[str]) -> None:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise SystemExit(75) from None
-        raw = _read_launch_record(launch_path, run_id)
-        if (
-            raw is None
-            or raw["launch_token"] != token
-            or raw["schema"] == "taste.brains/SubprocessLaunch/1"
-        ):
-            raise SystemExit(75)
-        # Keep the lock through exec.  It is the birth/liveness fence used by
-        # a restarted supervisor.  The independently observed OS birth value
-        # below is the PID-reuse fence used before any signal is sent.
-        os.set_inheritable(descriptor, True)
-        identity = _process_identity(os.getpid())
-        if not identity:
-            raise SystemExit(71)
-        _atomic_json(
-            launch_path,
-            {
-                "schema": "taste.brains/SubprocessLaunch/1",
-                "run_id": run_id,
-                "pid": os.getpid(),
-                "process_group_id": os.getpgrp(),
-                "launch_token": token,
-                "process_identity": identity,
-            },
-        )
-        os.execvpe(command[0], command, os.environ)
+        guard = launch_path.with_name(f"{launch_path.name}.guard.lock")
+        with _file_lock(guard):
+            if _launch_cancelled(launch_path, run_id):
+                raise SystemExit(75)
+            raw = _read_launch_record(launch_path, run_id)
+            if (
+                raw is None
+                or raw["launch_token"] != token
+                or raw["schema"] == "taste.brains/SubprocessLaunch/1"
+            ):
+                raise SystemExit(75)
+            # Keep the lock through exec.  It is the birth/liveness fence used by
+            # a restarted supervisor.  The independently observed OS birth value
+            # below is the PID-reuse fence used before any signal is sent.
+            os.set_inheritable(descriptor, True)
+            identity = _process_identity(os.getpid())
+            if not identity:
+                raise SystemExit(71)
+            _atomic_json(
+                launch_path,
+                {
+                    "schema": "taste.brains/SubprocessLaunch/1",
+                    "run_id": run_id,
+                    "pid": os.getpid(),
+                    "process_group_id": os.getpgrp(),
+                    "launch_token": token,
+                    "process_identity": identity,
+                },
+            )
+            os.execvpe(command[0], command, os.environ)
     finally:
         os.close(descriptor)
 
@@ -1663,10 +1803,10 @@ class CentralSupervisor:
         poll_interval: float = 0.05,
         termination_grace: float = 2.0,
     ) -> None:
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive")
-        if termination_grace < 0:
-            raise ValueError("termination_grace must not be negative")
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be finite and positive")
+        if not math.isfinite(termination_grace) or termination_grace < 0:
+            raise ValueError("termination_grace must be finite and non-negative")
         self.store = store
         self.launcher = launcher
         self._owns_control = isinstance(control_branch, str)
@@ -1985,6 +2125,7 @@ class CentralSupervisor:
             changes.setdefault("terminal_reason", terminal_reason)
         updated = replace(
             run,
+            _schema=RUN_SCHEMA,
             phase=phase or run.phase,
             sequence=sequence,
             uncertain=is_uncertain,
@@ -2122,14 +2263,9 @@ class CentralSupervisor:
             raise AssignmentIdentityConflict(
                 "assignment base must be an exact state in the integration lineage"
             )
-        paths: dict[str, str] = {}
+        paths: dict[str, tuple[str, str]] = {}
         for artifact in assignment.inputs:
             validate_artifact_path(artifact.path)
-            prior = paths.setdefault(artifact.path, artifact.blob_id)
-            if prior != artifact.blob_id:
-                raise AssignmentIdentityConflict(
-                    f"two inputs project different bytes to {artifact.path!r}"
-                )
             if _EXACT_OBJECT_ID.fullmatch(artifact.state_id) is None:
                 raise AssignmentIdentityConflict(
                     f"input {artifact.artifact_id!r} does not name an exact state"
@@ -2146,9 +2282,14 @@ class CentralSupervisor:
                     f"input {artifact.artifact_id!r} source identity is wrong"
                 )
             entry = self.store.backend.entry_at(state.id, artifact.path)
-            if entry is None or entry.mode == "040000" or entry.sha != artifact.blob_id:
+            if entry is None or entry.mode not in BLOB_MODES or entry.sha != artifact.blob_id:
                 raise AssignmentIdentityConflict(
                     f"input {artifact.artifact_id!r} does not point to the declared file bytes"
+                )
+            identity = (entry.mode, entry.sha)
+            if paths.setdefault(artifact.path, identity) != identity:
+                raise AssignmentIdentityConflict(
+                    f"two inputs project different bytes or modes to {artifact.path!r}"
                 )
         for output in assignment.outputs:
             validate_artifact_path(output.path)
@@ -2167,10 +2308,16 @@ class CentralSupervisor:
             raise AssignmentIdentityConflict("prepared assignment is not exact")
         if not self.store.backend.is_ancestor(run.assignment.base_state_id, state.id):
             raise AssignmentIdentityConflict("prepared state does not descend from exact base")
-        for artifact in run.assignment.inputs:
-            if state.blob(artifact.path) != artifact.blob_id:
+        self._verify_input_projection(run.assignment, state)
+
+    def _verify_input_projection(self, assignment: Assignment, state: State) -> None:
+        for artifact in assignment.inputs:
+            source = self.store.backend.entry_at(artifact.state_id, artifact.path)
+            projected = self.store.backend.entry_at(state.id, artifact.path)
+            if (source is None or source.mode not in BLOB_MODES
+                    or source.sha != artifact.blob_id or projected != source):
                 raise AssignmentIdentityConflict(
-                    f"prepared input {artifact.artifact_id!r} bytes do not match"
+                    f"prepared input {artifact.artifact_id!r} bytes or mode do not match"
                 )
 
     def prepare(
@@ -2185,8 +2332,13 @@ class CentralSupervisor:
         No process is created here.  Retrying an identical call returns the
         original prepared record after re-verifying its immutable state.
         """
-        if wall_timeout_seconds <= 0:
-            raise ValueError("wall_timeout_seconds must be positive")
+        if (
+            isinstance(wall_timeout_seconds, bool)
+            or not isinstance(wall_timeout_seconds, (int, float))
+            or not math.isfinite(wall_timeout_seconds)
+            or wall_timeout_seconds <= 0
+        ):
+            raise ValueError("wall_timeout_seconds must be finite and positive")
         if active_generation is not None and assignment.generation != active_generation:
             raise StaleGeneration("cannot prepare an assignment from a stale generation")
         with self._lock:
@@ -2213,6 +2365,10 @@ class CentralSupervisor:
                 if not prior.terminal:
                     raise AssignmentIdentityConflict(
                         f"worker {assignment.worker!r} already has a live assignment"
+                    )
+                if prior.recovery_status != "complete":
+                    raise AssignmentIdentityConflict(
+                        f"worker {assignment.worker!r} still has incomplete recovery"
                     )
                 if (
                     prior.assignment.assignment_id == assignment.assignment_id
@@ -2261,25 +2417,22 @@ class CentralSupervisor:
                         )
                 if not self.store.backend.is_ancestor(base.id, branch.head.id):
                     raise AssignmentIdentityConflict("worker branch does not descend from base")
-                for destination in (
-                    *(artifact.path for artifact in assignment.inputs),
-                    CONTRACT_PATH,
-                    ASSIGNMENT_PATH,
-                ):
+                for destination in (CONTRACT_PATH, ASSIGNMENT_PATH):
                     _assert_safe_write_destination(branch.worktree, destination)
+                for artifact in assignment.inputs:
+                    _assert_safe_write_destination(
+                        branch.worktree, artifact.path, replace_symlink_leaf=True
+                    )
                 for artifact in assignment.inputs:
                     source = self.store.state(artifact.state_id)
                     branch.adopt(source, artifact.path, as_=artifact.path)
-                    if branch.path(artifact.path).read_bytes() != source.read_bytes(artifact.path):
-                        raise AssignmentIdentityConflict(
-                            f"input projection changed bytes for {artifact.artifact_id!r}"
-                        )
                 branch.write(CONTRACT_PATH, assignment.contract.to_json())
                 branch.write(ASSIGNMENT_PATH, assignment.to_json())
                 prepared = branch.checkpoint(
                     f"prepare {assignment.assignment_id} generation "
                     f"{assignment.generation} attempt {assignment.attempt}"
                 )
+                self._verify_input_projection(assignment, prepared)
             finally:
                 branch.close()
 
@@ -2320,16 +2473,26 @@ class CentralSupervisor:
             self._handles[run.run_id] = handle
         return handle
 
-    def start(self, run_id: str, *, active_generation: int) -> SupervisorRun:
+    def start(
+        self, run_id: str, *, active_generation: int, deadline_at: datetime | None = None,
+    ) -> SupervisorRun:
         """Launch once, always after a durable spawn intent and deadline."""
+        if deadline_at is not None and (not isinstance(deadline_at, datetime) or deadline_at.tzinfo is None):
+            raise ValueError("deadline_at must be a timezone-aware datetime")
         with self._lock:
             run = self._load(run_id)
             self._validate_generation(run, active_generation)
-            if run.terminal or run.phase in {"spawned", "ready"}:
+            if run.stop_reason is not None and not run.terminal:
+                return self.stop(run_id, run.stop_reason)
+            if run.terminal:
                 return run
+            if run.phase in {"spawned", "ready"}:
+                return self.poll(run_id, active_generation=active_generation, deadline_at=deadline_at)
             self._verify_prepared(run)
             if run.phase == "prepared":
                 deadline = self.clock() + timedelta(seconds=run.wall_timeout_seconds)
+                if deadline_at is not None:
+                    deadline = min(deadline, deadline_at)
                 run = self._transition(
                     run,
                     kind="spawn_intent",
@@ -2339,20 +2502,16 @@ class CentralSupervisor:
                     detail="durable launch intent recorded before process creation",
                 )
 
+            if deadline_at is not None and _parse_time(run.deadline_at or "") > deadline_at:
+                run = self._transition(
+                    run, kind="deadline_shortened", phase=run.phase,
+                    deadline_at=_iso(deadline_at),
+                    detail="launch deadline capped by the containing goal deadline",
+                )
+
             handle = self._recover_handle(run)
             if handle is None and self.clock() >= _parse_time(run.deadline_at or ""):
-                recovery_state = self._capture_worker(run)
-                return self._transition(
-                    run,
-                    kind="deadline_before_launch",
-                    phase="terminal",
-                    observed_state_id=recovery_state,
-                    terminal=True,
-                    terminal_reason="wall_timeout",
-                    recovery_state_id=recovery_state,
-                    reaped=True,
-                    detail="durable wall deadline elapsed before a process was launched",
-                )
+                return self.stop(run.run_id, "wall_timeout")
             if handle is None:
                 try:
                     handle = self.launcher.launch(self._spec(run))
@@ -2384,18 +2543,102 @@ class CentralSupervisor:
                 uncertainty_reasons=(),
                 metadata={"deadline_at": run.deadline_at},
             )
-            return self.poll(run.run_id, active_generation=active_generation)
+            return self.poll(run.run_id, active_generation=active_generation, deadline_at=deadline_at)
 
-    def _capture_worker(self, run: SupervisorRun) -> str:
-        """Acquire the dead worker lease, checkpoint dirty work, remove worktree."""
-        before = self.store.view(run.assignment.worker).head.id
-        try:
-            self.store.remove_branch(run.assignment.worker)
-        except BranchBusy as exc:
-            raise SupervisorError("worker lease remained live after process termination") from exc
-        return self.store.view(run.assignment.worker).head.id if self.store.view(
-            run.assignment.worker
-        ).exists() else before
+    def _record_terminal(
+        self,
+        run: SupervisorRun,
+        *,
+        kind: str,
+        reason: str,
+        observed: ProcessExit,
+        uncertainty: tuple[str, ...] = (),
+        detail: str = "",
+    ) -> SupervisorRun:
+        """Persist the process outcome before any fallible worktree capture."""
+        terminal = self._transition(
+            run, kind=kind, phase="terminal", terminal=True, terminal_reason=reason,
+            exit_code=observed.exit_code, signal=observed.signal, reaped=observed.reaped,
+            recovery_status="pending", recovery_error="", recovery_state_id=None,
+            uncertain=True,
+            uncertainty_reasons=tuple(dict.fromkeys((*uncertainty, "worker_recovery_incomplete"))),
+            detail=detail,
+        )
+        return self._recover_worker(terminal)
+
+    def _recovery_failure(self, run: SupervisorRun, status: str, error: str) -> SupervisorRun:
+        diagnostic = error[:2048]
+        if run.recovery_status == status and run.recovery_error == diagnostic:
+            return run  # An unchanged failure is not another lifecycle event.
+        return self._transition(
+            run, kind="worker_recovery_failed", recovery_status=status,
+            recovery_error=diagnostic, observed_state_id=run.recovery_state_id,
+            detail=diagnostic,
+        )
+
+    def _recover_worker(self, run: SupervisorRun) -> SupervisorRun:
+        """Retry storage recovery independently of the already-recorded exit.
+
+        Capture is recorded before removal. A failed removal therefore keeps
+        its exact snapshot, whereas a failed capture never invents one. Both
+        prevent assignment reuse or report admission until recovery succeeds.
+        """
+        if run.recovery_status in {"complete", "unavailable"}:
+            return run
+        worker = run.assignment.worker
+        branch: Branch | None = None
+        with contextlib.ExitStack() as locks:
+            try:
+                try:
+                    branch = self.store.branch(worker, repair=run.recovery_state_id is not None)
+                    locks.enter_context(branch._mutation_lock)
+                    if run.recovery_state_id is not None:
+                        if branch.head.id != run.recovery_state_id:
+                            raise SupervisorError("worker head changed after its terminal capture")
+                    else:
+                        branch._capture("terminal worker recovery", run.run_id)
+                except Exception as exc:
+                    if isinstance(exc, WorktreeUnavailable):
+                        return self._recovery_failure(run, "unavailable", str(exc))
+                    return self._recovery_failure(
+                        run, "cleanup_failed" if run.recovery_state_id else "capture_failed",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                # Do not catch a failed control checkpoint as a storage error:
+                # the caller must know that persistence itself failed. The
+                # worktree stays available and the previous record is pending.
+                if run.recovery_state_id is None:
+                    run = self._transition(
+                        run, kind="worker_captured", recovery_status="cleanup_pending",
+                        recovery_error="", recovery_state_id=branch.head.id,
+                        observed_state_id=branch.head.id,
+                    )
+                try:
+                    self.store.remove_branch(worker)
+                except Exception as exc:
+                    return self._recovery_failure(run, "cleanup_failed", f"{type(exc).__name__}: {exc}")
+                reasons = tuple(reason for reason in run.uncertainty_reasons
+                                if reason != "worker_recovery_incomplete")
+                return self._transition(
+                    run, kind="worker_recovered", recovery_status="complete", recovery_error="",
+                    observed_state_id=run.recovery_state_id,
+                    uncertain=bool(reasons), uncertainty_reasons=reasons,
+                )
+            finally:
+                if branch is not None:
+                    branch.close()
+
+    def _request_stop(self, run: SupervisorRun, reason: str) -> SupervisorRun:
+        if run.stop_reason is not None:
+            return run
+        token = _reason_token(reason)
+        return self._transition(
+            run, kind="stop_requested", uncertain=True,
+            uncertainty_reasons=tuple(dict.fromkeys(
+                (*run.uncertainty_reasons, f"stop_requested:{token}")
+            )),
+            detail="durable stop intent precedes process cancellation and cleanup",
+        )
 
     def _terminalize(
         self,
@@ -2407,56 +2650,56 @@ class CentralSupervisor:
     ) -> SupervisorRun:
         # Even when the root exited naturally, descendants may remain.  Asking
         # the launch adapter to terminate/reap the exact tree is mandatory.
-        final_exit = observed
-        if handle is not None:
+        reason = run.stop_reason or _reason_token(reason)
+        run = self._request_stop(run, reason)
+        cancel = getattr(self.launcher, "cancel", None)
+        if cancel is not None:
+            cleaned = cancel(self._spec(run), self.termination_grace)
+        elif handle is not None:
             cleaned = handle.terminate_tree(self.termination_grace)
-            if cleaned.exit_code is not None or cleaned.signal is not None or cleaned.reaped:
-                final_exit = cleaned
-        recovery_state = self._capture_worker(run)
+        else:
+            raise SupervisorError("launcher cannot fence a pending launch without cancellation")
+        final_exit = (
+            cleaned if cleaned.exit_code is not None or cleaned.signal is not None
+            else replace(observed, reaped=cleaned.reaped)
+        )
         uncertainty: list[str] = []
         if not final_exit.reaped:
             uncertainty.append("process_not_reapable_after_supervisor_restart")
         if final_exit.exit_code is None and final_exit.signal is None:
             uncertainty.append("exit_status_unknown")
-        return self._transition(
+        return self._record_terminal(
             run,
             kind="process_terminal",
-            phase="terminal",
-            observed_state_id=recovery_state,
-            terminal=True,
-            terminal_reason=reason,
-            exit_code=final_exit.exit_code,
-            signal=final_exit.signal,
-            reaped=final_exit.reaped,
-            recovery_state_id=recovery_state,
-            uncertain=bool(uncertainty),
-            uncertainty_reasons=tuple(uncertainty),
+            reason=reason,
+            observed=final_exit,
+            uncertainty=tuple(uncertainty),
         )
 
-    def poll(self, run_id: str, *, active_generation: int) -> SupervisorRun:
+    def poll(
+        self, run_id: str, *, active_generation: int, deadline_at: datetime | None = None,
+    ) -> SupervisorRun:
         """Observe readiness, deadline, or process death once."""
+        if deadline_at is not None and (not isinstance(deadline_at, datetime) or deadline_at.tzinfo is None):
+            raise ValueError("deadline_at must be a timezone-aware datetime")
         with self._lock:
             run = self._load(run_id)
             self._validate_generation(run, active_generation)
             if run.terminal:
-                return run
+                return self._recover_worker(run)
+            if run.stop_reason is not None:
+                return self.stop(run_id, run.stop_reason)
             if run.phase in {"prepared", "spawn_intent"}:
-                return self.start(run_id, active_generation=active_generation)
+                return self.start(run_id, active_generation=active_generation, deadline_at=deadline_at)
+            if deadline_at is not None and _parse_time(run.deadline_at or "") > deadline_at:
+                run = self._transition(
+                    run, kind="deadline_shortened", phase=run.phase,
+                    deadline_at=_iso(deadline_at),
+                    detail="worker deadline capped by the containing goal deadline",
+                )
             handle = self._recover_handle(run)
             if handle is None:
-                recovery_state = self._capture_worker(run)
-                reasons = ("process_evidence_missing", "exit_status_unknown")
-                return self._transition(
-                    run,
-                    kind="process_lost",
-                    phase="terminal",
-                    observed_state_id=recovery_state,
-                    terminal=True,
-                    terminal_reason="process_lost",
-                    recovery_state_id=recovery_state,
-                    uncertain=True,
-                    uncertainty_reasons=reasons,
-                )
+                return self.stop(run_id, "process_lost")
 
             observed = handle.poll()
             # A readiness marker is accepted only between two live-process
@@ -2483,8 +2726,7 @@ class CentralSupervisor:
 
             assert run.deadline_at is not None
             if self.clock() >= _parse_time(run.deadline_at):
-                killed = handle.terminate_tree(self.termination_grace)
-                return self._terminalize(run, None, killed, reason="wall_timeout")
+                return self._terminalize(run, handle, ProcessExit(), reason="wall_timeout")
             return run
 
     def wait(self, run_id: str, *, active_generation: int) -> SupervisorRun:
@@ -2502,42 +2744,38 @@ class CentralSupervisor:
         with self._lock:
             run = self._load(run_id)
             if run.terminal:
-                return run
+                return self._recover_worker(run)
             if run.phase == "prepared":
-                recovery_state = self._capture_worker(run)
                 token = _reason_token(reason)
-                return self._transition(
+                return self._record_terminal(
                     run,
                     kind="stopped",
-                    phase="terminal",
-                    observed_state_id=recovery_state,
-                    terminal=True,
-                    terminal_reason=token,
-                    recovery_state_id=recovery_state,
+                    reason=token,
+                    observed=ProcessExit(reaped=True),
                 )
+            run = self._request_stop(run, reason)
             handle = self._recover_handle(run)
-            if handle is None:
-                exit_status = ProcessExit(reaped=False)
-            else:
-                exit_status = handle.terminate_tree(self.termination_grace)
             return self._terminalize(
                 run,
-                None,
-                exit_status,
+                handle,
+                ProcessExit(),
                 reason=_reason_token(reason),
             )
 
-    def reconcile(self, *, active_generation: int) -> tuple[SupervisorRun, ...]:
+    def reconcile(
+        self, *, active_generation: int, deadline_at: datetime | None = None,
+    ) -> tuple[SupervisorRun, ...]:
         """Resume every current-generation run without another planner call."""
         reconciled: list[SupervisorRun] = []
         for run in self.runs():
             if run.terminal:
-                reconciled.append(run)
+                with self._lock:
+                    reconciled.append(self._recover_worker(self._load(run.run_id)))
                 continue
             if run.assignment.generation != active_generation:
                 reconciled.append(self.stop(run.run_id, "stale_generation"))
                 continue
-            reconciled.append(self.poll(run.run_id, active_generation=active_generation))
+            reconciled.append(self.poll(run.run_id, active_generation=active_generation, deadline_at=deadline_at))
         return tuple(reconciled)
 
     def _report(self, run: SupervisorRun) -> tuple[WorkerReport, State]:
@@ -2594,6 +2832,11 @@ class CentralSupervisor:
             ):
                 raise InvalidWorkerReport(f"output {artifact_id!r} is not exact-state bound")
         for spec in run.assignment.outputs:
+            if not report.completed:
+                # A failed run can honestly produce no product or leave a
+                # requested deletion unfinished. Any refs it *does* report
+                # were still validated against the exact final state above.
+                continue
             if spec.disposition == "absent":
                 if final.blob(spec.path) is not None or spec.artifact_id in reported:
                     raise InvalidWorkerReport(f"output {spec.artifact_id!r} was not removed")
@@ -2653,6 +2896,8 @@ class CentralSupervisor:
             self._validate_generation(run, active_generation)
             if not run.terminal:
                 raise InvalidWorkerReport("worker process is not terminal")
+            if run.recovery_status != "complete":
+                raise InvalidWorkerReport("worker recovery is incomplete")
             report, report_state = self._report(run)
             if run.report_id is not None:
                 if run.report_id != report.report_id or run.report_state_id != report_state.id:

@@ -85,6 +85,10 @@ class FakeLauncher:
     def recover(self, spec):
         return self.handles.get(spec.run_id)
 
+    def cancel(self, spec, grace_seconds):
+        handle = self.handles.get(spec.run_id)
+        return handle.terminate_tree(grace_seconds) if handle else ProcessExit(reaped=True)
+
 
 class ScriptedTransport:
     def __init__(

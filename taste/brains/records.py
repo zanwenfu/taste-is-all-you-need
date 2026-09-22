@@ -426,7 +426,7 @@ class ArtifactSpec(_JsonRecord):
 
 @dataclass(frozen=True, slots=True)
 class ArtifactRef(_JsonRecord):
-    """An immutable pointer to bytes in one exact branch state."""
+    """An immutable file entry: state and path pin its mode as well as bytes."""
 
     SCHEMA: ClassVar[str] = _schema("ArtifactRef")
 

@@ -44,6 +44,7 @@ from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.jail import MUTATING_TOOLS, WorktreeJail
 from taste.brains.session_store import MemstoreSessionStore
 from taste.brains.wal import InFlight, WriteAheadLog, reconcile
+from taste.brains.worker_environment import PROVIDER_OVERRIDE_ENV
 from taste.memstore import Store
 from taste.pricing import ensure_priced, max_call_cost_usd
 
@@ -64,33 +65,7 @@ WORKER_TOOLS = (
 )
 BUDGETED_WORKER_TOOLS = tuple(tool for tool in WORKER_TOOLS if tool != "Bash")
 
-_PROVIDER_OVERRIDE_ENV = frozenset(
-    {
-        "ANTHROPIC_AWS_BASE_URL",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_BEDROCK_BASE_URL",
-        "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "ANTHROPIC_DEFAULT_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_FOUNDRY_BASE_URL",
-        "ANTHROPIC_GOOGLE_CLOUD_BASE_URL",
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_SMALL_FAST_MODEL",
-        "ANTHROPIC_VERTEX_BASE_URL",
-        "CLAUDE_CODE_API_BASE_URL",
-        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-        "CLAUDE_CODE_MODEL_CATALOG",
-        "CLAUDE_CODE_MODEL_CATALOG_URL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_USE_GATEWAY",
-        "CLAUDE_CODE_USE_MANTLE",
-        "CLAUDE_CODE_USE_VERTEX",
-    }
-)
+
 
 
 @dataclass(frozen=True)
@@ -384,7 +359,7 @@ fails the same way and costs you a turn."""
         already_spent = float(budget_already_spent_usd)
 
         env = dict(os.environ)
-        for name in _PROVIDER_OVERRIDE_ENV:
+        for name in PROVIDER_OVERRIDE_ENV:
             env.pop(name, None)
         env["CLAUDE_CONFIG_DIR"] = str(self.config_dir)
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
@@ -449,7 +424,7 @@ fails the same way and costs you a turn."""
             session_store=self.sessions,
             session_store_flush="eager",
             include_partial_messages=True,
-            max_turns=self.contract.max_turns or 40,
+            max_turns=self.contract.max_turns,
             resume=resume,
             **extra,
         )
@@ -562,7 +537,7 @@ fails the same way and costs you a turn."""
             and getattr(options, "env", {}).get("DISABLE_COMPACT") != "1"
         ):
             raise ValueError("budgeted worker compaction must remain disabled")
-        if _PROVIDER_OVERRIDE_ENV & set(getattr(options, "env", {})):
+        if PROVIDER_OVERRIDE_ENV & set(getattr(options, "env", {})):
             raise ValueError("worker environment contains a provider or model override")
         if getattr(options, "permission_mode", None) != "acceptEdits":
             raise ValueError("worker permission_mode must remain acceptEdits")

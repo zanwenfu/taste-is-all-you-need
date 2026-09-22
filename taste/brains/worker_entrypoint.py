@@ -57,6 +57,7 @@ from taste.brains.worker_runtime import (
 )
 from taste.llm import LLM, MODEL_MONITOR
 from taste.memstore import Store
+from taste.memstore.backend import BLOB_MODES
 from taste.memstore.store import _check_name
 
 __all__ = [
@@ -295,6 +296,15 @@ def _load_durable_input(
     ):
         raise EntrypointInputError("prepared control records differ from the live assignment")
 
+    for artifact in assignment.inputs:
+        source = store.backend.entry_at(artifact.state_id, artifact.path)
+        projected = store.backend.entry_at(prepared.id, artifact.path)
+        if (source is None or source.mode not in BLOB_MODES
+                or source.sha != artifact.blob_id or projected != source):
+            raise EntrypointInputError(
+                f"prepared input {artifact.artifact_id!r} bytes or mode do not match its source"
+            )
+
     run_id = _validated_environment(store, assignment, environ)
     return DurableWorkerInput(
         assignment=assignment,
@@ -346,10 +356,11 @@ def worker_command(
         or any(ord(character) < 32 for character in monitor_model)
     ):
         raise ValueError("monitor_model is not a stable model id")
-    command = [
-        executable,
-        "-m",
-        "taste.brains.worker_entrypoint",
+    from taste.brains.python_process import isolated_python_argv
+
+    command = isolated_python_argv(executable,
+        "import runpy; runpy.run_module('taste.brains.worker_entrypoint', "
+        "run_name='__main__', alter_sys=True)", [
         "--repo-root",
         str(root),
         "--session",
@@ -362,7 +373,7 @@ def worker_command(
         spec.prepared_state_id,
         "--monitor-model",
         monitor_model,
-    ]
+    ])
     monitor_budget = _assignment_monitor_budget_usd(spec.assignment)
     if monitor_budget is not None:
         command.extend(("--monitor-budget-usd", str(monitor_budget)))

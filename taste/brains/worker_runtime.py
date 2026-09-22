@@ -62,6 +62,8 @@ from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.delivery import is_control_path, validate_artifact_path
 from taste.brains.records import ArtifactRef, Assignment, WorkerReport, contract_digest
 from taste.brains.subbrain import SubBrain, SubBrainResult, Waking
+from taste.brains.worker_environment import PROVIDER_OVERRIDE_ENV
+from taste.memstore.backend import BLOB_MODES
 from taste.pricing import PRICES, PricingError, call_cost, ensure_priced, table_sha
 
 __all__ = [
@@ -522,6 +524,11 @@ class WorkerRuntime:
     def _make_client(options: Any) -> Any:
         from claude_agent_sdk import ClaudeSDKClient
 
+        if PROVIDER_OVERRIDE_ENV.intersection(os.environ):
+            # Direct in-process users do not pass through SubprocessLauncher.
+            # Fail before a provider-capable child exists; never mutate the
+            # application's global environment while other threads may use it.
+            raise ContractMismatch("worker process inherited a provider or model override")
         return ClaudeSDKClient(options=options)
 
     # --------------------------------------------------------------- durable input
@@ -658,6 +665,10 @@ class WorkerRuntime:
                 if state.blob(artifact.path) != artifact.blob_id:
                     raise ContractMismatch(
                         f"input {artifact.artifact_id!r} no longer names the declared bytes"
+                    )
+                if entry is None or entry.mode not in BLOB_MODES:
+                    raise ContractMismatch(
+                        f"input {artifact.artifact_id!r} is not a regular file or symlink"
                     )
 
         exact_record = self._accepted_assignment_text or self._accepted_contract_text

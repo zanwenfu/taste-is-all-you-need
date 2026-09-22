@@ -158,10 +158,10 @@ def test_the_launcher_command_starts_a_real_python_module(store: Store) -> None:
 
     argv = worker_command(spec, repo_root=store.root, session="session-1")
 
-    assert argv[:3] == (sys.executable, "-m", "taste.brains.worker_entrypoint")
+    assert argv[:3] == (sys.executable, "-I", "-c")
     # The module really is importable and really does parse arguments.
     probe = subprocess.run(
-        [sys.executable, "-m", "taste.brains.worker_entrypoint", "--help"],
+        [*argv, "--help"],
         capture_output=True,
         text=True,
         timeout=60,

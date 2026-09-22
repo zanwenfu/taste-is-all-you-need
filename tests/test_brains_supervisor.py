@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import json
+import multiprocessing as mp
 import os
+import shutil
+import signal
 import sys
 import time
+from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -38,6 +43,7 @@ from taste.brains.supervisor import (
 )
 from taste.brains.worker_runtime import ASSIGNMENT_PATH, WORKER_REPORT_PATH
 from taste.memstore import Store
+from taste.memstore.backend import GitBackend
 
 
 class FakeHandle:
@@ -88,6 +94,9 @@ class FakeLauncher:
     def recover(self, spec):
         self.recover_calls += 1
         return self.handle if self.launched else None
+
+    def cancel(self, spec, grace_seconds):
+        return self.handle.terminate_tree(grace_seconds) if self.launched else ProcessExit(reaped=True)
 
 
 class TrackingControlLock:
@@ -394,6 +403,54 @@ def test_prepare_projects_exact_inputs_and_spawn_intent_precedes_launch(store: S
     assert launcher.launch_calls == 1
     assert supervisor.start(prepared.run_id, active_generation=1).phase == "spawned"
     assert launcher.launch_calls == 1
+
+
+@pytest.mark.parametrize("mode", ["executable", "symlink"])
+def test_prepare_and_reopen_preserve_input_modes(store: Store, mode: str) -> None:
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    producer = store.branch("producer")
+    producer.write("input", "#!/bin/sh\nexit 0\n")
+    if mode == "symlink":
+        producer.path("input").unlink()
+        producer.path("input").symlink_to("missing-target")
+    else:
+        producer.path("input").chmod(0o755)
+    source = producer.checkpoint("publish mode-sensitive input")
+    producer.close()
+    artifact = ArtifactRef("input", "producer", source.id, "input", source.blob("input"))
+    assignment = assignment_for(supervisor, inputs=(artifact,))
+    prepared = supervisor.prepare(assignment, wall_timeout_seconds=30)
+    expected = store.backend.entry_at(source.id, "input")
+    assert store.backend.entry_at(prepared.prepared_state_id, "input") == expected
+    supervisor.close()
+
+    reopened = CentralSupervisor(store, launcher=launcher)
+    assert reopened.prepare(assignment, wall_timeout_seconds=30) == prepared
+    assert reopened.start(prepared.run_id, active_generation=1).phase == "spawned"
+    assert launcher.launch_calls == 1
+    reopened.close()
+
+
+def test_prepare_rejects_same_bytes_with_conflicting_input_modes(store: Store) -> None:
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    producer = store.branch("producer")
+    producer.write("input", "exit 0\n")
+    regular = producer.checkpoint("ordinary file")
+    producer.path("input").chmod(0o755)
+    executable = producer.checkpoint("same bytes, executable")
+    producer.close()
+    artifacts = tuple(
+        ArtifactRef(identity, "producer", state.id, "input", state.blob("input"))
+        for identity, state in (("regular", regular), ("executable", executable))
+    )
+    assert artifacts[0].blob_id == artifacts[1].blob_id
+    with pytest.raises(AssignmentIdentityConflict, match="different bytes or modes"):
+        supervisor.prepare(assignment_for(supervisor, inputs=artifacts), wall_timeout_seconds=30)
+    assert not store.view("worker-1").exists()
+    assert launcher.launch_calls == 0
+    supervisor.close()
 
 
 def test_coordinator_can_share_control_branch_and_mutation_lock(store: Store) -> None:
@@ -967,6 +1024,360 @@ def test_unknown_unreaped_process_exit_cannot_deliver_valid_report(store: Store)
     assert terminal.uncertain
     with pytest.raises(DeliveryRejected, match="process outcome remains uncertain"):
         supervisor.deliver(run.run_id, active_generation=1)
+
+
+@pytest.mark.parametrize("trigger", ["exit", "stop", "timeout", "prepared", "unlaunched", "lost"])
+def test_capture_failure_records_exit_and_retries_after_restart_without_relaunch(
+    store: Store, monkeypatch, trigger: str,
+) -> None:
+    clock = FakeClock()
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher, clock=clock)
+    assignment = assignment_for(supervisor)
+    run = supervisor.prepare(assignment, wall_timeout_seconds=30)
+    if trigger == "unlaunched":
+        launcher.fail_launches = 1
+        with pytest.raises(RuntimeError, match="injected launch gap"):
+            supervisor.start(run.run_id, active_generation=1)
+    elif trigger != "prepared":
+        supervisor.start(run.run_id, active_generation=1)
+    worker = store.branch(assignment.worker)
+    worker.write("precious.txt", "only uncommitted copy")
+    worktree = worker.worktree
+    worker.close()
+    if trigger == "exit":
+        launcher.handle.exit = ProcessExit(exit_code=17, reaped=True)
+    if trigger in {"timeout", "unlaunched"}:
+        clock.advance(31)
+    if trigger == "lost":
+        supervisor._handles.clear()
+        launcher.launched = False
+    real_stage = GitBackend.stage_all
+
+    def disk_full(backend):
+        if backend.path == worktree:
+            raise OSError(errno.ENOSPC, "simulated worker snapshot disk full")
+        real_stage(backend)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(GitBackend, "stage_all", disk_full)
+        terminal = (
+            supervisor.stop(run.run_id)
+            if trigger in {"stop", "prepared"}
+            else supervisor.poll(run.run_id, active_generation=1)
+        )
+        assert terminal.terminal
+        assert terminal.recovery_state_id is None
+        assert terminal.recovery_status == "capture_failed"
+        assert "disk full" in terminal.recovery_error
+        assert terminal.uncertain
+        if trigger == "exit":
+            assert terminal.exit_code == 17 and terminal.reaped
+        assert (worktree / "precious.txt").read_text() == "only uncommitted copy"
+        assert store.view(assignment.worker).head.read("precious.txt") is None
+        with pytest.raises(AssignmentIdentityConflict, match="recovery"):
+            supervisor.prepare(assignment_for(supervisor, attempt=1), wall_timeout_seconds=30)
+        with pytest.raises(InvalidWorkerReport, match="recovery"):
+            supervisor.collect(run.run_id, active_generation=1)
+        supervisor.close()
+        with (
+            closing(Store.open(store.root, store.session)) as reopened_store,
+            CentralSupervisor(reopened_store, launcher=launcher, clock=clock) as reopened,
+        ):
+            assert reopened.get(run.run_id) == terminal
+            # Repeated failure keeps the same evidence without an endless
+            # stream of identical checkpoints or another termination.
+            assert reopened.reconcile(active_generation=1) == (terminal,)
+    launches = launcher.launch_calls
+    terminations = launcher.handle.termination_calls
+    with (
+        closing(Store.open(store.root, store.session)) as reopened_store,
+        CentralSupervisor(reopened_store, launcher=launcher, clock=clock) as reopened,
+    ):
+        recovered, = reopened.reconcile(active_generation=1)
+        assert recovered.terminal
+        assert recovered.recovery_status == "complete"
+        assert not recovered.recovery_error
+        assert recovered.recovery_state_id is not None
+        assert reopened_store.state(recovered.recovery_state_id).read("precious.txt") == "only uncommitted copy"
+        assert not worktree.exists()
+        assert reopened.reconcile(active_generation=1) == (recovered,)
+    assert launcher.launch_calls == launches
+    assert launcher.handle.termination_calls == terminations
+
+
+def test_cleanup_failure_retains_exact_capture_and_recovers_without_recapturing(
+    store: Store, monkeypatch,
+) -> None:
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    assignment = assignment_for(supervisor)
+    run = supervisor.prepare(assignment, wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    worker = store.branch(assignment.worker)
+    worker.write("precious.txt", "keep")
+    worktree = worker.worktree
+    worker.close()
+    launcher.handle.exit = ProcessExit(exit_code=0, reaped=True)
+
+    def cannot_remove(_path):
+        raise PermissionError("simulated removal denied")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(store.backend, "worktree_remove", cannot_remove)
+        terminal = supervisor.poll(run.run_id, active_generation=1)
+        assert terminal.terminal and terminal.reaped and terminal.exit_code == 0
+        assert terminal.recovery_status == "cleanup_failed"
+        assert "removal denied" in terminal.recovery_error
+        assert store.state(terminal.recovery_state_id).read("precious.txt") == "keep"
+        assert worktree.exists()
+    supervisor.close()
+    with (
+        closing(Store.open(store.root, store.session)) as reopened_store,
+        CentralSupervisor(reopened_store, launcher=launcher) as reopened,
+    ):
+        recovered, = reopened.reconcile(active_generation=1)
+        assert recovered.recovery_status == "complete"
+        assert recovered.recovery_state_id == terminal.recovery_state_id
+        assert not recovered.uncertain
+        assert not worktree.exists()
+    assert launcher.launch_calls == launcher.handle.termination_calls == 1
+
+
+def test_exit_is_durable_before_interruption_inside_snapshot(store: Store, monkeypatch) -> None:
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    worker = store.branch(run.assignment.worker)
+    worker.write("precious.txt", "keep")
+    worktree = worker.worktree
+    worker.close()
+    launcher.handle.exit = ProcessExit(exit_code=3, reaped=True)
+    real_stage = GitBackend.stage_all
+
+    def interrupted(backend):
+        if backend.path == worktree:
+            durable = supervisor.get(run.run_id)
+            assert durable.terminal and durable.exit_code == 3
+            raise SystemExit("interrupted snapshot")
+        real_stage(backend)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(GitBackend, "stage_all", interrupted)
+        with pytest.raises(SystemExit, match="interrupted snapshot"):
+            supervisor.poll(run.run_id, active_generation=1)
+    supervisor.close()
+    with (
+        closing(Store.open(store.root, store.session)) as reopened_store,
+        CentralSupervisor(reopened_store, launcher=launcher) as reopened,
+    ):
+        durable = reopened.get(run.run_id)
+        assert durable.terminal and durable.exit_code == 3
+        assert durable.recovery_status == "pending"
+        recovered, = reopened.reconcile(active_generation=1)
+        assert reopened_store.state(recovered.recovery_state_id).read("precious.txt") == "keep"
+    assert launcher.launch_calls == launcher.handle.termination_calls == 1
+
+
+def test_stale_worktree_preservation_is_not_misreported_as_complete_capture(store: Store) -> None:
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    worker = store.branch(run.assignment.worker)
+    worker.write("precious.txt", "only copy")
+    worktree = worker.worktree
+    worker.close()
+    (worktree / ".git").unlink()
+    launcher.handle.exit = ProcessExit(exit_code=0, reaped=True)
+    terminal = supervisor.poll(run.run_id, active_generation=1)
+    assert terminal.terminal and terminal.recovery_status == "unavailable"
+    assert terminal.recovery_state_id is None
+    assert str(worktree) in terminal.recovery_error
+    assert (worktree / "precious.txt").read_text() == "only copy"
+    assert not store.worktree_recoveries(run.assignment.worker)
+    assert supervisor.reconcile(active_generation=1) == (terminal,)
+    with pytest.raises(AssignmentIdentityConflict, match="recovery"):
+        supervisor.prepare(assignment_for(supervisor, attempt=1), wall_timeout_seconds=30)
+    supervisor.close()
+
+
+def test_missing_worktree_without_capture_is_not_recreated_as_success(store: Store) -> None:
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    worktree = store.worktree_path_for(run.assignment.worker)
+    shutil.rmtree(worktree)
+    launcher.handle.exit = ProcessExit(exit_code=1, reaped=True)
+    terminal = supervisor.poll(run.run_id, active_generation=1)
+    assert terminal.recovery_status == "unavailable"
+    assert terminal.recovery_state_id is None
+    assert "Missing worktree" in terminal.recovery_error
+    assert not worktree.exists()
+    assert supervisor.reconcile(active_generation=1) == (terminal,)
+    supervisor.close()
+
+
+def test_missing_worker_ref_records_exit_without_inventing_recovery_lineage(store: Store) -> None:
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    worker = store.branch(run.assignment.worker)
+    worker.write("precious.txt", "only copy")
+    worktree = worker.worktree
+    worker.close()
+    store.backend.delete_ref(store.ref_for(run.assignment.worker))
+    launcher.handle.exit = ProcessExit(exit_code=1, reaped=True)
+    terminal = supervisor.poll(run.run_id, active_generation=1)
+    assert terminal.terminal and terminal.exit_code == 1
+    assert terminal.recovery_status == "unavailable"
+    assert terminal.recovery_state_id is None
+    assert "Missing worker branch ref" in terminal.recovery_error
+    assert (worktree / "precious.txt").read_text() == "only copy"
+    assert store.backend.ref_sha(store.ref_for(run.assignment.worker)) is None
+    supervisor.close()
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_legacy_supervisor_wire_roundtrip_preserves_immutable_observations(
+    store: Store, terminal: bool,
+) -> None:
+    with CentralSupervisor(store, launcher=FakeLauncher()) as supervisor:
+        run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+        if terminal:
+            run = supervisor.stop(run.run_id)
+        raw = run.to_dict()
+        raw["schema"] = "taste.brains/SupervisorRun/1"
+        raw.pop("recovery_status")
+        raw.pop("recovery_error")
+        restored = SupervisorRun.from_dict(raw)
+        assert restored.to_dict() == raw
+        assert restored.recovery_status == ("complete" if terminal else "not_started")
+        if terminal:
+            raw["recovery_state_id"] = None
+            with pytest.raises(ValueError, match="exact recovery state"):
+                SupervisorRun.from_dict(raw)
+
+
+def test_legacy_run_transitions_to_new_wire_without_rewriting_history(store: Store, monkeypatch) -> None:
+    real_serialize = SupervisorRun.to_dict
+
+    def legacy_serialize(run):
+        raw = real_serialize(run)
+        raw["schema"] = "taste.brains/SupervisorRun/1"
+        raw.pop("recovery_status", None)
+        raw.pop("recovery_error", None)
+        return raw
+
+    with CentralSupervisor(store, launcher=FakeLauncher()) as supervisor:
+        with monkeypatch.context() as legacy_writer:
+            legacy_writer.setattr(SupervisorRun, "to_dict", legacy_serialize)
+            prepared = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+        old_head = supervisor.control.head
+        old_bytes = old_head.read(supervisor_module._run_path(prepared.run_id))
+        assert supervisor.get(prepared.run_id).to_dict()["schema"] == "taste.brains/SupervisorRun/1"
+        terminal = supervisor.stop(prepared.run_id)
+        assert terminal.to_dict()["schema"] == supervisor_module.RUN_SCHEMA
+        assert terminal.recovery_status == "complete"
+        assert supervisor.runs() == (terminal,)
+        assert old_head.read(supervisor_module._run_path(prepared.run_id)) == old_bytes
+
+
+@pytest.mark.parametrize("boundary", ["process_terminal", "worker_captured", "worker_recovered"])
+def test_control_persistence_failure_is_explicit_and_storage_recovery_remains_retryable(
+    store: Store, monkeypatch, boundary: str,
+) -> None:
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    worker = store.branch(run.assignment.worker)
+    worker.write("precious.txt", "keep")
+    worktree = worker.worktree
+    worker.close()
+    launcher.handle.exit = ProcessExit(exit_code=0, reaped=True)
+    real_checkpoint = supervisor.control.checkpoint
+
+    def cannot_persist(reason, *args, **kwargs):
+        if reason.startswith(f"supervisor {boundary}:"):
+            raise OSError(errno.ENOSPC, "simulated control disk full")
+        return real_checkpoint(reason, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(supervisor.control, "checkpoint", cannot_persist)
+        with pytest.raises(OSError, match="control disk full"):
+            supervisor.poll(run.run_id, active_generation=1)
+    durable = supervisor.get(run.run_id)
+    if boundary == "process_terminal":
+        assert not durable.terminal
+        assert store.view(run.assignment.worker).head.read("precious.txt") is None
+    else:
+        assert durable.terminal and durable.exit_code == 0
+        assert durable.recovery_status == ("pending" if boundary == "worker_captured" else "cleanup_pending")
+    if boundary != "worker_recovered":
+        assert (worktree / "precious.txt").read_text() == "keep"
+    supervisor.close()
+    with (
+        closing(Store.open(store.root, store.session)) as reopened_store,
+        CentralSupervisor(reopened_store, launcher=launcher) as reopened,
+    ):
+        recovered, = reopened.reconcile(active_generation=1)
+        assert recovered.recovery_status == "complete"
+        assert reopened_store.state(recovered.recovery_state_id).read("precious.txt") == "keep"
+        assert not worktree.exists()
+    assert launcher.launch_calls == 1
+
+
+def _killed_during_terminal_snapshot(root: str, session: str, reached) -> None:
+    store = Store.open(Path(root), session)
+    launcher = FakeLauncher()
+    supervisor = CentralSupervisor(store, launcher=launcher)
+    run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    worker = store.branch(run.assignment.worker)
+    worker.write("precious.txt", "survives SIGKILL")
+    worktree = worker.worktree
+    worker.close()
+    launcher.handle.exit = ProcessExit(exit_code=17, reaped=True)
+    real_stage = GitBackend.stage_all
+
+    def kill_at_capture(backend):
+        if backend.path == worktree:
+            reached.set()
+            os.kill(os.getpid(), signal.SIGKILL)
+        real_stage(backend)
+
+    GitBackend.stage_all = kill_at_capture
+    supervisor.poll(run.run_id, active_generation=1)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGKILL and fork")
+def test_real_supervisor_kill_after_exit_record_resumes_capture(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    context = mp.get_context("fork")
+    reached = context.Event()
+    process = context.Process(target=_killed_during_terminal_snapshot, args=(str(root), "s", reached))
+    process.start()
+    try:
+        assert reached.wait(30), "child did not reach the capture boundary"
+        process.join(30)
+        assert process.exitcode == -signal.SIGKILL
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(10)
+    launcher = FakeLauncher()
+    with closing(Store.open(root, "s")) as reopened_store, CentralSupervisor(reopened_store, launcher=launcher) as reopened:
+        durable, = reopened.runs()
+        assert durable.terminal and durable.exit_code == 17 and durable.reaped
+        assert durable.recovery_status == "pending"
+        recovered, = reopened.reconcile(active_generation=1)
+        assert recovered.recovery_status == "complete"
+        assert reopened_store.state(recovered.recovery_state_id).read("precious.txt") == "survives SIGKILL"
+    assert launcher.launch_calls == launcher.recover_calls == launcher.handle.termination_calls == 0
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
