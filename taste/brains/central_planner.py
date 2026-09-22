@@ -61,6 +61,7 @@ from taste.brains.supervisor import RUN_ROOT, SupervisorRun
 from taste.brains.worker_runtime import WORKER_REPORT_PATH
 from taste.llm import MODEL_MONITOR, MODEL_WORKER
 from taste.memstore import Branch, State, Store
+from taste.memstore.backend import BLOB_MODES
 from taste.pricing import ensure_priced, max_call_cost_usd
 
 __all__ = [
@@ -1061,6 +1062,11 @@ class CentralPlanner:
                 "continues from the durable receipt journal"
             ),
         )
+
+    def bind_goal(self, goal: Goal) -> None:
+        """Bind or validate exact objective bytes before any runtime replay."""
+        with self.mutation_lock:
+            self._ensure_goal(goal)
 
     def _ensure_goal(self, goal: Goal) -> None:
         self._adopt_rewound_control()
@@ -2294,7 +2300,7 @@ class CentralPlanner:
                 f"input {artifact.artifact_id!r} was not reachable in the observed world"
             )
         entry = self.store.backend.entry_at(source.id, artifact.path)
-        if entry is None or entry.mode == "040000" or entry.sha != artifact.blob_id:
+        if entry is None or entry.mode not in BLOB_MODES or entry.sha != artifact.blob_id:
             raise InvalidPlannerOutput(
                 f"input {artifact.artifact_id!r} does not bind the declared bytes"
             )

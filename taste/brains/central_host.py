@@ -131,6 +131,7 @@ class CentralRuntimeHost:
         wall_clock_seconds: float,
         between_cycles: Any = None,
         monotonic: Any = None,
+        max_planner_failures: int = 3,
     ) -> GoalOutcome:
         """Drive the goal to an ending and return the durable record of it.
 
@@ -146,6 +147,7 @@ class CentralRuntimeHost:
                 wall_clock_seconds=wall_clock_seconds,
                 between_cycles=between_cycles,
                 monotonic=monotonic,
+                max_planner_failures=max_planner_failures,
             )
 
     def outcome(self) -> GoalOutcome | None:

@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
@@ -32,6 +32,7 @@ from taste.brains.central_planner import (
     CentralPlanner,
     Goal,
     InvalidPlannerOutput,
+    PlannerTransportError,
     RejectedPlannerOperation,
     StalePlanningWorld,
 )
@@ -41,6 +42,7 @@ from taste.brains.supervisor import (
     CentralSupervisor,
     DeliveryRejected,
     InvalidWorkerReport,
+    SupervisorError,
     SupervisorRun,
     SupervisorStateConflict,
 )
@@ -91,6 +93,10 @@ class CoordinatorCorruption(CoordinatorError):
 
 class BudgetBlocked(CoordinatorError):
     """A budgeted planner call is unsafe because durable cost is unprovable."""
+
+
+class _WallDeadlineReached(CoordinatorError):
+    """The goal deadline has elapsed before another external effect."""
 
 
 class _InjectedCoordinatorFault(CoordinatorError):
@@ -539,6 +545,9 @@ class CentralRuntime:
         self.clock = clock
         self.fault_injector = fault_injector
         self._lock = threading.RLock()
+        self._remaining_wall: Callable[[], float] | None = None
+        self._deadline_at: datetime | None = None
+        self._running = False
 
     def _fault(self, boundary: str, payload: Mapping[str, Any]) -> None:
         if self.fault_injector is not None:
@@ -1254,6 +1263,8 @@ class CentralRuntime:
     @staticmethod
     def _wall_timeout(assignment: Assignment, fallback: float) -> float:
         value = assignment.resources.get("wall_timeout_seconds", fallback)
+        if value is None:
+            value = fallback  # Null and absence both mean an unspecified timeout.
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError("wall_timeout_seconds must be numeric")
         result = float(value)
@@ -1736,7 +1747,7 @@ class CentralRuntime:
                     "complete": value.complete,
                 },
             )
-        except (InvalidPlannerOutput, RejectedPlannerOperation, StalePlanningWorld) as exc:
+        except (InvalidPlannerOutput, RejectedPlannerOperation, StalePlanningWorld, PlannerTransportError) as exc:
             self._finish_planner_operation(
                 base_id,
                 operation_id,
@@ -1790,7 +1801,7 @@ class CentralRuntime:
                     "complete": value.complete,
                 },
             )
-        except (InvalidPlannerOutput, RejectedPlannerOperation, StalePlanningWorld) as exc:
+        except (InvalidPlannerOutput, RejectedPlannerOperation, StalePlanningWorld, PlannerTransportError) as exc:
             self._finish_planner_operation(
                 base_id,
                 operation_id,
@@ -1808,6 +1819,30 @@ class CentralRuntime:
         wall_clock_seconds: float,
         between_cycles: Any = None,
         monotonic: Any = None,
+        max_planner_failures: int = 3,
+    ) -> GoalOutcome:
+        """Run one durable trial, serializing concurrent drivers of this runtime."""
+        with self._lock:
+            if self._running:
+                raise CoordinatorError("this runtime already has an active run() driver")
+            self._running = True
+            try:
+                return self._run(
+                    max_generations=max_generations, wall_clock_seconds=wall_clock_seconds,
+                    between_cycles=between_cycles, monotonic=monotonic,
+                    max_planner_failures=max_planner_failures,
+                )
+            finally:
+                self._running = False
+
+    def _run(
+        self,
+        *,
+        max_generations: int,
+        wall_clock_seconds: float,
+        between_cycles: Any = None,
+        monotonic: Any = None,
+        max_planner_failures: int = 3,
     ) -> GoalOutcome:
         """Drive cycles until the goal is answered, then record why it stopped.
 
@@ -1819,8 +1854,12 @@ class CentralRuntime:
         so the loop keeps going until the plan is complete, a hard bound is
         reached, or the budget can no longer be proven.
         """
-        if not isinstance(max_generations, int) or max_generations < 1:
+        if isinstance(max_generations, bool) or not isinstance(max_generations, int) or max_generations < 1:
             raise ValueError("max_generations must be a positive integer")
+        if isinstance(max_planner_failures, bool) or not isinstance(max_planner_failures, int) or max_planner_failures < 1:
+            raise ValueError("max_planner_failures must be a positive integer")
+        if isinstance(wall_clock_seconds, bool):
+            raise ValueError("wall_clock_seconds must be a positive finite number")
         wall_clock_seconds = float(wall_clock_seconds)
         if not math.isfinite(wall_clock_seconds) or wall_clock_seconds <= 0:
             raise ValueError("wall_clock_seconds must be a positive finite number")
@@ -1830,38 +1869,106 @@ class CentralRuntime:
             recorded = self.outcome()
             if recorded is not None:
                 return recorded
+            pending_stop = self._stop_request()
+            if pending_stop is not None:
+                return self._finish_run(pending_stop["stop_reason"], pending_stop["detail"])
 
         started = clock()
-        cycles = 0
-        last: CycleOutcome | None = None
+        limits_path = f"{_goal_root(self.goal.goal_id)}/run-limits.json"
+        limits = self.control.head.record(limits_path)
+        expected = {"schema": "taste.brains/GoalRunLimits/1", "goal_digest": _digest(self.goal.to_json()),
+                    "max_generations": max_generations, "wall_clock_seconds": wall_clock_seconds,
+                    "max_planner_failures": max_planner_failures}
+        if limits is None:
+            limits = {**expected, "deadline_at": _iso(self.clock() + timedelta(seconds=wall_clock_seconds))}
+            self._immutable(limits_path, limits, f"central run limits: {self.goal.goal_id}")
+        if (not isinstance(limits, dict) or set(limits) != {*expected, "deadline_at"}
+                or any(limits[key] != value for key, value in expected.items())):
+            raise CoordinatorError("run limits differ from this goal's durable trial limits")
+        try:
+            deadline = datetime.fromisoformat(limits["deadline_at"].replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                raise ValueError("deadline has no timezone")
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise CoordinatorCorruption("durable run deadline is malformed") from exc
+        self._remaining_wall = lambda: min(wall_clock_seconds - (clock() - started),
+                                            (deadline - self.clock()).total_seconds())
+        self._deadline_at = deadline
         stop_reason = "generation_bound"
         detail = ""
-        while True:
-            if clock() - started >= wall_clock_seconds:
-                stop_reason = "wall_clock"
-                detail = f"the run reached its {wall_clock_seconds:g}s bound"
-                break
-            outcome = self.cycle()
-            cycles += 1
-            last = outcome
-            if outcome.status == "budget_blocked":
-                stop_reason = "budget_blocked"
-                detail = "the budget could no longer be proven"
-                break
-            if outcome.complete:
-                stop_reason = "complete"
-                detail = outcome.plan.completion_reason
-                break
-            if outcome.plan.generation >= max_generations:
-                stop_reason = "generation_bound"
-                detail = f"the run reached its {max_generations} generation bound"
-                break
-            if between_cycles is not None:
-                between_cycles()
-        return self._record_outcome(last, stop_reason, detail, cycles)
+        try:
+            planner_failures = sum(attempt.status in {"rejected", "transport_error", "orphaned"}
+                                   for attempt in self.planner.planner_attempts(self.goal.goal_id))
+            while True:
+                remaining = self._remaining_wall()
+                if remaining <= 0:
+                    stop_reason = "wall_clock"
+                    detail = f"the run reached its {wall_clock_seconds:g}s bound"
+                    break
+                if planner_failures >= max_planner_failures:
+                    stop_reason, detail = "planner_failed", "durable planner failure limit reached"
+                    break
+                try:
+                    bind_deadline = getattr(self.planner.transport, "bind_deadline", None)
+                    if callable(bind_deadline):
+                        bind_deadline(remaining_seconds=remaining)
+                    outcome = self.cycle(max_generations=max_generations)
+                except (InvalidPlannerOutput, RejectedPlannerOperation, StalePlanningWorld,
+                        PlannerTransportError) as exc:
+                    planner_failures += 1
+                    if self._remaining_wall() <= 0:
+                        stop_reason, detail = "wall_clock", "goal deadline elapsed during planner call"
+                        break
+                    budget = self._budget(self.supervisor.runs())
+                    if budget.limit_usd is not None and not budget.enforceable:
+                        stop_reason, detail = "budget_blocked", "planner failure left durable cost unknown"
+                        break
+                    if planner_failures >= max_planner_failures:
+                        stop_reason = "planner_failed"
+                        detail = f"planner failed {planner_failures} times: {type(exc).__name__}: {exc}"[:2048]
+                        break
+                    # Each failed operation is terminal. The next operation
+                    # snapshots the current world, including our decision
+                    # records, and preserves all earlier billed receipts.
+                    time.sleep(min(self.supervisor.poll_interval,
+                                   max(0.0, wall_clock_seconds - (clock() - started))))
+                    continue
+                if self._remaining_wall() <= 0:
+                    stop_reason, detail = "wall_clock", "goal deadline elapsed during a cycle"
+                    break
+                if outcome.status == "budget_blocked":
+                    stop_reason = "budget_blocked"
+                    detail = "the budget could no longer be proven"
+                    break
+                if outcome.complete:
+                    stop_reason = "complete"
+                    detail = outcome.plan.completion_reason
+                    break
+                if outcome.status == "generation_bound":
+                    stop_reason = "generation_bound"
+                    detail = f"the run reached its {max_generations} generation bound"
+                    break
+                if between_cycles is not None:
+                    between_cycles()
+                else:
+                    time.sleep(min(self.supervisor.poll_interval,
+                                   max(0.0, wall_clock_seconds - (clock() - started))))
+        except _WallDeadlineReached as exc:
+            stop_reason, detail = "wall_clock", str(exc)
+        except BudgetBlocked as exc:
+            stop_reason, detail = "budget_blocked", str(exc)
+        except BaseException as exc:
+            self._finish_run("interrupted" if isinstance(exc, KeyboardInterrupt) else "runtime_error",
+                             f"{type(exc).__name__}: {exc}"[:2048])
+            raise
+        finally:
+            self._remaining_wall = None
+            self._deadline_at = None
+        return self._finish_run(stop_reason, detail)
 
     def outcome(self) -> GoalOutcome | None:
         """The recorded answer for this goal, if the run already ended."""
+        self.planner.bind_goal(self.goal)
         raw = self.control.head.read(_outcome_path(self.goal.goal_id))
         if raw is None:
             return None
@@ -1870,24 +1977,66 @@ class CentralRuntime:
         except (ValueError, KeyError, TypeError) as exc:
             raise CoordinatorCorruption("durable goal outcome is malformed") from exc
 
-    def _record_outcome(
-        self, last: CycleOutcome | None, stop_reason: str, detail: str, cycles: int
-    ) -> GoalOutcome:
-        plan = None if last is None else last.plan
+    def _stop_request(self) -> dict[str, Any] | None:
+        raw = self.control.head.record(f"{_goal_root(self.goal.goal_id)}/stop.json")
+        if raw is None:
+            return None
+        if (not isinstance(raw, dict)
+                or set(raw) != {"schema", "goal_digest", "stop_reason", "detail"}
+                or raw["schema"] != "taste.brains/GoalStop/1"
+                or raw["goal_digest"] != _digest(self.goal.to_json())
+                or not isinstance(raw["stop_reason"], str) or not raw["stop_reason"]
+                or not isinstance(raw["detail"], str)):
+            raise CoordinatorCorruption("durable goal stop request is malformed")
+        return raw
+
+    def _finish_run(self, stop_reason: str, detail: str) -> GoalOutcome:
+        """Durably stop, drain every owned run, then publish the final answer.
+
+        A cleanup failure leaves the stop request pending. Restart retries
+        cleanup without planning or launching, and never publishes a result
+        that could be mistaken for a safely finished trial.
+        """
+        with self._lock:
+            self.planner.bind_goal(self.goal)
+            runs = self.supervisor.runs()
+            self._validate_supervisor_scope(runs)
+            pending = self._stop_request()
+            if pending is None:
+                pending = {"schema": "taste.brains/GoalStop/1", "goal_digest": _digest(self.goal.to_json()),
+                           "stop_reason": stop_reason, "detail": detail}
+                self._immutable(f"{_goal_root(self.goal.goal_id)}/stop.json", pending,
+                                f"central stop requested: {self.goal.goal_id}")
+            errors: list[Exception] = []
+            for run in runs:
+                try:
+                    stopped = self.supervisor.stop(run.run_id, pending["stop_reason"])
+                    if stopped.recovery_status != "complete":
+                        raise SupervisorError(f"worker {run.run_id} recovery is {stopped.recovery_status}")
+                except Exception as exc:
+                    errors.append(exc)
+            if len(errors) == 1:
+                raise errors[0]
+            if errors:
+                raise ExceptionGroup("goal shutdown could not drain every worker", errors)
+            return self._record_outcome(pending["stop_reason"], pending["detail"])
+
+    def _record_outcome(self, stop_reason: str, detail: str) -> GoalOutcome:
+        plan = self.planner.current_plan(self.goal.goal_id)
+        runs = self.supervisor.runs()
         criteria = self.planner.criteria(self.goal.goal_id)
         outcome = GoalOutcome(
             goal_id=self.goal.goal_id,
             stop_reason=stop_reason,
-            complete=bool(last is not None and last.complete),
+            complete=bool(stop_reason == "complete" and plan is not None and plan.complete),
             generations=0 if plan is None else plan.generation,
-            cycles=cycles,
+            cycles=len(self._cycle_records()),
             completion_reason="" if plan is None else plan.completion_reason,
             criteria=criteria,
             assessment=() if plan is None else tuple(plan.assessment),
-            delivered_assignment_ids=(
-                () if last is None else tuple(last.delivered_assignment_ids)
-            ),
-            budget=BudgetState(None, 0.0, 0.0) if last is None else last.budget,
+            delivered_assignment_ids=tuple(sorted({run.assignment.assignment_id for run in runs
+                                                   if run.phase == "delivered"})),
+            budget=self._budget(runs),
             detail=detail,
         )
         with self._lock:
@@ -1897,7 +2046,7 @@ class CentralRuntime:
             )
         return outcome
 
-    def cycle(self) -> CycleOutcome:
+    def cycle(self, *, max_generations: int | None = None) -> CycleOutcome:
         """Advance or recover one coordinator cycle without waiting for workers.
 
         Hosts call this repeatedly.  A returned ``complete`` is possible only
@@ -1906,8 +2055,16 @@ class CentralRuntime:
         on the next call or after constructing a replacement runtime.
         """
         with self._lock:
+            self.planner.bind_goal(self.goal)
+            if self._stop_request() is not None:
+                raise CoordinatorError("goal shutdown is pending or complete; use run() to finalize")
             plan = self.planner.current_plan(self.goal.goal_id)
             cycle = self._begin_cycle(plan)
+            if plan is not None and max_generations is not None and plan.generation > max_generations:
+                return self._complete_cycle(cycle, CycleOutcome(
+                    cycle_id=cycle.cycle_id, status="generation_bound", plan=plan,
+                    runs=self.supervisor.runs(), budget=self._budget(self.supervisor.runs()),
+                ))
             if plan is None:
                 before_plan = self._budget(self.supervisor.runs())
                 plan = self._bootstrap(cycle, before_plan)
@@ -1939,7 +2096,9 @@ class CentralRuntime:
                             item.run_id: item.sequence for item in before_reconcile
                         },
                     },
-                    lambda: self.supervisor.reconcile(active_generation=plan.generation),
+                    lambda: self.supervisor.reconcile(
+                        active_generation=plan.generation, deadline_at=self._deadline_at,
+                    ),
                     lambda values: {
                         "run_ids": [item.run_id for item in values],
                         "sequences": {item.run_id: item.sequence for item in values},
@@ -1987,7 +2146,9 @@ class CentralRuntime:
                         item.run_id: item.sequence for item in before_reconcile
                     },
                 },
-                lambda: self.supervisor.reconcile(active_generation=plan.generation),
+                lambda: self.supervisor.reconcile(
+                    active_generation=plan.generation, deadline_at=self._deadline_at,
+                ),
                 lambda values: {
                     "run_ids": [item.run_id for item in values],
                     "sequences": {item.run_id: item.sequence for item in values},
@@ -2276,6 +2437,11 @@ class CentralRuntime:
                         break
                     try:
                         timeout = self._wall_timeout(assignment, self.default_wall_timeout_seconds)
+                        if self._remaining_wall is not None:
+                            remaining = self._remaining_wall()
+                            if remaining <= 0:
+                                raise _WallDeadlineReached("goal deadline elapsed before worker launch")
+                            timeout = min(timeout, remaining)
                         prepared = self._perform(
                             cycle,
                             "prepare",
@@ -2300,7 +2466,7 @@ class CentralRuntime:
                             prepared.run_id,
                             {"prepared_state_id": prepared.prepared_state_id},
                             lambda run_id=prepared.run_id: self.supervisor.start(
-                                run_id, active_generation=plan.generation
+                                run_id, active_generation=plan.generation, deadline_at=self._deadline_at,
                             ),
                             lambda value: {
                                 "run_id": value.run_id,
@@ -2415,6 +2581,15 @@ class CentralRuntime:
                     ),
                 )
 
+            if max_generations is not None and plan.generation >= max_generations:
+                for trigger in unique_triggers:
+                    self._record_trigger(cycle, trigger)
+                return self._complete_cycle(cycle, CycleOutcome(
+                    cycle_id=cycle.cycle_id, status="generation_bound", plan=plan, runs=current_runs,
+                    delivered_assignment_ids=tuple(sorted(delivered)),
+                    waiting_assignment_ids=tuple(sorted(waiting)),
+                    failed_assignment_ids=tuple(sorted(failed)), triggers=unique_triggers, budget=budget,
+                ))
             try:
                 revised = self._replan(cycle, plan, unique_triggers)
             except BudgetBlocked:

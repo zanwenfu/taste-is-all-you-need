@@ -11,7 +11,7 @@ pytest.importorskip("claude_agent_sdk", reason="the central host imports the wor
 
 from taste.brains.central_communication import CentralCommunication
 from taste.brains.central_host import CentralRuntimeHost, compose_central_runtime
-from taste.brains.central_planner import CentralPlanner, Goal, PlannerTransportError
+from taste.brains.central_planner import CentralPlanner, Goal
 from taste.brains.central_runtime import CentralRuntime
 from taste.brains.communication import Communicator
 from taste.brains.planner_transport import PLANNER_RECEIPT_BRANCH, LLMPlannerTransport
@@ -42,6 +42,9 @@ class NoLaunchLauncher:
 
     def recover(self, spec):
         return None
+
+    def cancel(self, spec, grace_seconds):
+        raise AssertionError("no process should have been launched")
 
 
 def goal() -> Goal:
@@ -422,11 +425,11 @@ def test_host_run_reaches_the_composed_planner(tmp_path: Path) -> None:
         launcher=NoLaunchLauncher(),
     )
     try:
-        with pytest.raises(PlannerTransportError) as caught:
-            host.run(max_generations=1, wall_clock_seconds=5.0)
-        assert "composition must not call the planner model" in str(caught.value)
-        # Nothing was concluded, so no ending was recorded.
-        assert host.outcome() is None
+        outcome = host.run(max_generations=1, wall_clock_seconds=5.0)
+        assert outcome.stop_reason == "budget_blocked"
+        assert not outcome.complete
+        assert len(outcome.budget.unknown_planner_attempt_ids) == 1
+        assert host.outcome() == outcome
     finally:
         host.close()
 
