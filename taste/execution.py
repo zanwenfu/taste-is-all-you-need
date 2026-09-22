@@ -41,6 +41,7 @@ import shlex
 import subprocess
 import tarfile
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -343,6 +344,7 @@ class DockerSandbox:
         on_close: Callable[[DockerSandbox], None] | None = None,
         network_mode: str = "none",
         env_prefix: str | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         if client is None:
             import docker
@@ -351,6 +353,8 @@ class DockerSandbox:
         self._client = client
         self.image = image
         self.workdir = workdir
+        self.platform = platform
+        self.network_mode = network_mode
         # Whoever caches this sandbox must learn when it dies. close() removes
         # the container, so a cache entry that outlives close() is a handle to
         # nothing: every exec throws, the probe's fail-open wrapper renders
@@ -413,6 +417,7 @@ class DockerSandbox:
                 # not comparable to it, which defeats the number's only purpose.
                 network_mode=network_mode,
                 auto_remove=False,
+                labels=dict(labels or {}),
             )
         except BaseException as exc:
             # The daemon may have created the container before its reply was
@@ -586,25 +591,33 @@ class DockerProvider:
         self.platform = platform
         self.env_prefix = env_prefix
         self._open: dict[str, DockerSandbox] = {}
+        self._open_specs: dict[str, tuple[str, str, str, str | None]] = {}
+        self._owner_id = uuid.uuid4().hex
 
     def open(
         self, *, key: str, image: str = "", network_mode: str = "none"
     ) -> DockerSandbox:
         if not image:
             raise ValueError(f"no image pinned for {key!r}")
+        requested = (image, network_mode, self.platform, self.env_prefix)
         cached = self._open.get(key)
         if cached is not None:
+            if self._open_specs.get(key) != requested:
+                raise resource_error(
+                    "docker_container", cached.container.id, "reuse configuration",
+                    ValueError("cached sandbox launch configuration differs from this request"),
+                )
             if self._alive(cached):
                 return cached
             # Keep ownership until removal has actually been confirmed.
             cached.close()
-        # The process id is part of the name. Two processes opening the same
-        # instance -- a re-score timing run beside a live sweep -- used to
-        # build identically named containers, and whichever closed first
-        # removed the other's: every replay in the survivor became a hole
-        # and the cell scored as 94 never-passed tests. Defect 34.
-        name = f"{self.prefix}-{key}-{os.getpid()}".replace("/", "_").replace(":", "_")[:200]
-        self._remove_stale(name)
+        # A PID is not an ownership token: separate providers in one process,
+        # normalized keys, truncated names and reused PIDs can all collide.
+        # Every launch gets a new name; never remove a container just because
+        # its name resembles this request. Lost launches require reconciliation
+        # against their recorded name/owner, not implicit destructive cleanup.
+        stem = f"{self.prefix}-{key}-{os.getpid()}".replace("/", "_").replace(":", "_")[:160]
+        name = f"{stem}-{uuid.uuid4().hex}"
         sandbox = DockerSandbox(
             image=image,
             name=name,
@@ -613,8 +626,10 @@ class DockerProvider:
             on_close=lambda closing: self._evict(key, closing),
             network_mode=network_mode,
             env_prefix=self.env_prefix,
+            labels={"taste.owner": self._owner_id, "taste.key": key, "taste.pid": str(os.getpid())},
         )
         self._open[key] = sandbox
+        self._open_specs[key] = requested
         return sandbox
 
     def _alive(self, sandbox: DockerSandbox) -> bool:
@@ -649,17 +664,7 @@ class DockerProvider:
         that has since taken the key."""
         if self._open.get(key) is sandbox:
             del self._open[key]
-
-    def _remove_stale(self, name: str) -> None:
-        """A crashed sweep leaves containers behind; the name would collide."""
-        identity = name
-        try:
-            container = self._client.containers.get(name)
-            identity = container.id
-            container.remove(force=True)
-        except Exception as exc:
-            if not _container_not_found(exc):
-                raise resource_error("docker_container", identity, "remove stale", exc) from exc
+            self._open_specs.pop(key, None)
 
     def close_all(self) -> None:
         failures = []
