@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -25,7 +27,7 @@ def lifetime_billed_usd(row: Mapping[str, Any]) -> float:
     identity = tuple(row.get(key) for key in ("task", "arm", "trial"))
     costs = [row.get("billed_usd")]
     for number, item in enumerate(prior, 1):
-        if (not isinstance(item, dict) or isinstance(item.get("attempts_made"), bool)
+        if (not isinstance(item, dict) or type(item.get("attempts_made")) is not int
                 or item.get("attempts_made") != number
                 or tuple(item.get(key) for key in ("task", "arm", "trial")) != identity
                 or item.get("prior_attempts")):
@@ -43,30 +45,49 @@ def lifetime_billed_usd(row: Mapping[str, Any]) -> float:
     return total
 
 
+def _unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    row: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in row:
+            raise ValueError(f"duplicate cell ledger field: {key}")
+        row[key] = value
+    return row
+
+
+def read_cost_row(path: Path) -> dict[str, Any]:
+    """One atomic cell record, with consistent validation for all consumers."""
+    try:
+        row = json.loads(path.read_text(), object_pairs_hook=_unique_fields)
+        if not isinstance(row, dict):
+            raise ValueError("cell result must be an object")
+        task, arm, trial = row.get("task"), row.get("arm"), row.get("trial")
+        if (not isinstance(task, str) or not task or not isinstance(arm, str) or not arm
+                or isinstance(trial, bool) or not isinstance(trial, int)):
+            raise ValueError("cell identity is missing or malformed")
+        if path.name != f"{task}__{arm}__t{trial}.json":
+            raise ValueError("cell ledger filename does not match its identity")
+        lifetime_billed_usd(row)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"invalid cell cost record {path}: {exc}") from exc
+    return row
+
+
 def read_cost_rows(directory: Path) -> list[dict[str, Any]]:
-    """Read the cell ledger without creating it or silently dropping bad rows."""
+    """A stable final-cost snapshot; never create files or race an admission."""
     directory = Path(directory)
     if not directory.is_dir():
         raise FileNotFoundError(f"cell ledger directory is missing: {directory}")
-    if (directory / ".sweep-journal" / "pending.json").exists():
-        raise ValueError("a sweep attempt is pending; final lifetime spending is not settled")
-    rows = []
-    for path in sorted(directory.glob("*.json")):
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
         try:
-            row = json.loads(path.read_text())
-            if not isinstance(row, dict):
-                raise ValueError("cell result must be an object")
-            task, arm, trial = row.get("task"), row.get("arm"), row.get("trial")
-            if (not isinstance(task, str) or not task or not isinstance(arm, str) or not arm
-                    or isinstance(trial, bool) or not isinstance(trial, int)):
-                raise ValueError("cell identity is missing or malformed")
-            if path.name != f"{task}__{arm}__t{trial}.json":
-                raise ValueError("cell ledger filename does not match its identity")
-            lifetime_billed_usd(row)
-        except (ValueError, TypeError) as exc:
-            raise ValueError(f"invalid cell cost record {path}: {exc}") from exc
-        rows.append(row)
-    return rows
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError("a sweep is active or pending; final lifetime spending is not settled") from exc
+        if (directory / ".sweep-journal" / "pending.json").exists():
+            raise ValueError("a sweep attempt is pending; final lifetime spending is not settled")
+        return [read_cost_row(path) for path in sorted(directory.glob("*.json"))]
+    finally:
+        os.close(descriptor)
 
 
 def ledger_billed_usd(directory: Path) -> float:

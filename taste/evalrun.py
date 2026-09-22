@@ -40,7 +40,7 @@ from typing import Any
 
 from taste.config import HarnessConfig, kernel_kwargs
 from taste.kernel import Kernel, RunResult
-from taste.ledger_costs import lifetime_billed_usd
+from taste.ledger_costs import lifetime_billed_usd, read_cost_row
 from taste.sweep_journal import SweepJournal, UnsettledSweepAttempt
 
 CellStatus = str  # "completed" | "failed" | "infra" | "budget" | "error" | "aborted"
@@ -196,11 +196,16 @@ class GradingResult:
 class Ledger:
     """One file per completed cell. The filesystem is the state."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, _journal: SweepJournal | None = None) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._journal = _journal
 
     def path_for(self, cell: Cell) -> Path:
+        if (not isinstance(cell.task, str) or not cell.task
+                or not isinstance(cell.arm, str) or not cell.arm
+                or type(cell.trial) is not int):
+            raise ValueError("cell identity is missing or malformed")
         if Path(cell.key).name != cell.key or "\x00" in cell.key:
             raise ValueError("cell identity cannot contain filesystem path separators")
         return self.root / f"{cell.key}.json"
@@ -228,12 +233,9 @@ class Ledger:
 
     def _read_path(self, path: Path) -> CellResult:
         try:
-            raw = json.loads(path.read_text())
-            if not isinstance(raw, dict):
-                raise ValueError("cell result must be an object")
+            raw = read_cost_row(path)
             # Dataclass defaults support new in-memory results, not missing
             # receipts on disk. Validate raw costs before applying defaults.
-            lifetime_billed_usd(raw)
             known = CellResult.__dataclass_fields__
             result = CellResult(**{k: v for k, v in raw.items() if k in known})
         except (ValueError, TypeError) as exc:
@@ -268,6 +270,16 @@ class Ledger:
 
     def write(self, result: CellResult) -> None:
         """Atomic: a partial file on interruption would read as a done cell."""
+        if self._journal is not None:
+            self._journal.assert_owner(self.root)
+            return self._write(result)
+        # Standalone callers cannot mutate a ledger during a sweep or report.
+        with SweepJournal(self.root) as journal:
+            if journal.pending() is not None:
+                raise UnsettledSweepAttempt("direct ledger mutation cannot settle a pending attempt")
+            return self._write(result)
+
+    def _write(self, result: CellResult) -> None:
         target = self._prepare_write(result)
         if target is None:
             return
@@ -331,8 +343,8 @@ def run_sweep(
     A failed grader leaves the execution pending for :func:`resume_grading`;
     it is never retried by paying for another execution.
     """
-    ledger = Ledger(ledger_dir)
     with SweepJournal(ledger_dir) as journal:
+        ledger = Ledger(ledger_dir, _journal=journal)
         ending = journal.ending()
         if ending is not None:
             ledger.write(CellResult(**ending))
@@ -356,8 +368,8 @@ def resume_grading(
     contexts are intentionally not deserialized. A completed ending is replayed
     without grading again; an unknown execution cannot use this recovery path.
     """
-    ledger = Ledger(ledger_dir)
     with SweepJournal(ledger_dir) as journal:
+        ledger = Ledger(ledger_dir, _journal=journal)
         if journal.pending() is None:
             return None
         ending = journal.ending(allow_incomplete=True)
@@ -439,7 +451,7 @@ def _run_sweep(
                  or not isinstance(sweep_budget_usd, (int, float))
                  or not math.isfinite(sweep_budget_usd) or sweep_budget_usd < 0)):
         raise ValueError("sweep_budget_usd must be a finite non-negative number")
-    ledger = Ledger(ledger_dir)
+    ledger = Ledger(ledger_dir, _journal=journal)
     report = SweepReport()
     notify = on_cell or (lambda _r: None)
 

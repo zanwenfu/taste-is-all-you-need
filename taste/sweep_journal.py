@@ -59,29 +59,42 @@ class SweepJournal:
         self.root = Path(ledger_dir) / ".sweep-journal"
         self.pending_path = self.root / "pending.json"
         self._owner = None
+        self._directory_owner: int | None = None
         self._active: dict[str, Any] | None = None
 
     def __enter__(self) -> SweepJournal:
         self.root.mkdir(parents=True, exist_ok=True)
         _sync_dir(self.root.parent)
-        self._owner = (self.root / "owner.lock").open("a+")
         try:
+            # Directory flock also coordinates with read-only report readers;
+            # they need no writable lock file, including on historical ledgers.
+            self._directory_owner = os.open(self.root.parent, os.O_RDONLY)
+            fcntl.flock(self._directory_owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._owner = (self.root / "owner.lock").open("a+")
             fcntl.flock(self._owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            self._owner.close()
-            self._owner = None
-            raise SweepBusy(f"another sweep owns {self.root.parent}") from exc
-        try:
             self._active = self.pending()
+        except BlockingIOError as exc:
+            self.__exit__()
+            raise SweepBusy(f"another sweep owns {self.root.parent}") from exc
         except BaseException:
             self.__exit__()
             raise
         return self
 
     def __exit__(self, *_exc: Any) -> None:
-        if self._owner is not None:
-            self._owner.close()  # Release the flock without unlinking its inode.
-            self._owner = None
+        owner, self._owner = self._owner, None
+        directory, self._directory_owner = self._directory_owner, None
+        try:
+            if owner is not None:
+                owner.close()  # Release the flock without unlinking its inode.
+        finally:
+            if directory is not None:
+                os.close(directory)
+
+    def assert_owner(self, ledger_dir: Path) -> None:
+        if (self._owner is None or self._directory_owner is None
+                or self.root.parent.resolve() != Path(ledger_dir).resolve()):
+            raise SweepBusy("ledger mutation requires its active sweep owner")
 
     def _read(self, path: Path) -> dict[str, Any]:
         try:
