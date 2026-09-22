@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,37 @@ def test_a_transcript_survives_the_death_of_the_process(tmp_path: Path) -> None:
     s2.close()
 
 
+def test_colliding_legacy_names_keep_separate_sdk_recovery_ledgers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    key = {"project_key": "proj", "session_id": "same-sdk-session"}
+    identities = (("tb", "task1.worker"), ("tb.task1", "worker"))
+
+    def interrupted(record):
+        raise OSError("interrupted after transcript persistence")
+
+    with ExitStack() as stack:
+        for index, (session, branch) in enumerate(identities):
+            store = stack.enter_context(closing(Store.open(root, session)))
+            adapter = MemstoreSessionStore(store, branch)
+            with monkeypatch.context() as patch:
+                patch.setattr(adapter, "_apply_append_sidecars", interrupted)
+                with pytest.raises(OSError, match="interrupted"):
+                    _run(adapter.append(key, [_entry(uuid="same-uuid", text=f"reasoning {index}")]))
+            store.branch(branch).turn(content=f"pending {index}")
+            store.gc()
+    for index, (session, branch) in enumerate(identities):
+        with closing(Store.open(root, session)) as store:
+            adapter = MemstoreSessionStore(store, branch)
+            assert _run(adapter.load(key)) == [_entry(uuid="same-uuid", text=f"reasoning {index}")]
+            state = store.branch(branch).checkpoint("persist SDK recovery")
+            assert [turn["content"] for turn in state.transcript.turns] == [f"pending {index}"]
+            ledger = adapter._read_mirror_ledger()
+            assert len(ledger["history"]) == 1
+            assert not ledger["unresolved"]
+
+
 def test_a_rollback_takes_the_conversation_with_it(store: Store) -> None:
     """A brain rolled back to an earlier state must not remember what it said
     afterwards -- and the abandoned conversation must still be reachable."""
@@ -140,6 +172,24 @@ def test_a_rollback_takes_the_conversation_with_it(store: Store) -> None:
     restored = store.state(bad.id)
     raw = restored.read(sess._path(key))
     assert raw is not None and "the mistake" in raw
+
+
+def test_sdk_mirror_and_worker_resume_on_a_repository_with_git_history(store: Store) -> None:
+    for index in range(3):
+        (store.root / "source.py").write_text(f"VERSION = {index}\n")
+        store.backend.repo.git.add("--all")
+        store.backend.repo.git.commit("-m", f"ordinary source history {index}")
+    key = {"project_key": "proj", "session_id": "s-1"}
+    adapter = MemstoreSessionStore(store, "brain")
+    _run(adapter.append(key, [_entry(uuid="a", text="understood existing source")]))
+    worker = store.branch("brain")
+    assert worker.resume().head_id == worker.head.id
+    worker.checkpoint("persist conversation with source")
+    worker.close()
+    recovered = MemstoreSessionStore(store, "brain")
+    assert _run(recovered.load(key)) == [_entry(uuid="a", text="understood existing source")]
+    assert store.branch("brain").resume().recovered_turns == ()
+    assert store.view("brain").read("source.py") == "VERSION = 2\n"
 
 
 def test_subagent_transcripts_are_discoverable(store: Store) -> None:

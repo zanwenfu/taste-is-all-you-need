@@ -909,17 +909,23 @@ class MemstoreSessionStore:
         these files stays reachable, so a deleted transcript is still in the
         history. This only removes it from the working tree the SDK reads.
         """
-        branch = self.store.branch(self.branch_name)
-        if key.get("subpath"):
-            targets = [self._path(key)]
-        else:
-            prefix = self._dir(key["project_key"], key["session_id"]) + "/"
-            targets = [p for p in self._files() if p.startswith(prefix)]
-        for path in targets:
-            full = branch.path(path)
-            if full.exists():
-                full.unlink()
-            self._seen.pop(path, None)
+        with self._mirror_lock:
+            # Resolve pending mirror writes before deletion; a later recovery
+            # must not replay an older append over this deletion.
+            self._reconcile_mirror_ledger()
+            branch = self.store.branch(self.branch_name)
+            with branch._mutation_lock:
+                if key.get("subpath"):
+                    targets = [self._path(key)]
+                else:
+                    prefix = self._dir(key["project_key"], key["session_id"]) + "/"
+                    targets = [p for p in self._files() if p.startswith(prefix)]
+                for path in targets:
+                    full = branch.path(path)
+                    if full.exists():
+                        full.unlink()
+                        self._fsync_directory(full.parent)
+                    self._seen.pop(path, None)
         # No checkpoint, for the same reason append takes none: committing
         # here would sweep the sub-brain's unrelated work into a state
         # labelled "transcript deleted". The removal is real on disk and
@@ -952,7 +958,7 @@ class MemstoreSessionStore:
         return view.head.id if view.exists() else ""
 
     def _read_current(self, path: str) -> str | None:
-        """The live file if the worktree has it, else the committed state.
+        """Use the live checkout when present, otherwise the committed state.
 
         Between checkpoints the working tree is ahead of the head, and after a
         worktree is removed the head is all there is, so a correct read
@@ -960,12 +966,15 @@ class MemstoreSessionStore:
         saw only committed state would hand the brain a transcript missing its
         most recent turns -- the reasoning it needs most.
         """
-        try:
-            live = self.store.worktree_path_for(self.branch_name) / path
-            if live.exists():
-                return live.read_text(encoding="utf-8", errors="surrogateescape")
-        except (OSError, ValueError):
-            pass
+        root = self.store.worktree_path_for(self.branch_name)
+        if root.exists():
+            # In a live checkout absence represents deletion. Falling back
+            # per-file resurrects a deleted committed transcript until the
+            # next checkpoint and defeats SDK delete/resume semantics.
+            try:
+                return (root / path).read_text(encoding="utf-8", errors="surrogateescape")
+            except FileNotFoundError:
+                return None
         return self._read(path)
 
     def _read(self, path: str) -> str | None:
@@ -989,11 +998,14 @@ class MemstoreSessionStore:
         being written -- the only one anybody is asking about.
         """
         seen: list[str] = []
-        root = self.store.worktree_path_for(self.branch_name) / TRANSCRIPT_DIR
+        worktree = self.store.worktree_path_for(self.branch_name)
+        root = worktree / TRANSCRIPT_DIR
         if root.exists():
             for path in sorted(root.rglob("*")):
                 if path.is_file():
                     seen.append(str(path.relative_to(root.parent)))
+        if worktree.exists():
+            return seen
         view = self.store.view(self.branch_name)
         if view.exists():
             for path in view.head.files():
