@@ -88,6 +88,8 @@ _R = TypeVar("_R")
 # processes can live for days and encounter an unbounded number of states.
 _NOTE_TREE_CACHE_MAX_REFS = 16
 _NOTE_TREE_CACHE_MAX_TARGETS = 16_384
+_NOTE_SUBTREE_CACHE_MAX_ENTRIES = 512
+_NOTE_SUBTREE_CACHE_MAX_TARGETS = 32_768
 _NOTE_BLOB_CACHE_MAX_ENTRIES = 4_096
 _NOTE_BLOB_CACHE_MAX_VALUE_BYTES = 256 * 1_024
 _NOTE_BLOB_CACHE_MAX_TOTAL_BYTES = 8 * 1_024 * 1_024
@@ -203,6 +205,8 @@ class GitBackend:
         # Cache only the tree decoded for one exact ref commit; a note write,
         # deletion, or raw ref rollback necessarily selects a different key.
         self._note_tree_cache: OrderedDict[str, tuple[str, dict[str, Blob]]] = OrderedDict()
+        self._note_subtree_cache: OrderedDict[tuple[str, int], dict[str, Blob]] = OrderedDict()
+        self._note_subtree_cache_size = 0
         self._note_blob_cache: OrderedDict[str, bytes] = OrderedDict()
         self._note_blob_cache_size = 0
         # These plumbing results are immutable only when addressed by a full
@@ -765,6 +769,8 @@ class GitBackend:
         self._ls_files_cache.clear()
         self._first_parent_cache.clear()
         self._note_tree_cache.clear()
+        self._note_subtree_cache.clear()
+        self._note_subtree_cache_size = 0
         self._note_blob_cache.clear()
         self._note_blob_cache_size = 0
 
@@ -780,6 +786,51 @@ class GitBackend:
                 path.unlink()
 
     # ---------------------------------------------------------------- notes
+
+    def _note_targets(self, tree: Tree, width: int, *, cache: bool = False) -> dict[str, Blob]:
+        """Validate relative target suffixes by immutable tree id and width.
+
+        A new notes ref usually changes only one subtree. Reuse other decoded
+        subtrees, but apply their suffixes under the newly observed prefix.
+        Width is part of the key: moving the same bytes deeper must not bypass
+        validation of the repository's complete object-id length.
+        """
+        key = (tree.hexsha, width)
+        if cache:
+            existing = _lru_get(self._note_subtree_cache, key)
+            if existing is not _CACHE_MISS:
+                return cast(dict[str, Blob], existing)
+        notes: dict[str, Blob] = {}
+        for entry in tree:
+            if entry.type not in {"tree", "blob"}:
+                raise ValueError(f"non-blob entry {entry.path!r}")
+            name = entry.name
+            hexadecimal = bool(name) and all(char in "0123456789abcdef" for char in name)
+            if entry.type == "tree":
+                if not hexadecimal or len(name) >= width:
+                    raise ValueError(f"invalid tree prefix {entry.path!r}")
+                child = self._note_targets(cast(Tree, entry), width - len(name), cache=True)
+                if not child:
+                    raise ValueError(f"invalid tree prefix {entry.path!r}: empty subtree")
+                entries = ((name + suffix, blob) for suffix, blob in child.items())
+            else:
+                if not hexadecimal or len(name) != width:
+                    raise ValueError(f"invalid target path {entry.path!r}")
+                entries = ((name, cast(Blob, entry)),)
+            for target, blob in entries:
+                if target in notes:
+                    raise ValueError("duplicate target paths")
+                notes[target] = blob
+        # The root's complete index already has its own bounded ref cache.
+        # Retain reusable child indexes without retaining every growing root.
+        if cache and notes and len(notes) <= _NOTE_SUBTREE_CACHE_MAX_TARGETS:
+            self._note_subtree_cache[key] = notes
+            self._note_subtree_cache_size += len(notes)
+            while (len(self._note_subtree_cache) > _NOTE_SUBTREE_CACHE_MAX_ENTRIES
+                   or self._note_subtree_cache_size > _NOTE_SUBTREE_CACHE_MAX_TARGETS):
+                _, evicted = self._note_subtree_cache.popitem(last=False)
+                self._note_subtree_cache_size -= len(evicted)
+        return notes
 
     @_serialized_object_read
     def note_get(self, namespace: str, commit: str) -> str | None:
@@ -814,35 +865,10 @@ class GitBackend:
                 note_commit = self.repo.commit(ref_sha)
             except (BadName, BadObject, TypeError, ValueError) as exc:
                 raise ValueError(f"notes ref {namespace!r} points to non-commit {ref_sha}") from exc
-            notes: dict[str, Blob] = {}
-            for entry in note_commit.tree.traverse():
-                if entry.type == "tree":
-                    prefix = entry.path.replace("/", "")
-                    if (
-                        not prefix
-                        or len(prefix) >= len(ref_sha)
-                        or any(character not in "0123456789abcdef" for character in prefix)
-                        or len(cast(Tree, entry)) == 0
-                    ):
-                        raise ValueError(
-                            f"notes ref {namespace!r} contains invalid tree prefix {entry.path!r}"
-                        )
-                    continue
-                if entry.type != "blob":
-                    raise ValueError(
-                        f"notes ref {namespace!r} contains non-blob entry {entry.path!r}"
-                    )
-                target = entry.path.replace("/", "")
-                if len(target) != len(ref_sha) or any(
-                    character not in "0123456789abcdef" for character in target
-                ):
-                    raise ValueError(
-                        f"notes ref {namespace!r} contains invalid target path {entry.path!r}"
-                    )
-                blob = cast(Blob, entry)
-                previous = notes.setdefault(target, blob)
-                if previous != entry:
-                    raise ValueError(f"notes ref {namespace!r} contains duplicate target paths")
+            try:
+                notes = self._note_targets(note_commit.tree, len(ref_sha))
+            except ValueError as exc:
+                raise ValueError(f"notes ref {namespace!r} contains {exc}") from exc
             cached = (ref_sha, notes)
             if len(notes) <= _NOTE_TREE_CACHE_MAX_TARGETS:
                 _lru_put(
