@@ -28,6 +28,9 @@ resulting numbers:
 from __future__ import annotations
 
 import json
+import math
+import os
+import tempfile
 import time
 import traceback
 from collections.abc import Callable, Iterator
@@ -96,6 +99,28 @@ class CellResult:
     """How many times this cell has been executed, including retries after
     infrastructure faults. Reported as attrition, never hidden."""
     ts: float = field(default_factory=time.time)
+    prior_attempts: tuple[dict[str, Any], ...] = ()
+    """Flat immutable snapshots of earlier attempts, including their costs."""
+
+    def __post_init__(self) -> None:
+        self.prior_attempts = tuple(self.prior_attempts)
+
+    @property
+    def total_billed_usd(self) -> float:
+        if isinstance(self.attempts_made, bool) or not isinstance(self.attempts_made, int) or self.attempts_made < 1:
+            raise ValueError("cell attempt count must be a positive integer")
+        if len(self.prior_attempts) != self.attempts_made - 1:
+            raise ValueError("cell is missing earlier attempt costs; refusing to assume zero")
+        costs = [self.billed_usd]
+        for number, item in enumerate(self.prior_attempts, 1):
+            if (not isinstance(item, dict) or item.get("attempts_made") != number
+                    or (item.get("task"), item.get("arm"), item.get("trial")) != (self.task, self.arm, self.trial)):
+                raise ValueError("cell attempt history has inconsistent identity")
+            costs.append(item.get("billed_usd"))
+        if any(isinstance(v, bool) or not isinstance(v, (int, float))
+               or not math.isfinite(v) or v < 0 for v in costs):
+            raise ValueError("cell attempt costs must be finite and non-negative")
+        return math.fsum(costs)
 
     @property
     def counts_toward_success(self) -> bool:
@@ -162,6 +187,8 @@ class Ledger:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def path_for(self, cell: Cell) -> Path:
+        if Path(cell.key).name != cell.key or "\x00" in cell.key:
+            raise ValueError("cell identity cannot contain filesystem path separators")
         return self.root / f"{cell.key}.json"
 
     def done(self, cell: Cell, *, retry_budget: int = 0) -> bool:
@@ -180,31 +207,67 @@ class Ledger:
         path = self.path_for(cell)
         if not path.exists():
             return None
+        result = self._read_path(path)
+        if (result.task, result.arm, result.trial) != (cell.task, cell.arm, cell.trial):
+            raise ValueError("cell ledger contains another cell's result")
+        return result
+
+    def _read_path(self, path: Path) -> CellResult:
         try:
             raw = json.loads(path.read_text())
-        except ValueError:
-            return None
-        known = {f for f in CellResult.__dataclass_fields__}
-        return CellResult(**{k: v for k, v in raw.items() if k in known})
+            if not isinstance(raw, dict):
+                raise ValueError("cell result must be an object")
+            known = CellResult.__dataclass_fields__
+            result = CellResult(**{k: v for k, v in raw.items() if k in known})
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"cell ledger is malformed: {path.name}") from exc
+        if path != self.path_for(Cell(result.task, result.arm, result.trial)):
+            raise ValueError(f"cell ledger filename does not match its identity: {path.name}")
+        return result
 
     def write(self, result: CellResult) -> None:
         """Atomic: a partial file on interruption would read as a done cell."""
         cell = Cell(result.task, result.arm, result.trial)
         target = self.path_for(cell)
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(result), indent=2, sort_keys=True))
-        tmp.replace(target)
+        previous = self.read(cell)
+        abort_marker = cell == Cell("__sweep__", "__abort__", 0) and result.status == "aborted"
+        if result.status == "aborted" and not abort_marker:
+            raise ValueError("an abort marker cannot replace a cell's paid attempt")
+        if abort_marker and (result.attempts_made != 1 or result.prior_attempts or result.billed_usd != 0):
+            raise ValueError("a sweep abort marker cannot contain paid attempts")
+        if previous is not None and not abort_marker:
+            if previous.attempts_made == result.attempts_made:
+                if asdict(previous) == asdict(result):
+                    return
+                raise ValueError("a recorded cell attempt cannot be overwritten")
+            if result.attempts_made != previous.attempts_made + 1:
+                raise ValueError("cell attempts must advance one at a time")
+            _ = previous.total_billed_usd
+            prior = asdict(previous)
+            prior.pop("prior_attempts")
+            result.prior_attempts = (*previous.prior_attempts, prior)
+        _ = result.total_billed_usd
+        tmp: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=self.root, suffix=".tmp", delete=False) as handle:
+                tmp = Path(handle.name)
+                json.dump(asdict(result), handle, indent=2, sort_keys=True, allow_nan=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            tmp.replace(target)
+            descriptor = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
 
     def all_results(self) -> list[CellResult]:
-        out = []
-        for path in sorted(self.root.glob("*.json")):
-            try:
-                raw = json.loads(path.read_text())
-            except ValueError:
-                continue
-            known = {f for f in CellResult.__dataclass_fields__}
-            out.append(CellResult(**{k: v for k, v in raw.items() if k in known}))
-        return out
+        # A corrupt row is missing evidence, not permission to silently shrink
+        # the denominator of a reported sweep.
+        return [self._read_path(path) for path in sorted(self.root.glob("*.json"))]
 
 
 def cells(tasks: list[str], arms: list[str], trials: int) -> Iterator[Cell]:
@@ -261,7 +324,10 @@ def run_sweep(
     notify = on_cell or (lambda _r: None)
 
     streak = 0
-    billed_total = 0.0
+    # All earlier paid attempts count before considering any retry, including
+    # cells later in the grid. A resume must not earn a fresh sweep allowance.
+    billed_total = math.fsum(prior.total_billed_usd for cell in cells(tasks, arms, trials)
+                             if (prior := ledger.read(cell)) is not None)
 
     def aborted(reason: str) -> None:
         marker = CellResult(
@@ -279,8 +345,6 @@ def run_sweep(
     for cell in cells(tasks, arms, trials):
         if ledger.done(cell, retry_budget=retry_budget):
             report.skipped += 1
-            prior = ledger.read(cell)
-            billed_total += prior.billed_usd if prior else 0.0
             continue
         if sweep_budget_usd is not None and billed_total >= sweep_budget_usd:
             aborted(
