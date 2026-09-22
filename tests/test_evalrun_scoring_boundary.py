@@ -1,10 +1,12 @@
 """Returned execution evidence survives failures across the grading boundary."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from taste.evalrun import Cell, Ledger, run_sweep
+from taste.evalrun import CellResult, run_sweep
+from taste.sweep_journal import SweepJournal, UnsettledSweepAttempt
 from tests.test_evalrun import _run_result
 
 
@@ -32,16 +34,20 @@ def test_failed_grader_preserves_returned_cost_and_execution_identity(tmp_path, 
         ctx.report_path = str(tmp_path / "partial-grade.json")
         raise RuntimeError("grader failed after execution")
 
-    run_sweep(tasks=["task"], arms=["A"], trials=1, ledger_dir=tmp_path / "ledger",
-              prepare=lambda cell: context, execute=lambda cell, ctx: result, score=grade)
-    restored = Ledger(tmp_path / "ledger").read(Cell("task", "A", 1))
-    assert restored.status == "error" and restored.error.startswith("score:")
+    with pytest.raises(UnsettledSweepAttempt, match="grading is incomplete"):
+        run_sweep(tasks=["task"], arms=["A"], trials=1, ledger_dir=tmp_path / "ledger",
+                  prepare=lambda cell: context, execute=lambda cell, ctx: result, score=grade)
+    with SweepJournal(tmp_path / "ledger") as journal:
+        restored = CellResult(**journal.execution())
+    assert restored.status == "completed"
     assert restored.score is None
     assert (restored.billed_usd, restored.work_usd, restored.cache_delta_usd) == (1.25, 2.5, 1.25)
     assert restored.config_hash == "exact-config"
     assert restored.session_id == result.session_id and restored.final_sha == result.final_sha
     assert restored.workspace == str(context.workspace) and restored.gitdir == str(context.gitdir)
-    assert restored.report_path == context.report_path
+    failure_path, = (tmp_path / "ledger/.sweep-journal").glob("*/grading-failure-*.json")
+    failure = json.loads(failure_path.read_text())["record"]
+    assert failure["error"].startswith("score:") and failure["report_path"] == context.report_path
 
 
 def test_successful_grader_cannot_rewrite_execution_cost_and_can_publish_report(tmp_path):

@@ -401,11 +401,11 @@ def ctx_hash(_workspace: Path, *, observe_tools: bool) -> str:
     return HarnessConfig.arm("A0", max_parallel=1, observe_tools=observe_tools).hash()
 
 
-def test_a_score_crash_leaves_the_paid_agent_phase_on_the_ledger(
+def test_a_score_crash_leaves_the_paid_agent_phase_in_the_journal(
     instance: swebench.SWEInstance, source: Path, tmp_path: Path
 ) -> None:
     """End to end through the real seam: the kernel runs and spends, score()
-    blows up, and the ledger row must still carry the spend — read from the
+    blows up, and the durable execution receipt must still carry the spend — read from the
     stats ``execute`` stashed on the context the moment the kernel finished —
     with an error naming the phase. Without that the money vanished and a
     resume re-executed the paid agent phase."""
@@ -417,21 +417,24 @@ def test_a_score_crash_leaves_the_paid_agent_phase_on_the_ledger(
     def exploding_score(cell, ctx, result):
         raise RuntimeError("evidence write failed")
 
-    report = run_sweep(
-        tasks=[instance.instance_id], arms=["A0"], trials=1, ledger_dir=ledger,
-        prepare=make_prepare(
-            instances={instance.instance_id: instance}, root=tmp_path / "runs",
-            source_root=source, provider=None,
-        ),
-        execute=make_execute(
-            llm_factory=lambda _ctx: fake_llm,
-            run_overrides=lambda _c, ctx: _breaking_run(ctx.workspace),
-        ),
-        score=exploding_score,
-    )
-    record = report.results[0]
-    assert record.status == "error"
-    assert (record.error or "").startswith("score:"), record.error
+    from taste.evalrun import CellResult
+    from taste.sweep_journal import SweepJournal, UnsettledSweepAttempt
+
+    with pytest.raises(UnsettledSweepAttempt, match="grading is incomplete"):
+        run_sweep(
+            tasks=[instance.instance_id], arms=["A0"], trials=1, ledger_dir=ledger,
+            prepare=make_prepare(
+                instances={instance.instance_id: instance}, root=tmp_path / "runs",
+                source_root=source, provider=None,
+            ),
+            execute=make_execute(
+                llm_factory=lambda _ctx: fake_llm,
+                run_overrides=lambda _c, ctx: _breaking_run(ctx.workspace),
+            ),
+            score=exploding_score,
+        )
+    with SweepJournal(ledger) as journal:
+        record = CellResult(**journal.execution())
     assert record.billed_usd > 0, "the agent phase was paid; the ledger must say so"
     assert record.work_usd > 0
 

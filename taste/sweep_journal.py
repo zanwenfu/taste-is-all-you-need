@@ -174,11 +174,30 @@ class SweepJournal:
             if execution["record"].get(key) != record.get(key):
                 raise UnsettledSweepAttempt(f"ending changed execution evidence: {key}")
 
-    def ending(self) -> dict[str, Any] | None:
+    def execution(self) -> dict[str, Any]:
+        """Read the bound receipt needed for grading without running the agent."""
+        path = self._receipt_path("execution")
+        if not path.exists():
+            raise UnsettledSweepAttempt("execution cost is unknown; no execution receipt is available")
+        value = self._read(path)
+        self._validate_receipt(value)
+        return value["record"]
+
+    def record_grading_failure(self, record: Mapping[str, Any]) -> None:
+        """Retain each grading failure without replacing execution evidence."""
+        self.execution()  # Grading requires a completed, durably bound execution.
+        path = self._receipt_path("execution").with_name(f"grading-failure-{uuid.uuid4().hex}.json")
+        value = {"schema": "taste/SweepReceipt/1", "admission": self._active, "record": dict(record)}
+        self._validate_receipt(value)
+        _write_json(path, value)
+
+    def ending(self, *, allow_incomplete: bool = False) -> dict[str, Any] | None:
         if self._active is None:
             return None
         path = self._receipt_path("ending")
         if not path.exists():
+            if allow_incomplete:
+                return None
             execution = self._receipt_path("execution")
             detail = "execution receipt preserved; grading is incomplete" if execution.exists() else "execution cost is unknown"
             raise UnsettledSweepAttempt(

@@ -33,6 +33,7 @@ import tempfile
 import time
 import traceback
 from collections.abc import Callable, Iterator
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -138,7 +139,9 @@ class CellResult:
         until an arm succeeds is the purest form of selecting on the
         dependent variable.
         """
-        return self.status in ("infra", "error")
+        # Historical ledgers predate grading-only recovery. Their score
+        # errors must not authorize another paid execution either.
+        return self.status in ("infra", "error") and not (self.error or "").startswith("score:")
 
 
 @dataclass
@@ -171,6 +174,23 @@ class SweepReport:
             "are computed by taste.stats on paired blocks."
         )
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class GradingResult:
+    """The fields a recovered grader may publish; execution stays immutable."""
+
+    score: float | None
+    report_path: str = ""
+
+    def __post_init__(self) -> None:
+        if self.score is not None and (
+            isinstance(self.score, bool) or not isinstance(self.score, (int, float))
+            or not math.isfinite(self.score)
+        ):
+            raise ValueError("grade must be a finite number or None")
+        if not isinstance(self.report_path, str):
+            raise ValueError("grade report path must be a string")
 
 
 class Ledger:
@@ -308,6 +328,8 @@ def run_sweep(
     the whole ledger. A killed attempt without a durable ending blocks more
     work until its execution/grading evidence is reconciled. A complete ending
     is replayed into the ledger without preparing or executing the cell again.
+    A failed grader leaves the execution pending for :func:`resume_grading`;
+    it is never retried by paying for another execution.
     """
     ledger = Ledger(ledger_dir)
     with SweepJournal(ledger_dir) as journal:
@@ -321,6 +343,57 @@ def run_sweep(
             retry_budget=retry_budget, max_consecutive_failures=max_consecutive_failures,
             sweep_budget_usd=sweep_budget_usd, journal=journal,
         )
+
+
+def resume_grading(
+    *, ledger_dir: Path, score: Callable[[CellResult], GradingResult],
+) -> CellResult | None:
+    """Grade a pending execution receipt, with no prepare or execute callback.
+
+    The caller supplies a benchmark-specific grader over the archived evidence
+    identified by the receipt. It must verify that evidence, reuse the original
+    grading configuration, and must not run the agent. Arbitrary live callback
+    contexts are intentionally not deserialized. A completed ending is replayed
+    without grading again; an unknown execution cannot use this recovery path.
+    """
+    ledger = Ledger(ledger_dir)
+    with SweepJournal(ledger_dir) as journal:
+        if journal.pending() is None:
+            return None
+        ending = journal.ending(allow_incomplete=True)
+        if ending is not None:
+            record = CellResult(**ending)
+        else:
+            record = CellResult(**journal.execution())
+            ledger._prepare_write(record)
+            try:
+                grade = score(deepcopy(record))
+                if not isinstance(grade, GradingResult):
+                    raise TypeError("recovered grader must return GradingResult")
+            except Exception as exc:
+                _grading_failed(journal, record, exc)
+            record.score = grade.score
+            record.report_path = grade.report_path
+            journal.record("ending", asdict(record))
+        ledger.write(record)
+        journal.finish()
+        return record
+
+
+def _grading_failed(journal: SweepJournal, record: CellResult, exc: Exception,
+                    report_path: str = "") -> None:
+    journal.record_grading_failure({
+        "task": record.task, "arm": record.arm, "trial": record.trial,
+        "attempt_id": record.attempt_id, "attempts_made": record.attempts_made,
+        "error": f"score: {type(exc).__name__}: {exc}",
+        "failure_reason": traceback.format_exc(limit=3),
+        "report_path": report_path, "ts": time.time(),
+    })
+    raise UnsettledSweepAttempt(
+        f"admitted attempt {record.attempt_id}: execution receipt preserved; grading is incomplete; "
+        f"automatic retry is blocked; use resume_grading with the archived evidence: "
+        f"{journal.root / record.attempt_id}"
+    ) from exc
 
 
 def _run_sweep(
@@ -420,19 +493,24 @@ def _run_sweep(
             journal.record("execution", asdict(execution_record))
             phase = "score"
             value = score(cell, context, result) if score else None
+            grade = GradingResult(value, str(getattr(context, "report_path", "") or ""))
             record = execution_record
-            record.score = value
-            record.report_path = str(getattr(context, "report_path", "") or "")
+            record.score = grade.score
+            record.report_path = grade.report_path
         except Exception as exc:
             # A grading failure does not erase the execution phase, its
             # returned costs, or the immutable state needed to investigate it.
             # Context statistics are a fallback for adapters that raise before
             # returning their result; they are not a required second receipt.
             if execution_record is not None:
-                record = execution_record
-                record.status = "error"
-                record.score = None
-                record.report_path = str(getattr(context, "report_path", "") or "")
+                if phase == "score":
+                    _grading_failed(journal, execution_record, exc,
+                                    str(getattr(context, "report_path", "") or ""))
+                # A receipt-publication error must not finalize a paid run as
+                # retryable. The pending admission retains the uncertainty.
+                raise UnsettledSweepAttempt(
+                    f"execution receipt publication failed for {attempt_id}; automatic retry is blocked"
+                ) from exc
             else:
                 stats = _execution_stats(result, context)
                 # Preparing only materializes the workspace; paid work belongs
