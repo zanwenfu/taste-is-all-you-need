@@ -100,6 +100,7 @@ class CompletionRequest:
     sampling: SamplingConfig
     role: str
     run_id: str = ""
+    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)

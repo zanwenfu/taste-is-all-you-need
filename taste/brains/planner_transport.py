@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -708,6 +709,12 @@ class LLMPlannerTransport:
         self._ensure_ready = ensure_ready
         self._bound_remaining_usd: float | None = None
         self._planner_bound = False
+        self._deadline: float | None = None
+
+    def bind_deadline(self, *, remaining_seconds: float) -> None:
+        if not math.isfinite(remaining_seconds) or remaining_seconds <= 0:
+            raise ValueError("planner deadline must be finite and positive")
+        self._deadline = time.monotonic() + remaining_seconds
 
     def _lock_path(self):
         return self.store.sidecar("planner-transport-lock", self.journal.name)
@@ -1233,6 +1240,12 @@ class LLMPlannerTransport:
             )
 
             try:
+                call_options: dict[str, Any] = {}
+                if self._deadline is not None:
+                    remaining = self._deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("planner deadline elapsed before provider dispatch")
+                    call_options["timeout_seconds"] = remaining
                 completion = self.llm.call(
                     model=self.model,
                     system=system,
@@ -1241,6 +1254,7 @@ class LLMPlannerTransport:
                     max_tokens=self.max_tokens,
                     temperature=0.0,
                     role="planner",
+                    **call_options,
                 )
             except Exception as exc:
                 telemetry = PlannerTelemetry.unknown(

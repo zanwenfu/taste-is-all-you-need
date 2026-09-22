@@ -108,6 +108,8 @@ class AnthropicProvider:
         }
         if request.tools:
             kwargs["tools"] = request.tools
+        if request.timeout_seconds is not None:
+            kwargs["timeout"] = request.timeout_seconds
 
         # A model that refuses ``temperature`` refuses the whole request, so
         # the choice is between dropping the parameter and never calling the

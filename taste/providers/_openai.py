@@ -101,6 +101,8 @@ class OpenAIProvider:
         }
         if request.tools:
             kwargs["tools"] = [_to_tool(t) for t in request.tools]
+        if request.timeout_seconds is not None:
+            kwargs["timeout"] = request.timeout_seconds
         if request.sampling.effort:
             kwargs["reasoning"] = {"effort": request.sampling.effort}
 

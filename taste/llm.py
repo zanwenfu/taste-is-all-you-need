@@ -28,7 +28,7 @@ import random
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -368,6 +368,7 @@ class LLM:
         temperature: float | None = DEFAULT_TEMPERATURE,
         effort: str | None = None,
         role: str = "unspecified",
+        timeout_seconds: float | None = None,
     ) -> Completion:
         """One model turn, retried on transient failure.
 
@@ -376,6 +377,12 @@ class LLM:
         the request. All three are typed so the kernel classifies the run
         rather than crashing.
         """
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be finite and positive")
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
         ensure_priced(model)
         exposure = self._reserve_call_budget(model, max_tokens)
         try:
@@ -394,8 +401,16 @@ class LLM:
             last_exc: Exception | None = None
             for attempt in range(self.max_attempts):
                 try:
-                    with self._semaphore:
-                        completion = provider.complete(request)
+                    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    if not self._semaphore.acquire(timeout=remaining):
+                        raise TimeoutError("model deadline elapsed while waiting for a call slot")
+                    try:
+                        remaining = None if deadline is None else deadline - time.monotonic()
+                        if remaining is not None and remaining <= 0:
+                            raise TimeoutError("model deadline elapsed before dispatch")
+                        completion = provider.complete(replace(request, timeout_seconds=remaining))
+                    finally:
+                        self._semaphore.release()
                 except ProtocolFailure:
                     raise  # already typed and already infra; retrying will not help
                 except Exception as exc:
@@ -411,7 +426,10 @@ class LLM:
                     last_exc = exc
                     if attempt < self.max_attempts - 1:
                         delay = min(self.backoff_base * (2**attempt), 30.0)
-                        time.sleep(delay * (0.5 + random.random()))
+                        delay *= 0.5 + random.random()
+                        if deadline is not None:
+                            delay = min(delay, max(0.0, deadline - time.monotonic()))
+                        time.sleep(delay)
                     continue
                 self.stats.record(model, completion, role=role)
                 return completion
