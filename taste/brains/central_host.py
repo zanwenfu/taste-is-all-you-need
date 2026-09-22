@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 import threading
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from taste.brains.supervisor import (
 from taste.brains.worker_entrypoint import worker_command_factory
 from taste.llm import LLM, MODEL_MONITOR, MODEL_PLANNER
 from taste.memstore import Branch, Store
+from taste.resources import close_resources
 
 __all__ = ["CentralRuntimeHost", "compose_central_runtime"]
 
@@ -109,6 +111,17 @@ class CentralRuntimeHost:
         self._owns_integration = owns_integration
         self._owns_planner_journal = owns_planner_journal
         self._closed = False
+        self._closing = False
+        self._pending_closes = ["supervisor"]
+        if owns_store:
+            self._pending_closes.append("store")
+        else:
+            if owns_planner_journal and planner_journal is not None:
+                self._pending_closes.append("planner_journal")
+            if owns_integration:
+                self._pending_closes.append("integration")
+            if owns_control:
+                self._pending_closes.append("control")
         self._lifecycle_lock = threading.RLock()
 
     @property
@@ -120,8 +133,7 @@ class CentralRuntimeHost:
     def cycle(self) -> CycleOutcome:
         """Run one crash-replayable reconciliation cycle."""
         with self._lifecycle_lock:
-            if self._closed:
-                raise RuntimeError("central runtime host is closed")
+            self._require_open()
             return self.runtime.cycle()
 
     def run(
@@ -140,8 +152,7 @@ class CentralRuntimeHost:
         would choose a stopping policy on the caller's behalf.
         """
         with self._lifecycle_lock:
-            if self._closed:
-                raise RuntimeError("central runtime host is closed")
+            self._require_open()
             return self.runtime.run(
                 max_generations=max_generations,
                 wall_clock_seconds=wall_clock_seconds,
@@ -153,36 +164,35 @@ class CentralRuntimeHost:
     def outcome(self) -> GoalOutcome | None:
         """The recorded ending for this goal, if the run already finished."""
         with self._lifecycle_lock:
-            if self._closed:
-                raise RuntimeError("central runtime host is closed")
+            self._require_open()
             return self.runtime.outcome()
 
     def close(self) -> None:
-        """Release exactly the resources opened by the composition factory."""
+        """Attempt all owned cleanup; retry only operations that did not finish.
+
+        Partial shutdown refuses new work. This releases local resources; it
+        does not cancel or drain a concurrently running goal or its workers.
+        """
         with self._lifecycle_lock:
             if self._closed:
                 return
-            self._closed = True
+            self._closing = True
             try:
-                # The supervisor received injected shared branches, so this is
-                # normally a no-op.  Keep it in the lifecycle sequence in case
-                # it later acquires another explicitly owned resource.
-                self.supervisor.close()
+                close_resources(partial(self._close_resource, name) for name in tuple(self._pending_closes))
             finally:
-                if self._owns_store:
-                    # Store.close owns every branch it opened and the backend.
-                    self.store.close()
-                else:
-                    if self._owns_planner_journal and self.planner_journal is not None:
-                        self.planner_journal.close()
-                    if self._owns_integration:
-                        self.integration.close()
-                    if self._owns_control:
-                        self.control.close()
+                self._closed = not self._pending_closes
+
+    def _close_resource(self, name: str) -> None:
+        getattr(self, name).close()
+        self._pending_closes.remove(name)
+
+    def _require_open(self) -> None:
+        if self._closing:
+            raise RuntimeError("central runtime host is closing or closed")
 
     def __enter__(self) -> CentralRuntimeHost:
-        if self.closed:
-            raise RuntimeError("central runtime host is closed")
+        with self._lifecycle_lock:
+            self._require_open()
         return self
 
     def __exit__(self, *_exc: Any) -> None:
@@ -413,10 +423,9 @@ def compose_central_runtime(
             if owns_store:
                 opened_store.close()
             else:
-                if owns_integration and opened_integration is not None:
-                    opened_integration.close()
-                if owns_planner_journal and opened_planner_journal is not None:
-                    opened_planner_journal.close()
-                if owns_control and opened_control is not None:
-                    opened_control.close()
+                close_resources([
+                    *([opened_integration.close] if owns_integration and opened_integration is not None else []),
+                    *([opened_planner_journal.close] if owns_planner_journal and opened_planner_journal is not None else []),
+                    *([opened_control.close] if owns_control and opened_control is not None else []),
+                ])
         raise

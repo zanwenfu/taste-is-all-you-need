@@ -2,8 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
+
+
+def close_resources(callbacks: Iterable[Callable[[], None]]) -> None:
+    """Attempt every owned close and preserve all failures, including interrupts."""
+    errors: list[BaseException] = []
+    for close in callbacks:
+        try:
+            close()
+        except BaseException as exc:
+            errors.append(exc)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("resource cleanup failed", errors)
 
 
 @dataclass(frozen=True)

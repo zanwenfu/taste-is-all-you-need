@@ -64,6 +64,7 @@ from taste.memstore.objects import (
     now_iso,
 )
 from taste.memstore.sidecars import TURN_SUFFIX, Sidecars, _fsync_directory, _mkdir_durable
+from taste.resources import close_resources
 
 NOTES = {
     "meta": "refs/notes/taste/meta",
@@ -545,8 +546,7 @@ class Branch:
         return f"Branch({self.name!r})"
 
     def close(self) -> None:
-        self.release()
-        self.backend.close()
+        close_resources((self.release, self.backend.close))
 
     def release(self) -> None:
         """Give up the write lease, keeping the object readable.
@@ -1508,12 +1508,17 @@ class Store:
         return cls(root, session)
 
     def close(self) -> None:
-        for b in list(self._branches.values()):
-            b.close()
-        self._branches.clear()
-        for backend in list(self._worktree_backends):
-            backend.close()
-        self.backend.close()
+        branches = list(self._branches.values())
+        # Lease ownership and backend ownership have different lifetimes.
+        # Attempt both independently; successful release removes its branch,
+        # while a failed lease remains registered for an explicit retry.
+        backends = {id(backend): backend for backend in (
+            *(branch.backend for branch in branches), *self._worktree_backends, self.backend,
+        )}
+        close_resources([
+            *(branch.release for branch in branches),
+            *(backend.close for backend in backends.values()),
+        ])
 
     # ---------------------------------------------------------- naming
 

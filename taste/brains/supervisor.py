@@ -44,6 +44,7 @@ from taste.brains.worker_runtime import ASSIGNMENT_PATH, WORKER_REPORT_PATH
 from taste.memstore import Branch, State, Store
 from taste.memstore.backend import BLOB_MODES
 from taste.memstore.objects import WorktreeUnavailable
+from taste.resources import close_resources
 
 __all__ = [
     "AssignmentIdentityConflict",
@@ -1847,10 +1848,10 @@ class CentralSupervisor:
         writer and one ``control_lock`` without either closing it underneath
         the other.
         """
-        if self._owns_integration:
-            self.integration.close()
-        if self._owns_control:
-            self.control.close()
+        close_resources([
+            *([self.integration.close] if self._owns_integration else []),
+            *([self.control.close] if self._owns_control else []),
+        ])
 
     def __enter__(self) -> CentralSupervisor:
         return self
