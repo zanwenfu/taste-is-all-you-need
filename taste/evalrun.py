@@ -209,10 +209,13 @@ class Ledger:
             raw = json.loads(path.read_text())
             if not isinstance(raw, dict):
                 raise ValueError("cell result must be an object")
+            # Dataclass defaults support new in-memory results, not missing
+            # receipts on disk. Validate raw costs before applying defaults.
+            lifetime_billed_usd(raw)
             known = CellResult.__dataclass_fields__
             result = CellResult(**{k: v for k, v in raw.items() if k in known})
         except (ValueError, TypeError) as exc:
-            raise ValueError(f"cell ledger is malformed: {path.name}") from exc
+            raise ValueError(f"cell ledger is malformed: {path.name}: {exc}") from exc
         if path != self.path_for(Cell(result.task, result.arm, result.trial)):
             raise ValueError(f"cell ledger filename does not match its identity: {path.name}")
         return result
@@ -307,19 +310,25 @@ def run_sweep(
     failing is evidence about the arm, not about the environment; any other
     outcome resets the count. The budget is a running total of billed
     dollars, checked before a cell starts — this is a stop-loss on real
-    spend, so it counts what was paid, including cells resumed from disk.
+    spend. The ledger directory defines its scope: every earlier paid cell
+    counts, including tasks or arms filtered out of a resume work queue.
+    A separate study with its own budget needs a separate ledger directory.
     Both trip into a single ``status="aborted"`` marker row naming the rule,
     so a resumed sweep can see it stopped deliberately, not crashed.
     """
+    if (sweep_budget_usd is not None
+            and (isinstance(sweep_budget_usd, bool)
+                 or not isinstance(sweep_budget_usd, (int, float))
+                 or not math.isfinite(sweep_budget_usd) or sweep_budget_usd < 0)):
+        raise ValueError("sweep_budget_usd must be a finite non-negative number")
     ledger = Ledger(ledger_dir)
     report = SweepReport()
     notify = on_cell or (lambda _r: None)
 
     streak = 0
-    # All earlier paid attempts count before considering any retry, including
-    # cells later in the grid. A resume must not earn a fresh sweep allowance.
-    billed_total = math.fsum(prior.total_billed_usd for cell in cells(tasks, arms, trials)
-                             if (prior := ledger.read(cell)) is not None)
+    # Selection controls work to do, not money already spent. In particular,
+    # CLI --skip-completed must not acquire a fresh allowance on every resume.
+    billed_total = math.fsum(prior.total_billed_usd for prior in ledger.all_results())
 
     def aborted(reason: str) -> None:
         marker = CellResult(
