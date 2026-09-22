@@ -141,6 +141,10 @@ def test_scripted_satisfies_the_protocol() -> None:
 # ------------------------------------------------------------------ docker
 
 
+class _ContainerNotFound(LookupError):
+    status_code = 404
+
+
 class _FakeContainer:
     def __init__(self, name: str = "", id: str = "cid-0") -> None:
         self.name = name
@@ -184,7 +188,7 @@ class _FakeContainers:
         # gone — the provider's liveness check depends on that distinction.
         if not self.container.removed and ref in (self.container.name, self.container.id):
             return self.container
-        raise KeyError(ref)
+        raise _ContainerNotFound(ref)
 
 
 class _FakeClient:
@@ -287,7 +291,7 @@ class _RespawningContainers:
         for container in self.spawned:
             if not container.removed and ref in (container.name, container.id):
                 return container
-        raise KeyError(ref)
+        raise _ContainerNotFound(ref)
 
 
 def _respawning_client():
@@ -377,7 +381,7 @@ def test_container_names_are_unique_per_process(tmp_path: Path) -> None:
                 return _C()
             @staticmethod
             def get(name):
-                raise LookupError(name)
+                raise _ContainerNotFound(name)
             @staticmethod
             def list(**kw):
                 return []

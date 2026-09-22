@@ -143,7 +143,7 @@ class SweepJournal:
         return identity
 
     def _receipt_path(self, kind: str) -> Path:
-        if kind not in {"execution", "ending", "failure"}:
+        if kind not in {"execution", "ending", "failure", "resources"}:
             raise ValueError("unknown sweep receipt kind")
         if self._active is None:
             raise UnsettledSweepAttempt("there is no active sweep admission")
@@ -158,6 +158,7 @@ class SweepJournal:
         value = json.loads(json.dumps(value, sort_keys=True, allow_nan=False))
         self._validate_receipt(value)
         if kind == "ending":
+            self.assert_resources_settled()
             self._assert_execution_preserved(value["record"])
         if path.exists():
             if self._read(path) != value:
@@ -177,6 +178,7 @@ class SweepJournal:
             raise UnsettledSweepAttempt("sweep receipt is not bound to its admission")
 
     def _assert_execution_preserved(self, record: Mapping[str, Any]) -> None:
+        self.assert_resources_settled()
         path = self._receipt_path("execution")
         if not path.exists():
             return
@@ -187,8 +189,20 @@ class SweepJournal:
             if execution["record"].get(key) != record.get(key):
                 raise UnsettledSweepAttempt(f"ending changed execution evidence: {key}")
 
+    def assert_resources_settled(self) -> None:
+        if self._active is None:
+            return
+        path = self._receipt_path("resources")
+        if path.exists():
+            self._validate_receipt(self._read(path))
+            raise UnsettledSweepAttempt(
+                f"admitted attempt {self._active['attempt_id']}: resource cleanup is unconfirmed; "
+                f"execution and grading recovery are blocked; evidence: {path}"
+            )
+
     def execution(self) -> dict[str, Any]:
         """Read the bound receipt needed for grading without running the agent."""
+        self.assert_resources_settled()
         path = self._receipt_path("execution")
         if not path.exists():
             raise UnsettledSweepAttempt("execution cost is unknown; no execution receipt is available")
@@ -207,6 +221,7 @@ class SweepJournal:
     def ending(self, *, allow_incomplete: bool = False) -> dict[str, Any] | None:
         if self._active is None:
             return None
+        self.assert_resources_settled()
         path = self._receipt_path("ending")
         if not path.exists():
             if allow_incomplete:
@@ -225,6 +240,7 @@ class SweepJournal:
     def finish(self) -> None:
         if self._active is None:
             raise UnsettledSweepAttempt("no active admission can be finalized")
+        self.assert_resources_settled()
         self.pending_path.unlink()
         _sync_dir(self.root)
         self._active = None

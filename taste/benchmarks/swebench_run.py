@@ -53,6 +53,7 @@ from taste.execution import SandboxProvider
 from taste.kernel import Kernel, RunResult
 from taste.memory import Memory
 from taste.replay import SandboxProbeExecutor, reconstruct
+from taste.resources import close_sandbox
 from taste.shadow import SHADOW_HEAD, load_timeline
 
 
@@ -185,7 +186,7 @@ def make_prepare(
             agent_sandbox = None
             if route_execution:
                 agent_sandbox = provider.open(key=f"agent:{cell.key}", image=instance.image)
-                resources.callback(agent_sandbox.close)
+                resources.callback(close_sandbox, agent_sandbox)
                 swebench.materialize_from_image(agent_sandbox, instance, workspace)
                 check = parity_check or swebench.environment_parity_check
                 reason = check(agent_sandbox, instance)
@@ -347,7 +348,7 @@ def make_execute(
                     # own probe container under a different key; keeping this one
                     # alive would only offer the next cell a stale tree to
                     # inherit.
-                    ctx.agent_sandbox.close()
+                    close_sandbox(ctx.agent_sandbox)
                     ctx.agent_sandbox = None
         ctx.session = result.session_id
         ctx.shadow_ref = f"{SHADOW_HEAD}_{result.session_id.upper().replace('-', '_')}"
@@ -396,7 +397,7 @@ def make_grade(*, timeout: int = 1800, grader=None):
         try:
             report = run_grader(sandbox, ctx.instance, patch, timeout=timeout)
         finally:
-            sandbox.close()
+            close_sandbox(sandbox)
         if report is None:
             return None
         ctx.grade_report = report
@@ -432,7 +433,7 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
             executor = None
             if ctx.provider is not None:
                 sandbox = ctx.provider.open(key=ctx.instance.instance_id, image=ctx.instance.image)
-                resources.callback(sandbox.close)
+                resources.callback(close_sandbox, sandbox)
                 executor = SandboxProbeExecutor(sandbox, memory, ctx.instance.base_commit)
 
             attribution = None

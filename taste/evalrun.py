@@ -41,6 +41,7 @@ from typing import Any
 from taste.config import HarnessConfig, kernel_kwargs
 from taste.kernel import Kernel, RunResult
 from taste.ledger_costs import lifetime_billed_usd, read_cost_row
+from taste.resources import resource_failures
 from taste.sweep_journal import SweepJournal, UnsettledSweepAttempt
 
 CellStatus = str  # "completed" | "failed" | "infra" | "budget" | "error" | "aborted"
@@ -382,7 +383,10 @@ def resume_grading(
                 grade = score(deepcopy(record))
                 if not isinstance(grade, GradingResult):
                     raise TypeError("recovered grader must return GradingResult")
-            except Exception as exc:
+            except BaseException as exc:
+                _resource_failed(journal, exc, "score", (record.billed_usd, record.work_usd, record.cache_delta_usd))
+                if not isinstance(exc, Exception):
+                    raise
                 _grading_failed(journal, record, exc)
             record.score = grade.score
             record.report_path = grade.report_path
@@ -392,8 +396,34 @@ def resume_grading(
         return record
 
 
+def _resource_failed(journal: SweepJournal, exc: BaseException, phase: str,
+                     costs: tuple[float, float, float] | None) -> None:
+    failures = resource_failures(exc)
+    if not failures:
+        return
+    admission = journal.pending()
+    if admission is None:
+        raise UnsettledSweepAttempt("resource failure has no active admission") from exc
+    journal.record("resources", {
+        **admission["cell"], "attempt_id": admission["attempt_id"],
+        "attempts_made": admission["attempts_made"], "phase": phase,
+        "billed_usd": None if costs is None else costs[0],
+        "work_usd": None if costs is None else costs[1],
+        "cache_delta_usd": None if costs is None else costs[2],
+        "resources": [item.to_dict() for item in failures],
+        "error": f"{type(exc).__name__}: {exc}",
+        "failure_reason": traceback.format_exc(limit=3),
+    })
+    raise UnsettledSweepAttempt(
+        f"admitted attempt {admission['attempt_id']}: resource cleanup is unconfirmed; "
+        f"automatic retry and grading recovery are blocked; evidence: "
+        f"{journal.root / admission['attempt_id']}"
+    ) from exc
+
+
 def _grading_failed(journal: SweepJournal, record: CellResult, exc: Exception,
                     report_path: str = "") -> None:
+    _resource_failed(journal, exc, "score", (record.billed_usd, record.work_usd, record.cache_delta_usd))
     journal.record_grading_failure({
         "task": record.task, "arm": record.arm, "trial": record.trial,
         "attempt_id": record.attempt_id, "attempts_made": record.attempts_made,
@@ -509,7 +539,21 @@ def _run_sweep(
             record = execution_record
             record.score = grade.score
             record.report_path = grade.report_path
-        except Exception as exc:
+        except BaseException as exc:
+            if resource_failures(exc):
+                if execution_record is not None:
+                    resource_costs = (execution_record.billed_usd, execution_record.work_usd,
+                                      execution_record.cache_delta_usd)
+                elif phase == "prepare":
+                    resource_costs = (0.0, 0.0, 0.0)
+                else:
+                    try:
+                        resource_costs = _receipt_costs(_execution_stats(result, context))
+                    except Exception:
+                        resource_costs = None
+                _resource_failed(journal, exc, phase, resource_costs)
+            if not isinstance(exc, Exception):
+                raise
             # A grading failure does not erase the execution phase, its
             # returned costs, or the immutable state needed to investigate it.
             # Context statistics are a fallback for adapters that raise before

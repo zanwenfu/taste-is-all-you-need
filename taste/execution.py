@@ -46,6 +46,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from taste.resources import ResourceCleanupError, close_sandbox, resource_error
+
 # Inherited environment is both a correctness hazard and a disclosure one. A
 # probe command is built from dataset content and runs whatever the tree
 # contains; handing it the harness's own environment leaks ANTHROPIC_API_KEY
@@ -355,6 +357,8 @@ class DockerSandbox:
         # each throw as a hole, and the cell scores as CLEAN. See
         # DockerProvider for the run this cost.
         self._on_close = on_close
+        self._closed = False
+        self._cleanup_pending = False
         # The conda activation the images bury in .bashrc, which only
         # interactive shells read. Every SWE-bench image installs the project
         # into the `testbed` env; a command that does not activate it runs
@@ -372,44 +376,54 @@ class DockerSandbox:
             if env_prefix is None
             else env_prefix
         )
-        self.container = client.containers.run(
-            image,
-            command="sleep infinity",
-            name=name,
-            detach=True,
-            platform=platform,
-            # `network_mode="none"`, NOT `network_disabled=True`.
-            #
-            # Both sever external access, which is the property the
-            # measurement needs: a probe reaching a third-party host fails
-            # intermittently for reasons unrelated to the agent, and an
-            # intermittent pass->fail is indistinguishable by this instrument
-            # from a silent regression.
-            #
-            # But `network_disabled` removes the network namespace outright,
-            # including loopback. Measured consequence: matplotlib and sphinx
-            # images ship `pytest_rerunfailures`, which binds a localhost
-            # socket at pytest_configure time. With no `lo` that raises
-            # `socket.gaierror` and pytest dies with INTERNALERROR before
-            # collecting a single test -- 812 graded tests reported as holes
-            # on one instance alone, and 23.5% of the entire dev-slice oracle
-            # across six instances.
-            #
-            # `none` keeps a loopback interface and still resolves nothing
-            # external. Verified both directions in the image.
-            #
-            # The default is the MEASUREMENT stance. The one caller that may
-            # override it is the official grader (network_mode="bridge"):
-            # the benchmark's own harness evaluates with the network up, and
-            # four of psf/requests' graded connect-timeout tests need a
-            # network stack to time out on — under `none` they fail at the
-            # base commit and every resolve rate reads ~3% low. A grade
-            # produced under different conditions than the leaderboard's is
-            # not comparable to it, which defeats the number's only purpose.
-            network_mode=network_mode,
-            auto_remove=False,
-        )
-        self._assert_workdir()
+        try:
+            self.container = client.containers.run(
+                image,
+                command="sleep infinity",
+                name=name,
+                detach=True,
+                platform=platform,
+                # `network_mode="none"`, NOT `network_disabled=True`.
+                #
+                # Both sever external access, which is the property the
+                # measurement needs: a probe reaching a third-party host fails
+                # intermittently for reasons unrelated to the agent, and an
+                # intermittent pass->fail is indistinguishable by this instrument
+                # from a silent regression.
+                #
+                # But `network_disabled` removes the network namespace outright,
+                # including loopback. Measured consequence: matplotlib and sphinx
+                # images ship `pytest_rerunfailures`, which binds a localhost
+                # socket at pytest_configure time. With no `lo` that raises
+                # `socket.gaierror` and pytest dies with INTERNALERROR before
+                # collecting a single test -- 812 graded tests reported as holes
+                # on one instance alone, and 23.5% of the entire dev-slice oracle
+                # across six instances.
+                #
+                # `none` keeps a loopback interface and still resolves nothing
+                # external. Verified both directions in the image.
+                #
+                # The default is the MEASUREMENT stance. The one caller that may
+                # override it is the official grader (network_mode="bridge"):
+                # the benchmark's own harness evaluates with the network up, and
+                # four of psf/requests' graded connect-timeout tests need a
+                # network stack to time out on — under `none` they fail at the
+                # base commit and every resolve rate reads ~3% low. A grade
+                # produced under different conditions than the leaderboard's is
+                # not comparable to it, which defeats the number's only purpose.
+                network_mode=network_mode,
+                auto_remove=False,
+            )
+        except BaseException as exc:
+            # The daemon may have created the container before its reply was
+            # lost. Keep its requested name as evidence instead of treating
+            # this as a retryable zero-resource preparation failure.
+            raise resource_error("docker_container_name", name, "create acknowledgement", exc) from exc
+        try:
+            self._assert_workdir()
+        except BaseException:
+            self.close()
+            raise
 
     def _assert_workdir(self) -> None:
         """Fail loudly now rather than silently on every command later.
@@ -426,7 +440,6 @@ class DockerSandbox:
         )
         code = probe[0] if isinstance(probe, tuple) else probe.exit_code
         if code != 0:
-            self.close()
             raise RuntimeError(
                 f"workdir {self.workdir!r} does not exist in image {self.image!r}; "
                 "every command would fail with exit 127 and be recorded as a hole"
@@ -512,12 +525,23 @@ class DockerSandbox:
         return self.get_bytes(path).decode("utf-8", errors="replace")
 
     def close(self) -> None:
-        with contextlib.suppress(Exception):  # teardown must not mask a result
-            self.container.remove(force=True)
-        callback, self._on_close = self._on_close, None  # close() may run twice
-        if callback is not None:
-            with contextlib.suppress(Exception):  # eviction must not either
-                callback(self)
+        self._cleanup_pending = True
+        if not self._closed:
+            try:
+                self.container.remove(force=True)
+            except BaseException as exc:
+                if not _container_not_found(exc):
+                    raise resource_error("docker_container", self.container.id, "remove", exc) from exc
+            self._closed = True
+        # Evict only after removal is confirmed. Retain a failed callback so a
+        # later explicit close can retry it without repeating container removal.
+        if self._on_close is not None:
+            try:
+                self._on_close(self)
+            except BaseException as exc:
+                raise resource_error("docker_container", self.container.id, "evict", exc) from exc
+            self._on_close = None
+        self._cleanup_pending = False
 
     def __enter__(self) -> DockerSandbox:
         return self
@@ -572,8 +596,7 @@ class DockerProvider:
         if cached is not None:
             if self._alive(cached):
                 return cached
-            # Dead without a close() — evict, then fall through to reopen.
-            self._open.pop(key, None)
+            # Keep ownership until removal has actually been confirmed.
             cached.close()
         # The process id is part of the name. Two processes opening the same
         # instance -- a re-score timing run beside a live sweep -- used to
@@ -601,11 +624,25 @@ class DockerProvider:
         Python object answers exec_run happily and every call throws
         downstream, where the probe's fail-open wrapper renders it as a hole.
         """
+        if sandbox._cleanup_pending:
+            raise resource_error("docker_container", sandbox.container.id, "reuse",
+                                 RuntimeError("previous cleanup remains unconfirmed"))
+        if sandbox._closed:
+            return False
         try:
             current = self._client.containers.get(sandbox.container.id)
-            return getattr(current, "status", "") == "running"
-        except Exception:
-            return False
+            status = getattr(current, "status", None)
+            if status == "running":
+                return True
+            if status in {"exited", "dead"}:
+                return False
+            raise RuntimeError(f"container state is not safe for reuse or replacement: {status!r}")
+        except Exception as exc:
+            if _container_not_found(exc):
+                return False
+            # Daemon/auth/transport failure is not evidence of death and does
+            # not authorize eviction or replacement of the owned container.
+            raise resource_error("docker_container", sandbox.container.id, "inspect", exc) from exc
 
     def _evict(self, key: str, sandbox: DockerSandbox) -> None:
         """Drop the cache entry when *this* sandbox closes — never a successor
@@ -615,18 +652,36 @@ class DockerProvider:
 
     def _remove_stale(self, name: str) -> None:
         """A crashed sweep leaves containers behind; the name would collide."""
-        with contextlib.suppress(Exception):  # absence is the expected case
-            self._client.containers.get(name).remove(force=True)
+        identity = name
+        try:
+            container = self._client.containers.get(name)
+            identity = container.id
+            container.remove(force=True)
+        except Exception as exc:
+            if not _container_not_found(exc):
+                raise resource_error("docker_container", identity, "remove stale", exc) from exc
 
     def close_all(self) -> None:
+        failures = []
         for sandbox in list(self._open.values()):
-            sandbox.close()
-        self._open.clear()
+            try:
+                close_sandbox(sandbox)
+            except ResourceCleanupError as exc:
+                failures.extend(exc.failures)
+        # Successful callbacks evict their own entries. Failed ones stay owned;
+        # still attempt every other close before surfacing the combined failure.
+        if failures:
+            raise ResourceCleanupError(tuple(failures))
 
     def prune(self) -> None:
         self.close_all()
         with contextlib.suppress(Exception):  # reclaiming disk is best-effort
             self._client.images.prune(filters={"dangling": False})
+
+
+def _container_not_found(error: BaseException) -> bool:
+    """Only explicit HTTP 404 on a container operation establishes absence."""
+    return getattr(error, "status_code", None) == 404
 
 
 def _decode(raw: object) -> str:

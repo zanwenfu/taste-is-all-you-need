@@ -34,6 +34,7 @@ from typing import Any
 from taste.cores import Plan, Step, Verification
 from taste.kernel import RunResult
 from taste.memory import Memory
+from taste.resources import close_sandbox
 from taste.shadow import ShadowLog
 
 SCAFFOLD = "mini-swe-agent"
@@ -313,18 +314,17 @@ def make_miniswe_execute(
 
         if ctx.agent_sandbox is None:
             raise RuntimeError("mini-swe-agent must run routed (a pinned container); refusing the host path")
-        config = load_scaffold_config(model_name, cost_limit=cost_limit, model_class=model_class)
-        started = time.time()
-        session_id = uuid.uuid4().hex[:8]
-        ctx.session = session_id
         try:
+            config = load_scaffold_config(model_name, cost_limit=cost_limit, model_class=model_class)
+            started = time.time()
+            session_id = uuid.uuid4().hex[:8]
+            ctx.session = session_id
             return _run_cell(ctx, config, session_id, started, model_name, model_factory)
         finally:
             # Whatever happened above -- a model layer that failed to build,
             # a dead container, a clean run -- the cell's container goes.
             if ctx.agent_sandbox is not None:
-                with contextlib.suppress(Exception):
-                    ctx.agent_sandbox.close()
+                close_sandbox(ctx.agent_sandbox)
                 ctx.agent_sandbox = None
 
     return execute
