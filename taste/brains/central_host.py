@@ -15,6 +15,7 @@ accepted by this API or copied into worker argv.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import threading
 from collections.abc import Mapping
@@ -40,6 +41,27 @@ from taste.resources import close_resources
 __all__ = ["CentralRuntimeHost", "compose_central_runtime"]
 
 _RLOCK_TYPE = type(threading.RLock())
+
+
+def _owned_call(call: Any) -> Any:
+    try:
+        return call()
+    except (KeyboardInterrupt, SystemExit) as exc:
+        # asyncio treats these specially when a Task raises them directly:
+        # they can stop the event loop before the owner awaits its cleanup.
+        raise BaseExceptionGroup("owned goal operation was interrupted", [exc]) from None
+
+
+async def _await_owned_task(task: asyncio.Task[Any]) -> Any:
+    """Delay repeated caller cancellation until an already-owned task settles."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            break
+    return task.result()
 
 
 def _validate_budgeted_planner_llm(llm: Any, goal: Goal) -> None:
@@ -166,6 +188,69 @@ class CentralRuntimeHost:
         with self._lifecycle_lock:
             self._require_open()
             return self.runtime.outcome()
+
+    def request_stop(self, detail: str = "external cancellation") -> None:
+        """Signal cancellation without waiting for this host's lifecycle lock."""
+        self.runtime.request_stop(detail)
+
+    def stop_and_drain(self, detail: str = "external cancellation") -> GoalOutcome:
+        """Wait for the goal driver and confirmed worker cleanup before returning."""
+        self.request_stop(detail)
+        with self._lifecycle_lock:
+            self._require_open()
+            return self.runtime.stop(detail)
+
+    async def run_async(
+        self,
+        *,
+        max_generations: int,
+        wall_clock_seconds: float,
+        between_cycles: Any = None,
+        monotonic: Any = None,
+        max_planner_failures: int = 3,
+    ) -> GoalOutcome:
+        """Run with cancellation that waits for driver and worker settlement.
+
+        Repeated cancellation never abandons the underlying thread. The
+        in-flight planner is allowed to settle its receipt before stopping.
+        This is cooperative shutdown, not a hard timeout for a hung provider;
+        benchmark orchestration also needs an owned outer process boundary.
+        """
+        driver = asyncio.create_task(asyncio.to_thread(_owned_call, partial(
+            self.run, max_generations=max_generations, wall_clock_seconds=wall_clock_seconds,
+            between_cycles=between_cycles, monotonic=monotonic,
+            max_planner_failures=max_planner_failures,
+        )))
+        try:
+            return await asyncio.shield(driver)
+        except BaseException as original:
+            detail = (
+                "the asynchronous goal caller cancelled"
+                if isinstance(original, asyncio.CancelledError)
+                else f"the asynchronous goal driver failed: {type(original).__name__}"
+            )
+            self.request_stop(detail)
+            failures: list[BaseException] = []
+            try:
+                await _await_owned_task(driver)
+            except BaseException as exc:
+                if exc is not original:
+                    failures.append(exc)
+            # Also settle failures before the driver's normal try/finally,
+            # e.g. a run-limit validation error after workers already existed.
+            cleanup = asyncio.create_task(asyncio.to_thread(
+                _owned_call, partial(self.stop_and_drain, detail),
+            ))
+            try:
+                await _await_owned_task(cleanup)
+            except BaseException as exc:
+                failures.append(exc)
+            if failures:
+                raise BaseExceptionGroup(
+                    "goal shutdown encountered execution or cleanup failures",
+                    [original, *failures],
+                ) from None
+            raise
 
     def close(self) -> None:
         """Attempt all owned cleanup; retry only operations that did not finish.

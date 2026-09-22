@@ -99,6 +99,10 @@ class _WallDeadlineReached(CoordinatorError):
     """The goal deadline has elapsed before another external effect."""
 
 
+class _StopRequested(CoordinatorError):
+    """An external caller requested orderly goal cancellation."""
+
+
 class _InjectedCoordinatorFault(CoordinatorError):
     """Testing/host fault boundary; never reinterpret it as worker failure."""
 
@@ -548,6 +552,9 @@ class CentralRuntime:
         self._remaining_wall: Callable[[], float] | None = None
         self._deadline_at: datetime | None = None
         self._running = False
+        self._stop_signal = threading.Event()
+        self._stop_signal_lock = threading.Lock()
+        self._requested_stop_detail: str | None = None
         self._cycle_audit_head: str | None = None
         self._cycle_audit_entries: list[Any] = []
 
@@ -954,7 +961,9 @@ class CentralRuntime:
         effect: Callable[[], T],
         result: Callable[[T], Mapping[str, Any]],
     ) -> T:
+        self._raise_if_stop_requested()
         decision_id, root, record = self._decision_intent(cycle, kind, subject_id, intent)
+        self._raise_if_stop_requested()
         try:
             value = effect()
         except Exception as exc:
@@ -1201,6 +1210,7 @@ class CentralRuntime:
         Every genuinely new provider call must expose a conservative billed
         ceiling and bind its process-local guard to the durable remainder.
         """
+        self._raise_if_stop_requested()
         if budget.limit_usd is None:
             return 0.0
 
@@ -1840,6 +1850,39 @@ class CentralRuntime:
         self._finish_planner_operation(base_id, operation_id, "applied")
         return plan
 
+    def request_stop(self, detail: str = "external cancellation") -> None:
+        """Signal the driver without waiting for a planner or coordinator lock.
+
+        This is an in-process request, not a receipt proving termination. The
+        driver persists its first stop reason at the next effect boundary and
+        drains owned workers. A hung external call still needs an outer process
+        boundary; callers must await run/stop before treating cleanup as done.
+        """
+        if not isinstance(detail, str) or "\x00" in detail or len(detail) > 2048:
+            raise ValueError("stop detail must be text without NUL, at most 2048 characters")
+        with self._stop_signal_lock:
+            if not self._stop_signal.is_set():
+                self._requested_stop_detail = detail
+                self._stop_signal.set()
+
+    def _raise_if_stop_requested(self) -> None:
+        if self._stop_signal.is_set():
+            raise _StopRequested(self._requested_stop_detail)
+
+    def stop(self, detail: str = "external cancellation") -> GoalOutcome:
+        """Stop further admission, wait for the driver, and drain every worker.
+
+        A prior ending is immutable. Incomplete cleanup retains the durable
+        stop request and raises, allowing this operation to be retried without
+        another planner call or worker launch.
+        """
+        self.request_stop(detail)
+        with self._lock:
+            recorded = self.outcome()
+            if recorded is not None:
+                return recorded
+            return self._finish_run("cancelled", self._requested_stop_detail or "")
+
     def run(
         self,
         *,
@@ -1900,6 +1943,8 @@ class CentralRuntime:
             pending_stop = self._stop_request()
             if pending_stop is not None:
                 return self._finish_run(pending_stop["stop_reason"], pending_stop["detail"])
+            if self._stop_signal.is_set():
+                return self._finish_run("cancelled", self._requested_stop_detail or "")
 
         started = clock()
         limits_path = f"{_goal_root(self.goal.goal_id)}/run-limits.json"
@@ -1928,6 +1973,7 @@ class CentralRuntime:
             planner_failures = sum(attempt.status in {"rejected", "transport_error", "orphaned"}
                                    for attempt in self.planner.planner_attempts(self.goal.goal_id))
             while True:
+                self._raise_if_stop_requested()
                 remaining = self._remaining_wall()
                 if remaining <= 0:
                     stop_reason = "wall_clock"
@@ -1944,6 +1990,7 @@ class CentralRuntime:
                 except (InvalidPlannerOutput, RejectedPlannerOperation, StalePlanningWorld,
                         PlannerTransportError) as exc:
                     planner_failures += 1
+                    self._raise_if_stop_requested()
                     if self._remaining_wall() <= 0:
                         stop_reason, detail = "wall_clock", "goal deadline elapsed during planner call"
                         break
@@ -1961,6 +2008,7 @@ class CentralRuntime:
                     time.sleep(min(self.supervisor.poll_interval,
                                    max(0.0, wall_clock_seconds - (clock() - started))))
                     continue
+                self._raise_if_stop_requested()
                 if self._remaining_wall() <= 0:
                     stop_reason, detail = "wall_clock", "goal deadline elapsed during a cycle"
                     break
@@ -1981,6 +2029,8 @@ class CentralRuntime:
                 else:
                     time.sleep(min(self.supervisor.poll_interval,
                                    max(0.0, wall_clock_seconds - (clock() - started))))
+        except _StopRequested as exc:
+            stop_reason, detail = "cancelled", str(exc)
         except _WallDeadlineReached as exc:
             stop_reason, detail = "wall_clock", str(exc)
         except BudgetBlocked as exc:
@@ -2035,18 +2085,18 @@ class CentralRuntime:
                            "stop_reason": stop_reason, "detail": detail}
                 self._immutable(f"{_goal_root(self.goal.goal_id)}/stop.json", pending,
                                 f"central stop requested: {self.goal.goal_id}")
-            errors: list[Exception] = []
+            errors: list[BaseException] = []
             for run in runs:
                 try:
                     stopped = self.supervisor.stop(run.run_id, pending["stop_reason"])
                     if stopped.recovery_status != "complete":
                         raise SupervisorError(f"worker {run.run_id} recovery is {stopped.recovery_status}")
-                except Exception as exc:
+                except BaseException as exc:
                     errors.append(exc)
             if len(errors) == 1:
                 raise errors[0]
             if errors:
-                raise ExceptionGroup("goal shutdown could not drain every worker", errors)
+                raise BaseExceptionGroup("goal shutdown could not drain every worker", errors)
             return self._record_outcome(pending["stop_reason"], pending["detail"])
 
     def _record_outcome(self, stop_reason: str, detail: str) -> GoalOutcome:
@@ -2083,6 +2133,7 @@ class CentralRuntime:
         on the next call or after constructing a replacement runtime.
         """
         with self._lock:
+            self._raise_if_stop_requested()
             self.planner.bind_goal(self.goal)
             if self._stop_request() is not None:
                 raise CoordinatorError("goal shutdown is pending or complete; use run() to finalize")
