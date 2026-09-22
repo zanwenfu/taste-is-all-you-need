@@ -23,8 +23,9 @@ classifiers = [
 # version that removed `temperature` from Messages.create() -- and every
 # planner call died with a TypeError while the laptop that developed this ran
 # 0.96.0 and was fine. Two machines, different code, and which numbers you get
-# depends on the day you ran `pip install`. See requirements-lock.txt for the
-# exact stack the reported results were produced on.
+# depends on the day you ran `pip install`. requirements-brains-lock.txt records
+# the current Linux regression stack; requirements-lock.txt preserves the older
+# legacy experiment environment for historical reproducibility.
 dependencies = [
     "anthropic>=0.90,<1.0",
     "click>=8.1,<9",

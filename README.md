@@ -219,6 +219,18 @@ compose_central_runtime(repo, session, goal).run(          # the multi-process r
 
 ## Quickstart with a real Claude
 
+The current Linux regression environment uses Python 3.14.4. In a clean Python
+3.14 environment, reproduce its dependency versions with:
+
+```bash
+python -m pip install -c requirements-brains-lock.txt -e '.[dev,brains]'
+python -m pip check
+```
+
+The historical `requirements-lock.txt` belongs to the earlier kernel experiments.
+The brain SDK's executable admission and benchmark environment checks are
+separate from installing Python dependencies.
+
 ```bash
 # One-time
 conda create -n agent-os python=3.11 -y
