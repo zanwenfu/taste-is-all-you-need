@@ -40,7 +40,7 @@ from typing import Any
 from taste.config import HarnessConfig, kernel_kwargs
 from taste.kernel import Kernel, RunResult
 from taste.ledger_costs import lifetime_billed_usd
-from taste.sweep_journal import SweepJournal
+from taste.sweep_journal import SweepJournal, UnsettledSweepAttempt
 
 CellStatus = str  # "completed" | "failed" | "infra" | "budget" | "error" | "aborted"
 
@@ -435,15 +435,30 @@ def _run_sweep(
                 record.report_path = str(getattr(context, "report_path", "") or "")
             else:
                 stats = _execution_stats(result, context)
+                # Preparing only materializes the workspace; paid work belongs
+                # in execute. Once execute starts, lack of a complete receipt
+                # cannot establish that it spent nothing before raising.
+                costs = _failed_execution_costs(stats) if phase == "execute" else (0.0, 0.0, 0.0)
+                if costs is None:
+                    journal.record("failure", {
+                        **asdict(cell), "attempt_id": attempt_id, "attempts_made": attempt_number,
+                        "billed_usd": None, "work_usd": None,
+                        "error": f"{phase}: {type(exc).__name__}: {exc}",
+                        "failure_reason": traceback.format_exc(limit=3),
+                    })
+                    raise UnsettledSweepAttempt(
+                        f"admitted attempt {attempt_id}: execution cost is unknown; "
+                        f"automatic retry is blocked; evidence: {journal.root / attempt_id}"
+                    ) from exc
                 record = CellResult(
                     task=cell.task,
                     arm=cell.arm,
                     trial=cell.trial,
                     status="error",
                     config_hash="",
-                    billed_usd=round(getattr(stats, "total_cost_usd", 0.0) or 0.0, 6),
-                    work_usd=round(getattr(stats, "total_work_usd", 0.0) or 0.0, 6),
-                    cache_delta_usd=round(getattr(stats, "cache_delta_usd", 0.0) or 0.0, 6),
+                    billed_usd=costs[0],
+                    work_usd=costs[1],
+                    cache_delta_usd=costs[2],
                     attempts_made=attempt_number,
                 )
             record.elapsed_s = round(time.time() - started, 2)
@@ -475,6 +490,18 @@ def _run_sweep(
 def _execution_stats(result: RunResult | None, context: Any) -> Any:
     stats = getattr(result, "stats", None)
     return stats if stats is not None else getattr(context, "llm_stats", None)
+
+
+def _failed_execution_costs(stats: Any) -> tuple[float, float, float] | None:
+    """Require both currencies on failure; a missing receipt is not zero."""
+    values = (getattr(stats, "total_cost_usd", None), getattr(stats, "total_work_usd", None),
+              getattr(stats, "cache_delta_usd", 0.0))
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           or not math.isfinite(value) for value in values):
+        return None
+    if values[0] < 0 or values[1] < 0:
+        return None
+    return tuple(round(value, 6) for value in values)
 
 
 def _record_from(cell: Cell, result: RunResult, score: float | None, context: Any) -> CellResult:

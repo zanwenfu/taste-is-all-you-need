@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -204,11 +205,12 @@ def test_a_run_halted_by_infra_is_recorded_as_infra(tmp_path: Path) -> None:
 
 def test_a_crash_is_recorded_rather_than_retried_forever(tmp_path: Path) -> None:
     def boom(cell, ctx):
+        ctx.llm_stats = SimpleNamespace(total_cost_usd=0.0, total_work_usd=0.0)
         raise RuntimeError("adapter exploded")
 
     report = run_sweep(
         tasks=["lib"], arms=["A3"], trials=1, ledger_dir=tmp_path,
-        prepare=lambda c: None, execute=boom,
+        prepare=lambda c: SimpleNamespace(), execute=boom,
     )
     assert report.results[0].status == "error"
     assert "adapter exploded" in (report.results[0].error or "")
@@ -292,11 +294,12 @@ def test_a_score_crash_keeps_the_execute_phase_spend(tmp_path: Path) -> None:
 
 def test_the_error_row_names_the_phase_that_crashed(tmp_path: Path) -> None:
     def boom(cell, ctx):
+        ctx.llm_stats = SimpleNamespace(total_cost_usd=0.0, total_work_usd=0.0)
         raise RuntimeError("adapter exploded")
 
     report = run_sweep(
         tasks=["lib"], arms=["A3"], trials=1, ledger_dir=tmp_path,
-        prepare=lambda c: None, execute=boom,
+        prepare=lambda c: SimpleNamespace(), execute=boom,
     )
     assert (report.results[0].error or "").startswith("execute:")
 

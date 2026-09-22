@@ -130,7 +130,7 @@ class SweepJournal:
         return identity
 
     def _receipt_path(self, kind: str) -> Path:
-        if kind not in {"execution", "ending"}:
+        if kind not in {"execution", "ending", "failure"}:
             raise ValueError("unknown sweep receipt kind")
         if self._active is None:
             raise UnsettledSweepAttempt("there is no active sweep admission")
