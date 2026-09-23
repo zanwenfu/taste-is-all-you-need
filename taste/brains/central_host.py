@@ -19,6 +19,7 @@ import asyncio
 import math
 import threading
 from collections.abc import Mapping
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -188,6 +189,18 @@ class CentralRuntimeHost:
         with self._lifecycle_lock:
             self._require_open()
             return self.runtime.outcome()
+
+    def prepare_run(
+        self, *, max_generations: int, wall_clock_seconds: float,
+        deadline_at: datetime, max_planner_failures: int = 3,
+    ) -> dict[str, Any]:
+        """Persist absolute trial limits without starting a planner or worker."""
+        with self._lifecycle_lock:
+            self._require_open()
+            return self.runtime.prepare_run(
+                max_generations=max_generations, wall_clock_seconds=wall_clock_seconds,
+                deadline_at=deadline_at, max_planner_failures=max_planner_failures,
+            )
 
     def request_stop(self, detail: str = "external cancellation") -> None:
         """Signal cancellation without waiting for this host's lifecycle lock."""

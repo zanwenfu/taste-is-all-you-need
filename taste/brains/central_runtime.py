@@ -1883,6 +1883,71 @@ class CentralRuntime:
                 return recorded
             return self._finish_run("cancelled", self._requested_stop_detail or "")
 
+    def _validated_run_limits(self, max_generations, wall_clock_seconds, max_planner_failures):
+        if isinstance(max_generations, bool) or not isinstance(max_generations, int) or max_generations < 1:
+            raise ValueError("max_generations must be a positive integer")
+        if isinstance(max_planner_failures, bool) or not isinstance(max_planner_failures, int) or max_planner_failures < 1:
+            raise ValueError("max_planner_failures must be a positive integer")
+        if isinstance(wall_clock_seconds, bool):
+            raise ValueError("wall_clock_seconds must be a positive finite number")
+        wall_clock_seconds = float(wall_clock_seconds)
+        if not math.isfinite(wall_clock_seconds) or wall_clock_seconds <= 0:
+            raise ValueError("wall_clock_seconds must be a positive finite number")
+        return {"schema": "taste.brains/GoalRunLimits/1", "goal_digest": _digest(self.goal.to_json()),
+                "max_generations": max_generations, "wall_clock_seconds": wall_clock_seconds,
+                "max_planner_failures": max_planner_failures}
+
+    def _bind_run_limits(self, expected, *, deadline_at: datetime | None = None):
+        limits_path = f"{_goal_root(self.goal.goal_id)}/run-limits.json"
+        limits = self.control.head.record(limits_path)
+        if limits is None:
+            deadline = deadline_at or self.clock() + timedelta(seconds=expected["wall_clock_seconds"])
+            limits = {**expected, "deadline_at": _iso(deadline)}
+            self._immutable(limits_path, limits, f"central run limits: {self.goal.goal_id}")
+        if (not isinstance(limits, dict) or set(limits) != {*expected, "deadline_at"}
+                or type(limits["max_generations"]) is not int
+                or type(limits["max_planner_failures"]) is not int
+                or isinstance(limits["wall_clock_seconds"], bool)
+                or any(limits[key] != value for key, value in expected.items())):
+            raise CoordinatorError("run limits differ from this goal's durable trial limits")
+        try:
+            deadline = datetime.fromisoformat(limits["deadline_at"].replace("Z", "+00:00"))
+            if deadline.tzinfo is None or deadline.utcoffset() is None:
+                raise ValueError("deadline has no timezone")
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise CoordinatorCorruption("durable run deadline is malformed") from exc
+        if deadline_at is not None and deadline != deadline_at:
+            raise CoordinatorError("deadline differs from this goal's durable trial deadline")
+        return limits, deadline
+
+    def prepare_run(
+        self, *, max_generations: int, wall_clock_seconds: float,
+        deadline_at: datetime, max_planner_failures: int = 3,
+    ) -> dict[str, Any]:
+        """Persist the containing trial's deadline before launching its driver.
+
+        This admits no planner call or worker. A delayed/restarted driver must
+        use these same limits, and an expired deadline permits only drainage.
+        Prepared goals must be advanced through run(), which enforces the
+        bounds; the unbounded cycle() API is then unavailable to outside callers.
+        """
+        expected = self._validated_run_limits(max_generations, wall_clock_seconds, max_planner_failures)
+        if not isinstance(deadline_at, datetime):
+            raise ValueError("deadline_at must be a timezone-aware datetime")
+        _iso(deadline_at)
+        with self._lock:
+            if self._running:
+                raise CoordinatorError("cannot prepare limits during an active run")
+            if deadline_at > self.clock() + timedelta(seconds=expected["wall_clock_seconds"]):
+                raise ValueError("deadline_at exceeds the wall-clock allowance")
+            if self.outcome() is not None or self._stop_request() is not None or self._stop_signal.is_set():
+                raise CoordinatorError("goal shutdown is pending or complete; cannot prepare execution")
+            if (self.control.head.record(f"{_goal_root(self.goal.goal_id)}/run-limits.json") is None
+                    and (self.supervisor.runs() or self.planner.planner_attempts(self.goal.goal_id))):
+                raise CoordinatorError("cannot prepare a trial after goal execution has begun")
+            limits, _ = self._bind_run_limits(expected, deadline_at=deadline_at)
+            return dict(limits)
+
     def run(
         self,
         *,
@@ -1925,15 +1990,8 @@ class CentralRuntime:
         so the loop keeps going until the plan is complete, a hard bound is
         reached, or the budget can no longer be proven.
         """
-        if isinstance(max_generations, bool) or not isinstance(max_generations, int) or max_generations < 1:
-            raise ValueError("max_generations must be a positive integer")
-        if isinstance(max_planner_failures, bool) or not isinstance(max_planner_failures, int) or max_planner_failures < 1:
-            raise ValueError("max_planner_failures must be a positive integer")
-        if isinstance(wall_clock_seconds, bool):
-            raise ValueError("wall_clock_seconds must be a positive finite number")
-        wall_clock_seconds = float(wall_clock_seconds)
-        if not math.isfinite(wall_clock_seconds) or wall_clock_seconds <= 0:
-            raise ValueError("wall_clock_seconds must be a positive finite number")
+        expected = self._validated_run_limits(max_generations, wall_clock_seconds, max_planner_failures)
+        wall_clock_seconds = expected["wall_clock_seconds"]
         clock = monotonic or time.monotonic
 
         with self._lock:
@@ -1947,23 +2005,7 @@ class CentralRuntime:
                 return self._finish_run("cancelled", self._requested_stop_detail or "")
 
         started = clock()
-        limits_path = f"{_goal_root(self.goal.goal_id)}/run-limits.json"
-        limits = self.control.head.record(limits_path)
-        expected = {"schema": "taste.brains/GoalRunLimits/1", "goal_digest": _digest(self.goal.to_json()),
-                    "max_generations": max_generations, "wall_clock_seconds": wall_clock_seconds,
-                    "max_planner_failures": max_planner_failures}
-        if limits is None:
-            limits = {**expected, "deadline_at": _iso(self.clock() + timedelta(seconds=wall_clock_seconds))}
-            self._immutable(limits_path, limits, f"central run limits: {self.goal.goal_id}")
-        if (not isinstance(limits, dict) or set(limits) != {*expected, "deadline_at"}
-                or any(limits[key] != value for key, value in expected.items())):
-            raise CoordinatorError("run limits differ from this goal's durable trial limits")
-        try:
-            deadline = datetime.fromisoformat(limits["deadline_at"].replace("Z", "+00:00"))
-            if deadline.tzinfo is None:
-                raise ValueError("deadline has no timezone")
-        except (TypeError, ValueError, AttributeError) as exc:
-            raise CoordinatorCorruption("durable run deadline is malformed") from exc
+        _, deadline = self._bind_run_limits(expected)
         self._remaining_wall = lambda: min(wall_clock_seconds - (clock() - started),
                                             (deadline - self.clock()).total_seconds())
         self._deadline_at = deadline
@@ -2134,6 +2176,10 @@ class CentralRuntime:
         """
         with self._lock:
             self._raise_if_stop_requested()
+            if (not self._running and self.control.head.record(
+                    f"{_goal_root(self.goal.goal_id)}/run-limits.json") is not None
+                    and self._stop_request() is None):
+                raise CoordinatorError("a bounded goal must be advanced through run(), not cycle()")
             self.planner.bind_goal(self.goal)
             if self._stop_request() is not None:
                 raise CoordinatorError("goal shutdown is pending or complete; use run() to finalize")
