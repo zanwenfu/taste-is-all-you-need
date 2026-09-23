@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Server-only entrypoint validation in real, disposable, unprivileged services.
 
-Three serial cases, at most eleven services, no provider requests. Exercises
+Four serial cases, at most fifteen services, no provider requests. Exercises
 expired admission through the actual CLI, then real SIGTERM/SIGKILL of a hung
 planner plus detached writer, followed by the actual settlement CLI. The
 test-only provider seam is Python injection; launch JSON cannot select it.
@@ -128,6 +128,7 @@ def main():
     parser.add_argument("--owner-token", required=True)
     parser.add_argument("--user", default="bugbash")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--case", choices=("expired", "deadline", "explicit_stop", "async_cancel"))
     args = parser.parse_args()
     require(os.geteuid() == 0, "controller must run as root")
     require(re.fullmatch(r"[0-9a-f]{32}", args.owner_token), "invalid owner token")
@@ -150,7 +151,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
 
     def create(case, mode, workdir, argv, duration=15):
-        require(len(owned) < 11, "validation exceeded its eleven-service bound")
+        require(len(owned) < 15, "validation exceeded its fifteen-service bound")
         scope = OwnedProcessScope.create(
             root / f"owner-{case}-{mode}",
             ScopeSpec(tuple(argv), str(workdir), account.pw_uid, duration, 0.5),
@@ -165,8 +166,39 @@ def main():
                 and manager.empty(scope.unit), "service was not drained and released")
         return receipt
 
+    def entered(workdir, scope):
+        entry = json.loads((workdir / "entered.json").read_text())
+        group = f"/system.slice/{scope.unit}"
+        require(entry["uid"] == account.pw_uid and group in entry["cgroup"], "wrong driver scope")
+        require(group in Path(f"/proc/{entry['descendant_pid']}/cgroup").read_text(),
+                "detached descendant left its process scope")
+        return entry
+
+    async def cancel_owned(scope, workdir):
+        task = asyncio.create_task(scope.run_async(timeout_seconds=10))
+        try:
+            deadline = time.monotonic() + 5
+            while not (workdir / "entered.json").exists() or not (workdir / "effects.txt").exists():
+                require(time.monotonic() < deadline, "async driver did not enter")
+                await asyncio.sleep(0.02)
+            entry = entered(workdir, scope)
+            for _ in range(3):
+                task.cancel()
+                await asyncio.sleep(0.02)
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("asynchronous caller cancellation was lost")
+            return scope.stop("inspect completed async drainage"), entry
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     try:
-        for case in ("expired", "deadline", "explicit_stop"):
+        for case in ((args.case,) if args.case else ("expired", "deadline", "explicit_stop", "async_cancel")):
             started = time.monotonic()
             workdir = root / case
             workdir.mkdir(mode=0o700)
@@ -186,18 +218,17 @@ def main():
             else:
                 scope = create(case, "run", workdir,
                                script_command(script, "hang", workdir, input_path, digest), 6)
-                scope.start()
-                entered_deadline = time.monotonic() + 5
-                while not (workdir / "entered.json").exists() or not (workdir / "effects.txt").exists():
-                    require(time.monotonic() < entered_deadline, "hung planner and writer did not enter")
-                    time.sleep(0.02)
-                entry = json.loads((workdir / "entered.json").read_text())
-                group = f"/system.slice/{scope.unit}"
-                require(entry["uid"] == account.pw_uid and group in entry["cgroup"], "wrong driver scope")
-                require(group in Path(f"/proc/{entry['descendant_pid']}/cgroup").read_text(),
-                        "detached descendant left its process scope")
-                execution = (scope.stop("test caller cancelled") if case == "explicit_stop"
-                             else scope.wait(timeout_seconds=10))
+                if case == "async_cancel":
+                    execution, entry = asyncio.run(cancel_owned(scope, workdir))
+                else:
+                    scope.start()
+                    entered_deadline = time.monotonic() + 5
+                    while not (workdir / "entered.json").exists() or not (workdir / "effects.txt").exists():
+                        require(time.monotonic() < entered_deadline, "hung planner and writer did not enter")
+                        time.sleep(0.02)
+                    entry = entered(workdir, scope)
+                    execution = (scope.stop("test caller cancelled") if case == "explicit_stop"
+                                 else scope.wait(timeout_seconds=10))
                 require(execution["processes_stopped"] and manager.empty(scope.unit)
                         and manager.inspect(scope.unit) is None, "hung scope was not released")
                 require((workdir / "signal-observed.json").is_file(), "production signal handler was not exercised")

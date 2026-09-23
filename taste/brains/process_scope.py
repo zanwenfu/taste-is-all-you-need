@@ -14,6 +14,7 @@ in a private controller-owned directory, outside the service's write access.
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -23,6 +24,7 @@ import pwd
 import re
 import stat
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -32,6 +34,33 @@ from pathlib import Path
 from typing import Any
 
 from taste.resources import resource_error
+
+
+class _WaitCancelled(Exception):
+    """Wake only the outside polling thread; never imply service drainage."""
+
+
+def _owned_call(call):
+    try:
+        return call()
+    except (KeyboardInterrupt, SystemExit) as exc:
+        # These exceptions must not escape a Task directly and halt the loop
+        # before its owner can wait for cleanup.
+        raise BaseExceptionGroup("scope control operation interrupted", [exc]) from None
+
+
+async def _settled_task(task):
+    while not task.done():
+        try:
+            # wait() does not propagate caller cancellation into its Tasks.
+            # Unlike a cancelled shield on Python 3.14, it also leaves their
+            # eventual exceptions for this owner to retrieve exactly once.
+            await asyncio.wait((task,))
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            break
+    return task.result()
 
 
 def _canonical(value: Any) -> str:
@@ -380,9 +409,11 @@ class OwnedProcessScope:
             except BaseException as exc:
                 raise self._failure(fd, state, "stop", exc) from exc
 
-    def wait(self, *, timeout_seconds: float) -> dict[str, Any]:
+    def wait(self, *, timeout_seconds: float, _cancel_wait: threading.Event | None = None) -> dict[str, Any]:
         deadline = time.monotonic() + _positive(timeout_seconds, "timeout_seconds")
         while True:
+            if _cancel_wait is not None and _cancel_wait.is_set():
+                raise _WaitCancelled()
             with self._locked() as fd:
                 state = self._read(fd)
                 if state["phase"] == "ready":
@@ -404,3 +435,58 @@ class OwnedProcessScope:
             if time.monotonic() >= deadline:
                 return self.stop("outside controller wait deadline expired")
             time.sleep(0.05)
+
+    async def run_async(self, *, timeout_seconds: float) -> dict[str, Any]:
+        """Own launch, polling and drainage across repeated caller cancellation.
+
+        An in-flight manager request is allowed to settle before the caller
+        returns. Cancellation wakes the polling thread even if service cleanup
+        fails, so no background controller is abandoned. Such failure retains
+        the durable scope fence and raises; it never produces a drain receipt.
+        The returned receipt still requires separate goal settlement.
+        """
+        _positive(timeout_seconds, "timeout_seconds")
+        cancelled = threading.Event()
+
+        def drive():
+            if cancelled.is_set():
+                raise _WaitCancelled()
+            self.start()
+            return self.wait(timeout_seconds=timeout_seconds, _cancel_wait=cancelled)
+
+        driver = asyncio.create_task(asyncio.to_thread(_owned_call, drive))
+        try:
+            await asyncio.wait((driver,))
+            return driver.result()
+        except BaseException as original:
+            cancelled.set()
+            reason = ("asynchronous caller cancelled" if isinstance(original, asyncio.CancelledError)
+                      else "asynchronous scope operation failed")
+            cleanup = asyncio.create_task(asyncio.to_thread(_owned_call, lambda: self.stop(reason)))
+            failures = []
+            for task in (driver, cleanup):
+                try:
+                    await _settled_task(task)
+                except _WaitCancelled:
+                    if task is not driver:
+                        raise
+                except BaseException as exc:
+                    if exc is not original:
+                        failures.append(exc)
+            if failures:
+                raise BaseExceptionGroup("scope execution or drainage failed", [original, *failures]) from None
+            raise
+
+    async def stop_async(self, reason: str = "external cancellation") -> dict[str, Any]:
+        """Recover/drain without launch, retaining ownership through cancellation."""
+        cleanup = asyncio.create_task(asyncio.to_thread(_owned_call, lambda: self.stop(reason)))
+        try:
+            await asyncio.wait((cleanup,))
+            return cleanup.result()
+        except BaseException as original:
+            try:
+                await _settled_task(cleanup)
+            except BaseException as exc:
+                if exc is not original:
+                    raise BaseExceptionGroup("scope recovery failed", [original, exc]) from None
+            raise
