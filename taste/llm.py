@@ -250,7 +250,8 @@ class LLM:
     """The single call surface. Owns retries, budget, and telemetry.
 
     Auto-loads `.env` from the working directory upwards. Keys are never
-    logged, echoed, or exposed through the public API.
+    logged, echoed, or exposed through the public API. Set load_env_file=False
+    when the working tree is task data and authentication is supplied by the host.
     """
 
     def __init__(
@@ -259,6 +260,7 @@ class LLM:
         api_key: str | None = None,
         api_keys: dict[str, str] | None = None,
         env_dir: Path | None = None,
+        load_env_file: bool = True,
         budget_usd: float | None = None,
         max_attempts: int = 5,
         backoff_base: float = 1.0,
@@ -266,7 +268,10 @@ class LLM:
         run_id: str = "",
         cap_on: str = "work",
     ) -> None:
-        load_dotenv(_find_env(env_dir), override=False)
+        if type(load_env_file) is not bool:
+            raise ValueError("load_env_file must be a boolean")
+        if load_env_file:
+            load_dotenv(_find_env(env_dir), override=False)
         self._api_keys = dict(api_keys or {})
         if api_key:  # legacy single-key form: the Anthropic slot
             self._api_keys.setdefault("anthropic", api_key)

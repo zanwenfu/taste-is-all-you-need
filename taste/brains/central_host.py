@@ -410,6 +410,9 @@ def compose_central_runtime(
             if concrete_llm is None:
                 concrete_llm = LLM(
                     env_dir=root,
+                    # Task files cannot choose SDK endpoints, proxies, keys,
+                    # or configuration inherited by later worker processes.
+                    load_env_file=False,
                     budget_usd=goal.budget_usd,
                     run_id=f"central-planner.{goal.goal_id}",
                     max_attempts=1,

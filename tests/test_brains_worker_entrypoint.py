@@ -483,8 +483,10 @@ def test_exact_assignment_monitor_budget_reaches_only_the_monitor_llm(
     assert captured["budget_usd"] == 0.75
     assert captured["cap_on"] == "billed"
     assert captured["max_attempts"] == 1
+    assert captured["load_env_file"] is False
     assert set(captured) == {
         "env_dir",
+        "load_env_file",
         "budget_usd",
         "run_id",
         "max_attempts",

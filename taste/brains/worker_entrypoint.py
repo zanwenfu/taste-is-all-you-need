@@ -457,6 +457,9 @@ async def execute_worker(
             try:
                 monitor_llm = llm_factory(
                     env_dir=config.repo_root,
+                    # Provider configuration comes from the launch owner.
+                    # A task-controlled .env must never modify this process.
+                    load_env_file=False,
                     budget_usd=config.monitor_budget_usd,
                     run_id=f"{durable.run_id}.monitor",
                     # One monitor judgement is one independently durable unit.
