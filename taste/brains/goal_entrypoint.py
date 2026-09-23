@@ -230,7 +230,8 @@ async def execute_goal(config: GoalProcessInput, *, mode="run", host_factory=com
                 _owned_call, lambda: host.stop_and_drain("outer process scope terminated"),
             ))
             try:
-                return await asyncio.shield(task)
+                await asyncio.wait((task,))
+                return task.result()
             except BaseException as original:
                 try:
                     await _await_owned_task(task)

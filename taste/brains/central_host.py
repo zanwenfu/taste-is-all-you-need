@@ -57,7 +57,9 @@ async def _await_owned_task(task: asyncio.Task[Any]) -> Any:
     """Delay repeated caller cancellation until an already-owned task settles."""
     while not task.done():
         try:
-            await asyncio.shield(task)
+            # Keep cancellation outside the owned Task without installing a
+            # cancelled shield's Python 3.14 exception-logging callback.
+            await asyncio.wait((task,))
         except asyncio.CancelledError:
             continue
         except BaseException:
@@ -235,7 +237,8 @@ class CentralRuntimeHost:
             max_planner_failures=max_planner_failures,
         )))
         try:
-            return await asyncio.shield(driver)
+            await asyncio.wait((driver,))
+            return driver.result()
         except BaseException as original:
             detail = (
                 "the asynchronous goal caller cancelled"
