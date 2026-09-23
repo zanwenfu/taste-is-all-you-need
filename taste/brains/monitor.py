@@ -87,6 +87,32 @@ __all__ = [
     "TerminalDecision",
 ]
 
+
+async def _owned_monitor_call(call):
+    """Keep a judge-and-persist thread owned through repeated cancellation."""
+    def invoke():
+        try:
+            return call()
+        except (KeyboardInterrupt, SystemExit) as exc:
+            raise BaseExceptionGroup("monitor operation interrupted", [exc]) from None
+
+    task = asyncio.create_task(asyncio.to_thread(invoke))
+    try:
+        await asyncio.wait((task,))
+    except asyncio.CancelledError as original:
+        while not task.done():
+            try:
+                await asyncio.wait((task,))
+            except asyncio.CancelledError:
+                continue
+        try:
+            task.result()
+        except BaseException as failure:
+            raise BaseExceptionGroup("monitor operation failed during cancellation",
+                                     [original, failure]) from None
+        raise
+    return task.result()
+
 BATCH_SIZE = 10
 """How many events a monitor judges per model call.
 
@@ -1124,7 +1150,7 @@ class MonitorBrain:
             action = pending[0]
             return action.judgement, await self._respond_action(action, client)
 
-        judgement = await asyncio.to_thread(self.tick, force=final)
+        judgement = await _owned_monitor_call(lambda: self.tick(force=final))
         if judgement is None:
             return None, None
         pending = self.pending_actions
@@ -1447,20 +1473,11 @@ class MonitorBrain:
     ) -> TerminalAssessment:
         """Assess one work checkpoint without blocking the SDK event loop.
 
-        The complete judge-and-persist operation runs in one thread. Shielding
-        means caller cancellation cannot cancel the awaitable while that thread
-        is still publishing its answer; after a cancellation, the method waits
-        for the durable old-or-new sidecar boundary before propagating it.
+        The complete judge-and-persist operation runs in one owned thread.
+        Repeated caller cancellation waits for the durable old-or-new sidecar
+        boundary. A persistence failure is retained alongside cancellation.
         """
-        task = asyncio.create_task(
-            asyncio.to_thread(self._certify_terminal_sync, state, context)
-        )
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            with contextlib.suppress(Exception):
-                await task
-            raise
+        return await _owned_monitor_call(lambda: self._certify_terminal_sync(state, context))
 
     # ------------------------------------------------------------------ report
 

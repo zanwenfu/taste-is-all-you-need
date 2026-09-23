@@ -2154,7 +2154,19 @@ class WorkerRuntime:
         # that thread continued mutating the same durable state.
         tasks = [task for task in (self._monitor_task, self._inbox_task) if task]
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Cancelling gather() would cancel the monitor despite the rule
+            # above. wait() leaves each producer owned by the shutdown path.
+            await asyncio.wait(tasks)
+            failures = []
+            for task in tasks:
+                if task.cancelled():
+                    failures.append(RuntimeError("worker producer cancelled before confirmed shutdown"))
+                elif (failure := task.exception()) is not None:
+                    failures.append(failure)
+            if failures:
+                # Ordinary faults are already queued by the background loops;
+                # never lose an unexpected task-level failure at this boundary.
+                raise BaseExceptionGroup("worker producers failed during shutdown", failures)
         self._backgrounds_stopped = True
 
     # --------------------------------------------------------------- SDK semantics
@@ -2467,33 +2479,64 @@ class WorkerRuntime:
     # --------------------------------------------------------------- shutdown/reporting
 
     async def _disconnect_and_collect_tail(self) -> tuple[list[str], bool]:
+        """Retain the whole shutdown writer, including the final SDK messages."""
+        async def disconnect():
+            try:
+                background_failure = None
+                try:
+                    await self._stop_background_loops()
+                except BaseException as exc:
+                    background_failure = exc
+                try:
+                    result = await self._disconnect_and_collect_tail_owned()
+                except BaseException as exc:
+                    if background_failure is not None:
+                        raise BaseExceptionGroup("worker producers and SDK shutdown failed",
+                                                 [background_failure, exc]) from None
+                    raise
+                if background_failure is not None:
+                    self._shutdown_confirmed = False
+                    raise background_failure
+                return result
+            except (KeyboardInterrupt, SystemExit) as exc:
+                raise BaseExceptionGroup("worker shutdown interrupted", [exc]) from None
+
+        task = asyncio.create_task(disconnect(), name="worker-shutdown")
+        try:
+            await asyncio.wait((task,))
+        except asyncio.CancelledError as original:
+            while not task.done():
+                try:
+                    await asyncio.wait((task,))
+                except asyncio.CancelledError:
+                    continue
+            try:
+                task.result()
+            except BaseException as failure:
+                raise BaseExceptionGroup("worker shutdown failed during cancellation",
+                                         [original, failure]) from None
+            raise
+        return task.result()
+
+    async def _disconnect_and_collect_tail_owned(self) -> tuple[list[str], bool]:
         errors: list[str] = []
         durability_ok = True
-        delayed_cancellation: asyncio.CancelledError | None = None
+        disconnected = not self._connect_attempted
+        disconnect_failure: BaseException | None = None
+        self._shutdown_confirmed = False
         if self._connect_attempted:
-            disconnect_task = asyncio.create_task(
-                self._client.disconnect(), name="worker-sdk-disconnect"
-            )
-            while not disconnect_task.done():
-                try:
-                    await asyncio.shield(disconnect_task)
-                except asyncio.CancelledError as exc:
-                    # Raw asyncio cancellation can penetrate the SDK's anyio
-                    # shields if it reaches disconnect itself. Delay it until
-                    # the SDK's bounded terminate/kill/reap sequence finishes.
-                    delayed_cancellation = exc
             try:
-                disconnect_task.result()
+                # Caller cancellation never reaches this owned operation or
+                # penetrates the SDK's bounded terminate/kill/reap sequence.
+                await self._client.disconnect()
             except asyncio.CancelledError as exc:
-                raise ShutdownUnconfirmed(
-                    "SDK disconnect cancelled itself before child reaping was confirmed"
-                ) from exc
+                disconnect_failure = exc
+                errors.append("SDK disconnect cancelled itself before child reaping was confirmed")
             except Exception as exc:
+                disconnect_failure = exc
                 errors.append(f"disconnect failed: {type(exc).__name__}: {exc}")
             else:
-                self._shutdown_confirmed = True
-        else:
-            self._shutdown_confirmed = True
+                disconnected = True
 
         if self._reader_task is not None and not self._reader_task.done():
             done, _ = await asyncio.wait({self._reader_task}, timeout=self.shutdown_timeout)
@@ -2534,8 +2577,10 @@ class WorkerRuntime:
                 self._tail_uncertainty.append(
                     f"{type(message).__name__} arrived only during SDK shutdown"
                 )
-        if delayed_cancellation is not None:
-            raise delayed_cancellation
+        if not disconnected:
+            raise ShutdownUnconfirmed("; ".join(errors) or "SDK child reaping is unconfirmed") from disconnect_failure
+        # Only the entire writer/reader boundary can release the branch lease.
+        self._shutdown_confirmed = True
         return errors, durability_ok
 
     @staticmethod
@@ -2707,6 +2752,14 @@ class WorkerRuntime:
         try:
             self.assignment = self._validate_durable_input()
             return await self._run_validated()
+        except BaseException as exc:
+            if (self._connect_attempted and not self._shutdown_confirmed
+                    and not isinstance(exc, ShutdownUnconfirmed)):
+                # The entrypoint quarantines this typed failure. A generic
+                # error or cancellation would otherwise close the branch even
+                # though SDK children or shutdown writers may still be active.
+                raise ShutdownUnconfirmed("worker exited without confirmed SDK shutdown") from exc
+            raise
         finally:
             # A worker-process supervisor may kill an unresponsive process,
             # which releases this kernel lease. In-process handoff is forbidden
@@ -2800,7 +2853,6 @@ class WorkerRuntime:
             runtime_errors.append(f"{type(exc).__name__}: {exc}")
             self.brain.branch.turn(kind="runtime_error", detail=runtime_errors[-1])
         finally:
-            await self._stop_background_loops()
             tail_errors, tail_durable = await self._disconnect_and_collect_tail()
             runtime_errors.extend(tail_errors)
             durability_ok = durability_ok and tail_durable
