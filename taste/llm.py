@@ -36,6 +36,7 @@ from dotenv import load_dotenv
 
 from taste import providers
 from taste.pricing import PricingError, call_cost, ensure_priced, max_call_cost_usd
+from taste.providers.azure_openai import AzureOpenAIConfig
 from taste.providers.base import (
     Completion,
     CompletionRequest,
@@ -259,10 +260,11 @@ class LLM:
         *,
         api_key: str | None = None,
         api_keys: dict[str, str] | None = None,
+        azure_openai: AzureOpenAIConfig | None = None,
         env_dir: Path | None = None,
         load_env_file: bool = True,
         budget_usd: float | None = None,
-        max_attempts: int = 5,
+        max_attempts: int | None = None,
         backoff_base: float = 1.0,
         semaphore: threading.Semaphore | None = None,
         run_id: str = "",
@@ -270,7 +272,15 @@ class LLM:
     ) -> None:
         if type(load_env_file) is not bool:
             raise ValueError("load_env_file must be a boolean")
-        if load_env_file:
+        if azure_openai is not None and (api_key is not None or api_keys):
+            raise ValueError("Azure-only calls cannot be combined with direct provider keys")
+        if max_attempts is None:
+            max_attempts = 1 if azure_openai is not None else 5
+        if azure_openai is not None and (type(max_attempts) is not int or max_attempts != 1):
+            raise ValueError("Azure-only calls require exactly one attempt")
+        self._azure_openai = azure_openai
+        self._azure_uncertain = False
+        if load_env_file and azure_openai is None:
             load_dotenv(_find_env(env_dir), override=False)
         self._api_keys = dict(api_keys or {})
         if api_key:  # legacy single-key form: the Anthropic slot
@@ -310,8 +320,17 @@ class LLM:
         from taste.pricing import provider_for as _provider_for
 
         name = _provider_for(model)
+        if self._azure_openai is not None:
+            self._azure_openai.deployment_for(model)
+            if name != "openai":
+                raise ProtocolFailure("Azure-only calls cannot use another provider")
         if name not in self._providers:
-            self._providers[name] = providers.get(name, api_key=self._api_keys.get(name))
+            if self._azure_openai is not None:
+                from taste.providers._openai import OpenAIProvider
+
+                self._providers[name] = OpenAIProvider(azure=self._azure_openai)
+            else:
+                self._providers[name] = providers.get(name, api_key=self._api_keys.get(name))
         return self._providers[name]
 
     def ensure_ready(self, *models: str) -> None:
@@ -332,15 +351,17 @@ class LLM:
 
     def _reserve_call_budget(self, model: str, max_tokens: int) -> float:
         """Reserve worst-case exposure atomically before a provider request."""
-        if self.budget_usd is None:
-            return 0.0
-        exposure = max_call_cost_usd(
+        exposure = 0.0 if self.budget_usd is None else max_call_cost_usd(
             model,
             max_output_tokens=max_tokens,
             max_attempts=self.max_attempts,
             cap_on=self.cap_on,
         )
         with self._budget_lock:
+            if self._azure_uncertain:
+                raise ProtocolFailure("Azure call has unsettled spending; this LLM is fenced")
+            if self.budget_usd is None:
+                return 0.0
             spent = self.spent_usd()
             required = self._reserved_usd + exposure
             if spent + required > self.budget_usd:
@@ -390,6 +411,7 @@ class LLM:
         deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
         ensure_priced(model)
         exposure = self._reserve_call_budget(model, max_tokens)
+        dispatched = accounted = False
         try:
             provider = self.provider_for(model)
             request = CompletionRequest(
@@ -413,6 +435,7 @@ class LLM:
                         remaining = None if deadline is None else deadline - time.monotonic()
                         if remaining is not None and remaining <= 0:
                             raise TimeoutError("model deadline elapsed before dispatch")
+                        dispatched = True
                         completion = provider.complete(replace(request, timeout_seconds=remaining))
                     finally:
                         self._semaphore.release()
@@ -437,6 +460,7 @@ class LLM:
                         time.sleep(delay)
                     continue
                 self.stats.record(model, completion, role=role)
+                accounted = True
                 return completion
 
             raise InfraFailure(
@@ -445,7 +469,13 @@ class LLM:
                 last_error=last_exc,
             ) from last_exc
         finally:
-            self._release_call_budget(exposure)
+            if self._azure_openai is not None and dispatched and not accounted:
+                # Retain the exposure, including on BaseException. This is an
+                # in-process fence; the goal journal remains the restart fence.
+                with self._budget_lock:
+                    self._azure_uncertain = True
+            else:
+                self._release_call_budget(exposure)
 
 
 # ---------------------------------------------------------------- prompts

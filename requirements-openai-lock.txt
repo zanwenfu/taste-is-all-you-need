@@ -1,0 +1,6 @@
+# Serial Linux OpenAI migration regression environment, CPython 3.14.4.
+# Includes the existing runtime regression stack so component seams can be
+# checked during migration. Installing Claude's SDK does not enable its use.
+# This is not yet the final Claude-free worker/runtime dependency lock.
+-r requirements-brains-lock.txt
+openai==3.19.2

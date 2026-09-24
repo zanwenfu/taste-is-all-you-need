@@ -108,6 +108,19 @@ def _tiered(short: Rates, long: Rates, *, window: int, as_of: str) -> ModelPrice
 
 
 _OPENAI = {
+    # Global Standard on Azure, verified 2026-09-24 against Microsoft's
+    # /blog/gpt-6-astra-sol-and-luna-for-production-agents-in-microsoft-foundry/
+    # and the OpenAI model cards. Same rates as OpenAI Standard; no Data Zone
+    # or Priority deployment is admitted by AzureOpenAIConfig. Versions are
+    # pinned to the Azure deployments, never a mutable deployment alias.
+    "gpt-6-astra-2026-09-03": _tiered(
+        Rates(10.00, 50.00, 1.00, 12.50), Rates(20.00, 75.00, 2.00, 25.00),
+        window=1_050_000, as_of="2026-09-24",
+    ),
+    "gpt-6-sol-2026-09-22": _tiered(
+        Rates(2.00, 10.00, 0.20, 2.50), Rates(4.00, 15.00, 0.40, 5.00),
+        window=1_050_000, as_of="2026-09-24",
+    ),
     "gpt-5.6-sol": _tiered(
         Rates(5.00, 30.00, 0.50, 6.25), Rates(10.00, 45.00, 1.00, 12.50),
         window=1_050_000, as_of="2026-08-15",

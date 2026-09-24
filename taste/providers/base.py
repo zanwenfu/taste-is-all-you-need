@@ -121,6 +121,8 @@ class Completion:
     """What was actually sent, for the manifest — a provider that rejects or
     ignores a parameter must not leave the record claiming otherwise."""
     raw: Any = field(default=None, compare=False, repr=False)
+    provenance: Mapping[str, str] = field(default_factory=dict)
+    """Nonsecret endpoint/deployment/served-model identity, when available."""
 
     @property
     def summary_text(self) -> str:

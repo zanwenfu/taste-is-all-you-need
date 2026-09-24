@@ -31,8 +31,10 @@ import json
 import os
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
+from taste.providers.azure_openai import AzureOpenAIConfig
 from taste.providers.base import (
     Completion,
     CompletionRequest,
@@ -58,8 +60,11 @@ _STOP_REASONS = {
 class OpenAIProvider:
     name = "openai"
 
-    def __init__(self, *, api_key: str | None = None) -> None:
-        self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
+    def __init__(self, *, api_key: str | None = None, azure: AzureOpenAIConfig | None = None) -> None:
+        if azure is not None and api_key is not None:
+            raise ProtocolFailure("Azure credentials must come from the explicit Azure configuration")
+        self._azure = azure
+        self._api_key = azure.api_key if azure is not None else api_key or os.environ.get("OPENAI_API_KEY")
         self._client: Any = None
 
     def ensure_ready(self) -> None:
@@ -77,7 +82,22 @@ class OpenAIProvider:
                 ) from exc
             # max_retries=0: the facade owns retry policy so it cannot differ
             # between providers or compound with the SDK's own.
-            self._client = openai.OpenAI(api_key=self._api_key, max_retries=0)
+            if self._azure is None:
+                self._client = openai.OpenAI(api_key=self._api_key, max_retries=0)
+            else:
+                import httpx
+
+                if os.environ.get("OPENAI_CUSTOM_HEADERS"):
+                    # The SDK merges this variable into explicit headers,
+                    # including Authorization. Refuse before creating a client
+                    # rather than mutate process environment across threads.
+                    raise ProtocolFailure("Azure-only calls forbid OPENAI_CUSTOM_HEADERS")
+                self._client = openai.OpenAI(
+                    api_key=self._api_key, base_url=self._azure.base_url,
+                    organization="", project="", admin_api_key="", webhook_secret="",
+                    max_retries=0, timeout=60.0,
+                    http_client=httpx.Client(trust_env=False, follow_redirects=False),
+                )
         return self._client
 
     # ------------------------------------------------------------ calls
@@ -85,10 +105,11 @@ class OpenAIProvider:
     def complete(self, request: CompletionRequest) -> Completion:
         if type(request.max_tokens) is not int or request.max_tokens < 1:
             raise ProtocolFailure("max_tokens must be a positive integer")
+        binding = self._azure.deployment_for(request.model) if self._azure is not None else None
         client = self._ensure_client()
 
         kwargs: dict[str, Any] = {
-            "model": request.model,
+            "model": binding.deployment if binding is not None else request.model,
             "instructions": _instructions(request.system),
             "input": self._to_input(request.messages),
             "max_output_tokens": request.max_tokens,
@@ -119,9 +140,25 @@ class OpenAIProvider:
         if not isinstance(payload, dict):
             raise ProtocolFailure("Responses payload must be a JSON object")
         usage = self._to_usage(payload.get("usage"))
-        return self._to_completion(raw.parse(), request, dropped, usage=usage)
+        completion = self._to_completion(raw.parse(), request, dropped, usage=usage)
+        if binding is not None:
+            served = raw.headers.get("x-ms-served-model") or payload.get("model")
+            if served != binding.model or payload.get("model") not in {binding.model, binding.deployment}:
+                raise ProtocolFailure("Azure served-model identity differs from the pinned deployment")
+            completion = replace(completion, model=served, provenance={
+                "route": "azure_openai", "endpoint": self._azure.base_url,
+                "deployment": binding.deployment, "deployment_type": binding.deployment_type,
+                "served_model": served,
+                "model_session": raw.headers.get("azureml-model-session", ""),
+                "region": raw.headers.get("x-ms-region", ""),
+            })
+        return completion
 
     def is_retryable(self, exc: Exception) -> bool:
+        if self._azure is not None:
+            # A lost reply may already have been billed. The new Azure path
+            # requires explicit settlement, never automatic paid replays.
+            return False
         try:
             import openai
         except ImportError:  # pragma: no cover
