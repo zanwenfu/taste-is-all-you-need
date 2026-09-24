@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from taste.brains.owned_thread import start_owned_thread
 from taste.llm import LLM, BudgetExceeded
 from taste.pricing import call_cost, ensure_priced, max_call_cost_usd, table_sha
 from taste.providers.azure_openai import AzureOpenAIConfig
@@ -358,7 +359,7 @@ class ResponsesSession:
             # its caller. Awaiting to_thread directly would abandon a running
             # HTTP operation in that case. This Future is not a Task, and wait
             # never propagates cancellation into it.
-            operation = asyncio.get_running_loop().run_in_executor(None, self._dispatch, request)
+            operation = start_owned_thread(self._dispatch, request)
             interrupted = None
             wait_errors = []
             while not operation.done():

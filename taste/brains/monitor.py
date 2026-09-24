@@ -72,6 +72,7 @@ from enum import StrEnum
 from typing import Any
 
 from taste.brains.contract import CONTRACT_PATH, Contract
+from taste.brains.owned_thread import start_owned_thread
 from taste.brains.records import Assignment, contract_digest
 from taste.memstore import Store, Verdict
 
@@ -96,7 +97,7 @@ async def _owned_monitor_call(call):
         except (KeyboardInterrupt, SystemExit) as exc:
             raise BaseExceptionGroup("monitor operation interrupted", [exc]) from None
 
-    task = asyncio.create_task(asyncio.to_thread(invoke))
+    task = start_owned_thread(invoke)
     try:
         await asyncio.wait((task,))
     except asyncio.CancelledError as original:

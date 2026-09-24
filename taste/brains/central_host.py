@@ -28,6 +28,7 @@ from taste.brains.central_communication import CentralCommunication
 from taste.brains.central_planner import CentralPlanner, Goal, PlannerTransport
 from taste.brains.central_runtime import CentralRuntime, CycleOutcome, GoalOutcome
 from taste.brains.communication import Communicator
+from taste.brains.owned_thread import start_owned_thread
 from taste.brains.planner_transport import PLANNER_RECEIPT_BRANCH, LLMPlannerTransport
 from taste.brains.supervisor import (
     CentralSupervisor,
@@ -53,7 +54,7 @@ def _owned_call(call: Any) -> Any:
         raise BaseExceptionGroup("owned goal operation was interrupted", [exc]) from None
 
 
-async def _await_owned_task(task: asyncio.Task[Any]) -> Any:
+async def _await_owned_task(task: asyncio.Future[Any]) -> Any:
     """Delay repeated caller cancellation until an already-owned task settles."""
     while not task.done():
         try:
@@ -231,11 +232,11 @@ class CentralRuntimeHost:
         This is cooperative shutdown, not a hard timeout for a hung provider;
         benchmark orchestration also needs an owned outer process boundary.
         """
-        driver = asyncio.create_task(asyncio.to_thread(_owned_call, partial(
+        driver = start_owned_thread(_owned_call, partial(
             self.run, max_generations=max_generations, wall_clock_seconds=wall_clock_seconds,
             between_cycles=between_cycles, monotonic=monotonic,
             max_planner_failures=max_planner_failures,
-        )))
+        ))
         try:
             await asyncio.wait((driver,))
             return driver.result()
@@ -254,9 +255,9 @@ class CentralRuntimeHost:
                     failures.append(exc)
             # Also settle failures before the driver's normal try/finally,
             # e.g. a run-limit validation error after workers already existed.
-            cleanup = asyncio.create_task(asyncio.to_thread(
+            cleanup = start_owned_thread(
                 _owned_call, partial(self.stop_and_drain, detail),
-            ))
+            )
             try:
                 await _await_owned_task(cleanup)
             except BaseException as exc:

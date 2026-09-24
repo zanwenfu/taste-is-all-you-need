@@ -31,6 +31,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from taste.brains.owned_thread import start_owned_thread
+
 
 class TerminalFenced(RuntimeError):
     """This environment may not accept another terminal effect."""
@@ -289,28 +291,31 @@ class TerminalBroker:
             self._operation = asyncio.create_task(self._execute_owned(request, self._interrupt))
             try:
                 await asyncio.wait((self._operation,))
+                return self._operation.result()
             except asyncio.CancelledError as cancelled:
                 self._closing = True
                 if not self._interrupt.done():
                     self._interrupt.set_result(None)
                 try:
-                    await _settle(self._operation)
+                    # Whole-loop shutdown can cancel the owner before its
+                    # coroutine enters the cleanup handler. Its intent is
+                    # durable, but the task environment still needs a stop.
+                    with suppress(asyncio.CancelledError):
+                        await _settle(self._operation)
                     # Cancellation can race a fully persisted receipt. The
                     # effect stays completed, but the caller still ended the trial.
                     if self.phase != "stopped":
                         self._fence("terminal caller cancelled after completion")
-                        self._operation = asyncio.create_task(self._stop_owned())
-                        await _settle(self._operation)
+                        await self._stop_owned()
                 except asyncio.CancelledError:
                     raise cancelled from None
                 except BaseException as failure:
                     raise BaseExceptionGroup("terminal cancellation and settlement failed", [cancelled, failure]) from None
                 raise
-            return self._operation.result()
 
     async def _stop_owned(self):
         self._identity()
-        receipt = await _settle(asyncio.create_task(asyncio.to_thread(_call, self.backend.stop_and_confirm)))
+        receipt = await _settle(start_owned_thread(_call, self.backend.stop_and_confirm))
         if receipt != self.binding.environment_id:
             raise TerminalConflict("termination receipt identifies another environment")
         with self._db:
@@ -333,7 +338,7 @@ class TerminalBroker:
             timeout = min(request.timeout_seconds, self.binding.deadline_unix - time.time())
             if timeout <= 0:
                 raise TimeoutError("terminal deadline expired before execution")
-            effect = asyncio.create_task(asyncio.to_thread(_call, self._execute_backend, request))
+            effect = start_owned_thread(_call, self._execute_backend, request)
             done, _ = await asyncio.wait((effect, interrupt), timeout=timeout)
             if interrupt in done:
                 raise asyncio.CancelledError()
@@ -377,13 +382,20 @@ class TerminalBroker:
             self._abort_task = asyncio.create_task(self._abort_owned())
         try:
             await asyncio.wait((self._abort_task,))
+            return self._abort_task.result()
         except asyncio.CancelledError as cancelled:
             try:
-                await _settle(self._abort_task)
+                while True:
+                    try:
+                        await _settle(self._abort_task)
+                        break
+                    except asyncio.CancelledError:
+                        # A task cancelled before it starts owns no cleanup.
+                        # Keep this caller responsible until a stop completes.
+                        self._abort_task = asyncio.create_task(self._abort_owned())
             except BaseException as failure:
                 raise BaseExceptionGroup("terminal abort cancellation and drainage failed", [cancelled, failure]) from None
             raise
-        return self._abort_task.result()
 
     async def _abort_owned(self):
         operation = self._operation
