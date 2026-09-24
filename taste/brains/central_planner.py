@@ -58,7 +58,7 @@ from taste.brains.records import (
     contract_digest,
 )
 from taste.brains.supervisor import RUN_ROOT, SupervisorRun
-from taste.brains.worker_runtime import WORKER_REPORT_PATH
+from taste.brains.worker_protocol import WORKER_REPORT_PATH
 from taste.llm import MODEL_MONITOR, MODEL_WORKER
 from taste.memstore import Branch, State, Store
 from taste.memstore.backend import BLOB_MODES

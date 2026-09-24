@@ -63,6 +63,13 @@ from taste.brains.delivery import is_control_path, validate_artifact_path
 from taste.brains.records import ArtifactRef, Assignment, WorkerReport, contract_digest
 from taste.brains.subbrain import SubBrain, SubBrainResult, Waking
 from taste.brains.worker_environment import PROVIDER_OVERRIDE_ENV
+from taste.brains.worker_protocol import (
+    ASSIGNMENT_PATH,
+    WORKER_REPORT_PATH,
+    WORKER_RESULT_SCHEMA,
+    ContractMismatch,
+    ShutdownUnconfirmed,
+)
 from taste.memstore.backend import BLOB_MODES
 from taste.pricing import PRICES, PricingError, call_cost, ensure_priced, table_sha
 
@@ -76,34 +83,6 @@ __all__ = [
     "WorkerRuntime",
 ]
 
-ASSIGNMENT_PATH = "assignment.json"
-WORKER_REPORT_PATH = "worker-report.json"
-
-WORKER_RESULT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "status": {"type": "string", "enum": ["completed", "blocked", "continue"]},
-        "summary": {"type": "string"},
-        "evidence": {"type": "array", "items": {"type": "string"}},
-        "accepted_inbox_ids": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "uniqueItems": True,
-        },
-        "accepted_verdicts": {
-            "type": "object",
-            "additionalProperties": {"type": "integer", "minimum": 1},
-        },
-    },
-    "required": [
-        "status",
-        "summary",
-        "evidence",
-        "accepted_inbox_ids",
-        "accepted_verdicts",
-    ],
-    "additionalProperties": False,
-}
 
 _TRACKED_TASK_TYPES = frozenset({"local_agent", "local_workflow"})
 _ABORT_REASONS = frozenset({"aborted_streaming", "aborted_tools"})
@@ -133,16 +112,8 @@ _AUDITED_CLAUDE_CODE_SHA256 = frozenset(
 )
 
 
-class ContractMismatch(RuntimeError):
-    """The runtime was asked to execute something other than durable truth."""
-
-
 class MirrorDurabilityError(RuntimeError):
     """The SDK continued after failing to mirror part of its transcript."""
-
-
-class ShutdownUnconfirmed(RuntimeError):
-    """The SDK client may still own a live child, so branch handoff is unsafe."""
 
 
 @dataclass(frozen=True)

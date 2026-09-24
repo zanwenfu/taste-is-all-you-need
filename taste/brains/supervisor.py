@@ -40,7 +40,7 @@ from taste.brains.monitor import TerminalAssessment
 from taste.brains.python_process import isolated_python_argv
 from taste.brains.records import Assignment, LifecycleEvent, WorkerReport, contract_digest
 from taste.brains.worker_environment import PROVIDER_OVERRIDE_ENV
-from taste.brains.worker_runtime import ASSIGNMENT_PATH, WORKER_REPORT_PATH
+from taste.brains.worker_protocol import ASSIGNMENT_PATH, WORKER_REPORT_PATH
 from taste.memstore import Branch, State, Store
 from taste.memstore.backend import BLOB_MODES
 from taste.memstore.objects import WorktreeUnavailable

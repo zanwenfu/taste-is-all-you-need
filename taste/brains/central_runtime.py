@@ -46,7 +46,7 @@ from taste.brains.supervisor import (
     SupervisorRun,
     SupervisorStateConflict,
 )
-from taste.brains.worker_runtime import WORKER_REPORT_PATH
+from taste.brains.worker_protocol import WORKER_REPORT_PATH
 from taste.memstore import Branch, Store
 
 __all__ = [

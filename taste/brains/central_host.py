@@ -34,7 +34,7 @@ from taste.brains.supervisor import (
     ProcessLauncher,
     SubprocessLauncher,
 )
-from taste.brains.worker_entrypoint import worker_command_factory
+from taste.brains.worker_launch import worker_command_factory
 from taste.llm import LLM, MODEL_MONITOR, MODEL_PLANNER
 from taste.memstore import Branch, Store
 from taste.resources import close_resources

@@ -48,13 +48,16 @@ from taste.brains.monitor import BATCH_SIZE, MonitorBrain
 from taste.brains.monitor_judge import LLMMonitorJudge
 from taste.brains.records import Assignment
 from taste.brains.subbrain import SubBrain, SubBrainResult
-from taste.brains.supervisor import LaunchSpec, mark_worker_ready
-from taste.brains.worker_runtime import (
+from taste.brains.supervisor import mark_worker_ready
+from taste.brains.worker_launch import worker_command, worker_command_factory
+from taste.brains.worker_protocol import (
     ASSIGNMENT_PATH,
     ContractMismatch,
     ShutdownUnconfirmed,
-    WorkerRuntime,
+    _assignment_monitor_budget_usd,
+    assignment_run_id,
 )
+from taste.brains.worker_runtime import WorkerRuntime
 from taste.llm import LLM, MODEL_MONITOR
 from taste.memstore import Store
 from taste.memstore.backend import BLOB_MODES
@@ -176,25 +179,6 @@ class DurableWorkerInput:
     contract: Contract
     head_state_id: str
     run_id: str
-
-
-def assignment_run_id(assignment: Assignment) -> str:
-    """The same content-bound run identity minted by CentralSupervisor."""
-    token = hashlib.sha256(assignment.to_json().encode("utf-8")).hexdigest()
-    return f"worker-run.{token}"
-
-
-def _assignment_monitor_budget_usd(assignment: Assignment) -> float | None:
-    if "monitor_budget_usd" not in assignment.resources:
-        return None
-    value = assignment.resources["monitor_budget_usd"]
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not 0 < float(value) < float("inf")
-    ):
-        raise ValueError("Assignment.resources.monitor_budget_usd must be finite and positive")
-    return float(value)
 
 
 def _expected_readiness_path(store: Store, run_id: str) -> Path:
@@ -328,77 +312,6 @@ def _validate_acquired_brain(
     dirty = brain.branch.dirty_paths()
     if dirty:
         raise EntrypointInputError("worker worktree was dirty when its lease was acquired")
-
-
-def worker_command(
-    spec: LaunchSpec,
-    *,
-    repo_root: Path,
-    session: str,
-    python_executable: str | None = None,
-    monitor_model: str = MODEL_MONITOR,
-) -> tuple[str, ...]:
-    """Build the non-secret argv for one exact LaunchSpec."""
-    executable = python_executable or sys.executable
-    if not executable or "\x00" in executable:
-        raise ValueError("python_executable is invalid")
-    root = Path(repo_root).expanduser().resolve(strict=True)
-    _check_name(session, "session")
-    if spec.run_id != assignment_run_id(spec.assignment):
-        raise ValueError("LaunchSpec run_id does not match its exact assignment")
-    if _EXACT_OBJECT_ID.fullmatch(spec.prepared_state_id) is None:
-        raise ValueError("LaunchSpec prepared_state_id is not exact")
-    if (
-        not isinstance(monitor_model, str)
-        or not monitor_model.strip()
-        or monitor_model != monitor_model.strip()
-        or len(monitor_model) > 256
-        or any(ord(character) < 32 for character in monitor_model)
-    ):
-        raise ValueError("monitor_model is not a stable model id")
-    from taste.brains.python_process import isolated_python_argv
-
-    command = isolated_python_argv(executable,
-        "import runpy; runpy.run_module('taste.brains.worker_entrypoint', "
-        "run_name='__main__', alter_sys=True)", [
-        "--repo-root",
-        str(root),
-        "--session",
-        session,
-        "--worker",
-        spec.assignment.worker,
-        "--model",
-        spec.assignment.model,
-        "--prepared-state",
-        spec.prepared_state_id,
-        "--monitor-model",
-        monitor_model,
-    ])
-    monitor_budget = _assignment_monitor_budget_usd(spec.assignment)
-    if monitor_budget is not None:
-        command.extend(("--monitor-budget-usd", str(monitor_budget)))
-    return tuple(command)
-
-
-def worker_command_factory(
-    repo_root: Path,
-    session: str,
-    *,
-    python_executable: str | None = None,
-    monitor_model: str = MODEL_MONITOR,
-) -> Callable[[LaunchSpec], tuple[str, ...]]:
-    """Return the command callable accepted by SubprocessLauncher."""
-
-    def command(spec: LaunchSpec) -> tuple[str, ...]:
-        return worker_command(
-            spec,
-            repo_root=repo_root,
-            session=session,
-            python_executable=python_executable,
-            monitor_model=monitor_model,
-        )
-
-    return command
 
 
 async def execute_worker(
