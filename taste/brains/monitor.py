@@ -125,6 +125,8 @@ event, and it stays flat instead of climbing.
 
 UNJUDGED_KINDS = frozenset(
     {
+        "responses_binding",
+        "responses_request",
         "runtime_budget_receipt",
         "runtime_budget_connection_intent",
         "runtime_session_bound",

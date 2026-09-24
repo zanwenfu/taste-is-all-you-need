@@ -11,6 +11,7 @@ import pytest
 @pytest.mark.parametrize("module", [
     "central_planner", "central_runtime", "supervisor", "central_host",
     "goal_entrypoint", "worker_launch", "worker_protocol", "monitor", "responses_session",
+    "responses_conversation",
 ])
 def test_coordinator_imports_do_not_require_a_model_sdk(module):
     code = f"""

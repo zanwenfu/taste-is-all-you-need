@@ -259,6 +259,11 @@ class ResponsesSession:
         return value
 
     @property
+    def fenced(self) -> bool:
+        self._check()
+        return self._fenced
+
+    @property
     def unsettled(self) -> bool:
         self._check()
         return bool(self._db.execute("SELECT 1 FROM calls WHERE status IN ('pending','unknown') LIMIT 1").fetchone())
