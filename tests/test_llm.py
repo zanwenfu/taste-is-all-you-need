@@ -273,7 +273,7 @@ class _FakeResponse:
         self.output = output
         self.model = "gpt-5.6-terra"
         self.usage = _FakeItem(input_tokens=10, output_tokens=5,
-                               input_tokens_details=_FakeItem(cached_tokens=0),
+                               input_tokens_details=_FakeItem(cached_tokens=0, cache_write_tokens=0),
                                output_tokens_details=_FakeItem(reasoning_tokens=0))
 
 

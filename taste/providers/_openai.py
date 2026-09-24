@@ -20,15 +20,17 @@ buckets here is what makes a dollar figure comparable across families;
 getting it wrong double-counts every cached token on one side of the study.
 
 **Reasoning tokens are inside ``output_tokens``** and are reported separately
-for analysis, never added. They also consume ``max_output_tokens``, which is
-why a ceiling sized for a one-word verdict can be spent entirely on thinking
-and return nothing — see ``_REASONING_HEADROOM``.
+for analysis, never added. They also consume ``max_output_tokens``. A small
+ceiling may produce no visible output; the adapter must honor it anyway,
+because the facade reserved a budget for precisely that ceiling.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from collections import Counter
+from collections.abc import Mapping
 from typing import Any
 
 from taste.providers.base import (
@@ -37,20 +39,13 @@ from taste.providers.base import (
     ProtocolFailure,
     ToolCall,
     Usage,
-    require,
+    UsageSchemaError,
 )
 
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 
 # Blocks carrying provider-native items through the canonical transcript.
 _NATIVE = "_openai_item"
-
-# Reasoning tokens are billed as output AND drawn from max_output_tokens, so a
-# ceiling sized for the visible answer can be consumed entirely by thinking,
-# returning an empty message the Monitor would score as a failed step. This
-# floor keeps a small verdict call from failing for a reason unrelated to the
-# task. It raises the ceiling, not the spend: unused tokens cost nothing.
-_REASONING_HEADROOM = 2048
 
 _STOP_REASONS = {
     "completed": "end_turn",
@@ -88,16 +83,21 @@ class OpenAIProvider:
     # ------------------------------------------------------------ calls
 
     def complete(self, request: CompletionRequest) -> Completion:
+        if type(request.max_tokens) is not int or request.max_tokens < 1:
+            raise ProtocolFailure("max_tokens must be a positive integer")
         client = self._ensure_client()
 
         kwargs: dict[str, Any] = {
             "model": request.model,
             "instructions": _instructions(request.system),
             "input": self._to_input(request.messages),
-            "max_output_tokens": max(request.max_tokens, _REASONING_HEADROOM),
+            "max_output_tokens": request.max_tokens,
             # No server-side state: a run must be reproducible from its own
             # transcript, not from something the provider remembers.
             "store": False,
+            # Required by Azure's stateless Responses contract; also accepted
+            # by OpenAI versions that now include encrypted content by default.
+            "include": ["reasoning.encrypted_content"],
         }
         if request.tools:
             kwargs["tools"] = [_to_tool(t) for t in request.tools]
@@ -111,8 +111,15 @@ class OpenAIProvider:
         # that never applied, so the drop is recorded instead.
         dropped = ["temperature"] if request.sampling.temperature is not None else []
 
-        response = client.responses.create(**kwargs)
-        return self._to_completion(response, request, dropped)
+        raw = client.responses.with_raw_response.create(**kwargs)
+        # Validate counters before the SDK's permissive model construction:
+        # it can coerce strings/bools into integer counters, concealing an
+        # incompatible wire schema from the accounting boundary.
+        payload = raw.http_response.json()
+        if not isinstance(payload, dict):
+            raise ProtocolFailure("Responses payload must be a JSON object")
+        usage = self._to_usage(payload.get("usage"))
+        return self._to_completion(raw.parse(), request, dropped, usage=usage)
 
     def is_retryable(self, exc: Exception) -> bool:
         try:
@@ -137,13 +144,28 @@ class OpenAIProvider:
                 items.append({"role": role, "content": content})
                 continue
 
+            # Older saved turns contain both canonical text and a native
+            # message with that text. Replay the native message exactly once,
+            # preserving its phase, annotations and provider-specific fields.
+            # Count matching shadows so unrelated added text is retained.
+            shadows: Counter[str] = Counter()
+            for block in content or []:
+                native = block.get("item", {}) if block.get("type") == _NATIVE else {}
+                if isinstance(native, dict) and native.get("type") == "message":
+                    shadows.update(
+                        p["text"] for p in native.get("content", [])
+                        if p.get("type") == "output_text"
+                    )
             for block in content or []:
                 kind = block.get("type")
                 if kind == _NATIVE:
                     # Reasoning and function_call items, replayed verbatim.
                     items.append(block["item"])
                 elif kind == "text":
-                    items.append({"role": role, "content": block["text"]})
+                    if shadows[block["text"]]:
+                        shadows[block["text"]] -= 1
+                    else:
+                        items.append({"role": role, "content": block["text"]})
                 elif kind == "tool_result":
                     items.append(
                         {
@@ -159,11 +181,20 @@ class OpenAIProvider:
     # ------------------------------------------------------------ response
 
     def _to_completion(
-        self, response: Any, request: CompletionRequest, dropped: list[str]
+        self, response: Any, request: CompletionRequest, dropped: list[str],
+        *, usage: Usage | None = None,
     ) -> Completion:
         texts: list[str] = []
         calls: list[ToolCall] = []
         transcript: list[dict[str, Any]] = []
+        status = getattr(response, "status", "") or ""
+        stop = _STOP_REASONS.get(status, "other")
+        if status == "incomplete":
+            reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+            if reason == "content_filter":
+                stop = "content_filter"
+        refused = False
+        call_ids: set[str] = set()
 
         for item in getattr(response, "output", []) or []:
             kind = getattr(item, "type", None)
@@ -173,34 +204,40 @@ class OpenAIProvider:
                 for part in getattr(item, "content", []) or []:
                     if getattr(part, "type", None) == "output_text":
                         texts.append(part.text)
-                        transcript.append({"type": "text", "text": part.text})
+                    elif getattr(part, "type", None) == "refusal":
+                        refused = True
                 # The message item itself is replayed so the model sees its
                 # own prior turn in the same shape it produced it.
                 transcript.append({"type": _NATIVE, "item": native})
 
             elif kind == "function_call":
-                raw_arguments = getattr(item, "arguments", "") or "{}"
+                # Even a parseable call in a truncated/failed response is not
+                # an authorized action. Never expose it to a tool dispatcher.
+                if status != "completed":
+                    continue
+                raw_arguments = getattr(item, "arguments", "")
                 try:
-                    arguments = json.loads(raw_arguments)
-                except json.JSONDecodeError as exc:
-                    if _STOP_REASONS.get(getattr(response, "status", "") or "", "") == "max_tokens":
-                        # The output ceiling cut this call's JSON mid-string.
-                        # Drop the fragment and let stop_reason=max_tokens
-                        # reach the cores, whose truncation guard discards
-                        # the whole turn and reprompts — a retryable event,
-                        # not a protocol violation. Raising here killed three
-                        # of nine calibration cells as typed errors.
-                        continue
-                    # A complete response with malformed arguments is a real
-                    # protocol violation. The cores index into these; a string
-                    # would fail far from here with a confusing error.
+                    arguments = json.loads(raw_arguments, parse_constant=_reject_constant)
+                    # JSON numeric overflow (1e999) becomes inf without going
+                    # through parse_constant. Reject it recursively as well.
+                    json.dumps(arguments, allow_nan=False)
+                except (TypeError, ValueError) as exc:
                     raise ProtocolFailure(
                         f"tool call {getattr(item, 'name', '?')!r} had unparseable "
-                        f"arguments: {raw_arguments[:200]!r}"
+                        "JSON arguments"
                     ) from exc
+                if not isinstance(arguments, dict):
+                    raise ProtocolFailure("tool arguments must be a JSON object")
+                call_id = getattr(item, "call_id", None)
+                name = getattr(item, "name", None)
+                if not isinstance(call_id, str) or not call_id or call_id in call_ids:
+                    raise ProtocolFailure("tool call_id is missing or duplicated")
+                if not isinstance(name, str) or not name:
+                    raise ProtocolFailure("tool name is missing")
+                call_ids.add(call_id)
                 call = ToolCall(
-                    id=getattr(item, "call_id", "") or getattr(item, "id", ""),
-                    name=getattr(item, "name", ""),
+                    id=call_id,
+                    name=name,
                     arguments=arguments,
                     raw_arguments=raw_arguments,
                 )
@@ -220,8 +257,10 @@ class OpenAIProvider:
                 # model's own context across a tool call.
                 transcript.append({"type": _NATIVE, "item": native})
 
-        stop = _STOP_REASONS.get(getattr(response, "status", "") or "", "other")
-        if calls and stop == "end_turn":
+        if refused:
+            stop = "refusal"
+            calls.clear()
+        elif calls and stop == "end_turn":
             stop = "tool_use"
 
         sampling: dict[str, Any] = {"temperature": None, "effort": request.sampling.effort}
@@ -234,40 +273,32 @@ class OpenAIProvider:
             stop_reason=stop,
             model=getattr(response, "model", "") or request.model,
             provider=self.name,
-            usage=self._to_usage(response.usage),
+            usage=usage if usage is not None else self._to_usage(response.usage),
             transcript_blocks=tuple(transcript),
             effective_sampling=sampling,
             raw=response,
         )
 
     def _to_usage(self, usage: Any) -> Usage:
-        total_prompt = require(usage, "input_tokens", "prompt_tokens")
-        output = require(usage, "output_tokens", "completion_tokens")
+        total_prompt = _counter(usage, "input_tokens")
+        output = _counter(usage, "output_tokens")
+        details = _field(usage, "input_tokens_details")
+        cached = _counter(details, "cached_tokens")
+        written = _counter(details, "cache_write_tokens")
+        reasoning = _counter(_field(usage, "output_tokens_details"), "reasoning_tokens")
+        if cached + written > total_prompt or reasoning > output:
+            raise UsageSchemaError("Responses usage buckets exceed their reported total")
 
-        cached = 0
-        details = getattr(usage, "input_tokens_details", None) or getattr(
-            usage, "prompt_tokens_details", None
-        )
-        if details is not None:
-            cached = int(getattr(details, "cached_tokens", 0) or 0)
-
-        reasoning = 0
-        out_details = getattr(usage, "output_tokens_details", None) or getattr(
-            usage, "completion_tokens_details", None
-        )
-        if out_details is not None:
-            reasoning = int(getattr(out_details, "reasoning_tokens", 0) or 0)
-
-        # THE subtraction: the ledger's input bucket is the uncached remainder.
+        # GPT-5.6+ bills writes separately, at 1.25x ordinary input, rather
+        # than adding a surcharge to tokens already counted as uncached.
         return Usage(
-            input_tokens=max(total_prompt - cached, 0),
+            input_tokens=total_prompt - cached - written,
             output_tokens=output,
             cache_read_tokens=cached,
-            # Caching is automatic here: prefixes are cached without a write
-            # charge, so there is no bucket to bill.
-            cache_write_tokens=0,
+            cache_write_tokens=written,
             reasoning_tokens=reasoning,
-            raw={"input_tokens": total_prompt, "cached_tokens": cached},
+            raw={"input_tokens": total_prompt, "cached_tokens": cached,
+                 "cache_write_tokens": written},
         )
 
 
@@ -284,15 +315,16 @@ def _instructions(system: list[dict[str, Any]]) -> str:
 def _to_tool(tool: dict[str, Any]) -> dict[str, Any]:
     """Canonical tool schema -> Responses function tool (flat, not nested).
 
-    ``strict`` is left unset deliberately: it constrains the schema dialect,
-    and a tool that silently stops being callable is worse than one that
-    occasionally needs a retry.
+    Explicit non-strict mode preserves the existing schemas' optional fields.
+    Responses may otherwise normalize an omitted ``strict`` into strict mode.
+    Tool handlers still validate arguments before any effect.
     """
     return {
         "type": "function",
         "name": tool["name"],
         "description": tool.get("description", ""),
         "parameters": tool.get("input_schema", {"type": "object"}),
+        "strict": False,
     }
 
 
@@ -303,3 +335,18 @@ def _as_dict(item: Any) -> Any:
         except Exception:
             pass
     return item
+
+
+def _field(value: Any, name: str) -> Any:
+    return value.get(name) if isinstance(value, Mapping) else getattr(value, name, None)
+
+
+def _counter(value: Any, name: str) -> int:
+    count = _field(value, name)
+    if type(count) is not int or count < 0:
+        raise UsageSchemaError(f"Responses usage {name} must be a non-negative integer")
+    return count
+
+
+def _reject_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant: {value}")
