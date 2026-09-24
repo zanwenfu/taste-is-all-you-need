@@ -232,6 +232,11 @@ class CentralRuntimeHost:
         This is cooperative shutdown, not a hard timeout for a hung provider;
         benchmark orchestration also needs an owned outer process boundary.
         """
+        if asyncio.current_task().cancelling():
+            # Mark the stop before starting the driver thread. Its first
+            # provider call can otherwise win the race with our next await.
+            # Still run the driver/cleanup path to drain existing workers.
+            self.request_stop("the asynchronous goal caller cancelled")
         driver = start_owned_thread(_owned_call, partial(
             self.run, max_generations=max_generations, wall_clock_seconds=wall_clock_seconds,
             between_cycles=between_cycles, monotonic=monotonic,

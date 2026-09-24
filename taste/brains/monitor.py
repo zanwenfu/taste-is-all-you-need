@@ -91,6 +91,9 @@ __all__ = [
 
 async def _owned_monitor_call(call):
     """Keep a judge-and-persist thread owned through repeated cancellation."""
+    if asyncio.current_task().cancelling():
+        raise asyncio.CancelledError()
+
     def invoke():
         try:
             return call()

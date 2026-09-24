@@ -419,3 +419,64 @@ asyncio.run(conversation.step())
     finally:
         session.close()
         store.close()
+
+
+def test_context_read_cannot_splice_journal_across_a_concurrent_checkpoint(worker, sdk_transport, monkeypatch):
+    from taste.memstore.store import BranchView
+
+    sent = install(sdk_transport, [message("complete")])
+    conversation = make(worker)
+    conversation.observe("contract", "the exact task must survive checkpointing")
+    entered, release, checkpointed = threading.Event(), threading.Event(), threading.Event()
+    writer_entered = threading.Event()
+    original = BranchView.pending_turns
+    first = True
+    race_observed, errors = [], []
+
+    def pause_pending(view):
+        nonlocal first
+        if first:
+            first = False
+            entered.set()
+            assert release.wait(10)
+        return original(view)
+
+    def checkpoint():
+        try:
+            assert entered.wait(5)
+            with worker.branch._mutation_lock:
+                writer_entered.set()
+                worker.branch.checkpoint("publish while the worker reads its context")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            checkpointed.set()
+
+    def release_reader():
+        try:
+            assert entered.wait(5)
+            crossed = writer_entered.wait(1)
+            race_observed.append(crossed)
+            if crossed:
+                assert checkpointed.wait(10)
+        finally:
+            release.set()
+
+    monkeypatch.setattr(BranchView, "pending_turns", pause_pending)
+    writer = threading.Thread(target=checkpoint)
+    observer = threading.Thread(target=release_reader)
+    writer.start()
+    observer.start()
+    try:
+        reply = asyncio.run(conversation.step())
+        assert reply.summary_text == "complete"
+    finally:
+        release.set()
+        writer.join(10)
+        observer.join(10)
+    assert not writer.is_alive() and not observer.is_alive() and not errors
+    assert race_observed == [False], "checkpoint crossed the context snapshot"
+    assert len(sent) == 1
+    assert json.loads(sent[0].content)["input"] == [
+        {"role": "user", "content": "the exact task must survive checkpointing"},
+    ]

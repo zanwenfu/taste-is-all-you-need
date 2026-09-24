@@ -143,8 +143,12 @@ class ResponsesConversation:
 
     def _events(self):
         _ = self.session.known_cost_usd  # check ownership before memory access
-        return [event for event in (*self.branch.head.transcript.turns, *self.branch.view.pending_turns())
-                if str(event.get("kind", "")).startswith(_PREFIX)]
+        # A checkpoint folds the pending journal into a new head. Read both
+        # halves under the writer's reentrant lock, so a controller thread
+        # cannot splice the old committed prefix with the new empty journal.
+        with self.branch._mutation_lock:
+            return [event for event in (*self.branch.head.transcript.turns, *self.branch.view.pending_turns())
+                    if str(event.get("kind", "")).startswith(_PREFIX)]
 
     def _append(self, kind, **payload):
         self.branch.turn(kind=_PREFIX + kind, **_copy(payload))

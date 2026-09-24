@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import suppress
 
 import pytest
 
@@ -204,3 +205,72 @@ def test_cancellation_before_idle_abort_owner_starts_still_drains(tmp_path, monk
         asyncio.run(scenario())
     finally:
         owner.close()
+
+
+def finish_thread_before_return(monkeypatch, module):
+    """Expose a legal scheduling window: the thread runs before the next await."""
+    original = module.start_owned_thread
+
+    def start(call, *args, **kwargs):
+        finished = threading.Event()
+
+        def invoke():
+            try:
+                return call(*args, **kwargs)
+            finally:
+                finished.set()
+
+        future = original(invoke)
+        assert finished.wait(10), "thread did not settle at the scheduled boundary"
+        return future
+
+    monkeypatch.setattr(module, "start_owned_thread", start)
+
+
+def test_already_cancelling_goal_caller_admits_no_model_or_worker(make_host, monkeypatch):
+    import taste.brains.central_host as module
+
+    host = make_host()
+    finish_thread_before_return(monkeypatch, module)
+
+    async def scenario():
+        asyncio.current_task().cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await host.run_async(**bounds())
+        assert host.transport.calls == [], "an already-cancelled caller admitted planning"
+        assert host.launcher.launch_calls == []
+        assert host.outcome().stop_reason == "cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_already_cancelling_monitor_caller_admits_no_judge(tmp_path, monkeypatch):
+    import taste.brains.monitor as module
+
+    finish_thread_before_return(monkeypatch, module)
+    store = Store.open(tmp_path / "repo", "pre-cancelled")
+    contract = Contract("worker", "produce", success_criteria=("correct",))
+    store.branch("worker").turn(kind="tool_result", summary="observe")
+    calls = []
+
+    def judge(*_args):
+        calls.append("paid judge")
+        return Judgement(Severity.FINE, "observed", cost_usd=0.01)
+
+    monitor = MonitorBrain(store, contract, judge, batch_size=1)
+
+    async def scenario():
+        asyncio.current_task().cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitor.cycle(None)
+        # The guard can reject synchronously, before asyncio injects the
+        # queued cancellation. Consume that injection in this test observer.
+        with suppress(asyncio.CancelledError):
+            await asyncio.sleep(0)
+        assert calls == [], "an already-cancelled caller admitted a monitor call"
+        assert monitor.report()["model_calls"] == 0
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        store.close()
