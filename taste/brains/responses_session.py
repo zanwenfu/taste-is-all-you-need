@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import quote
 
 from taste.brains.owned_thread import start_owned_thread
+from taste.brains.worker_protocol import ModelCallAccounting
 from taste.llm import LLM, BudgetExceeded
 from taste.pricing import call_cost, ensure_priced, max_call_cost_usd, table_sha
 from taste.providers.azure_openai import AzureOpenAIConfig
@@ -74,8 +75,11 @@ class ResponsesBinding:
     max_output_tokens: int
     deadline_unix: float
     max_request_bytes: int = 196_608
+    role: str = "worker"
 
     def __post_init__(self):
+        if self.role not in {"worker", "monitor", "planner"}:
+            raise ValueError("Responses role must be worker, monitor or planner")
         if not isinstance(self.run_id, str) or _ID.fullmatch(self.run_id) is None:
             raise ValueError("run_id must be a stable identifier")
         for name in ("budget_usd", "deadline_unix"):
@@ -142,7 +146,12 @@ class ResponsesSession:
         self._db = None
         self._llm = LLM(azure_openai=azure, budget_usd=binding.budget_usd,
                         cap_on="billed", max_attempts=1, run_id=binding.run_id)
-        identity = _json({"schema": _VERSION, "binding": asdict(binding), "pricing_sha": table_sha()})
+        identity_binding = asdict(binding)
+        # Existing /1 journals predate the role field and are worker-only.
+        # Preserve their exact identity; every other role is explicitly bound.
+        if binding.role == "worker":
+            identity_binding.pop("role")
+        identity = _json({"schema": _VERSION, "binding": identity_binding, "pricing_sha": table_sha()})
         try:
             if fresh:
                 self.directory.mkdir(mode=0o700)
@@ -268,6 +277,51 @@ class ResponsesSession:
         self._check()
         return bool(self._db.execute("SELECT 1 FROM calls WHERE status IN ('pending','unknown') LIMIT 1").fetchone())
 
+    def call_accounting(self) -> ModelCallAccounting:
+        self._check()
+        counts = dict(self._db.execute("SELECT status,count(*) FROM calls GROUP BY status"))
+        return ModelCallAccounting(
+            known_cost_usd=self.known_cost_usd,
+            completed_calls=counts.get("completed", 0),
+            unknown_calls=counts.get("pending", 0) + counts.get("unknown", 0),
+        )
+
+    def pin_context(self, context_id: str, value: dict[str, Any]) -> dict[str, Any]:
+        """Persist the first observation before its potentially paid request.
+
+        The caller binds context_id to all immutable evidence and verifies a
+        recovered observation against it. Time-of-observation fields can then
+        retain their original value when publication is retried much later.
+        These snapshots do not count as provider calls or reset spending.
+        """
+        self._check()
+        if not isinstance(context_id, str) or _ID.fullmatch(context_id) is None:
+            raise ValueError("context_id must be a stable identifier")
+        key = "context:" + context_id
+        prior = self._db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        if prior is not None:
+            envelope = json.loads(prior[0])
+            raw = envelope["value"]
+            if (not isinstance(raw, dict) or _digest(_json(raw)) != envelope["digest"]
+                    or len(_json(raw).encode()) > self.binding.max_request_bytes):
+                raise ResponsesConflict("pinned Responses context is malformed")
+            return raw
+        if not isinstance(value, dict):
+            raise ValueError("Responses context must be an object")
+        raw = _json(value)
+        if len(raw.encode()) > self.binding.max_request_bytes:
+            raise ValueError("Responses context exceeds the admitted byte limit")
+        if self._fenced or self.unsettled:
+            raise ResponsesFenced("Responses session is fenced")
+        if time.time() >= self.binding.deadline_unix:
+            self._fence()
+            raise ResponsesFenced("Responses session deadline elapsed")
+        if self._db.execute("SELECT count(*) FROM meta WHERE key LIKE 'context:%'").fetchone()[0] >= self.binding.max_calls:
+            raise ResponsesFenced("Responses context limit reached")
+        with self._db:
+            self._db.execute("INSERT INTO meta VALUES (?,?)", (key, _json({"value": value, "digest": _digest(raw)})))
+        return json.loads(raw)
+
     def lookup(self, request_id: str) -> Completion | None:
         self._check()
         row = self._db.execute("SELECT status,result,digest FROM calls WHERE id=?", (request_id,)).fetchone()
@@ -349,7 +403,7 @@ class ResponsesSession:
             if remaining <= 0:
                 raise _NotDispatched("deadline elapsed before provider invocation")
             return self._llm.call(model=self.binding.model, max_tokens=self.binding.max_output_tokens,
-                                  role="worker", temperature=None,
+                                  role=self.binding.role, temperature=None,
                                   timeout_seconds=remaining, **request)
         except (KeyboardInterrupt, SystemExit) as exc:
             raise BaseExceptionGroup("Responses provider was interrupted", [exc]) from None

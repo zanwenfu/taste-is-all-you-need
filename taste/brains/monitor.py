@@ -74,6 +74,7 @@ from typing import Any
 from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.records import Assignment, contract_digest
+from taste.brains.worker_protocol import ModelCallAccounting
 from taste.memstore import Store, Verdict
 
 __all__ = [
@@ -1517,12 +1518,33 @@ class MonitorBrain:
                 cost_usd = math.fsum(costs)
             except OverflowError:
                 cost_known = False
+        accounting_fields: dict[str, Any] = {}
+        model_calls: int | None = len(call_judgements)
+        durable_accounting = getattr(self._judge, "call_accounting", None)
+        if callable(durable_accounting):
+            # Judgements can lag paid receipts or exclude a rejected response.
+            # Only the provider journal can account for those dispatches, and
+            # a lost/corrupt/leased journal must not fall back to apparent zero.
+            try:
+                accounting = durable_accounting()
+                if not isinstance(accounting, ModelCallAccounting):
+                    raise TypeError("monitor accounting must come from model receipts")
+                cost_usd = accounting.cost_usd
+                cost_known = cost_usd is not None
+                model_calls = accounting.model_calls
+                accounting_fields = {
+                    "known_cost_usd": accounting.known_cost_usd,
+                    "unknown_model_calls": accounting.unknown_calls,
+                }
+            except Exception as exc:
+                cost_known, cost_usd, model_calls = False, None, None
+                accounting_fields = {"accounting_failure": type(exc).__name__}
         return {
             "worker": self.contract.identity,
             "contract_digest": self.contract_digest,
             "worst": self.state.worst.value,
             "judgements": len(self.state.judgements),
-            "model_calls": len(call_judgements),
+            "model_calls": model_calls,
             "cost_known": cost_known,
             "cost_usd": cost_usd if cost_known else None,
             "pending_actions": [action.id for action in self.pending_actions],
@@ -1531,6 +1553,7 @@ class MonitorBrain:
             "current_state": current.state_id if current is not None else None,
             "terminal_assessment": current.to_dict() if current is not None else None,
             "alive": self.worker_is_alive(),
+            **accounting_fields,
         }
 
 

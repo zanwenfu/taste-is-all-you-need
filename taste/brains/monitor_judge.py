@@ -694,6 +694,7 @@ class LLMMonitorJudge:
         *,
         model: str = MODEL_MONITOR,
         max_tokens: int = 1024,
+        json_prefill: bool = True,
     ) -> None:
         if not callable(getattr(llm, "call", None)):
             raise TypeError("monitor llm must provide call()")
@@ -701,9 +702,12 @@ class LLMMonitorJudge:
             raise ValueError("monitor model must not be empty")
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
             raise ValueError("monitor max_tokens must be a positive integer")
+        if type(json_prefill) is not bool:
+            raise ValueError("json_prefill must be boolean")
         self.llm = llm
         self.model = model
         self.max_tokens = max_tokens
+        self.json_prefill = json_prefill
 
     def _completion(self, *, system: str, prompt: str) -> tuple[str, str, float]:
         if len(system.encode("utf-8")) + len(prompt.encode("utf-8")) > MAX_MONITOR_PROMPT_BYTES:
@@ -723,13 +727,13 @@ class LLMMonitorJudge:
         # test_response_parser_rejects_malformed_or_ambiguous_output): the
         # observation is untrusted evidence, and accepting prose around the
         # verdict would widen what a compromised observation could smuggle.
+        messages = [{"role": "user", "content": prompt}]
+        if self.json_prefill:
+            messages.append({"role": "assistant", "content": _PREFILL})
         completion = self.llm.call(
             model=self.model,
             system=system,
-            messages=[
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": _PREFILL},
-            ],
+            messages=messages,
             tools=None,
             max_tokens=self.max_tokens,
             temperature=0.0,
@@ -750,7 +754,7 @@ class LLMMonitorJudge:
         # actually missing: a provider (or a test double) that returns a whole
         # object must round-trip byte-identically, because this exact string is
         # what the durable judgement records as its audit evidence.
-        if not raw_response.lstrip().startswith("{"):
+        if self.json_prefill and not raw_response.lstrip().startswith("{"):
             raw_response = _PREFILL + raw_response
 
         usage = getattr(completion, "usage", None)
@@ -776,13 +780,18 @@ class LLMMonitorJudge:
             raise MonitorResponseError("monitor completion usage is not auditable") from exc
         return raw_response, actual_model, billed_usd
 
+    def _observation(
+        self, contract: Contract, batch: list[dict[str, Any]], view: Any,
+    ) -> PinnedMonitorObservation:
+        return build_monitor_observation(contract, batch, view)
+
     def __call__(
         self,
         contract: Contract,
         batch: list[dict[str, Any]],
         view: Any,
     ) -> Judgement:
-        observation = build_monitor_observation(contract, batch, view)
+        observation = self._observation(contract, batch, view)
         raw_response, actual_model, billed_usd = self._completion(
             system=_SYSTEM_PROMPT,
             prompt=observation.prompt(),

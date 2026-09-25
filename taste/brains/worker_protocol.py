@@ -7,8 +7,36 @@ The legacy runtime re-exports these names for existing callers.
 from __future__ import annotations
 
 import hashlib
+import math
+from dataclasses import dataclass
 
 from taste.brains.records import Assignment
+
+
+@dataclass(frozen=True)
+class ModelCallAccounting:
+    """Provider receipts, including dispatches whose final cost is unknown."""
+
+    known_cost_usd: float
+    completed_calls: int
+    unknown_calls: int
+
+    def __post_init__(self) -> None:
+        value = self.known_cost_usd
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise ValueError("known model cost must be finite and nonnegative")
+        for count in (self.completed_calls, self.unknown_calls):
+            if type(count) is not int or count < 0:
+                raise ValueError("model call counts must be nonnegative integers")
+
+    @property
+    def cost_usd(self) -> float | None:
+        return None if self.unknown_calls else self.known_cost_usd
+
+    @property
+    def model_calls(self) -> int:
+        return self.completed_calls + self.unknown_calls
 
 ASSIGNMENT_PATH = "assignment.json"
 
@@ -68,4 +96,3 @@ def _assignment_monitor_budget_usd(assignment: Assignment) -> float | None:
     ):
         raise ValueError("Assignment.resources.monitor_budget_usd must be finite and positive")
     return float(value)
-
