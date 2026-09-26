@@ -60,6 +60,13 @@ class Contract:
         object.__setattr__(self, "inputs", tuple(self.inputs))
         object.__setattr__(self, "outputs", tuple(self.outputs))
         object.__setattr__(self, "success_criteria", tuple(self.success_criteria))
+        # Assignment's strict wire format prices in floating-point dollars.
+        # The standalone control record must serialize those dollars the same
+        # way, or a valid integer budget fails exact worker admission after
+        # decoding the assignment (30 versus 30.0). Booleans remain invalid
+        # inputs for the strict record validator rather than becoming 1.0.
+        if isinstance(self.budget_usd, int) and not isinstance(self.budget_usd, bool):
+            object.__setattr__(self, "budget_usd", float(self.budget_usd))
         if not self.success_criteria:
             # Without this a monitor has nothing to judge against and falls
             # back to taste, which is exactly the failure the architecture is
