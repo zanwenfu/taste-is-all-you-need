@@ -41,7 +41,7 @@ from taste.brains.python_process import isolated_python_argv
 from taste.brains.records import Assignment, LifecycleEvent, WorkerReport, contract_digest
 from taste.brains.worker_environment import PROVIDER_OVERRIDE_ENV
 from taste.brains.worker_protocol import ASSIGNMENT_PATH, WORKER_REPORT_PATH
-from taste.memstore import Branch, State, Store
+from taste.memstore import Branch, State, Store, Transcript
 from taste.memstore.backend import BLOB_MODES
 from taste.memstore.objects import WorktreeUnavailable
 from taste.resources import close_resources
@@ -2357,6 +2357,11 @@ class CentralSupervisor:
                 self._verify_prepared(existing)
                 return existing
 
+            azure = "azure_openai" in assignment.resources
+            if azure:
+                from taste.brains.azure_worker_policy import AzureWorkerPolicy
+
+                AzureWorkerPolicy.from_assignment(assignment)
             base = self._validate_assignment(assignment)
             previous = self._worker_runs(assignment.worker)
             if assignment.worker in {self.control.name, self.integration.name}:
@@ -2421,10 +2426,20 @@ class CentralSupervisor:
                     raise AssignmentIdentityConflict("worker branch does not descend from base")
                 for destination in (CONTRACT_PATH, ASSIGNMENT_PATH):
                     _assert_safe_write_destination(branch.worktree, destination)
+                if azure:
+                    _assert_safe_write_destination(branch.worktree, WORKER_REPORT_PATH)
                 for artifact in assignment.inputs:
                     _assert_safe_write_destination(
                         branch.worktree, artifact.path, replace_symlink_leaf=True
                     )
+                if azure:
+                    # A new assignment is a new active context, not a resume
+                    # of the previous Responses binding. Preserve all pending
+                    # work before replacing context; old checkpoints and paid
+                    # journals remain reachable and unchanged. Existing runs
+                    # returned above never pass through this boundary.
+                    branch._capture("new Azure assignment", run_id)
+                    branch.path(WORKER_REPORT_PATH).unlink(missing_ok=True)
                 for artifact in assignment.inputs:
                     source = self.store.state(artifact.state_id)
                     branch.adopt(source, artifact.path, as_=artifact.path)
@@ -2432,7 +2447,8 @@ class CentralSupervisor:
                 branch.write(ASSIGNMENT_PATH, assignment.to_json())
                 prepared = branch.checkpoint(
                     f"prepare {assignment.assignment_id} generation "
-                    f"{assignment.generation} attempt {assignment.attempt}"
+                    f"{assignment.generation} attempt {assignment.attempt}",
+                    **({"transcript": Transcript()} if azure else {}),
                 )
                 self._verify_input_projection(assignment, prepared)
             finally:
