@@ -217,6 +217,25 @@ compose_central_runtime(repo, session, goal).run(          # the multi-process r
     max_generations=8, wall_clock_seconds=900.0)           # bounds are required; an unbudgeted goal has no other limit
 ```
 
+### Separate Azure OpenAI worker harness
+
+The Claude Agent SDK harness remains available through
+`taste.brains.worker_entrypoint` and `taste.brains.worker_launch`. The opt-in
+Azure Responses harness uses `taste.brains.azure_worker_entrypoint` and the
+`worker_command_factory` in `taste.brains.azure_worker_launch`, passed to
+`SubprocessLauncher`. It does not import the Claude Agent SDK. Install the
+`openai` extra and supply `AZURE_OPENAI_BASE_URL` and `AZURE_OPENAI_API_KEY` in the
+launch environment; each immutable Assignment must carry its matching
+`AzureWorkerPolicy`, worker/monitor budgets, call limits and absolute deadline.
+Personal OpenAI and Anthropic credentials are not fallback routes.
+
+The Azure worker currently supports confined artifact tools, explicit feedback
+acceptance, private model-call accounting, exact-state monitor certification,
+and coordinator delivery. An existing or partly initialized run is refused by
+the fresh-launch entrypoint; it never resets the allowance on restart. Explicit
+recovery, task-container terminal transport, Azure goal/planner composition and
+Harbor grading remain integration work before a full Terminal Bench run.
+
 ## Quickstart with a real Claude
 
 The current Linux regression environment uses Python 3.14.4. In a clean Python

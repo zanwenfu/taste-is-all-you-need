@@ -286,6 +286,11 @@ class ResponsesSession:
             unknown_calls=counts.get("pending", 0) + counts.get("unknown", 0),
         )
 
+    def ensure_ready(self) -> None:
+        """Validate SDK/credential configuration without dispatch or spending."""
+        self._check()
+        self._llm.ensure_ready(self.binding.model)
+
     def pin_context(self, context_id: str, value: dict[str, Any]) -> dict[str, Any]:
         """Persist the first observation before its potentially paid request.
 

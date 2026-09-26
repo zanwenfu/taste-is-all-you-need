@@ -14,6 +14,7 @@ import hashlib
 import os
 import signal
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -31,6 +32,10 @@ from taste.brains.worker_admission import (
     validate_acquired_branch,
 )
 from taste.memstore import Store
+
+# A cleanup failure must not let GC drop the worker lease while its process
+# boundary remains unconfirmed. The OS releases these at process death.
+_QUARANTINED_RESOURCES: list[tuple] = []
 
 
 def run_directory(store: Store, run_id: str) -> Path:
@@ -52,6 +57,8 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
         policy = AzureWorkerPolicy.from_assignment(durable.assignment)
         policy.validate_launch(config)
         azure = policy.azure_config(environment)
+        if time.time() >= policy.worker.deadline_unix:
+            raise EntrypointInputError("Azure assignment deadline has already elapsed")
         directory = run_directory(store, durable.run_id)
         if os.path.lexists(directory):
             raise EntrypointInputError("existing Azure run requires explicit recovery")
@@ -73,6 +80,8 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
             os.close(fd)
         session = ResponsesSession.create(directory / "worker", policy.worker, azure)
         judge = ResponsesMonitorJudge.create(directory / "monitor", policy.monitor, azure)
+        session.ensure_ready()
+        judge.ensure_ready()
         monitor = MonitorBrain(store, durable.contract, judge, batch_size=policy.monitor_batch_size,
                                run_id=durable.run_id)
         runtime = AzureWorkerRuntime(branch, durable.assignment, session, monitor)
@@ -100,7 +109,9 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
                     resource.close()
                 except Exception as exc:
                     print(f"Azure worker cleanup failed: {type(exc).__name__}", file=sys.stderr, flush=True)
-                    outcome = WorkerExitCode.RUNTIME_FAILURE
+                    _QUARANTINED_RESOURCES.append((session, branch, store))
+                    outcome = WorkerExitCode.SHUTDOWN_UNCONFIRMED
+                    break
     return outcome
 
 

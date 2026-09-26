@@ -92,6 +92,14 @@ class ResponsesMonitorJudge(LLMMonitorJudge):
     def call_accounting(self) -> ModelCallAccounting:
         return self.llm.call_accounting()
 
+    def ensure_ready(self) -> None:
+        calls = self.llm
+        session = ResponsesSession.open(calls.directory, calls.binding, calls.azure)
+        try:
+            session.ensure_ready()
+        finally:
+            session.close()
+
     @staticmethod
     def _observation_id(observation):
         evidence = json.loads(observation.payload)

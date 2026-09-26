@@ -2490,6 +2490,7 @@ class CentralSupervisor:
                 return run
             if run.phase in {"spawned", "ready"}:
                 return self.poll(run_id, active_generation=active_generation, deadline_at=deadline_at)
+            deadline_at = self._assignment_deadline(run.assignment, deadline_at)
             self._verify_prepared(run)
             if run.phase == "prepared":
                 deadline = self.clock() + timedelta(seconds=run.wall_timeout_seconds)
@@ -2677,6 +2678,17 @@ class CentralSupervisor:
             observed=final_exit,
             uncertainty=tuple(uncertainty),
         )
+
+    @staticmethod
+    def _assignment_deadline(assignment: Assignment, requested: datetime | None) -> datetime | None:
+        if "azure_openai" not in assignment.resources:
+            return requested
+        from taste.brains.azure_worker_policy import AzureWorkerPolicy
+
+        policy = AzureWorkerPolicy.from_assignment(assignment)
+        if requested is not None and requested.timestamp() <= policy.worker.deadline_unix:
+            return requested
+        return datetime.fromtimestamp(policy.worker.deadline_unix, UTC)
 
     def poll(
         self, run_id: str, *, active_generation: int, deadline_at: datetime | None = None,
