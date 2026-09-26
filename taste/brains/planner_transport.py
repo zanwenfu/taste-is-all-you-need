@@ -695,6 +695,7 @@ class LLMPlannerTransport:
         model: str = MODEL_PLANNER,
         max_tokens: int = 8192,
         max_prompt_bytes: int = 192 * 1024,
+        deadline_unix: float | None = None,
     ) -> None:
         if not isinstance(store, Store):
             raise TypeError("planner transport store must be a Store")
@@ -714,6 +715,11 @@ class LLMPlannerTransport:
             raise ValueError("planner max_tokens must be a positive integer")
         if type(max_prompt_bytes) is not int or max_prompt_bytes < 1:
             raise ValueError("planner max_prompt_bytes must be a positive integer")
+        if deadline_unix is not None and (
+            isinstance(deadline_unix, bool) or not isinstance(deadline_unix, (int, float))
+            or not math.isfinite(deadline_unix) or deadline_unix <= 0
+        ):
+            raise ValueError("planner absolute deadline must be finite and positive")
         self.llm = llm
         self.store = store
         self.control = control
@@ -721,6 +727,7 @@ class LLMPlannerTransport:
         self.mutation_lock = mutation_lock
         self.max_tokens = max_tokens
         self.max_prompt_bytes = max_prompt_bytes
+        self.deadline_unix = deadline_unix
         self.journal_branch = journal.name
         self._ensure_ready = ensure_ready
         self._bound_remaining_usd: float | None = None
@@ -820,6 +827,8 @@ class LLMPlannerTransport:
             # receipts additionally bind the non-secret route, so restart
             # cannot replay a receipt under another endpoint or deployment.
             config["azure_route"] = route
+        if self.deadline_unix is not None:
+            config["deadline_unix"] = self.deadline_unix
         return config
 
     def _binding(self, *, system: str, prompt: str) -> dict[str, Any]:
@@ -1293,6 +1302,11 @@ class LLMPlannerTransport:
                     if remaining <= 0:
                         raise TimeoutError("planner deadline elapsed before provider dispatch")
                     call_options["timeout_seconds"] = remaining
+                if self.deadline_unix is not None:
+                    remaining = self.deadline_unix - time.time()
+                    if remaining <= 0:
+                        raise TimeoutError("planner absolute deadline elapsed before provider dispatch")
+                    call_options["timeout_seconds"] = min(call_options.get("timeout_seconds", remaining), remaining)
                 dispatched = True
                 completion = self.llm.call(
                     model=self.model,

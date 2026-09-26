@@ -24,6 +24,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from taste.brains.azure_execution_policy import AzureExecutionPolicy
 from taste.brains.central_communication import CentralCommunication
 from taste.brains.central_planner import CentralPlanner, Goal, PlannerTransport
 from taste.brains.central_runtime import CentralRuntime, CycleOutcome, GoalOutcome
@@ -118,6 +119,7 @@ class CentralRuntimeHost:
         owns_control: bool,
         owns_integration: bool,
         owns_planner_journal: bool,
+        owns_planner_sdk: bool = False,
     ) -> None:
         self.store = store
         self.goal = goal
@@ -139,6 +141,8 @@ class CentralRuntimeHost:
         self._closed = False
         self._closing = False
         self._pending_closes = ["supervisor"]
+        if owns_planner_sdk:
+            self._pending_closes.append("planner_sdk")
         if owns_store:
             self._pending_closes.append("store")
         else:
@@ -290,7 +294,13 @@ class CentralRuntimeHost:
                 self._closed = not self._pending_closes
 
     def _close_resource(self, name: str) -> None:
-        getattr(self, name).close()
+        if name == "planner_sdk":
+            # Only the explicit Azure composition transfers this ownership;
+            # its facade has private clients, never the global provider cache.
+            close_resources(provider._client.close for provider in self.planner_llm._providers.values()
+                            if provider._client is not None)
+        else:
+            getattr(self, name).close()
         self._pending_closes.remove(name)
 
     def _require_open(self) -> None:
@@ -332,6 +342,8 @@ def compose_central_runtime(
     default_wall_timeout_seconds: float = 900.0,
     supervisor_poll_interval: float = 0.05,
     supervisor_termination_grace: float = 2.0,
+    azure_policy: AzureExecutionPolicy | None = None,
+    owns_planner_sdk: bool = False,
 ) -> CentralRuntimeHost:
     """Build the concrete central coordinator around one exact shared state.
 
@@ -344,6 +356,24 @@ def compose_central_runtime(
     """
     if not isinstance(goal, Goal):
         raise TypeError("goal must be a Goal")
+    if azure_policy is not None and not isinstance(azure_policy, AzureExecutionPolicy):
+        raise TypeError("azure_policy must be an AzureExecutionPolicy")
+    if type(owns_planner_sdk) is not bool or (owns_planner_sdk and azure_policy is None):
+        raise ValueError("SDK client ownership requires the explicit Azure composition")
+    if azure_policy is not None:
+        from taste.providers.azure_openai import AZURE_PLANNER_MODEL
+
+        expected_route = {
+            "route": "azure_openai", "endpoint": azure_policy.endpoint,
+            "deployment": azure_policy.planner_deployment, "deployment_type": "GlobalStandard",
+            "served_model": AZURE_PLANNER_MODEL,
+        }
+        if (transport is not None or not isinstance(planner_llm, LLM)
+                or planner_model != AZURE_PLANNER_MODEL
+                or planner_llm.azure_route_for(planner_model) != expected_route
+                or planner_max_tokens != azure_policy.planner_max_output_tokens
+                or launcher is None or goal != azure_policy.bind_goal(goal)):
+            raise ValueError("Azure composition requires its exact planner, goal policy and explicit worker launcher")
     if len({control_branch, integration_branch, planner_journal_branch}) != 3:
         raise ValueError("control, integration, and planner journal branch names must be distinct")
     root = Path(repo_root).expanduser().resolve(strict=True)
@@ -438,6 +468,8 @@ def compose_central_runtime(
                 mutation_lock=lock,
                 model=planner_model,
                 max_tokens=planner_max_tokens,
+                **({"max_prompt_bytes": azure_policy.max_request_bytes,
+                    "deadline_unix": azure_policy.deadline_unix} if azure_policy is not None else {}),
             )
         elif isinstance(concrete_transport, LLMPlannerTransport):
             if opened_planner_journal is None:
@@ -466,6 +498,7 @@ def compose_central_runtime(
             control_branch=opened_control.name,
             integration_branch=opened_integration.name,
             mutation_lock=lock,
+            azure_policy=azure_policy,
         )
 
         concrete_launcher = launcher
@@ -527,6 +560,7 @@ def compose_central_runtime(
             owns_control=owns_control,
             owns_integration=owns_integration,
             owns_planner_journal=owns_planner_journal,
+            owns_planner_sdk=owns_planner_sdk,
         )
     except BaseException:
         if opened_store is not None:

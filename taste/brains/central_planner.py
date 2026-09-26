@@ -35,6 +35,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
+from taste.brains.azure_execution_policy import POLICY_KEY, AzureExecutionPolicy
 from taste.brains.contract import Contract
 from taste.brains.delivery import validate_artifact_path
 from taste.brains.planner_transport import (
@@ -965,7 +966,10 @@ class CentralPlanner:
         integration_branch: str = "integration",
         mutation_lock: threading.RLock | None = None,
         clock: Any = _now,
+        azure_policy: AzureExecutionPolicy | None = None,
     ) -> None:
+        if azure_policy is not None and not isinstance(azure_policy, AzureExecutionPolicy):
+            raise TypeError("azure_policy must be an AzureExecutionPolicy")
         if control is not None and (control.store is not store or control.name != control_branch):
             raise ValueError("injected control branch has the wrong store or identity")
         self.store = store
@@ -975,6 +979,7 @@ class CentralPlanner:
         self.integration_branch = integration_branch
         self.mutation_lock = mutation_lock or threading.RLock()
         self.clock = clock
+        self.azure_policy = azure_policy
         # A successful immutable-history audit is a monotonic checkpoint, not
         # a best-effort memo.  Subsequent calls at the same authoritative head
         # can reuse it exactly; a forward head audits only its new first-parent
@@ -1069,6 +1074,9 @@ class CentralPlanner:
             self._ensure_goal(goal)
 
     def _ensure_goal(self, goal: Goal) -> None:
+        expected = None if self.azure_policy is None else self.azure_policy.to_dict()
+        if goal.metadata.get(POLICY_KEY) != expected:
+            raise PlannerIdentityConflict("goal and coordinator Azure execution policies differ")
         self._adopt_rewound_control()
         path = _goal_path(goal.goal_id)
         raw = self.control.head.read(path)
@@ -2194,6 +2202,8 @@ class CentralPlanner:
                 "monitor_budget_usd_if_present_must_be_positive_finite": True,
             },
         }
+        if self.azure_policy is not None:
+            self.azure_policy.configure_prompt(payload)
         return _pretty(payload)
 
     @staticmethod
@@ -2386,6 +2396,8 @@ class CentralPlanner:
             assessment = self._validate_assessment(raw["assessment"], request, raw["complete"])
             for assignment in assignments:
                 self._validate_assignment_budget_caps(assignment, request)
+                if self.azure_policy is not None:
+                    self.azure_policy.validate_assignment(assignment)
             metadata = _mapping(raw["metadata"], "PlannerProposal.metadata")
             proposal_digest = _digest(_canonical(raw))
             plan = PlanRevision(

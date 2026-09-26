@@ -1,0 +1,236 @@
+"""Azure planning, exact assignment admission, actual worker and goal replay."""
+from __future__ import annotations
+
+import json
+import math
+import sqlite3
+import time
+from dataclasses import replace
+
+import pytest
+
+from taste.brains.azure_central_host import compose_azure_central_runtime
+from taste.brains.azure_execution_policy import POLICY_KEY, AzureExecutionPolicy
+from taste.brains.azure_worker_entrypoint import run_directory
+from taste.brains.azure_worker_launch import worker_command
+from taste.brains.azure_worker_policy import AzureWorkerPolicy
+from taste.brains.central_host import compose_central_runtime
+from taste.brains.central_planner import Goal, InvalidPlannerOutput, PlannerIdentityConflict
+from taste.brains.supervisor import SubprocessLauncher
+from taste.pricing import call_cost, table_sha
+from taste.providers.azure_openai import AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
+from tests.test_azure_openai import config, httpx
+from tests.test_azure_openai import sdk_transport as _sdk_transport
+from tests.test_azure_worker_process import BOOTSTRAP
+from tests.test_brains_central_host import NoLaunchLauncher
+from tests.test_openai_responses import message, response
+
+sdk_transport = _sdk_transport
+
+
+@pytest.fixture
+def policy():
+    return AzureExecutionPolicy(
+        endpoint=config().base_url, planner_deployment="gpt-6-astra", worker_deployment="gpt-6-sol",
+        deadline_unix=time.time() + 120, worker_budget_usd=20, monitor_budget_usd=20,
+        worker_max_calls=8, monitor_max_calls=16, worker_max_output_tokens=256,
+        monitor_max_output_tokens=512, planner_max_output_tokens=512,
+        monitor_batch_size=1, pricing_sha=table_sha(),
+    )
+
+
+@pytest.fixture
+def goal():
+    return Goal(goal_id="azure-goal", task="Write output.txt with the exact text correct",
+                success_criteria=("output.txt contains correct",), budget_usd=100)
+
+
+def environment():
+    return {"AZURE_OPENAI_BASE_URL": config().base_url, "AZURE_OPENAI_API_KEY": "azure-test-only"}
+
+
+def host(tmp_path, goal, policy, **kwargs):
+    root = tmp_path / "repo"
+    root.mkdir(exist_ok=True)
+    return compose_azure_central_runtime(root, "azure-central", goal, policy=policy,
+                                         environment=environment(), **kwargs)
+
+
+def proposal(payload, *, complete=False):
+    result = payload["required_output_shape"]
+    if complete:
+        result["assignments"] = []
+    else:
+        assignment = result["assignments"][0]
+        assignment["assignment_id"] = "write-output"
+        assignment["contract"].update(identity="azure-worker", task="Write output.txt containing correct",
+                                      outputs=["output.txt"], success_criteria=["output.txt contains correct"])
+        assignment["outputs"][0].update(artifact_id="output-artifact", path="output.txt")
+    result.update(complete=complete, completion_reason="verified delivered output" if complete else "",
+                  rationale="one declared artifact")
+    result["assessment"] = [
+        {"criterion_id": item["criterion_id"], "verdict": "met" if complete else "not_met",
+         "evidence": "delivered output contains correct" if complete else "no output yet"}
+        for item in payload["standing_criteria"]]
+    return result
+
+
+def install_planner(sdk_transport, transform=None):
+    payloads = []
+
+    def handler(wire):
+        request = json.loads(wire.content)
+        assert request["model"] == "gpt-6-astra"
+        assert str(wire.url) == config().base_url + "responses"
+        assert wire.headers["authorization"] == "Bearer azure-test-only"
+        assert "tools" not in request
+        payload = json.loads(request["input"][0]["content"])
+        payloads.append(payload)
+        result = proposal(payload, complete=len(payloads) > 1)
+        if transform is not None:
+            transform(result)
+        return httpx.Response(200, json=response(model=AZURE_PLANNER_MODEL, output=[message(json.dumps(result))]))
+
+    sent, _ = sdk_transport(handler)
+    return sent, payloads
+
+
+def test_real_azure_planner_to_worker_to_certified_delivery_and_reopen(tmp_path, goal, policy, sdk_transport):
+    sent, payloads = install_planner(sdk_transport)
+    root = tmp_path / "repo"
+
+    def command(spec):
+        argv = list(worker_command(spec, repo_root=root, session="azure-central"))
+        bootstrap = BOOTSTRAP + "\nsys.modules.pop('taste.brains.azure_worker_entrypoint', None)\n"
+        argv[3] = argv[3].replace("import runpy;", bootstrap + "\nimport runpy;", 1)
+        return argv
+
+    launcher = SubprocessLauncher(command, env=environment())
+    with host(tmp_path, goal, policy, launcher=launcher) as runtime:
+        assert not sent
+        assert runtime.goal.metadata[POLICY_KEY] == policy.to_dict()
+        result = runtime.run(max_generations=3, wall_clock_seconds=60)
+        assert result.complete and result.budget.enforceable, result.to_dict()
+        assert result.budget.known_spent_usd > 0
+        assert runtime.integration.head.read("output.txt") == "correct"
+        runs = runtime.supervisor.runs()
+        assert len(runs) == 1 and runs[0].reaped and runs[0].phase == "delivered"
+        paid = []
+        for journal in run_directory(runtime.store, runs[0].run_id).glob("*/calls.sqlite3"):
+            connection = sqlite3.connect(f"file:{journal}?mode=ro", uri=True)
+            try:
+                for (raw,) in connection.execute("SELECT result FROM calls WHERE status='completed'"):
+                    receipt = json.loads(raw)
+                    usage = receipt["usage"]
+                    paid.append(call_cost(receipt["model"], **{
+                        key: usage[key] for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+                    })[0])
+            finally:
+                connection.close()
+        assert len(paid) >= 4
+        assert result.budget.worker_spent_usd == pytest.approx(math.fsum(paid))
+        admitted = AzureWorkerPolicy.from_assignment(runs[0].assignment)
+        assert admitted.worker.model == AZURE_WORKER_MODEL
+        assert admitted.worker.deadline_unix == policy.deadline_unix
+        assert admitted.worker.budget_usd == policy.worker_budget_usd
+        assert len(sent) == 2
+        assert "run shell commands" in payloads[0]["rules"]["worker_capabilities"]["cannot"]
+        bound_goal = runtime.goal
+        client = runtime.planner_llm.provider_for(AZURE_PLANNER_MODEL)._client
+        assert not client.is_closed()
+    assert client.is_closed()
+    with host(tmp_path, goal, policy, launcher=NoLaunchLauncher()) as reopened:
+        assert reopened.run(max_generations=3, wall_clock_seconds=60) == result
+        assert len(sent) == 2
+    # The historical factory cannot accidentally execute an Azure-bound goal.
+    with compose_central_runtime(root, "azure-central", bound_goal, launcher=NoLaunchLauncher()) as legacy:
+        with pytest.raises(PlannerIdentityConflict, match="policies differ"):
+            legacy.cycle()
+        assert len(sent) == 2
+
+
+@pytest.mark.parametrize("field,value", [
+    ("endpoint", "https://other.openai.azure.com/openai/v1/"),
+    ("worker_deployment", "other-worker"), ("planner_deployment", "other-planner"),
+    ("deadline_unix", 4000000000.0), ("worker_budget_usd", 21.0),
+])
+def test_policy_drift_is_rejected_before_new_call_or_worker(tmp_path, goal, policy, sdk_transport, field, value):
+    sent, _ = install_planner(sdk_transport)
+    with host(tmp_path, goal, policy, launcher=NoLaunchLauncher()) as first:
+        original_head = first.control.head.id
+    altered = replace(policy, **{field: value})
+    env = {**environment(), "AZURE_OPENAI_BASE_URL": altered.endpoint}
+    with pytest.raises(PlannerIdentityConflict):
+        compose_azure_central_runtime(tmp_path / "repo", "azure-central", goal,
+                                     policy=altered, environment=env, launcher=NoLaunchLauncher())
+    with host(tmp_path, goal, policy, launcher=NoLaunchLauncher()) as reopened:
+        assert reopened.control.head.id == original_head
+        assert not reopened.supervisor.runs() and not sent
+
+
+@pytest.mark.parametrize("change", ["route", "deadline", "worker_budget", "monitor_budget", "model", "calls", "extra"])
+def test_untrusted_planner_cannot_change_execution_policy(tmp_path, goal, policy, sdk_transport, change):
+    def transform(result):
+        assignment = result["assignments"][0]
+        if change == "worker_budget":
+            assignment["contract"]["budget_usd"] = 21
+        elif change == "monitor_budget":
+            assignment["resources"]["monitor_budget_usd"] = 21
+        elif change == "model":
+            assignment["model"] = "claude-sonnet-4-6"
+        elif change == "extra":
+            assignment["resources"]["terminal"] = True
+        else:
+            key, value = {"route": ("worker_deployment", "other"), "deadline": ("deadline_unix", 4000000000),
+                          "calls": ("worker_max_calls", 100)}[change]
+            assignment["resources"]["azure_openai"][key] = value
+
+    sent, _ = install_planner(sdk_transport, transform)
+    with host(tmp_path, goal, policy, launcher=NoLaunchLauncher()) as runtime:
+        with pytest.raises(InvalidPlannerOutput):
+            runtime.cycle()
+        assert runtime.planner.planner_cost(goal.goal_id, currency="billed") > 0
+        assert len(sent) == 1 and not runtime.supervisor.runs()
+
+
+def test_expired_policy_does_not_refresh_planner_deadline_or_dispatch(tmp_path, goal, policy, sdk_transport):
+    sent, _ = install_planner(sdk_transport)
+    expired = replace(policy, deadline_unix=1)
+    with host(tmp_path, goal, expired, launcher=NoLaunchLauncher()) as runtime:
+        result = runtime.run(max_generations=1, wall_clock_seconds=30, max_planner_failures=1)
+        assert not result.complete and result.budget.enforceable
+        assert result.budget.known_spent_usd == 0
+        assert not sent and not runtime.supervisor.runs()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("worker_max_calls", True), ("monitor_max_calls", 0), ("max_request_bytes", 0),
+    ("worker_budget_usd", 0.001), ("monitor_budget_usd", 0.001),
+    ("monitor_batch_size", 0), ("deadline_unix", float("nan")), ("pricing_sha", "changed"),
+])
+def test_unusable_policy_is_rejected_before_composition(policy, field, value):
+    with pytest.raises(ValueError):
+        replace(policy, **{field: value})
+
+
+def test_sdk_close_failure_blocks_host_until_cleanup_retry(tmp_path, goal, policy, sdk_transport, monkeypatch):
+    sent, _ = install_planner(sdk_transport)
+    runtime = host(tmp_path, goal, policy, launcher=NoLaunchLauncher())
+    runtime.planner_llm.ensure_ready(AZURE_PLANNER_MODEL)
+    client = runtime.planner_llm.provider_for(AZURE_PLANNER_MODEL)._client
+    original = client.close
+
+    def fail_close():
+        raise OSError("SDK close failed")
+
+    try:
+        monkeypatch.setattr(client, "close", fail_close)
+        with pytest.raises(OSError, match="SDK close"):
+            runtime.close()
+        assert not runtime.closed and not client.is_closed()
+        with pytest.raises(RuntimeError, match="closing"):
+            runtime.cycle()
+    finally:
+        monkeypatch.setattr(client, "close", original)
+        runtime.close()
+    assert runtime.closed and client.is_closed() and not sent
