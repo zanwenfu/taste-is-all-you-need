@@ -36,7 +36,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from taste.brains.contract import CONTRACT_PATH
 from taste.brains.delivery import DeliveryResult, deliver_product, validate_artifact_path
-from taste.brains.monitor import TerminalAssessment
+from taste.brains.monitor import TerminalAssessment, monitor_state_suffix
 from taste.brains.python_process import isolated_python_argv
 from taste.brains.records import Assignment, LifecycleEvent, WorkerReport, contract_digest
 from taste.brains.worker_environment import PROVIDER_OVERRIDE_ENV
@@ -1760,16 +1760,17 @@ def _subprocess_bootstrap(arguments: Sequence[str]) -> None:
         os.close(descriptor)
 
 
-def mark_worker_ready() -> None:
+def mark_worker_ready(*, environ: Mapping[str, str] | None = None) -> None:
     """Publish readiness bound to the exact launched process.
 
     This is suitable as the body of ``WorkerRuntime(..., ready=...)``.  It is
     intentionally a no-op error outside a supervised worker: a missing launch
     identity means there is no process boundary to certify.
     """
-    run_id = os.environ.get(_RUN_ID_ENV, "")
-    token = os.environ.get(_LAUNCH_TOKEN_ENV, "")
-    raw_path = os.environ.get(_READY_PATH_ENV, "")
+    environment = os.environ if environ is None else environ
+    run_id = environment.get(_RUN_ID_ENV, "")
+    token = environment.get(_LAUNCH_TOKEN_ENV, "")
+    raw_path = environment.get(_READY_PATH_ENV, "")
     if not run_id or not token or not raw_path:
         raise SupervisorError("worker readiness environment is incomplete")
     _atomic_json(
@@ -2871,12 +2872,16 @@ class CentralSupervisor:
         # The worker report is a notification, not the source of the monitor's
         # certificate.  Require the same content-identified assessment in the
         # contract-scoped durable monitor sidecar.
-        digest_hex = report.contract_digest.removeprefix("sha256:")
-        sidecar = self.store.sidecar(
-            "monitor", report.worker, f".contract-{digest_hex}"
-        )
         try:
+            # Routing comes from the accepted assignment, never a path or
+            # harness flag supplied by the worker report.
+            run = self._load(report.run_id)
+            azure = "azure_openai" in run.assignment.resources
+            suffix = monitor_state_suffix(report.contract_digest, report.run_id if azure else None)
+            sidecar = self.store.sidecar("monitor", report.worker, suffix)
             raw = json.loads(sidecar.read_text(encoding="utf-8"))
+            if azure and raw.get("run_id") != run.run_id:
+                raise ValueError("monitor sidecar run differs")
             if raw.get("contract_digest") != report.contract_digest:
                 raise ValueError("monitor sidecar contract digest differs")
             durable = [

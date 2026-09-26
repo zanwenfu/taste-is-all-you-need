@@ -587,6 +587,13 @@ class MonitorState:
         return max((j.severity for j in self.judgements), key=lambda s: s.rank)
 
 
+def monitor_state_suffix(digest: str, run_id: str | None = None) -> str:
+    if run_id is None:
+        return ".contract-" + digest.removeprefix("sha256:")
+    # One digest binds both identities without exceeding sidecar name limits.
+    return ".run-" + hashlib.sha256(f"{digest}\0{run_id}".encode()).hexdigest()
+
+
 class MonitorBrain:
     """Watches one sub-brain: reads its events, judges, and escalates.
 
@@ -602,11 +609,15 @@ class MonitorBrain:
         judge: Any,
         *,
         batch_size: int = BATCH_SIZE,
+        run_id: str | None = None,
     ) -> None:
         self.store = store
         self.contract = contract
         self.identity = f"monitor/{contract.identity}"
         self.contract_digest = contract_digest(contract)
+        if run_id is not None and (not isinstance(run_id, str) or not run_id):
+            raise ValueError("monitor run_id must be nonempty text")
+        self.run_id = run_id
         self._judge = judge
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise ValueError("monitor batch_size must be a positive integer")
@@ -618,11 +629,10 @@ class MonitorBrain:
             self._save_state()
 
     def _state_path(self):
-        digest_hex = self.contract_digest.removeprefix("sha256:")
         return self.store.sidecar(
             "monitor",
             self.contract.identity,
-            f".contract-{digest_hex}",
+            monitor_state_suffix(self.contract_digest, self.run_id),
         )
 
     def _legacy_state_path(self):
@@ -679,6 +689,8 @@ class MonitorBrain:
         path = self._state_path()
         if path.exists():
             raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("run_id") != self.run_id:
+                raise ValueError("monitor sidecar belongs to a different run")
             schema = raw.get("schema")
             if schema not in {*_LEGACY_STATE_SCHEMAS, _STATE_SCHEMA}:
                 raise ValueError(f"unsupported monitor state schema: {schema!r}")
@@ -693,6 +705,10 @@ class MonitorBrain:
                 self._state_needs_upgrade = True
             return self._state_from_raw(raw)
 
+        if self.run_id is not None:
+            # A new assignment never inherits a previous attempt's findings,
+            # paid observations or terminal certificates.
+            return MonitorState()
         legacy = self._legacy_state_path()
         if not legacy.exists():
             return MonitorState()
@@ -729,6 +745,7 @@ class MonitorBrain:
             payload = json.dumps(
                 {
                     "schema": _STATE_SCHEMA,
+                    **({"run_id": self.run_id} if self.run_id is not None else {}),
                     "contract_digest": self.contract_digest,
                     "judged_through": self.state.judged_through,
                     "fingerprints": self.state.fingerprints,
