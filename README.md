@@ -229,12 +229,28 @@ launch environment; each immutable Assignment must carry its matching
 `AzureWorkerPolicy`, worker/monitor budgets, call limits and absolute deadline.
 Personal OpenAI and Anthropic credentials are not fallback routes.
 
-The Azure worker currently supports confined artifact tools, explicit feedback
-acceptance, private model-call accounting, exact-state monitor certification,
-and coordinator delivery. An existing or partly initialized run is refused by
-the fresh-launch entrypoint; it never resets the allowance on restart. Explicit
-recovery, task-container terminal transport, Azure goal/planner composition and
-Harbor grading remain integration work before a full Terminal Bench run.
+The Azure worker supports confined artifact tools, explicit feedback acceptance,
+private model-call accounting, exact-state monitor certification, and coordinator
+delivery. `compose_azure_central_runtime` in `taste.brains.azure_central_host`
+wires the Azure planner and worker launcher together. Its `AzureExecutionPolicy`
+pins the routes, call limits, worker/monitor budgets, pricing table and absolute
+deadline into the immutable goal. The planner must propose assignments matching
+that policy. The host owns and closes its private planner SDK client.
+
+For a separate goal process, `prepare_azure_goal_process` in
+`taste.brains.azure_goal_entrypoint` returns the exact `GoalProcessInput` without
+model calls. Persist its bytes outside task write access, hash them with SHA256,
+and use `azure_goal_command(input_path, digest, mode="run")` to build the isolated
+command. `mode="settle"` reconciles the same admitted goal without planning or
+launching workers. The caller must own an outer process scope that enforces a
+hard deadline and confirms all descendants have stopped. The historical Claude
+goal and worker entrypoints remain separately available.
+
+An existing or partly initialized worker run is refused by the fresh-launch
+entrypoint; it never resets the allowance on restart. Explicit interrupted-worker
+recovery, task-container terminal transport and Harbor grading remain integration
+work before a full Terminal Bench run. Azure execution currently exposes artifact
+tools; it does not yet give workers a task-container terminal.
 
 ## Quickstart with a real Claude
 
