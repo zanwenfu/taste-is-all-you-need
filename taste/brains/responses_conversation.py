@@ -20,7 +20,8 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from taste.brains.responses_session import (
@@ -84,12 +85,22 @@ class _Context:
     next_tool: int = 0
     tool_intent: str | None = None
     input_since_response: bool = False
+    submitted_inputs: dict[str, str] = field(default_factory=dict)
 
     @property
     def pending(self):
         return self.request_id is not None and (
             self.completion is None or self.next_tool < len(self.completion.tool_calls)
         )
+
+
+@dataclass(frozen=True)
+class CompletedResponsesTurn:
+    """A paid reply and the exact controller inputs submitted before it."""
+
+    request_id: str
+    completion: Completion
+    submitted_inputs: Mapping[str, str]
 
 
 class ResponsesConversation:
@@ -159,7 +170,7 @@ class ResponsesConversation:
     def _effect_id(self, request_id, call):
         return "effect_" + _sha([self.session.binding.run_id, request_id, call.id])
 
-    def _context(self) -> _Context:
+    def _context(self, *, stop_at_completion: str | None = None) -> _Context:
         events = self._events()
         if not events or events[0] != {"kind": "responses_binding", "binding": self._binding}:
             raise ResponsesConflict("worker context differs from the admitted Responses binding")
@@ -180,6 +191,7 @@ class ResponsesConversation:
                     raise ResponsesConflict("Responses intent does not match its exact context")
                 request_ids.add(identifier)
                 context.request_id, context.completion = identifier, None
+                context.submitted_inputs = dict(context.inputs)
                 context.next_tool, context.tool_intent = 0, None
                 context.input_since_response = False
             elif kind == "responses_completion":
@@ -193,6 +205,8 @@ class ResponsesConversation:
                 call_ids.update(call.id for call in reply.tool_calls)
                 context.completion = reply
                 context.messages.append({"role": "assistant", "content": list(reply.transcript_blocks)})
+                if stop_at_completion == context.request_id:
+                    return context
             elif kind in {"responses_tool_intent", "responses_tool_result"}:
                 reply = context.completion
                 if reply is None or context.next_tool >= len(reply.tool_calls):
@@ -223,6 +237,23 @@ class ResponsesConversation:
     def messages(self):
         with self.branch._mutation_lock:
             return _copy(self._context().messages)
+
+    def completed_turn(self, request_id: str | None = None) -> CompletedResponsesTurn:
+        """Read a receipt for feedback acceptance, including after a restart.
+
+        Inputs queued after this request are excluded. A historical receipt is
+        reconstructed from its verified memory prefix and private provider
+        receipt; callers cannot invent a submission by writing an ack marker.
+        """
+        with self.branch._mutation_lock:
+            context = self._context(stop_at_completion=request_id)
+            if (context.completion is None or context.request_id is None
+                    or (request_id is not None and context.request_id != request_id)):
+                raise ResponsesConflict("no completed Responses turn matches this request")
+            return CompletedResponsesTurn(
+                context.request_id, context.completion,
+                MappingProxyType(dict(context.submitted_inputs)),
+            )
 
     def observe(self, identifier: str, content: str):
         """Durably supply a contract or feedback; this alone accepts no inbox message."""
