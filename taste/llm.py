@@ -315,6 +315,21 @@ class LLM:
 
     # ------------------------------------------------------------ providers
 
+    def azure_route_for(self, model: str) -> dict[str, str] | None:
+        """Non-secret route identity for durable admission; no SDK or dispatch.
+
+        Credentials may rotate without changing a run's identity. Endpoint,
+        deployment, served model and deployment pricing class may not.
+        """
+        if self._azure_openai is None:
+            return None
+        deployment = self._azure_openai.deployment_for(model)
+        return {
+            "route": "azure_openai", "endpoint": self._azure_openai.base_url,
+            "deployment": deployment.deployment,
+            "deployment_type": deployment.deployment_type, "served_model": deployment.model,
+        }
+
     def provider_for(self, model: str) -> Any:
         """The adapter serving ``model``, cached per instance."""
         from taste.pricing import provider_for as _provider_for

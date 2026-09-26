@@ -16,7 +16,7 @@ import json
 import math
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -799,7 +799,7 @@ class LLMPlannerTransport:
         cap_on = getattr(self.llm, "cap_on", None)
         if cap_on is not None and cap_on not in {"billed", "work"}:
             raise PlannerReceiptError("planner LLM cap currency is invalid")
-        return {
+        config = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "max_prompt_bytes": self.max_prompt_bytes,
@@ -814,6 +814,13 @@ class LLMPlannerTransport:
             "context_window": price.context_window,
             "max_billed_call_usd": self.max_billed_call_usd(),
         }
+        route = self.llm.azure_route_for(self.model) if isinstance(self.llm, LLM) else None
+        if route is not None:
+            # Preserve historical direct-provider receipt identities. Azure
+            # receipts additionally bind the non-secret route, so restart
+            # cannot replay a receipt under another endpoint or deployment.
+            config["azure_route"] = route
+        return config
 
     def _binding(self, *, system: str, prompt: str) -> dict[str, Any]:
         config = self._call_config()
@@ -1143,6 +1150,16 @@ class LLMPlannerTransport:
                 model=actual_model,
                 provider=provider,
                 usage=usage,
+            )
+        route = self.llm.azure_route_for(self.model) if isinstance(self.llm, LLM) else None
+        provenance = getattr(completion, "provenance", None)
+        if route is not None and (
+            not isinstance(provenance, Mapping)
+            or any(provenance.get(key) != value for key, value in route.items())
+        ):
+            return PlannerTelemetry.unknown(
+                source="azure_route_mismatch", requested_model=self.model,
+                model=actual_model, provider=provider, usage=usage,
             )
         try:
             price = ensure_priced(actual_model)
