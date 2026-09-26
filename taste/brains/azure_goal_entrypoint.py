@@ -28,11 +28,13 @@ from taste.providers.azure_openai import AZURE_MONITOR_MODEL, AZURE_PLANNER_MODE
 from taste.providers.base import ProtocolFailure
 
 
-def _host_factory(*args, policy, environment, planner_model, monitor_model, planner_max_tokens, **kwargs):
+def _host_factory(*args, policy, environment, planner_model, monitor_model, planner_max_tokens,
+                  settlement_only=False, **kwargs):
     if (planner_model != AZURE_PLANNER_MODEL or monitor_model != AZURE_MONITOR_MODEL
             or planner_max_tokens != policy.planner_max_output_tokens):
         raise GoalInputError("Azure goal model options differ from the admitted policy")
-    return compose_azure_central_runtime(*args, policy=policy, environment=environment, **kwargs)
+    return compose_azure_central_runtime(*args, policy=policy, environment=environment,
+                                         settlement_only=settlement_only, **kwargs)
 
 
 def prepare_azure_goal_process(
@@ -66,7 +68,8 @@ def _policy(config):
 async def execute_azure_goal(config, *, mode="run", environment=None):
     policy = _policy(config)
     return await execute_goal(config, mode=mode,
-                              host_factory=partial(_host_factory, policy=policy, environment=environment))
+                              host_factory=partial(_host_factory, policy=policy, environment=environment,
+                                                   settlement_only=mode == "settle"))
 
 
 def azure_goal_command(input_path, expected_sha256, *, mode="run", python_executable=None):

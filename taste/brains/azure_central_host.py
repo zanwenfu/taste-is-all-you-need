@@ -9,6 +9,20 @@ from taste.brains.central_host import compose_central_runtime
 from taste.brains.supervisor import SubprocessLauncher
 from taste.llm import LLM
 from taste.providers.azure_openai import AZURE_MONITOR_MODEL, AZURE_PLANNER_MODEL
+from taste.providers.base import ProtocolFailure
+
+
+class _SettlementLLM(LLM):
+    def ensure_ready(self, *models):
+        raise ProtocolFailure("settlement cannot admit a model call")
+
+    def call(self, **kwargs):
+        raise ProtocolFailure("settlement cannot admit a model call")
+
+
+class _SettlementLauncher(SubprocessLauncher):
+    def launch(self, spec):
+        raise RuntimeError("settlement cannot launch a worker")
 
 
 def compose_azure_central_runtime(
@@ -16,6 +30,7 @@ def compose_azure_central_runtime(
     environment=None, launcher=None, store=None, python_executable=None,
     launcher_handshake_timeout=5.0, default_wall_timeout_seconds=900.0,
     supervisor_poll_interval=0.05, supervisor_termination_grace=2.0,
+    settlement_only=False,
 ):
     """Bind non-secret policy into host.goal before any planning or launch.
 
@@ -26,15 +41,24 @@ def compose_azure_central_runtime(
     """
     if not isinstance(policy, AzureExecutionPolicy):
         raise TypeError("policy must be an AzureExecutionPolicy")
+    if type(settlement_only) is not bool or (settlement_only and launcher is not None):
+        raise ValueError("settlement requires its fixed recovery-only launcher")
     bound_goal = policy.bind_goal(goal)
     environment = dict(os.environ if environment is None else environment)
-    azure = policy.azure_config(environment)
-    llm = LLM(azure_openai=azure, budget_usd=bound_goal.budget_usd, cap_on="billed",
-              max_attempts=1, load_env_file=False, run_id=f"central-planner.{bound_goal.goal_id}")
+    # Settlement needs the original route identity for receipt audit, never
+    # provider authentication. Both paid-call methods and process admission
+    # are disabled, so even a mistaken run() cannot dispatch with this marker.
+    azure = policy.azure_config(
+        {"AZURE_OPENAI_BASE_URL": policy.endpoint, "AZURE_OPENAI_API_KEY": "settlement-no-dispatch"}
+        if settlement_only else environment)
+    llm_type = _SettlementLLM if settlement_only else LLM
+    llm = llm_type(azure_openai=azure, budget_usd=bound_goal.budget_usd, cap_on="billed",
+                  max_attempts=1, load_env_file=False, run_id=f"central-planner.{bound_goal.goal_id}")
     if launcher is None:
-        launcher = SubprocessLauncher(
+        launcher_type = _SettlementLauncher if settlement_only else SubprocessLauncher
+        launcher = launcher_type(
             worker_command_factory(repo_root, session, python_executable=python_executable),
-            env={"AZURE_OPENAI_BASE_URL": azure.base_url, "AZURE_OPENAI_API_KEY": azure.api_key},
+            env={} if settlement_only else {"AZURE_OPENAI_BASE_URL": azure.base_url, "AZURE_OPENAI_API_KEY": azure.api_key},
             handshake_timeout=launcher_handshake_timeout,
         )
     host = compose_central_runtime(

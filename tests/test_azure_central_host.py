@@ -19,6 +19,7 @@ from taste.brains.central_planner import Goal, InvalidPlannerOutput, PlannerIden
 from taste.brains.supervisor import SubprocessLauncher
 from taste.pricing import call_cost, table_sha
 from taste.providers.azure_openai import AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
+from taste.providers.base import ProtocolFailure
 from tests.test_azure_openai import config, httpx
 from tests.test_azure_openai import sdk_transport as _sdk_transport
 from tests.test_azure_worker_process import BOOTSTRAP
@@ -234,3 +235,18 @@ def test_sdk_close_failure_blocks_host_until_cleanup_retry(tmp_path, goal, polic
         monkeypatch.setattr(client, "close", original)
         runtime.close()
     assert runtime.closed and client.is_closed() and not sent
+
+
+def test_settlement_composition_refuses_even_direct_model_and_launch_calls(tmp_path, goal, policy, sdk_transport):
+    sent, _ = install_planner(sdk_transport)
+    root = tmp_path / "repo"
+    root.mkdir()
+    with compose_azure_central_runtime(root, "settlement", goal, policy=policy,
+                                      environment={}, settlement_only=True) as runtime:
+        with pytest.raises(ProtocolFailure, match="settlement"):
+            runtime.planner_llm.ensure_ready(AZURE_PLANNER_MODEL)
+        with pytest.raises(ProtocolFailure, match="settlement"):
+            runtime.planner_llm.call(model=AZURE_PLANNER_MODEL)
+        with pytest.raises(RuntimeError, match="settlement"):
+            runtime.launcher.launch(None)
+        assert runtime.planner_llm._providers == {} and not sent

@@ -241,8 +241,8 @@ For a separate goal process, `prepare_azure_goal_process` in
 `taste.brains.azure_goal_entrypoint` returns the exact `GoalProcessInput` without
 model calls. Persist its bytes outside task write access, hash them with SHA256,
 and use `azure_goal_command(input_path, digest, mode="run")` to build the isolated
-command. `mode="settle"` reconciles the same admitted goal without planning or
-launching workers. The caller must own an outer process scope that enforces a
+command. `mode="settle"` reconciles the same admitted goal without provider
+credentials and refuses new model calls or worker launches. The caller must own an outer process scope that enforces a
 hard deadline and confirms all descendants have stopped. The historical Claude
 goal and worker entrypoints remain separately available.
 

@@ -90,11 +90,21 @@ def test_real_azure_goal_process_and_settlement_never_fall_back_or_repeat_paid_r
     for mode in ("run", "run", "settle"):
         argv = azure_goal_command(path, digest, mode=mode)
         argv[3] = argv[3].replace("from taste.brains.azure_goal_entrypoint", BOOTSTRAP + "\nfrom taste.brains.azure_goal_entrypoint", 1)
-        result = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=40)
+        child_env = dict(env)
+        if mode == "settle":
+            child_env.pop("AZURE_OPENAI_API_KEY")
+            child_env.pop("AZURE_OPENAI_BASE_URL")
+        result = subprocess.run(argv, cwd=tmp_path, env=child_env, capture_output=True, text=True, timeout=40)
         assert result.returncode == 0, (mode, result.stdout, result.stderr)
         assert counter.read_text().splitlines() == ["one Azure planner request"]
         assert "personal-do-not-use" not in result.stdout + result.stderr
     assert "azure-test-only" not in raw.decode()
+
+
+def test_settlement_before_first_plan_needs_no_credential_or_paid_request(prepared):
+    result = asyncio.run(execute_azure_goal(prepared, mode="settle", environment={}))
+    assert not result.complete and result.stop_reason == "cancelled"
+    assert result.budget.enforceable and result.budget.known_spent_usd == 0
 
 
 @pytest.mark.parametrize("field,value", [
