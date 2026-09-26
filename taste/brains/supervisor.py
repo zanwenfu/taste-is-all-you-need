@@ -2948,6 +2948,15 @@ class CentralSupervisor:
         if report.metadata.get("durability_ok") is not True:
             raise DeliveryRejected("worker transcript durability is not certified")
         self._terminal_assessment(report)
+        if "azure_openai" in run.assignment.resources:
+            from taste.brains.communication import Communicator
+
+            # The worker checks before publishing its report. The coordinator
+            # must also check at delivery: feedback can arrive after that
+            # checkpoint or while the process is being reaped. A successful
+            # old report cannot silently accept this later input.
+            if Communicator(self.store).pending(run.assignment.worker):
+                raise DeliveryRejected("Azure worker has unaccepted feedback at delivery")
 
         reported_ids = {output.artifact_id for output in report.outputs}
         paths = tuple(

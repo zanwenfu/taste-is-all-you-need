@@ -10,6 +10,7 @@ import pytest
 
 from taste.brains import azure_worker_entrypoint as entrypoint
 from taste.brains.azure_worker_launch import worker_command
+from taste.brains.communication import Communicator, Message
 from taste.brains.monitor import MonitorBrain, monitor_state_suffix
 from taste.brains.records import contract_digest
 from taste.brains.responses_session import ResponsesSession
@@ -56,7 +57,8 @@ def assigned(supervisor, worker):
                    base_state_id=supervisor.integration.head.id, inputs=())
 
 
-def test_real_subprocess_has_no_claude_dependency_and_delivers_certified_product(worker):
+@pytest.mark.parametrize("late_feedback", [False, True])
+def test_real_subprocess_has_no_claude_dependency_and_delivers_certified_product(worker, late_feedback):
     def command(spec):
         argv = list(worker_command(spec, repo_root=worker.store.root, session=worker.store.session))
         argv[3] = argv[3].replace("import runpy;", BOOTSTRAP + "\nimport runpy;", 1)
@@ -73,6 +75,15 @@ def test_real_subprocess_has_no_claude_dependency_and_delivers_certified_product
         result = supervisor.collect(prepared.run_id, active_generation=1)
         assert result.completed and result.cost_usd == pytest.approx(0.001464)
         assert result.metadata["harness"] == "azure-responses/1"
+        if late_feedback:
+            Communicator(worker.store).send(Message.create(
+                idempotency_key="after-report", kind="feedback", sender="central",
+                recipient=assignment.worker, generation=assignment.generation,
+                payload={"instruction": "additional requirement after worker stopped"}))
+            with pytest.raises(DeliveryRejected, match="unaccepted feedback"):
+                supervisor.deliver(prepared.run_id, active_generation=1)
+            assert supervisor.integration.head.read("output.txt") is None
+            return
         # A forged notification is insufficient: delivery checks the separate
         # exact-run monitor sidecar, not a legacy contract-only certificate.
         scoped = worker.store.sidecar("monitor", assignment.worker,
