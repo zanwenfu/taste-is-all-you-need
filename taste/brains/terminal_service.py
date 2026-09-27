@@ -156,6 +156,10 @@ async def _read(reader, limit):
     size = int.from_bytes(await reader.readexactly(4), "big")
     if not 0 < size <= limit:
         raise TerminalAccessDenied("terminal message exceeds its byte limit")
+    return _decode_message(await reader.readexactly(size))
+
+
+def _decode_message(raw):
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -165,7 +169,7 @@ async def _read(reader, limit):
         return result
 
     try:
-        value = json.loads(await reader.readexactly(size), object_pairs_hook=unique)
+        value = json.loads(raw, object_pairs_hook=unique)
     except (ValueError, RecursionError) as exc:
         raise TerminalAccessDenied("invalid terminal message") from exc
     if not isinstance(value, dict):
@@ -184,17 +188,24 @@ async def _write(writer, value, limit):
 class TerminalService:
     """Own every accepted handler and its broker effect through shutdown."""
 
-    def __init__(self, broker: TerminalBroker, credentials, *, max_connections=16):
+    def __init__(self, broker: TerminalBroker, credentials=(), *, max_connections=16, issuer=None):
         if not isinstance(broker, TerminalBroker):
             raise TypeError("a TerminalBroker is required")
         credentials = tuple(credentials)
-        if not 1 <= len(credentials) <= 256 or not all(isinstance(item, TerminalCredential) for item in credentials):
+        if not (0 if issuer is not None else 1) <= len(credentials) <= 256 or not all(isinstance(item, TerminalCredential) for item in credentials):
             raise ValueError("terminal service requires 1-256 worker grants")
+        if issuer is not None:
+            from taste.brains.terminal_issuer import TerminalIssuerCredential
+
+            if (not isinstance(issuer, TerminalIssuerCredential) or issuer.policy.binding != broker.binding
+                    or issuer.server_uid != os.geteuid()):
+                raise ValueError("terminal issuer must bind this exact service")
         if type(max_connections) is not int or not 1 <= max_connections <= 256:
             raise ValueError("terminal service connection limit must be 1-256")
         self.broker, self.max_connections = broker, max_connections
         self._credentials = {}
-        self.path = Path(credentials[0].socket_path)
+        self._issuer, self._issued = issuer, {}
+        self.path = Path(issuer.socket_path if issuer is not None else credentials[0].socket_path)
         actors = set()
         for credential in credentials:
             if (not isinstance(credential, TerminalCredential)
@@ -204,6 +215,8 @@ class TerminalService:
                     or credential.grant.actor_id in actors):
                 raise ValueError("terminal grants must name unique actors in this exact service")
             key = hashlib.sha256(credential.token.encode()).digest()
+            if issuer is not None and credential.token == issuer.token:
+                raise ValueError("terminal worker and issuer cannot share a bearer token")
             if key in self._credentials:
                 raise ValueError("terminal grants cannot share bearer tokens")
             actors.add(credential.grant.actor_id)
@@ -229,6 +242,8 @@ class TerminalService:
                 or credential.server_uid != os.geteuid() or credential.socket_path != str(self.path)):
             raise TerminalAccessDenied("terminal credential does not identify this service")
         key = hashlib.sha256(credential.token.encode()).digest()
+        if self._issuer is not None and credential.token == self._issuer.token:
+            raise TerminalAccessDenied("terminal worker cannot use the issuer token")
         if self._credentials.get(key) == credential:
             return
         if key in self._credentials or any(
@@ -341,6 +356,12 @@ class TerminalService:
         try:
             async with asyncio.timeout(HANDSHAKE_SECONDS):
                 message = await _read(reader, REQUEST_BYTES)
+                if message.get("operation") == "issue":
+                    from taste.brains.terminal_issuer import issue_for_coordinator
+
+                    credential = issue_for_coordinator(self, message, writer)
+                    reply.update(status="ok", scope=self._issuer.public_scope(), credential=credential.to_dict())
+                    return
                 grant = self._authorize(message, writer)
             reply["grant"] = grant.to_dict()
             operation, arguments = message["operation"], message["arguments"]

@@ -293,6 +293,15 @@ worker verifies them and probes the service before paid admission. It receives
 truncation counts. Files, packages and services in the container persist across
 memory rollback. Omitting the terminal policy preserves artifact-only execution.
 
+For a separate coordinator process, `TerminalIssuerClient` supplies this callback
+over the same socket using a distinct private `TerminalIssuerCredential`.
+The broker checks the coordinator UID, exact goal-input digest and terminal
+policy, derives each actor from its assignment, and refuses changed checkpoints,
+expired deadlines or new grants after sealing. Worker tokens cannot issue grants;
+the issuer token cannot execute commands. A repeated issuance request returns
+the same token only within that service lifetime. Service loss still requires
+outside cleanup and recovery rather than restarting workers speculatively.
+
 The standalone Azure goal CLI does not yet construct this terminal lifecycle or
 credential provider. The outside lifecycle owner must enforce the process
 deadline, drain agent processes, and call `TerminalService.seal_for_grading()`

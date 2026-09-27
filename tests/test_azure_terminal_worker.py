@@ -18,6 +18,7 @@ from taste.brains.azure_worker_launch import worker_command
 from taste.brains.records import contract_digest
 from taste.brains.supervisor import CentralSupervisor, SubprocessLauncher
 from taste.brains.terminal_broker import TerminalBinding, TerminalBroker, TerminalResult
+from taste.brains.terminal_issuer import TerminalIssuerClient, TerminalIssuerCredential
 from taste.brains.terminal_service import TerminalCredential, TerminalService
 from taste.brains.terminal_worker_policy import (
     TERMINAL_POLICY_KEY,
@@ -45,7 +46,7 @@ worker = _worker
 
 
 @asynccontextmanager
-async def terminal(worker, tmp_path, *, assignment=None):
+async def terminal(worker, tmp_path, *, assignment=None, issue_remotely=False):
     env = Environment()
     source = worker.assignment if assignment is None else assignment
     binding = TerminalBinding("terminal_trial", env.environment_id, source.resources["azure_openai"]["deadline_unix"], 10)
@@ -58,13 +59,16 @@ async def terminal(worker, tmp_path, *, assignment=None):
     with tempfile.TemporaryDirectory(prefix="taste-azure-rpc-", dir="/tmp") as directory:
         credential = TerminalCredential(str(Path(directory) / "service" / "terminal.sock"),
             os.geteuid(), os.geteuid(), policy.grant(updated), "e" * 64)
-        service = TerminalService(owner, [credential])
+        issuer = (TerminalIssuerCredential(credential.socket_path, os.geteuid(), os.geteuid(),
+                  "1" * 64, policy, "d" * 64) if issue_remotely else None)
+        service = TerminalService(owner, [] if issue_remotely else [credential], issuer=issuer)
         await service.start()
         if assignment is None:
             install_terminal_credential(worker.store, updated, worker.config.prepared_state_id, credential)
         try:
             yield SimpleNamespace(env=env, owner=owner, service=service, credential=credential,
-                                  assignment=updated, policy=policy)
+                                  assignment=updated, policy=policy,
+                                  issuer=TerminalIssuerClient(issuer) if issuer else None)
         finally:
             env.release.set()
             env.stop_release.set()
@@ -176,17 +180,25 @@ def test_cancelled_worker_waits_for_remote_terminal_settlement_and_reports_uncer
     asyncio.run(scenario())
 
 
-def test_real_azure_subprocess_uses_private_grant_and_delivers_after_terminal_receipt(worker, tmp_path):
+@pytest.mark.parametrize("issue_remotely", [False, True])
+def test_real_azure_subprocess_uses_private_grant_and_delivers_after_terminal_receipt(worker, tmp_path, issue_remotely):
     async def scenario():
         bootstrap = BOOTSTRAP.replace("install(network)",
             "from tests.terminal_worker_wire import replies\ninstall(network, worker_reply=replies)")
         bootstrap += "\nsys.modules.pop('taste.brains.azure_worker_entrypoint', None)\n"
 
         def command(spec):
+            def provide(admitted):
+                if t.issuer is not None:
+                    t.credential = t.issuer(admitted)
+                return t.credential
+
             argv = list(worker_command(spec, repo_root=worker.store.root, session=worker.store.session,
-                                       terminal_credential_provider=lambda _spec: t.credential))
+                                       terminal_credential_provider=provide))
             argv[3] = argv[3].replace("import runpy;", bootstrap + "\nimport runpy;", 1)
             assert t.credential.token not in " ".join(argv)
+            if t.issuer is not None:
+                assert t.issuer.credential.token not in " ".join(argv)
             return argv
 
         launcher = SubprocessLauncher(command, env=environment())
@@ -195,7 +207,7 @@ def test_real_azure_subprocess_uses_private_grant_and_delivers_after_terminal_re
         contract = replace(source.contract, identity="terminal-process-worker", inputs=())
         assignment = replace(source, contract=contract, contract_digest=contract_digest(contract),
                              base_state_id=supervisor.integration.head.id, inputs=())
-        async with terminal(worker, tmp_path, assignment=assignment) as t:
+        async with terminal(worker, tmp_path, assignment=assignment, issue_remotely=issue_remotely) as t:
             prepared = supervisor.prepare(t.assignment, wall_timeout_seconds=30)
             try:
                 await asyncio.to_thread(supervisor.start, prepared.run_id, active_generation=1)
