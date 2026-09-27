@@ -278,6 +278,19 @@ class TerminalBroker:
             raise TerminalFenced("terminal request has no confirmed completed receipt")
         return TerminalResult(*row[2:])
 
+    def lookup_actor(self, request_id: str, actor_id: str):
+        """Read one actor's completed receipt without allowing an effect replay."""
+        self._check()
+        _identifier(request_id)
+        _identifier(actor_id)
+        row = self._db.execute("SELECT payload FROM requests WHERE id=?", (request_id,)).fetchone()
+        if row is None:
+            return None
+        request = TerminalRequest(**json.loads(row[0]))
+        if request.actor_id != actor_id:
+            raise TerminalConflict("terminal receipt belongs to another actor")
+        return self.lookup(request)
+
     def _fence(self, reason):
         with self._db:
             self._db.execute("UPDATE state SET phase='fenced'")
