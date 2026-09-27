@@ -1,0 +1,366 @@
+"""Bounded Linux Docker transport for the trusted, outside-container broker.
+
+Uses only an explicitly named local daemon socket, pinned Docker API v1.51,
+non-TTY exec and cgroup v2. Never creates, restarts or removes a container.
+Persist DockerTerminalBinding outside task write access before admitting work;
+recovery must use that original binding, not admit the container again.
+
+This is not the worker credential boundary or the outside death watchdog.
+The lifecycle owner must create an isolated container with restart disabled,
+reserve its ownership label, and stop/remove it even if this controller dies.
+Neither task containers nor model workers should receive the Docker socket.
+"""
+
+from __future__ import annotations
+
+import http.client
+import json
+import math
+import re
+import socket
+import threading
+import time
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+from taste.brains.terminal_broker import (
+    MAX_TERMINAL_OUTPUT_BYTES,
+    TerminalConflict,
+    TerminalFenced,
+    TerminalRequest,
+    TerminalResult,
+)
+
+API_VERSION = "v1.51"
+OWNER_LABEL = "taste.terminal.owner"
+CONTROL_BYTES = 1024 * 1024
+READ_BYTES = 65536
+CONTROL_SECONDS = 10
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+PROC_ROOT = Path("/proc")
+
+
+class DockerTransportError(RuntimeError):
+    """An unconfirmed transport outcome, never an ordinary command exit."""
+
+
+def _remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Docker transport deadline expired")
+    return remaining
+
+
+def _full_id(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+class _DeadlineSocket(socket.socket):
+    # SocketIO calls recv_into for each underlying read. Applying the remaining
+    # *absolute* allowance here also bounds slowly trickled HTTP headers/chunks.
+    def __init__(self, deadline):
+        timeout = _remaining(deadline)
+        super().__init__(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.deadline = deadline
+        self.settimeout(timeout)
+
+    def recv_into(self, buffer, nbytes=0, flags=0):
+        self.settimeout(_remaining(self.deadline))
+        return super().recv_into(buffer, nbytes, flags)
+
+    def sendall(self, data, flags=0):
+        self.settimeout(_remaining(self.deadline))
+        return super().sendall(data, flags)
+
+
+class _Wire:
+    def __init__(self, socket_path):
+        self.socket_path = socket_path
+        self._lock = threading.Lock()
+        self._sockets = set()
+        self._closed = False
+
+    def cancel(self):
+        with self._lock:
+            self._closed = True
+            for sock in self._sockets:
+                with suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+
+    @contextmanager
+    def request(self, method, path, deadline, body=None, *, upgrade=False):
+        connection = http.client.HTTPConnection("localhost")
+        sock = _DeadlineSocket(deadline)
+        response = None
+        try:
+            with self._lock:
+                if self._closed:
+                    raise TerminalFenced("Docker transport admission ended")
+                self._sockets.add(sock)
+            sock.connect(self.socket_path)
+            with self._lock:
+                if self._closed:
+                    raise TerminalFenced("Docker transport admission ended")
+            connection.sock = sock
+            headers = {"Content-Type": "application/json"}
+            if upgrade:
+                headers.update(Connection="Upgrade", Upgrade="tcp")
+            else:
+                headers["Connection"] = "close"
+            payload = None if body is None else json.dumps(body, allow_nan=False).encode()
+            connection.request(method, f"/{API_VERSION}{path}", body=payload, headers=headers)
+            response = connection.getresponse()
+            _remaining(deadline)
+            yield response
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()
+            with self._lock:
+                self._sockets.discard(sock)
+            sock.close()
+
+    def control(self, method, path, deadline, body=None, *, statuses=(200,)):
+        with self.request(method, path, deadline, body) as response:
+            if response.status not in statuses:
+                # Daemon error bodies can contain task data; don't echo them.
+                raise DockerTransportError(f"Docker control request returned HTTP {response.status}")
+            data = bytearray()
+            while True:
+                _remaining(deadline)
+                chunk = response.read1(min(READ_BYTES, CONTROL_BYTES + 1 - len(data)))
+                if not chunk:
+                    if response.length not in (None, 0):
+                        raise DockerTransportError("truncated Docker control reply")
+                    break
+                data.extend(chunk)
+                if len(data) > CONTROL_BYTES:
+                    raise DockerTransportError("Docker control reply exceeded its byte limit")
+            if not data:
+                return None
+            try:
+                result = json.loads(data)
+            except (ValueError, RecursionError) as exc:
+                raise DockerTransportError("invalid Docker control JSON") from exc
+            if not isinstance(result, dict):
+                raise DockerTransportError("Docker control reply must be an object")
+            return result
+
+
+def _capture(response, deadline, limit):
+    if response.status == 101:
+        if response.getheader("Upgrade", "").lower() != "tcp":
+            raise DockerTransportError("invalid Docker stream upgrade")
+        read = response.fp.read1  # HTTP framing ends at a successful upgrade.
+    elif response.status == 200:
+        read = response.read1  # Includes HTTP chunk decoding when present.
+    else:
+        raise DockerTransportError(f"Docker exec start returned HTTP {response.status}")
+    if response.getheader("Content-Type", "").split(";", 1)[0].strip() not in {
+        "application/vnd.docker.raw-stream", "application/vnd.docker.multiplexed-stream",
+    }:
+        raise DockerTransportError("Docker did not supply a framed non-TTY stream")
+
+    streams = [bytearray(), bytearray()]
+    dropped = [0, 0]
+
+    def take(count):
+        _remaining(deadline)
+        return read(count)
+
+    while True:
+        header = bytearray()
+        while len(header) < 8:
+            part = take(8 - len(header))
+            if not part:
+                if not header:
+                    if response.status == 200 and response.length not in (None, 0):
+                        raise DockerTransportError("truncated Docker HTTP stream")
+                    return bytes(streams[0]), bytes(streams[1]), *dropped
+                raise DockerTransportError("truncated Docker stream header")
+            header.extend(part)
+        if header[0] not in (1, 2) or header[1:4] != b"\0\0\0":
+            raise DockerTransportError("invalid Docker stdout/stderr frame")
+        index, remaining = header[0] - 1, int.from_bytes(header[4:], "big")
+        while remaining:
+            part = take(min(remaining, READ_BYTES))
+            if not part:
+                raise DockerTransportError("truncated Docker stream payload")
+            remaining -= len(part)
+            keep = min(len(part), limit - len(streams[index]))
+            streams[index].extend(part[:keep])
+            dropped[index] += len(part) - keep
+            if dropped[index] > 2**63 - 1:
+                raise DockerTransportError("Docker output byte count overflow")
+
+
+@dataclass(frozen=True)
+class DockerTerminalBinding:
+    socket_path: str
+    container_id: str
+    owner_token: str
+    started_at: str
+    cgroup_path: str
+    deadline_unix: float
+    output_limit: int = 65536
+
+    def __post_init__(self):
+        if (not isinstance(self.socket_path, str) or not self.socket_path.startswith("/")
+                or "\0" in self.socket_path or len(self.socket_path.encode()) > 107):
+            raise ValueError("an absolute local Docker Unix socket path is required")
+        if not _full_id(self.container_id):
+            raise ValueError("a full Docker container ID is required")
+        if not isinstance(self.owner_token, str) or re.fullmatch(r"[0-9a-f]{32}", self.owner_token) is None:
+            raise ValueError("a 32-character lowercase hex owner token is required")
+        if (not isinstance(self.started_at, str) or not self.started_at
+                or len(self.started_at) > 64):
+            raise ValueError("the original Docker start timestamp is required")
+        if (not isinstance(self.cgroup_path, str) or not self.cgroup_path.startswith("/")
+                or "\0" in self.cgroup_path or len(self.cgroup_path) > 4096
+                or ".." in PurePosixPath(self.cgroup_path).parts
+                or self.container_id not in PurePosixPath(self.cgroup_path).name):
+            raise ValueError("the original container-specific cgroup v2 path is required")
+        if (type(self.deadline_unix) not in (int, float) or not math.isfinite(self.deadline_unix)
+                or self.deadline_unix <= 0):
+            raise ValueError("a finite positive task deadline is required")
+        if type(self.output_limit) is not int or not 1 <= self.output_limit <= MAX_TERMINAL_OUTPUT_BYTES:
+            raise ValueError("output limit must be between 1 byte and 1 MiB per stream")
+
+
+class DockerTerminalBackend:
+    def __init__(self, binding: DockerTerminalBinding):
+        if not isinstance(binding, DockerTerminalBinding):
+            raise TypeError("a validated DockerTerminalBinding is required")
+        self.binding = binding
+        self._lock, self._stop_lock = threading.Lock(), threading.Lock()
+        self._closing = False
+        self._active = None
+
+    @property
+    def environment_id(self):
+        return self.binding.container_id
+
+    @classmethod
+    def admit(cls, socket_path, container_id, owner_token, deadline_unix, *, output_limit=65536):
+        # Validate caller values before constructing any daemon URL. The real
+        # start/cgroup binding is captured below, then checked a second time.
+        provisional = DockerTerminalBinding(socket_path, container_id, owner_token, "pending",
+                                            f"/{container_id}", deadline_unix, output_limit)
+        if deadline_unix <= time.time():
+            raise TerminalFenced("Docker task admission deadline expired")
+        wire = _Wire(socket_path)
+        deadline = time.monotonic() + min(CONTROL_SECONDS, deadline_unix - time.time())
+        info = wire.control("GET", f"/containers/{container_id}/json", deadline)
+        cls._check_container(info, provisional, original_start=False)
+        if info["State"]["Running"] is not True:
+            raise TerminalFenced("Docker admission requires an already running container")
+        pid = info["State"].get("Pid")
+        if type(pid) is not int or pid <= 0 or not (CGROUP_ROOT / "cgroup.controllers").is_file():
+            raise TerminalFenced("Docker transport requires local Linux cgroup v2")
+        paths = [line[3:] for line in (PROC_ROOT / str(pid) / "cgroup").read_text().splitlines()
+                 if line.startswith("0::")]
+        if len(paths) != 1:
+            raise TerminalFenced("cannot identify the original container cgroup")
+        backend = cls(DockerTerminalBinding(socket_path, container_id, owner_token,
+                      info["State"].get("StartedAt"), paths[0], deadline_unix, output_limit))
+        confirmed = backend._inspect(wire, deadline)
+        if confirmed["State"]["Running"] is not True or confirmed["State"].get("Pid") != pid:
+            raise TerminalFenced("container changed during terminal admission")
+        return backend
+
+    @staticmethod
+    def _check_container(info, binding, *, original_start=True):
+        if (not isinstance(info, dict) or info.get("Id") != binding.container_id
+                or not isinstance(info.get("Config"), dict)
+                or not isinstance(info["Config"].get("Labels"), dict)
+                or info["Config"]["Labels"].get(OWNER_LABEL) != binding.owner_token):
+            raise TerminalConflict("Docker container identity or ownership label changed")
+        state, config = info.get("State"), info.get("HostConfig")
+        if (not isinstance(state, dict) or type(state.get("Running")) is not bool
+                or state.get("Paused") is not False or state.get("Restarting") is not False
+                or state.get("Dead") is not False or not isinstance(config, dict)
+                or config.get("AutoRemove") is not False
+                or not isinstance(config.get("RestartPolicy"), dict)
+                or config["RestartPolicy"].get("Name") != "no"):
+            raise TerminalFenced("Docker container state or lifecycle policy is not admissible")
+        if original_start and state.get("StartedAt") != binding.started_at:
+            raise TerminalConflict("Docker container was restarted after admission")
+
+    def _inspect(self, wire, deadline):
+        info = wire.control("GET", f"/containers/{self.environment_id}/json", deadline)
+        self._check_container(info, self.binding)
+        return info
+
+    def execute(self, request: TerminalRequest) -> TerminalResult:
+        if not isinstance(request, TerminalRequest):
+            raise TypeError("a validated TerminalRequest is required")
+        wire = _Wire(self.binding.socket_path)
+        with self._lock:
+            if self._closing or self._active is not None:
+                raise TerminalFenced("Docker terminal is closed or already executing")
+            self._active = wire
+        try:
+            allowance = min(request.timeout_seconds, self.binding.deadline_unix - time.time())
+            deadline = time.monotonic() + allowance
+            _remaining(deadline)
+            info = self._inspect(wire, deadline)
+            if info["State"]["Running"] is not True:
+                raise TerminalFenced("Docker terminal never restarts a stopped container")
+            created = wire.control("POST", f"/containers/{self.environment_id}/exec", deadline, {
+                "AttachStdout": True, "AttachStderr": True, "AttachStdin": False,
+                "Tty": False, "Cmd": ["/bin/sh", "-c", request.command], "WorkingDir": request.cwd,
+            }, statuses=(201,))
+            exec_id = created.get("Id") if isinstance(created, dict) else None
+            if not _full_id(exec_id):
+                raise DockerTransportError("Docker did not identify the created exec")
+            with wire.request("POST", f"/exec/{exec_id}/start", deadline,
+                              {"Detach": False, "Tty": False}, upgrade=True) as response:
+                stdout, stderr, out_dropped, err_dropped = _capture(response, deadline, self.binding.output_limit)
+            result = wire.control("GET", f"/exec/{exec_id}/json", deadline)
+            if (not isinstance(result, dict) or result.get("ID") != exec_id
+                    or result.get("ContainerID") != self.environment_id
+                    or result.get("Running") is not False
+                    or type(result.get("ExitCode")) is not int or not 0 <= result["ExitCode"] <= 255):
+                raise DockerTransportError("Docker exec has no confirmed exit for this container")
+            self._inspect(wire, deadline)
+            return TerminalResult(result["ExitCode"], stdout, stderr, out_dropped, err_dropped)
+        except BaseException:
+            with self._lock:
+                self._closing = True
+            raise
+        finally:
+            wire.cancel()
+            with self._lock:
+                self._active = None
+
+    def stop_and_confirm(self):
+        with self._lock:
+            self._closing = True
+            if self._active is not None:
+                self._active.cancel()
+        # A retry can establish proof after a lost stop reply; it cannot execute.
+        with self._stop_lock:
+            deadline = time.monotonic() + CONTROL_SECONDS
+            wire = _Wire(self.binding.socket_path)
+            info = self._inspect(wire, deadline)
+            if info["State"]["Running"]:
+                wire.control("POST", f"/containers/{self.environment_id}/stop?t=1", deadline,
+                             statuses=(204, 304))
+            if self._inspect(wire, deadline)["State"]["Running"]:
+                raise TerminalFenced("Docker still reports the container running")
+            if not (CGROUP_ROOT / "cgroup.controllers").is_file():
+                raise TerminalFenced("local cgroup v2 proof is unavailable")
+            events = CGROUP_ROOT / self.binding.cgroup_path.lstrip("/") / "cgroup.events"
+            while True:
+                _remaining(deadline)
+                try:
+                    state = dict(line.split() for line in events.read_text().splitlines())
+                except FileNotFoundError:
+                    break
+                if state.get("populated") == "0":
+                    break
+                if state.get("populated") != "1":
+                    raise TerminalFenced("unrecognized container cgroup state")
+                time.sleep(min(0.02, _remaining(deadline)))
+            return self.environment_id

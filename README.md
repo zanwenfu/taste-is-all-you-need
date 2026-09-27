@@ -248,9 +248,22 @@ goal and worker entrypoints remain separately available.
 
 An existing or partly initialized worker run is refused by the fresh-launch
 entrypoint; it never resets the allowance on restart. Explicit interrupted-worker
-recovery, task-container terminal transport and Harbor grading remain integration
+recovery, authenticated worker terminal access and Harbor grading remain integration
 work before a full Terminal Bench run. Azure execution currently exposes artifact
 tools; it does not yet give workers a task-container terminal.
+
+The controller-side `DockerTerminalBackend` in `taste.brains.docker_terminal`
+implements bounded non-TTY terminal transport over an explicit local Docker
+socket (API v1.51, Linux cgroup v2). It binds the full container ID, ownership
+label and original start time, captures bounded binary stream prefixes with
+durable dropped-byte counts, and confirms exit status through Docker's exec API.
+Stopping requires both a stopped container and an empty original cgroup.
+Persist the original `DockerTerminalBinding` outside task write access for recovery.
+The lifecycle owner must create the isolated container with restart disabled
+and independently stop/remove it if the controller dies. Workers must not receive
+the Docker socket. `scripts/check_docker_terminal.py` exercises this transport in
+five serial disposable containers; its invocation documents the outside cleanup
+requirement. Worker authentication and Harbor lifecycle/grading are still pending.
 
 ## Quickstart with a real Claude
 
