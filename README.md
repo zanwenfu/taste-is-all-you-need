@@ -327,6 +327,18 @@ containers and unprivileged worker processes, including grading a fixture after
 sealing and killing a worker during a command. These checks do not yet constitute
 a Harbor adapter or an official Terminal Bench result.
 
+`scripts/check_harbor_trial.py` exercises the pinned Harbor revision
+`d611f10b15ffab8afb7b665b3e69e96773044fc8` in a separate server environment.
+It runs a controlled local task through Harbor's actual Trial and verifier with
+an unprivileged scripted worker. The success case requires reward `1.0`; the
+worker-death case requires an exception and no reward. Both require broker stop
+proof before container removal, an empty original cgroup, and retention of the
+cached image. Run each mode in a bounded systemd unit with the independent
+owner-label cleanup described in the script. Telemetry is disabled and no image
+pulls or paid calls occur. This validates the grading/cleanup handoff for that
+fixture; the production Azure Harbor runner and broader task admission remain
+unfinished.
+
 ## Quickstart with a real Claude
 
 The current Linux regression environment uses Python 3.14.4. In a clean Python
