@@ -24,6 +24,7 @@ from taste.brains.monitor import MonitorBrain
 from taste.brains.responses_monitor import ResponsesMonitorJudge
 from taste.brains.responses_session import ResponsesSession
 from taste.brains.supervisor import mark_worker_ready
+from taste.brains.terminal_worker_policy import load_terminal_client
 from taste.brains.worker_admission import (
     EntrypointConfig,
     EntrypointInputError,
@@ -56,6 +57,7 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
         durable = _load_durable_input(store, config, environment)
         policy = AzureWorkerPolicy.from_assignment(durable.assignment)
         policy.validate_launch(config)
+        terminal = load_terminal_client(store, durable.assignment, config.prepared_state_id)
         azure = policy.azure_config(environment)
         if time.time() >= policy.worker.deadline_unix:
             raise EntrypointInputError("Azure assignment deadline has already elapsed")
@@ -70,6 +72,12 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
                                run_id=durable.run_id)
         if monitor._state_path().exists():
             raise EntrypointInputError("existing Azure monitor requires explicit recovery")
+        if terminal is not None:
+            try:
+                if await terminal.ping() != "ready":
+                    raise EntrypointInputError("terminal service is not admitting task commands")
+            except Exception as exc:
+                raise EntrypointInputError("the admitted terminal service is unavailable") from exc
         # Exclusive parent creation is the irreversible admission marker. Any
         # partial initialization remains fenced, including a missing child DB.
         directory.mkdir(mode=0o700)
@@ -84,7 +92,7 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
         judge.ensure_ready()
         monitor = MonitorBrain(store, durable.contract, judge, batch_size=policy.monitor_batch_size,
                                run_id=durable.run_id)
-        runtime = AzureWorkerRuntime(branch, durable.assignment, session, monitor)
+        runtime = AzureWorkerRuntime(branch, durable.assignment, session, monitor, terminal_client=terminal)
         if ready_callback is None:
             mark_worker_ready(environ=environment)
         else:

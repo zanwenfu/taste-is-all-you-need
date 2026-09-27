@@ -9,12 +9,14 @@ from pathlib import Path
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.python_process import isolated_python_argv
 from taste.brains.supervisor import LaunchSpec
+from taste.brains.terminal_worker_policy import TerminalWorkerPolicy, install_terminal_credential
 from taste.brains.worker_admission import EntrypointConfig
 from taste.brains.worker_protocol import assignment_run_id
+from taste.memstore import Store
 
 
 def worker_command(spec: LaunchSpec, *, repo_root: Path, session: str,
-                   python_executable: str | None = None) -> tuple[str, ...]:
+                   python_executable: str | None = None, terminal_credential_provider=None) -> tuple[str, ...]:
     policy = AzureWorkerPolicy.from_assignment(spec.assignment)
     if spec.run_id != assignment_run_id(spec.assignment):
         raise ValueError("LaunchSpec run_id differs from its assignment")
@@ -25,6 +27,16 @@ def worker_command(spec: LaunchSpec, *, repo_root: Path, session: str,
     executable = python_executable or sys.executable
     if not isinstance(executable, str) or not executable or "\x00" in executable:
         raise ValueError("invalid Python executable")
+    terminal = TerminalWorkerPolicy.from_assignment(spec.assignment)
+    if terminal is not None:
+        if terminal_credential_provider is None:
+            raise ValueError("terminal assignment requires a trusted credential provider")
+        credential = terminal_credential_provider(spec)
+        store = Store.open(repo_root, session)
+        try:
+            install_terminal_credential(store, spec.assignment, spec.prepared_state_id, credential)
+        finally:
+            store.close()
     return tuple(isolated_python_argv(executable,
         "import runpy; runpy.run_module('taste.brains.azure_worker_entrypoint', "
         "run_name='__main__', alter_sys=True)", [
@@ -37,8 +49,10 @@ def worker_command(spec: LaunchSpec, *, repo_root: Path, session: str,
         ]))
 
 
-def worker_command_factory(repo_root: Path, session: str, *, python_executable: str | None = None
+def worker_command_factory(repo_root: Path, session: str, *, python_executable: str | None = None,
+                           terminal_credential_provider=None,
                            ) -> Callable[[LaunchSpec], tuple[str, ...]]:
     def command(spec):
-        return worker_command(spec, repo_root=repo_root, session=session, python_executable=python_executable)
+        return worker_command(spec, repo_root=repo_root, session=session, python_executable=python_executable,
+                              terminal_credential_provider=terminal_credential_provider)
     return command

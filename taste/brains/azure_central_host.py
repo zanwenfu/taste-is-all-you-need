@@ -30,7 +30,7 @@ def compose_azure_central_runtime(
     environment=None, launcher=None, store=None, python_executable=None,
     launcher_handshake_timeout=5.0, default_wall_timeout_seconds=900.0,
     supervisor_poll_interval=0.05, supervisor_termination_grace=2.0,
-    settlement_only=False,
+    settlement_only=False, terminal_credential_provider=None,
 ):
     """Bind non-secret policy into host.goal before any planning or launch.
 
@@ -43,6 +43,8 @@ def compose_azure_central_runtime(
         raise TypeError("policy must be an AzureExecutionPolicy")
     if type(settlement_only) is not bool or (settlement_only and launcher is not None):
         raise ValueError("settlement requires its fixed recovery-only launcher")
+    if policy.terminal is not None and not settlement_only and launcher is None and terminal_credential_provider is None:
+        raise ValueError("terminal execution requires a trusted per-assignment credential provider")
     bound_goal = policy.bind_goal(goal)
     environment = dict(os.environ if environment is None else environment)
     # Settlement needs the original route identity for receipt audit, never
@@ -57,7 +59,8 @@ def compose_azure_central_runtime(
     if launcher is None:
         launcher_type = _SettlementLauncher if settlement_only else SubprocessLauncher
         launcher = launcher_type(
-            worker_command_factory(repo_root, session, python_executable=python_executable),
+            worker_command_factory(repo_root, session, python_executable=python_executable,
+                                   terminal_credential_provider=terminal_credential_provider),
             env={} if settlement_only else {"AZURE_OPENAI_BASE_URL": azure.base_url, "AZURE_OPENAI_API_KEY": azure.api_key},
             handshake_timeout=launcher_handshake_timeout,
         )

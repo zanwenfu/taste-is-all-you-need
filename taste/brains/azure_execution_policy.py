@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, fields, replace
 
 from taste.brains.azure_worker_policy import AZURE_WORKER_POLICY_SCHEMA, AzureWorkerPolicy
 from taste.brains.responses_session import ResponsesBinding
+from taste.brains.terminal_worker_policy import TERMINAL_POLICY_KEY, TerminalWorkerPolicy
 from taste.brains.worker_admission import EntrypointInputError
 from taste.pricing import max_call_cost_usd, table_sha
 from taste.providers.azure_openai import (
@@ -39,8 +40,13 @@ class AzureExecutionPolicy:
     max_request_bytes: int = 196608
     monitor_batch_size: int = 8
     pricing_sha: str = ""
+    terminal: TerminalWorkerPolicy | None = None
 
     def __post_init__(self):
+        if self.terminal is not None and (
+                not isinstance(self.terminal, TerminalWorkerPolicy)
+                or self.terminal.binding.deadline_unix != self.deadline_unix):
+            raise ValueError("terminal policy must share the original Azure goal deadline")
         route = self.azure_config({"AZURE_OPENAI_BASE_URL": self.endpoint,
                                    "AZURE_OPENAI_API_KEY": "policy-validation-only"})
         if route.base_url != self.endpoint:
@@ -66,14 +72,23 @@ class AzureExecutionPolicy:
             object.__setattr__(self, name, float(getattr(self, name)))
 
     def to_dict(self):
-        return {"schema": "taste.brains/AzureExecutionPolicy/1", **asdict(self)}
+        value = asdict(self)
+        value.pop("terminal")
+        if self.terminal is None:
+            return {"schema": "taste.brains/AzureExecutionPolicy/1", **value}
+        return {"schema": "taste.brains/AzureExecutionPolicy/2", **value,
+                "terminal": self.terminal.to_dict()}
 
     @classmethod
     def from_dict(cls, value):
-        if (not isinstance(value, Mapping) or set(value) != {"schema", *(item.name for item in fields(cls))}
-                or value["schema"] != "taste.brains/AzureExecutionPolicy/1"):
+        names = {item.name for item in fields(cls)} - {"terminal"}
+        if not isinstance(value, Mapping):
             raise ValueError("invalid Azure execution policy fields or schema")
-        return cls(**{key: value[key] for key in value if key != "schema"})
+        if value.get("schema") == "taste.brains/AzureExecutionPolicy/1" and set(value) == {"schema", *names}:
+            return cls(**{key: value[key] for key in names})
+        if value.get("schema") == "taste.brains/AzureExecutionPolicy/2" and set(value) == {"schema", "terminal", *names}:
+            return cls(**{key: value[key] for key in names}, terminal=TerminalWorkerPolicy.from_dict(value["terminal"]))
+        raise ValueError("invalid Azure execution policy fields or schema")
 
     def bind_goal(self, goal):
         from taste.brains.central_planner import Goal
@@ -121,13 +136,28 @@ class AzureExecutionPolicy:
             },
             azure_execution_policy=self.to_dict(),
         )
+        if self.terminal is not None:
+            exemplar["resources"][TERMINAL_POLICY_KEY] = self.terminal.to_dict()
+            capabilities = payload["rules"]["worker_capabilities"]
+            capabilities["can"].extend(["run bounded commands in the shared task container",
+                                         "read this worker's retained terminal output pages"])
+            capabilities["cannot"] = ["run commands on the controller host", "read undeclared memory artifacts"]
+            capabilities["terminal_effects"] = (
+                "All workers share one task container with serial terminal actions. Files, packages and services "
+                "persist across successful commands and memory rollback. Active command timeout/cancellation "
+                "ends the task environment. Official benchmark grading remains the outside lifecycle owner's job.")
 
     def validate_assignment(self, assignment):
+        allowed = {"azure_openai", "monitor_budget_usd", "wall_timeout_seconds"}
+        if self.terminal is not None:
+            allowed.add(TERMINAL_POLICY_KEY)
+            if assignment.resources.get(TERMINAL_POLICY_KEY) != self.terminal.to_dict():
+                raise ValueError("assignment differs from the goal's terminal policy")
         if (assignment.resources.get("azure_openai") != self.worker_resources()
                 or assignment.resources.get("monitor_budget_usd") != self.monitor_budget_usd
                 or assignment.contract.budget_usd != self.worker_budget_usd
                 or assignment.contract.max_turns != self.worker_max_calls
-                or set(assignment.resources) - {"azure_openai", "monitor_budget_usd", "wall_timeout_seconds"}):
+                or set(assignment.resources) - allowed):
             raise ValueError("assignment differs from the goal's exact Azure execution policy")
         try:
             AzureWorkerPolicy.from_assignment(assignment)

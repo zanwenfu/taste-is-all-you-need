@@ -3,8 +3,8 @@
 The entrypoint lends this runtime the worker branch and private call journals.
 Every operation settles before those leases are released. The supervisor owns
 the process deadline (including killing a provider thread that cannot settle).
-Only confined artifact tools are admitted here; task terminal transport is a
-separate capability and is not implicitly replaced with a host shell.
+Artifact tools are confined to memory outputs. A separately admitted terminal
+capability connects to the task broker and never substitutes a host shell.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from taste.brains.records import ArtifactRef, Assignment, WorkerReport
 from taste.brains.responses_conversation import ResponsesConversation
 from taste.brains.responses_feedback import ResponsesFeedback, WorkerClaim
 from taste.brains.responses_session import ResponsesFenced, ResponsesSession
+from taste.brains.terminal_tools import TerminalTools
+from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
 from taste.brains.worker_protocol import ASSIGNMENT_PATH, WORKER_REPORT_PATH, ContractMismatch
 from taste.memstore import Branch, State
 
@@ -106,15 +108,24 @@ class AzureWorkerResult:
 
 class AzureWorkerRuntime:
     def __init__(self, branch: Branch, assignment: Assignment, session: ResponsesSession,
-                 monitor: MonitorBrain):
+                 monitor: MonitorBrain, *, terminal_client=None):
         self.branch, self.assignment = branch, assignment
         self.session, self.monitor = session, monitor
         self.prepared = branch.head
         if (monitor.store is not branch.store or monitor.contract != assignment.contract
                 or monitor.run_id != session.binding.run_id):
             raise ContractMismatch("Azure monitor differs from the admitted worker run")
-        self.conversation = ResponsesConversation(
-            branch, session, system=SYSTEM, tools=ArtifactTools(branch, assignment).tools())
+        terminal_policy = TerminalWorkerPolicy.from_assignment(assignment)
+        tools, system = ArtifactTools(branch, assignment).tools(), SYSTEM
+        if terminal_policy is not None:
+            if terminal_client is None or terminal_client.credential.grant != terminal_policy.grant(assignment):
+                raise ContractMismatch("Azure terminal client differs from the admitted assignment")
+            terminal = TerminalTools(terminal_client)
+            tools.update(terminal.tools())
+            system += "\n" + terminal.instructions()
+        elif terminal_client is not None:
+            raise ContractMismatch("Azure assignment does not admit a terminal client")
+        self.conversation = ResponsesConversation(branch, session, system=system, tools=tools)
         self.feedback = ResponsesFeedback(self.conversation, assignment)
         self.conversation.observe("assignment", assignment.to_json())
 
