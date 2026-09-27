@@ -71,6 +71,8 @@ def message(r):
 def test_issuance_is_stable_and_worker_grants_cannot_cross_roles(rig):
     async def scenario():
         async with rig() as r:
+            assert await asyncio.to_thread(r.client.ping) == "ready"
+            assert not r.service._credentials
             spec = SimpleNamespace(assignment=r.assignment, prepared_state_id=r.prepared,
                                    run_id=assignment_run_id(r.assignment))
             grant = await asyncio.to_thread(r.client, spec)
@@ -158,6 +160,11 @@ def test_closed_admission_cannot_issue_more_authority(rig, monkeypatch, phase):
                         TerminalGrant(r.owner.binding, f"actor_{i}", 5), secrets.token_hex(32)))
             assert await raw_reply(r.credential, message(r)) == {"version": 1, "status": "fenced"}
             assert not r.service._issued and not r.env.calls
+            if phase == "full":
+                assert await asyncio.to_thread(r.client.ping) == "ready"
+            else:
+                with pytest.raises(TerminalFenced):
+                    await asyncio.to_thread(r.client.ping)
     asyncio.run(scenario())
 
 

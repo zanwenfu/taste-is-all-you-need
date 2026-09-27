@@ -21,6 +21,7 @@ import pytest
 import taste.brains.supervisor as supervisor_module
 from taste.brains.contract import Contract
 from taste.brains.monitor import Judgement, MonitorBrain, Severity, TerminalDecision
+from taste.brains.python_process import isolated_python_argv
 from taste.brains.records import (
     ArtifactRef,
     ArtifactSpec,
@@ -1382,14 +1383,13 @@ def test_real_supervisor_kill_after_exit_record_resumes_capture(tmp_path: Path) 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
 def test_subprocess_launcher_observes_ready_and_reaps_process_group(store: Store) -> None:
-    command = [
+    command = isolated_python_argv(
         sys.executable,
-        "-c",
         (
             "from taste.brains.supervisor import mark_worker_ready; "
             "import time; mark_worker_ready(); time.sleep(30)"
-        ),
-    ]
+        ), [],
+    )
     launcher = SubprocessLauncher(command)
     supervisor = CentralSupervisor(store, launcher=launcher, termination_grace=0.1)
     run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=20)
@@ -1411,9 +1411,8 @@ def test_subprocess_launcher_observes_ready_and_reaps_process_group(store: Store
 def test_subprocess_launcher_reaps_a_descendant_that_detaches_its_group(
     store: Store,
 ) -> None:
-    command = [
+    command = isolated_python_argv(
         sys.executable,
-        "-c",
         (
             "from pathlib import Path; import subprocess, sys, time; "
             "from taste.brains.supervisor import mark_worker_ready, _process_identity; "
@@ -1421,8 +1420,8 @@ def test_subprocess_launcher_reaps_a_descendant_that_detaches_its_group(
             "start_new_session=True); "
             "Path('child.json').write_text(str(child.pid)+'\\n'+_process_identity(child.pid)); "
             "mark_worker_ready(); time.sleep(30)"
-        ),
-    ]
+        ), [],
+    )
     launcher = SubprocessLauncher(command)
     supervisor = CentralSupervisor(store, launcher=launcher, termination_grace=0.1)
     run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=20)
@@ -1472,20 +1471,20 @@ def test_subprocess_launcher_finds_detached_child_when_root_exits_before_first_p
             assert isinstance(handle, supervisor_module._SubprocessHandle)
             assert handle._popen is not None
             handle._popen.wait(timeout=5)
+            assert handle._popen.returncode == 0, "fixture parent failed before recording its descendant"
             assert not handle._observed_root_live
             return handle
 
-    command = [
+    command = isolated_python_argv(
         sys.executable,
-        "-c",
         (
             "from pathlib import Path; import subprocess, sys; "
             "from taste.brains.supervisor import _process_identity; "
             "child=subprocess.Popen([sys.executable, '-c', "
             "'import time; time.sleep(30)'], start_new_session=True); "
             "Path('child.json').write_text(str(child.pid)+'\\n'+_process_identity(child.pid))"
-        ),
-    ]
+        ), [],
+    )
     launcher = RootExitedBeforeReturnLauncher(command)
     supervisor = CentralSupervisor(store, launcher=launcher, termination_grace=0.1)
     run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=20)

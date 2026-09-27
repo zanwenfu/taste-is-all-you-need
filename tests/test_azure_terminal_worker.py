@@ -181,11 +181,13 @@ def test_cancelled_worker_waits_for_remote_terminal_settlement_and_reports_uncer
 
 
 @pytest.mark.parametrize("issue_remotely", [False, True])
-def test_real_azure_subprocess_uses_private_grant_and_delivers_after_terminal_receipt(worker, tmp_path, issue_remotely):
+def test_real_azure_subprocess_uses_private_grant_and_delivers_after_terminal_receipt(worker, tmp_path, issue_remotely, monkeypatch):
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", "/private/coordinator-only-credentials")
     async def scenario():
         bootstrap = BOOTSTRAP.replace("install(network)",
             "from tests.terminal_worker_wire import replies\ninstall(network, worker_reply=replies)")
         bootstrap += "\nsys.modules.pop('taste.brains.azure_worker_entrypoint', None)\n"
+        bootstrap += "\nimport os; assert 'CREDENTIALS_DIRECTORY' not in os.environ\n"
 
         def command(spec):
             def provide(admitted):

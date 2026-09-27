@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import subprocess
 import time
@@ -12,6 +13,7 @@ from datetime import datetime
 import pytest
 
 from taste.brains.azure_execution_policy import POLICY_KEY, AzureExecutionPolicy
+from taste.brains.azure_goal_credentials import GOAL_CREDENTIAL_NAME, encode_azure_goal_credentials
 from taste.brains.azure_goal_entrypoint import (
     azure_goal_command,
     execute_azure_goal,
@@ -77,7 +79,8 @@ httpx.Client = Client
 '''
 
 
-def test_real_azure_goal_process_and_settlement_never_fall_back_or_repeat_paid_request(prepared, tmp_path):
+@pytest.mark.parametrize("systemd_credentials", [False, True])
+def test_real_azure_goal_process_and_settlement_never_fall_back_or_repeat_paid_request(prepared, tmp_path, systemd_credentials):
     raw = prepared.to_bytes()
     path = tmp_path / "input.json"
     path.write_bytes(raw)
@@ -87,18 +90,71 @@ def test_real_azure_goal_process_and_settlement_never_fall_back_or_repeat_paid_r
     env = {**os.environ, **environment(), "TASTE_TEST_WIRE_COUNT": str(counter),
            "ANTHROPIC_API_KEY": "claude-do-not-use", "OPENAI_API_KEY": "personal-do-not-use",
            "OPENAI_BASE_URL": "https://wrong.invalid/v1"}
+    if systemd_credentials:
+        credentials = tmp_path / "service-credentials"
+        credentials.mkdir(mode=0o700)
+        secret = credentials / GOAL_CREDENTIAL_NAME
+        secret.write_bytes(encode_azure_goal_credentials(prepared, "azure-test-only"))
+        secret.chmod(0o400)
+        env.pop("AZURE_OPENAI_API_KEY")
+        env.pop("AZURE_OPENAI_BASE_URL")
+        env["CREDENTIALS_DIRECTORY"] = str(credentials)
     for mode in ("run", "run", "settle"):
-        argv = azure_goal_command(path, digest, mode=mode)
+        argv = azure_goal_command(path, digest, mode=mode, systemd_credentials=systemd_credentials)
         argv[3] = argv[3].replace("from taste.brains.azure_goal_entrypoint", BOOTSTRAP + "\nfrom taste.brains.azure_goal_entrypoint", 1)
         child_env = dict(env)
         if mode == "settle":
-            child_env.pop("AZURE_OPENAI_API_KEY")
-            child_env.pop("AZURE_OPENAI_BASE_URL")
+            child_env.pop("AZURE_OPENAI_API_KEY", None)
+            child_env.pop("AZURE_OPENAI_BASE_URL", None)
+            if systemd_credentials:
+                secret.unlink()
         result = subprocess.run(argv, cwd=tmp_path, env=child_env, capture_output=True, text=True, timeout=40)
         assert result.returncode == 0, (mode, result.stdout, result.stderr)
         assert counter.read_text().splitlines() == ["one Azure planner request"]
         assert "personal-do-not-use" not in result.stdout + result.stderr
     assert "azure-test-only" not in raw.decode()
+
+
+@pytest.mark.parametrize("damage", ["missing", "mode", "hardlink", "symlink", "fifo", "large", "input",
+                                     "extra", "key", "duplicate", "directory_mode"])
+def test_bad_private_goal_credentials_fail_before_host_or_paid_admission(prepared, tmp_path, monkeypatch, damage):
+    directory = tmp_path / "private-credentials"
+    directory.mkdir(mode=0o700)
+    path = directory / GOAL_CREDENTIAL_NAME
+    value = json.loads(encode_azure_goal_credentials(prepared, "azure-test-only"))
+    if damage == "input":
+        value["input_sha256"] = "f" * 64
+    elif damage == "extra":
+        value["fallback"] = "https://api.openai.com/v1"
+    elif damage == "key":
+        value["api_key"] = "invalid\x00key"
+    raw = json.dumps(value).encode()
+    if damage == "large":
+        raw = b"x" * 65537
+    elif damage == "duplicate":
+        raw = raw[:-1] + b', "api_key": "replaced"}'
+    path.write_bytes(raw)
+    path.chmod(0o400)
+    if damage == "missing":
+        path.unlink()
+    elif damage == "mode":
+        path.chmod(0o644)
+    elif damage == "hardlink":
+        os.link(path, directory / "alias")
+    elif damage in {"symlink", "fifo"}:
+        path.rename(directory / "saved")
+        if damage == "symlink":
+            path.symlink_to(directory / "saved")
+        else:
+            os.mkfifo(path)
+    elif damage == "directory_mode":
+        directory.chmod(0o777)
+    async def cannot_compose(*_args, **_kwargs):
+        pytest.fail("credential rejection must precede host composition")
+    monkeypatch.setattr("taste.brains.azure_goal_entrypoint.execute_goal", cannot_compose)
+    with pytest.raises(GoalInputError, match="private Azure goal credentials were rejected"):
+        asyncio.run(execute_azure_goal(prepared, systemd_credentials=True,
+                                     environment={"CREDENTIALS_DIRECTORY": str(directory)}))
 
 
 def test_settlement_before_first_plan_needs_no_credential_or_paid_request(prepared):

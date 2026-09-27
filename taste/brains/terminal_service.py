@@ -356,11 +356,11 @@ class TerminalService:
         try:
             async with asyncio.timeout(HANDSHAKE_SECONDS):
                 message = await _read(reader, REQUEST_BYTES)
-                if message.get("operation") == "issue":
-                    from taste.brains.terminal_issuer import issue_for_coordinator
+                if message.get("operation") in ("issue", "issuer_ping"):
+                    from taste.brains.terminal_issuer import handle_coordinator_request
 
-                    credential = issue_for_coordinator(self, message, writer)
-                    reply.update(status="ok", scope=self._issuer.public_scope(), credential=credential.to_dict())
+                    result = handle_coordinator_request(self, message, writer)
+                    reply.update(status="ok", scope=self._issuer.public_scope(), **result)
                     return
                 grant = self._authorize(message, writer)
             reply["grant"] = grant.to_dict()

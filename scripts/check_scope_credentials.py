@@ -18,20 +18,38 @@ import signal
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
+from taste.brains.azure_execution_policy import AzureExecutionPolicy
+from taste.brains.azure_goal_credentials import GOAL_CREDENTIAL_NAME, encode_azure_goal_credentials
 from taste.brains.process_credentials import ScopeCredential
 from taste.brains.process_scope import OwnedProcessScope, ScopeSpec, SystemdManager
+from taste.pricing import table_sha
 from taste.resources import ResourceCleanupError
 
 CHILD = r'''
 import errno, hashlib, json, os, pathlib, sys, time
-source, expected, report = sys.argv[1:]
+source, expected, report, name, checkout, public_policy = sys.argv[1:]
+public_policy = json.loads(public_policy)
 directory = pathlib.Path(os.environ["CREDENTIALS_DIRECTORY"])
-path = directory / "azure.json"
+path = directory / name
 raw = path.read_bytes()
 assert hashlib.sha256(raw).hexdigest() == expected
-assert raw not in pathlib.Path("/proc/self/cmdline").read_bytes()
-assert raw not in pathlib.Path("/proc/self/environ").read_bytes()
+secret = raw
+if public_policy:
+    # Exercise the actual credential loader in systemd's mount. The fake public
+    # config isolates delivery from goal preparation, covered by process tests.
+    sys.path.insert(0, checkout)
+    from types import SimpleNamespace
+    from taste.brains.azure_goal_credentials import load_azure_goal_credentials
+    config = SimpleNamespace(to_bytes=lambda: b"dummy goal input",
+        goal=SimpleNamespace(metadata={"azure_execution": public_policy}))
+    environment, issuer = load_azure_goal_credentials(config, str(directory))
+    assert issuer is None
+    secret = json.loads(raw)["api_key"].encode()
+    assert environment["AZURE_OPENAI_API_KEY"].encode() == secret
+assert secret not in pathlib.Path("/proc/self/cmdline").read_bytes()
+assert secret not in pathlib.Path("/proc/self/environ").read_bytes()
 try:
     pathlib.Path(source).read_bytes()
 except PermissionError:
@@ -49,6 +67,8 @@ pathlib.Path(report).write_text(json.dumps({
     "uid": os.geteuid(), "gid": os.getegid(), "groups": os.getgroups(),
     "credential_directory": str(directory), "sha256": expected,
     "source_denied": True, "copy_readonly": True, "argv_and_env_clean": True,
+    "azure_loader_verified": bool(public_policy), "credential_uid": path.stat().st_uid,
+    "credential_mode": path.stat().st_mode & 0o777,
     "pid": os.getpid(), "cgroup": pathlib.Path("/proc/self/cgroup").read_text(),
 }))
 time.sleep(60)
@@ -86,17 +106,29 @@ def main():
 
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        for case in ("deadline", "lost_start_reply"):
+        for case in ("deadline", "lost_start_reply", "azure_loader"):
             secret = secrets.token_hex(32).encode()
-            descriptor = ScopeCredential.from_bytes("azure.json", secret)
+            name, public_policy = "azure.json", ""
+            if case == "azure_loader":
+                policy = AzureExecutionPolicy(
+                    "https://test-resource.openai.azure.com/openai/v1/", "gpt-6-astra", "gpt-6-sol",
+                    time.time() + 60, 20, 20, 2, 2, 256, 256, 256, pricing_sha=table_sha(),
+                )
+                public_policy = json.dumps(policy.to_dict(), sort_keys=True)
+                config = SimpleNamespace(to_bytes=lambda: b"dummy goal input",
+                    goal=SimpleNamespace(metadata={"azure_execution": policy.to_dict()}))
+                secret = encode_azure_goal_credentials(config, secret.decode())
+                name = GOAL_CREDENTIAL_NAME
+            descriptor = ScopeCredential.from_bytes(name, secret)
             owner = private / case
             output = workdir / f"{case}.json"
             spec = ScopeSpec(
-                (sys.executable, "-I", "-c", CHILD, str(owner / "credentials/azure.json"),
-                 descriptor.sha256, str(output)), str(workdir), account.pw_uid, 4, 0.5,
+                (sys.executable, "-I", "-c", CHILD, str(owner / "credentials" / name),
+                 descriptor.sha256, str(output), name, str(Path(__file__).resolve().parents[1]),
+                 public_policy or "null"), str(workdir), account.pw_uid, 4, 0.5,
                 credentials=(descriptor,),
             )
-            scope = OwnedProcessScope.create(owner, spec, credentials={"azure.json": secret})
+            scope = OwnedProcessScope.create(owner, spec, credentials={name: secret})
             owned.append(scope)
             if case == "lost_start_reply":
                 class LostReply(SystemdManager):
@@ -126,7 +158,7 @@ def main():
                 require(secret not in source.read_bytes(), "credential leaked into public launch metadata")
             restored = OwnedProcessScope(owner)
             receipt = (restored.wait(timeout_seconds=8) if case == "deadline"
-                       else restored.stop("recover lost credential start reply"))
+                       else restored.stop("credential check complete"))
             require(receipt["processes_stopped"] and receipt["goal_settlement_required"],
                     "credential scope cleanup incorrectly settled its goal")
             require(manager.empty(scope.unit) and manager.inspect(scope.unit) is None, "scope leaked")

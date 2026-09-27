@@ -1,13 +1,15 @@
 """Run or settle a prepared Azure goal in an externally owned process scope.
 
 The existing GoalProcessInput wire format pins the non-secret Azure policy in
-Goal.metadata. Credentials remain in the host environment. An outer owner must
+Goal.metadata. Credentials arrive through the host environment or explicit
+systemd credential delivery. An outer owner must
 still bound and drain this entire process scope, including worker descendants.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import signal
 import sys
 from datetime import UTC, datetime
@@ -16,6 +18,8 @@ from pathlib import Path
 
 from taste.brains.azure_central_host import compose_azure_central_runtime
 from taste.brains.azure_execution_policy import POLICY_KEY, AzureExecutionPolicy
+from taste.brains.azure_goal_credentials import load_azure_goal_credentials
+from taste.brains.central_host import _await_owned_task, _owned_call
 from taste.brains.goal_entrypoint import (
     GoalInputError,
     execute_goal,
@@ -48,7 +52,9 @@ def prepare_azure_goal_process(
         deadline_at=datetime.fromtimestamp(policy.deadline_unix, UTC),
         planner_model=AZURE_PLANNER_MODEL, monitor_model=AZURE_MONITOR_MODEL,
         planner_max_tokens=policy.planner_max_output_tokens,
-        host_factory=partial(_host_factory, policy=policy, environment=environment),
+        # Preparing admission cannot launch or call a model and therefore
+        # requires neither an API key nor a terminal issuer capability.
+        host_factory=partial(_host_factory, policy=policy, environment=environment, settlement_only=True),
     )
 
 
@@ -65,26 +71,55 @@ def _policy(config):
     return policy
 
 
-async def execute_azure_goal(config, *, mode="run", environment=None):
+async def execute_azure_goal(config, *, mode="run", environment=None, systemd_credentials=False,
+                             terminal_credential_provider=None):
     policy = _policy(config)
+    if type(systemd_credentials) is not bool:
+        raise GoalInputError("systemd credential selection must be boolean")
+    if systemd_credentials and mode == "run":
+        if terminal_credential_provider is not None:
+            raise GoalInputError("goal cannot combine two terminal credential providers")
+        source = os.environ if environment is None else environment
+        environment, terminal_credential_provider = load_azure_goal_credentials(
+            config, source.get("CREDENTIALS_DIRECTORY"))
+        if terminal_credential_provider is not None:
+            # Check broker reachability and the private coordinator role before
+            # paying for a plan. Retain the bounded probe thread on cancellation.
+            probe = asyncio.create_task(asyncio.to_thread(_owned_call, terminal_credential_provider.ping))
+            try:
+                await asyncio.wait((probe,))
+                probe.result()
+            except BaseException as original:
+                try:
+                    await _await_owned_task(probe)
+                except BaseException as cleanup:
+                    if cleanup is not original:
+                        raise BaseExceptionGroup("terminal readiness probe and settlement failed",
+                                                 [original, cleanup]) from None
+                raise
     return await execute_goal(config, mode=mode,
                               host_factory=partial(_host_factory, policy=policy, environment=environment,
-                                                   settlement_only=mode == "settle"))
+                                                   settlement_only=mode == "settle",
+                                                   terminal_credential_provider=terminal_credential_provider))
 
 
-def azure_goal_command(input_path, expected_sha256, *, mode="run", python_executable=None):
+def azure_goal_command(input_path, expected_sha256, *, mode="run", python_executable=None,
+                       systemd_credentials=False):
     # Share the input/path/mode checks with the historical entrypoint.
     goal_command(input_path, expected_sha256, mode=mode, python_executable=python_executable)
+    if type(systemd_credentials) is not bool:
+        raise GoalInputError("systemd credential selection must be boolean")
     return isolated_python_argv(
         python_executable or sys.executable,
         "from taste.brains.azure_goal_entrypoint import main; raise SystemExit(main())",
-        ["--input", str(input_path), "--sha256", expected_sha256, "--mode", mode],
+        ["--input", str(input_path), "--sha256", expected_sha256, "--mode", mode,
+         *(["--systemd-credentials"] if systemd_credentials else [])],
     )
 
 
-async def _run(config, mode):
+async def _run(config, mode, systemd_credentials=False):
     loop = asyncio.get_running_loop()
-    task = asyncio.create_task(execute_azure_goal(config, mode=mode))
+    task = asyncio.create_task(execute_azure_goal(config, mode=mode, systemd_credentials=systemd_credentials))
     installed = []
     try:
         for caught in (signal.SIGTERM, signal.SIGINT):
@@ -101,6 +136,7 @@ def main(argv=None):
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--sha256", required=True)
     parser.add_argument("--mode", choices=("run", "settle"), default="run")
+    parser.add_argument("--systemd-credentials", action="store_true")
     args = parser.parse_args(argv)
     try:
         config = load_goal_input(args.input, args.sha256)
@@ -109,7 +145,7 @@ def main(argv=None):
         print("Azure goal input rejected", file=sys.stderr)
         return 65
     try:
-        outcome = asyncio.run(_run(config, args.mode))
+        outcome = asyncio.run(_run(config, args.mode, args.systemd_credentials))
     except (asyncio.CancelledError, KeyboardInterrupt):
         return 130
     except BaseException:

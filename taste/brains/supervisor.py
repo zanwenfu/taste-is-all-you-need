@@ -1564,6 +1564,10 @@ class SubprocessLauncher:
         # process boundary, before either the worker or the SDK can inherit them.
         for name in PROVIDER_OVERRIDE_ENV:
             environment.pop(name, None)
+        # A goal service may hold a coordinator-only terminal issuer alongside
+        # its Azure key. Workers receive only the explicit provider env and
+        # their own prepared assignment credential, never this directory hint.
+        environment.pop("CREDENTIALS_DIRECTORY", None)
         environment.update(
             {
                 _RUN_ID_ENV: spec.run_id,

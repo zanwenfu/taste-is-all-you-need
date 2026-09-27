@@ -256,7 +256,19 @@ values. The service reads its read-only copies through `CREDENTIALS_DIRECTORY`.
 The owner retains its private snapshots for recovery and must remove them when
 the trial is settled. Credential-free scope records retain their existing format
 and digests. `scripts/check_scope_credentials.py` checks actual unprivileged
-delivery, deadline cleanup and lost-acknowledgement recovery using dummy bytes.
+delivery, deadline cleanup, lost-acknowledgement recovery and the Azure credential
+loader using dummy bytes. The loader admits either a private service-owned copy
+or systemd's root-owned copy with exactly one ACL reader for the service UID.
+
+For the standalone Azure command, encode the exact prepared input's API key and
+optional terminal issuer with `encode_azure_goal_credentials` in
+`taste.brains.azure_goal_credentials`. Deliver those bytes as the scope credential
+`taste-azure-goal.json` and call `azure_goal_command(..., systemd_credentials=True)`.
+The goal validates the private input binding and probes terminal issuer readiness
+before the first paid plan. A failed or cancelled probe cannot dispatch a goal.
+Workers receive their own assignment grants and Azure authentication; the
+coordinator's credential-directory hint is removed at their process boundary.
+Preparation and settlement require no provider or terminal credentials.
 
 An existing or partly initialized worker run is refused by the fresh-launch
 entrypoint; it never resets the allowance on restart. Explicit interrupted-worker
@@ -302,8 +314,8 @@ the issuer token cannot execute commands. A repeated issuance request returns
 the same token only within that service lifetime. Service loss still requires
 outside cleanup and recovery rather than restarting workers speculatively.
 
-The standalone Azure goal CLI does not yet construct this terminal lifecycle or
-credential provider. The outside lifecycle owner must enforce the process
+The standalone Azure goal CLI can load the issuer callback, but the outside
+lifecycle owner must still create the task container and broker, enforce the process
 deadline, drain agent processes, and call `TerminalService.seal_for_grading()`
 before grading the live task. Sealing refuses an active or uncertain command,
 permanently blocks new effects (including after broker recovery), and leaves

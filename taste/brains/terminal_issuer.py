@@ -86,12 +86,12 @@ def _grant(issuer, assignment):
         raise TerminalAccessDenied("terminal assignment differs from the issuer policy") from exc
 
 
-def issue_for_coordinator(service, message, writer):
+def handle_coordinator_request(service, message, writer):
     """Service-loop transaction; never waits between admission and registration."""
     issuer = service._issuer
     if (issuer is None or set(message) != {"version", "token", "scope", "operation", "arguments"}
             or type(message["version"]) is not int or message["version"] != 1
-            or message["operation"] != "issue" or not isinstance(message["token"], str)
+            or message["operation"] not in {"issue", "issuer_ping"} or not isinstance(message["token"], str)
             or re.fullmatch(r"[0-9a-f]{64}", message["token"]) is None
             or not hmac.compare_digest(hashlib.sha256(message["token"].encode()).digest(),
                                        hashlib.sha256(issuer.token.encode()).digest())
@@ -102,6 +102,10 @@ def issue_for_coordinator(service, message, writer):
             or time.time() >= issuer.policy.binding.deadline_unix):
         raise TerminalFenced("terminal issuer is not accepting assignments")
     arguments = message["arguments"]
+    if message["operation"] == "issuer_ping" and arguments == {}:
+        return {"phase": service.broker.phase}
+    if message["operation"] != "issue":
+        raise TerminalAccessDenied("invalid terminal issuer readiness arguments")
     if not isinstance(arguments, dict) or set(arguments) != {"assignment", "prepared_state_id"}:
         raise TerminalAccessDenied("invalid terminal issuance arguments")
     assignment = Assignment.from_dict(arguments["assignment"])
@@ -112,12 +116,12 @@ def issue_for_coordinator(service, message, writer):
     if prior is not None:
         if prior[0] != prepared:
             raise TerminalConflict("terminal assignment already binds a different prepared checkpoint")
-        return prior[1]
+        return {"credential": prior[1].to_dict()}
     credential = TerminalCredential(issuer.socket_path, issuer.server_uid, issuer.coordinator_uid,
                                     grant, secrets.token_hex(32))
     service.authorize(credential)
     service._issued[run_id] = (prepared, credential)
-    return credential
+    return {"credential": credential.to_dict()}
 
 
 class TerminalIssuerClient:
@@ -134,19 +138,16 @@ class TerminalIssuerClient:
             raise TerminalAccessDenied("terminal launch identity differs from its assignment")
         return self.issue(spec.assignment, spec.prepared_state_id)
 
-    def issue(self, assignment, prepared_state_id):
+    def _exchange(self, operation, arguments):
         issuer = self.credential
         if os.getpid() != self._pid or os.geteuid() != issuer.coordinator_uid:
             raise TerminalAccessDenied("terminal issuer belongs to another process or UID")
-        grant = _grant(issuer, assignment)
-        _state_id(prepared_state_id, "prepared_state_id")
         allowance = min(HANDSHAKE_SECONDS, issuer.policy.binding.deadline_unix - time.time())
         if allowance <= 0:
             raise TerminalFenced("terminal assignment deadline expired")
         deadline = time.monotonic() + allowance
         wire = _json({"version": 1, "token": issuer.token, "scope": issuer.public_scope(),
-                      "operation": "issue", "arguments": {
-                          "assignment": assignment.to_dict(), "prepared_state_id": prepared_state_id}})
+                      "operation": operation, "arguments": arguments})
         if len(wire) > REQUEST_BYTES:
             raise TerminalAccessDenied("terminal assignment exceeds its issuance byte limit")
         try:
@@ -189,10 +190,24 @@ class TerminalIssuerClient:
             raise TerminalConflict("terminal issuance conflicts with its prepared checkpoint")
         if response == {"version": 1, "status": "fenced"}:
             raise TerminalFenced("terminal issuer is fenced")
-        if (set(response) != {"version", "status", "scope", "credential"}
+        field = "credential" if operation == "issue" else "phase"
+        if (set(response) != {"version", "status", "scope", field}
                 or type(response["version"]) is not int or response["version"] != 1
                 or response["status"] != "ok" or _json(response["scope"]) != _json(issuer.public_scope())):
             raise TerminalUnavailable("terminal issuer reply does not bind the admitted scope")
+        return response
+
+    def ping(self):
+        if self._exchange("issuer_ping", {})["phase"] != "ready":
+            raise TerminalFenced("terminal issuer is not ready for a goal")
+        return "ready"
+
+    def issue(self, assignment, prepared_state_id):
+        issuer = self.credential
+        grant = _grant(issuer, assignment)
+        _state_id(prepared_state_id, "prepared_state_id")
+        response = self._exchange("issue", {"assignment": assignment.to_dict(),
+                                             "prepared_state_id": prepared_state_id})
         try:
             credential = TerminalCredential.from_dict(response["credential"])
         except ValueError as exc:
