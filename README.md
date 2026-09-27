@@ -248,9 +248,8 @@ goal and worker entrypoints remain separately available.
 
 An existing or partly initialized worker run is refused by the fresh-launch
 entrypoint; it never resets the allowance on restart. Explicit interrupted-worker
-recovery, authenticated worker terminal access and Harbor grading remain integration
-work before a full Terminal Bench run. Azure execution currently exposes artifact
-tools; it does not yet give workers a task-container terminal.
+recovery, Harbor lifecycle/grading, scaling checks and a bounded live Azure pilot
+remain integration work before a full Terminal Bench run.
 
 The controller-side `DockerTerminalBackend` in `taste.brains.docker_terminal`
 implements bounded non-TTY terminal transport over an explicit local Docker
@@ -263,7 +262,32 @@ The lifecycle owner must create the isolated container with restart disabled
 and independently stop/remove it if the controller dies. Workers must not receive
 the Docker socket. `scripts/check_docker_terminal.py` exercises this transport in
 five serial disposable containers; its invocation documents the outside cleanup
-requirement. Worker authentication and Harbor lifecycle/grading are still pending.
+requirement.
+
+`TerminalService` and `TerminalClient` in `taste.brains.terminal_service` connect
+workers to that broker over a bounded Linux Unix-socket protocol. Peer UID checks
+and a private random bearer token bind each worker to its immutable assignment,
+task container and original deadline. Disconnecting an active command stops and
+drains the task environment; a completed request can be looked up without running
+it again. The broker serializes all workers' terminal effects in the same container.
+
+To admit terminal tools, set `AzureExecutionPolicy.terminal` to the public
+`TerminalWorkerPolicy` and give `compose_azure_central_runtime` a trusted
+`terminal_credential_provider`. For each prepared launch, that callback must
+register the matching `TerminalCredential` with the service before returning it.
+Credentials are installed in private files outside model-visible memory; the
+worker verifies them and probes the service before paid admission. It receives
+`terminal_exec` and `read_terminal_output`, with bounded pages and explicit
+truncation counts. Files, packages and services in the container persist across
+memory rollback. Omitting the terminal policy preserves artifact-only execution.
+
+The standalone Azure goal CLI does not yet construct this terminal lifecycle or
+credential provider. The outside lifecycle owner must also enforce the process
+deadline, grade the live task before normal service shutdown, and stop/remove the
+container if the controller dies. `scripts/check_terminal_service.py` validates
+the broker with two serial containers and unprivileged worker processes, including
+a worker killed during a command. These checks do not yet constitute a Harbor
+adapter or an official Terminal Bench result.
 
 ## Quickstart with a real Claude
 
