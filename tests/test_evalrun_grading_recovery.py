@@ -59,7 +59,7 @@ def test_repaired_grader_preserves_attempt_history_and_ignores_input_mutation(tm
 def test_killed_grader_can_resume_without_the_agent(tmp_path):
     killed = subprocess.run([sys.executable, str(child_script(tmp_path, "score"))],
                              capture_output=True, text=True, timeout=20)
-    assert killed.returncode == -signal.SIGKILL
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
     result = evalrun.resume_grading(ledger_dir=tmp_path / "ledger",
                                     score=lambda record: evalrun.GradingResult(score=0.0))
     assert result.billed_usd == 1.25 and result.attempts_made == 1
@@ -110,8 +110,9 @@ def test_grading_recovery_replays_ending_after_commit_interruption(tmp_path, mon
 
 
 def test_grading_cannot_recover_unknown_execution(tmp_path):
-    subprocess.run([sys.executable, str(child_script(tmp_path, "execute"))],
-                   capture_output=True, text=True, timeout=20)
+    killed = subprocess.run([sys.executable, str(child_script(tmp_path, "execute"))],
+                            capture_output=True, text=True, timeout=20)
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
     with pytest.raises(UnsettledSweepAttempt, match="execution cost is unknown"):
         evalrun.resume_grading(ledger_dir=tmp_path / "ledger",
                               score=lambda record: pytest.fail("no completed execution"))

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,11 +22,15 @@ def paid_result():
 
 
 def child_script(tmp_path, mode):
+    # This driver runs from a temporary directory. Editable installs exclude
+    # tests, and CI does not supply PYTHONPATH: bind the fixture's checkout
+    # explicitly so the child exercises the same source as its parent.
     script = tmp_path / "driver.py"
     script.write_text(f'''
-import os, signal, time
+import os, signal, sys, time
 from pathlib import Path
 from types import SimpleNamespace
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
 from taste.evalrun import run_sweep
 from tests.test_evalrun import _run_result
 root = Path({str(tmp_path)!r})
@@ -54,8 +59,10 @@ run_sweep(tasks=["task"], arms=["A"], trials=1, ledger_dir=root / "ledger",
 
 @pytest.mark.parametrize("phase", ["execute", "score"])
 def test_killed_attempt_cannot_be_readmitted_even_from_a_filtered_queue(tmp_path, phase):
-    result = subprocess.run([sys.executable, str(child_script(tmp_path, phase))],
-                            capture_output=True, text=True, timeout=20)
+    # -I and a non-project cwd keep this boundary independent of ambient
+    # PYTHONPATH, user site packages, and the parent's pytest import setup.
+    result = subprocess.run([sys.executable, "-I", str(child_script(tmp_path, phase))],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=20)
     assert result.returncode == -signal.SIGKILL, result.stderr
     called = []
     with pytest.raises(RuntimeError, match="automatic retry is blocked"):
@@ -77,6 +84,9 @@ def test_a_second_process_cannot_admit_work_in_an_owned_ledger(tmp_path):
     try:
         deadline = time.monotonic() + 15
         while not (tmp_path / "paid-effect").exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                _, stderr = process.communicate(timeout=5)
+                pytest.fail(f"sweep child exited before admission: {stderr.decode(errors='replace')}")
             time.sleep(0.02)
         assert (tmp_path / "paid-effect").exists()
         called = []
@@ -116,8 +126,9 @@ def test_completed_ending_replays_across_ledger_commit_interruption(tmp_path, mo
 def test_pending_attempt_is_not_reported_as_zero_spend(tmp_path):
     from taste.ledger_costs import ledger_billed_usd
 
-    subprocess.run([sys.executable, str(child_script(tmp_path, "execute"))],
-                   capture_output=True, text=True, timeout=20)
+    killed = subprocess.run([sys.executable, str(child_script(tmp_path, "execute"))],
+                            capture_output=True, text=True, timeout=20)
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
     with pytest.raises(ValueError, match="pending"):
         ledger_billed_usd(tmp_path / "ledger")
 
