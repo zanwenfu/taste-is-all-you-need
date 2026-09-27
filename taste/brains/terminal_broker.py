@@ -369,7 +369,8 @@ class TerminalBroker:
             if timeout <= 0:
                 raise TimeoutError("terminal deadline expired before execution")
             effect = start_owned_thread(_call, self._execute_backend, request)
-            done, _ = await asyncio.wait((effect, interrupt), timeout=timeout)
+            done, _ = await asyncio.wait((effect, interrupt), timeout=timeout,
+                                         return_when=asyncio.FIRST_COMPLETED)
             if interrupt in done:
                 raise asyncio.CancelledError()
             if effect not in done:

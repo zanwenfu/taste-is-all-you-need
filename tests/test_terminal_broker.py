@@ -119,6 +119,25 @@ def test_only_one_controller_can_admit_for_the_environment(tmp_path):
         owner.close()
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_command_completion_or_failure_does_not_wait_for_unused_interrupt(tmp_path, failed):
+    owner = broker(tmp_path)
+    if failed:
+        owner.backend.error = ConnectionError("command reply failed immediately")
+    started = time.monotonic()
+    try:
+        if failed:
+            with pytest.raises(ConnectionError):
+                asyncio.run(owner.execute(request(timeout_seconds=3)))
+            assert owner.phase == "stopped"
+        else:
+            assert asyncio.run(owner.execute(request(timeout_seconds=3))) == owner.backend.result
+            assert not owner.backend.stopped
+        assert time.monotonic() - started < 1.5, "broker waited for a signal that was never needed"
+    finally:
+        owner.close()
+
+
 def test_serial_commands_and_cancelled_queue_cannot_overlap_effects(tmp_path):
     owner = broker(tmp_path)
     env = owner.backend
