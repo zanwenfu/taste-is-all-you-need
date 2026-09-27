@@ -331,13 +331,26 @@ a Harbor adapter or an official Terminal Bench result.
 `d611f10b15ffab8afb7b665b3e69e96773044fc8` in a separate server environment.
 It runs a controlled local task through Harbor's actual Trial and verifier with
 an unprivileged scripted worker. The success case requires reward `1.0`; the
-worker-death case requires an exception and no reward. Both require broker stop
+worker-death case requires an exception and no reward. Every case requires broker stop
 proof before container removal, an empty original cgroup, and retention of the
 cached image. Run each mode in a bounded systemd unit with the independent
 owner-label cleanup described in the script. Telemetry is disabled and no image
 pulls or paid calls occur. This validates the grading/cleanup handoff for that
 fixture; the production Azure Harbor runner and broader task admission remain
 unfinished.
+
+The fixture exports logs, artifacts and rewards through
+`taste.benchmarks.output_snapshot`, with no host output mounts. It checks the
+original Docker identity before and after a bounded archive download, validates
+all entries before writing, and creates only ordinary files in an empty private
+destination. Links, special/sparse files, path escapes, duplicates, stale output
+and excess data are refused. Defaults cap archives at 16 MiB, individual files
+at 4 MiB, total file data at 8 MiB and entries at 1,024. These are explicit
+admission limits, not silent truncation. Additional real fixture modes
+`reward-symlink`, `reward-fifo` and `reward-oversize` require a verifier download
+error and no reward. The controller must retain ownership of in-flight copies
+through cancellation and must not grade a failed snapshot. This initial path
+does not support arbitrary artifact destinations or filtered downloads.
 
 ## Quickstart with a real Claude
 
