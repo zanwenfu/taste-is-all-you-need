@@ -72,6 +72,96 @@ def broker(tmp_path, environment=None, **limits):
     return TerminalBroker.create(tmp_path / "terminal", binding, environment)
 
 
+def test_grading_handoff_survives_restart_and_preserves_read_only_receipts(tmp_path):
+    owner = broker(tmp_path)
+    env, binding = owner.backend, owner.binding
+
+    async def original():
+        await owner.execute(request())
+        # Scheduled but not admitted: sealing must win without running it.
+        queued = asyncio.create_task(owner.execute(request("queued")))
+        assert owner.seal_for_grading() == binding
+        assert owner.seal_for_grading() == binding
+        with pytest.raises(TerminalFenced):
+            await queued
+        assert await owner.execute(request()) == env.result
+        assert owner.phase == "sealed" and not env.stopped
+        assert len(env.calls) == 1 and [kind for kind, _ in owner.events()].count("sealed") == 1
+
+    try:
+        asyncio.run(original())
+    finally:
+        owner.close()
+    recovered = TerminalBroker.open(tmp_path / "terminal", binding, env)
+
+    async def recovery():
+        assert recovered.phase == "sealed" and recovered.seal_for_grading() == binding
+        assert recovered.lookup_actor(request().request_id, request().actor_id) == env.result
+        with pytest.raises(TerminalFenced):
+            await recovered.execute(request("after_restart"))
+        assert not env.stopped and len(env.calls) == 1
+        await recovered.abort()
+        assert env.stopped and recovered.phase == "stopped"
+        with pytest.raises(TerminalFenced):
+            recovered.seal_for_grading()
+
+    try:
+        asyncio.run(recovery())
+    finally:
+        recovered.close()
+
+
+def test_grading_handoff_refuses_active_command_without_discarding_its_effect(tmp_path):
+    owner = broker(tmp_path)
+    env = owner.backend
+    env.release.clear()
+
+    async def scenario():
+        active = asyncio.create_task(owner.execute(request()))
+        await wait_event(env.entered)
+        with pytest.raises(TerminalFenced, match="active or uncertain"):
+            owner.seal_for_grading()
+        assert owner.phase == "ready" and not env.stopped
+        env.release.set()
+        assert await active == env.result
+        owner.seal_for_grading()
+        assert owner.phase == "sealed" and not env.stopped
+        await owner.abort()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        env.release.set()
+        owner.close()
+
+
+def test_grading_handoff_refuses_uncertain_termination_and_changed_identity(tmp_path):
+    owner = broker(tmp_path)
+    env = owner.backend
+
+    async def scenario():
+        owner.seal_for_grading()
+        env.environment_id = "replaced_container"
+        with pytest.raises(TerminalConflict):
+            owner.seal_for_grading()
+        env.environment_id = owner.binding.environment_id
+        env.stop_error = ConnectionError("stop not confirmed")
+        with pytest.raises(ConnectionError):
+            await owner.abort()
+        assert owner.phase == "fenced"
+        with pytest.raises(TerminalFenced):
+            owner.seal_for_grading()
+        env.stop_error = None
+        await owner.abort()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        env.environment_id = owner.binding.environment_id
+        env.stop_error = None
+        owner.close()
+
+
 @pytest.mark.parametrize("code", [0, 1, 124, 137])
 def test_result_is_lossless_and_reopen_never_reexecutes_completed_id(tmp_path, code):
     env = Environment()

@@ -223,7 +223,7 @@ class TerminalService:
         already registered actor is refused. No model can mint actor grants.
         """
         self._on_loop()
-        if self._closing or self._server is None:
+        if self._closing or self._server is None or self.broker.phase != "ready":
             raise TerminalFenced("terminal service is not accepting actor grants")
         if (not isinstance(credential, TerminalCredential) or credential.grant.binding != self.broker.binding
                 or credential.server_uid != os.geteuid() or credential.socket_path != str(self.path)):
@@ -237,6 +237,19 @@ class TerminalService:
         if len(self._credentials) >= 256:
             raise TerminalFenced("terminal actor grant limit reached")
         self._credentials[key] = credential
+
+    def seal_for_grading(self) -> TerminalBinding:
+        """Trusted lifecycle handoff, never a worker RPC; keep receipts readable.
+
+        Call only after draining agent processes. The broker refuses to seal
+        an active command. Successful sealing survives broker restart and
+        prevents new effects while the outside verifier uses the live container.
+        close() still stops the environment after grading or on any failure.
+        """
+        self._on_loop()
+        if self._closing or self._server is None:
+            raise TerminalFenced("terminal service is not available for grading handoff")
+        return self.broker.seal_for_grading()
 
     def _on_loop(self):
         if os.getpid() != self._pid:
@@ -476,7 +489,7 @@ class TerminalClient:
                 if status not in {"ok", "missing"}:
                     raise TerminalUnavailable("terminal operation did not complete with a receipt")
                 if operation == "ping":
-                    if set(response) != {"version", "status", "grant", "phase"} or response["phase"] not in {"ready", "fenced", "stopped"}:
+                    if set(response) != {"version", "status", "grant", "phase"} or response["phase"] not in {"ready", "sealed", "fenced", "stopped"}:
                         raise TerminalUnavailable("invalid terminal readiness reply")
                     return response["phase"]
                 if response.get("request_id") != arguments["request_id"]:

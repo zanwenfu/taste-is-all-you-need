@@ -107,6 +107,56 @@ def test_binary_receipts_replay_and_actor_scoped_lookup(rig):
     asyncio.run(scenario())
 
 
+def test_grading_handoff_fences_incomplete_rpc_and_new_grants_but_keeps_receipts(rig):
+    async def scenario():
+        async with rig() as r:
+            await r.a.execute(req())
+            reader, writer = await asyncio.open_unix_connection(r.credentials[0].socket_path)
+            payload = rpc._json(message(r.credentials[0], arguments=asdict(req("late"))))
+            writer.write(len(payload).to_bytes(4, "big")[:2])
+            await writer.drain()
+            assert r.service.seal_for_grading() == r.owner.binding
+            assert r.service.seal_for_grading() == r.owner.binding
+            writer.write(len(payload).to_bytes(4, "big")[2:] + payload)
+            await writer.drain()
+            try:
+                assert (await rpc._read(reader, rpc.RESPONSE_BYTES))["status"] == "fenced"
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            assert await r.a.ping() == "sealed"
+            assert await r.a.lookup(req().request_id) == r.env.result
+            assert await r.a.execute(req()) == r.env.result
+            with pytest.raises(TerminalFenced):
+                await r.b.execute(req("new", actor="worker_B"))
+            with pytest.raises(TerminalFenced):
+                r.service.authorize(r.credentials[0])
+            assert not r.env.stopped and len(r.env.calls) == 1
+            assert [kind for kind, _ in r.owner.events()].count("sealed") == 1
+    asyncio.run(scenario())
+
+
+def test_only_idle_trusted_owner_can_hand_environment_to_grading(rig):
+    async def scenario():
+        async with rig() as r:
+            reply = await raw_reply(r.credentials[0], message(r.credentials[0], operation="seal_for_grading", arguments={}))
+            assert reply["status"] == "denied" and r.owner.phase == "ready"
+            r.env.release.clear()
+            active = asyncio.create_task(r.a.execute(req()))
+            await wait_event(r.env.entered)
+            with pytest.raises(TerminalFenced):
+                r.service.seal_for_grading()
+            r.env.release.set()
+            assert await active == r.env.result
+            r.service.seal_for_grading()
+            assert not r.env.stopped
+            await r.service.close()
+            assert r.env.stopped
+            with pytest.raises(TerminalFenced):
+                r.service.seal_for_grading()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("fault", ["token", "actor", "trial", "deadline", "boolean_scope", "timeout", "version", "extra"])
 def test_forged_or_excess_authority_never_reaches_broker(rig, fault):
     async def scenario():

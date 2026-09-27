@@ -282,12 +282,17 @@ truncation counts. Files, packages and services in the container persist across
 memory rollback. Omitting the terminal policy preserves artifact-only execution.
 
 The standalone Azure goal CLI does not yet construct this terminal lifecycle or
-credential provider. The outside lifecycle owner must also enforce the process
-deadline, grade the live task before normal service shutdown, and stop/remove the
-container if the controller dies. `scripts/check_terminal_service.py` validates
-the broker with two serial containers and unprivileged worker processes, including
-a worker killed during a command. These checks do not yet constitute a Harbor
-adapter or an official Terminal Bench result.
+credential provider. The outside lifecycle owner must enforce the process
+deadline, drain agent processes, and call `TerminalService.seal_for_grading()`
+before grading the live task. Sealing refuses an active or uncertain command,
+permanently blocks new effects (including after broker recovery), and leaves
+completed receipts readable. Task background services remain part of the live
+environment. Call `close()` after grading or on failure; an independent owner
+must still stop/remove the container if the controller dies.
+`scripts/check_terminal_service.py` validates the broker with two serial
+containers and unprivileged worker processes, including grading a fixture after
+sealing and killing a worker during a command. These checks do not yet constitute
+a Harbor adapter or an official Terminal Bench result.
 
 ## Quickstart with a real Claude
 

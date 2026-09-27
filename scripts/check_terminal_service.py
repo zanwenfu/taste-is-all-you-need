@@ -58,7 +58,8 @@ async def child(credential_path, mode, ledger_path):
     if mode == "killed":
         await client.execute(TerminalRequest("hung", credential.grant.actor_id, HUNG, "/tmp", 10))
         raise AssertionError("worker intended for termination returned")
-    code = "import sys; sys.stdout.buffer.write(bytes(range(256))*40); sys.stderr.buffer.write(b'err')"
+    code = ("import sys; from pathlib import Path; Path('/tmp/agent-result').write_bytes(b'correct'); "
+            "sys.stdout.buffer.write(bytes(range(256))*40); sys.stderr.buffer.write(b'err')")
     call = ToolCall("fixture", "terminal_exec", {
         "command": "python3 -c " + shlex.quote(code), "cwd": "/tmp", "timeout_seconds": 10})
     result = await TerminalTools(client).execute("binary", call)
@@ -148,6 +149,16 @@ def main():
                 if mode == "complete":
                     observed = json.loads(stdout)
                     assert observed["status"] == "passed"
+                    assert service.seal_for_grading() == binding
+                    assert owner.phase == "sealed"
+                    assert json.loads(cli("inspect", container_id).stdout)[0]["State"]["Running"] is True
+                    # A deterministic verifier fixture, not an official Harbor
+                    # reward: the outside owner can grade the live task after
+                    # broker admission has ended and before container cleanup.
+                    verifier = cli("exec", container_id, "python3", "-c",
+                        "from pathlib import Path; assert Path('/tmp/agent-result').read_bytes() == b'correct'")
+                    observed.update(agent_admission_sealed=True, container_live_after_seal=True,
+                                    verifier_fixture_exit=verifier.returncode)
                 else:
                     async with asyncio.timeout(15):
                         while owner.phase != "stopped":

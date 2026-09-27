@@ -155,6 +155,8 @@ class TerminalBroker:
 
     Use create for a new trial and open for the same retained environment.
     close only releases the controller lease; abort stops the environment.
+    seal_for_grading permanently ends command admission once commands are idle,
+    leaving the environment alive for its outside verifier and cleanup owner.
     An incomplete recovered request fences the trial even if exec never began.
     Call abort to confirm drainage; do not invent a new request ID to retry it.
     All async methods of an instance belong to one event loop.
@@ -257,7 +259,7 @@ class TerminalBroker:
     def phase(self):
         self._check()
         rows = self._db.execute("SELECT phase FROM state").fetchall()
-        if len(rows) != 1 or rows[0][0] not in {"ready", "fenced", "stopped"}:
+        if len(rows) != 1 or rows[0][0] not in {"ready", "sealed", "fenced", "stopped"}:
             raise TerminalFenced("invalid terminal ledger state")
         return rows[0][0]
 
@@ -290,6 +292,30 @@ class TerminalBroker:
         if request.actor_id != actor_id:
             raise TerminalConflict("terminal receipt belongs to another actor")
         return self.lookup(request)
+
+    def seal_for_grading(self) -> TerminalBinding:
+        """Irreversibly hand an idle environment to the outside verifier.
+
+        The lifecycle owner must first drain agent processes. This synchronous
+        transition on the broker loop cannot race admission. A queued request
+        will see the sealed state; an already active request makes sealing fail.
+        Completed receipts remain readable, including after controller recovery.
+        This proves no future broker effect, not that task background services
+        have stopped. Those services belong to the live task being graded.
+        """
+        self._on_loop()
+        self._identity()
+        if self.phase == "sealed" and not self._closing:
+            return self.binding
+        if (self._closing or self.phase != "ready" or self._lock.locked()
+                or (self._operation is not None and not self._operation.done())
+                or (self._abort_task is not None and not self._abort_task.done())
+                or self._db.execute("SELECT 1 FROM requests WHERE status='pending' LIMIT 1").fetchone()):
+            raise TerminalFenced("cannot hand an active or uncertain terminal environment to grading")
+        with self._db:
+            self._db.execute("UPDATE state SET phase='sealed'")
+            self._event("sealed", {"environment_id": self.binding.environment_id})
+        return self.binding
 
     def _fence(self, reason):
         with self._db:
