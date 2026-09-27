@@ -246,6 +246,18 @@ credentials and refuses new model calls or worker launches. The caller must own 
 hard deadline and confirms all descendants have stopped. The historical Claude
 goal and worker entrypoints remain separately available.
 
+`OwnedProcessScope` can deliver private files through systemd `LoadCredential`.
+Add `ScopeCredential` name/digest descriptors to its `ScopeSpec` and pass the
+matching byte mapping to `OwnedProcessScope.create(..., credentials=...)`.
+The controller snapshots those bytes outside worker write access and validates
+the files and every path ancestor before launch. Only names and digests enter
+the saved specification; secrets never enter service arguments or environment
+values. The service reads its read-only copies through `CREDENTIALS_DIRECTORY`.
+The owner retains its private snapshots for recovery and must remove them when
+the trial is settled. Credential-free scope records retain their existing format
+and digests. `scripts/check_scope_credentials.py` checks actual unprivileged
+delivery, deadline cleanup and lost-acknowledgement recovery using dummy bytes.
+
 An existing or partly initialized worker run is refused by the fresh-launch
 entrypoint; it never resets the allowance on restart. Explicit interrupted-worker
 recovery, Harbor lifecycle/grading, scaling checks and a bounded live Azure pilot

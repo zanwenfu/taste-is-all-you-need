@@ -33,6 +33,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from taste.brains.process_credentials import (
+    MAX_CREDENTIALS,
+    ScopeCredential,
+    credential_values,
+    load_credential_properties,
+    write_credentials,
+)
 from taste.resources import resource_error
 
 
@@ -95,6 +102,7 @@ class ScopeSpec:
     runtime_seconds: float
     grace_seconds: float = 2.0
     python_path: str | None = None
+    credentials: tuple[ScopeCredential, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.argv, tuple) or not self.argv:
@@ -113,12 +121,23 @@ class ScopeSpec:
             raise ValueError("scope uid must be a non-root numeric uid")
         object.__setattr__(self, "runtime_seconds", _positive(self.runtime_seconds, "runtime_seconds"))
         object.__setattr__(self, "grace_seconds", _positive(self.grace_seconds, "grace_seconds"))
-        if len(_canonical(asdict(self)).encode()) > 65536:
+        if (not isinstance(self.credentials, tuple) or len(self.credentials) > MAX_CREDENTIALS
+                or not all(isinstance(item, ScopeCredential) for item in self.credentials)
+                or len({item.name for item in self.credentials}) != len(self.credentials)):
+            raise ValueError("scope requires at most eight uniquely named credential descriptors")
+        if len(_canonical(self.to_dict()).encode()) > 65536:
             raise ValueError("scope configuration exceeds 64 KiB")
+
+    def to_dict(self):
+        value = asdict(self)
+        # Preserve every existing credential-free scope's digest and wire form.
+        if not self.credentials:
+            del value["credentials"]
+        return value
 
     @property
     def digest(self) -> str:
-        return hashlib.sha256(_canonical(asdict(self)).encode()).hexdigest()
+        return hashlib.sha256(_canonical(self.to_dict()).encode()).hexdigest()
 
 
 class SystemdManager:
@@ -132,7 +151,7 @@ class SystemdManager:
             raise RuntimeError(f"{argv[0]} failed ({result.returncode}): {result.stderr[:2048]}")
         return result
 
-    def start(self, unit: str, description: str, spec: ScopeSpec) -> None:
+    def start(self, unit: str, description: str, spec: ScopeSpec, *, credential_directory=None) -> None:
         if os.geteuid() != 0 or not Path("/sys/fs/cgroup/cgroup.controllers").is_file():
             raise RuntimeError("system scope controller requires root and Linux cgroup v2")
         account = pwd.getpwuid(spec.uid)
@@ -156,6 +175,12 @@ class SystemdManager:
         ]
         if spec.python_path is not None:
             argv.append(f"--setenv=PYTHONPATH={spec.python_path}")
+        if spec.credentials:
+            if credential_directory is None:
+                raise ValueError("scope credential directory is missing")
+            argv.extend(load_credential_properties(credential_directory, spec.credentials))
+        elif credential_directory is not None:
+            raise ValueError("credential-free scope cannot load private files")
         self._command([*argv, "--", *spec.argv])
 
     def inspect(self, unit: str) -> dict[str, str] | None:
@@ -217,14 +242,16 @@ class OwnedProcessScope:
         self.description = f"taste-goal:{state['owner']}:{self.spec.digest}"
 
     @classmethod
-    def create(cls, directory: Path | str, spec: ScopeSpec, *, manager: Any = None):
+    def create(cls, directory: Path | str, spec: ScopeSpec, *, manager: Any = None,
+               credentials=None):
         if not isinstance(spec, ScopeSpec):
             raise TypeError("spec must be a ScopeSpec")
+        values = credential_values(spec.credentials, credentials)
         path = Path(directory).absolute()
         path.mkdir(mode=0o700)  # Existing state is never overwritten or reused.
         owner = uuid.uuid4().hex
         state = {"schema": "taste.brains/ProcessScope/1", "owner": owner,
-                 "spec": asdict(spec), "spec_digest": spec.digest, "phase": "ready",
+                 "spec": spec.to_dict(), "spec_digest": spec.digest, "phase": "ready",
                  "launch_attempted": False, "launch_acknowledged": False,
                  "invocation_id": None, "stop_reason": None,
                  "termination": None, "last_error": None, "last_observation": None}
@@ -232,6 +259,7 @@ class OwnedProcessScope:
         temporary = cls.__new__(cls)
         temporary.directory = path
         with temporary._locked() as fd:
+            write_credentials(fd, values)
             temporary._write(fd, state)
         return cls(path, manager=manager)
 
@@ -253,6 +281,10 @@ class OwnedProcessScope:
             raise ValueError("malformed scope specification")
         raw = dict(state["spec"])
         raw["argv"] = tuple(raw["argv"])
+        if "credentials" in raw:
+            if not isinstance(raw["credentials"], list) or not raw["credentials"]:
+                raise ValueError("malformed scope credentials")
+            raw["credentials"] = tuple(ScopeCredential(**item) for item in raw["credentials"])
         spec = ScopeSpec(**raw)
         if spec.digest != state["spec_digest"]:
             raise ValueError("scope configuration digest differs from durable intent")
@@ -358,7 +390,8 @@ class OwnedProcessScope:
                     raise RuntimeError("scope name or cgroup already exists")
                 state.update(phase="launch_pending", launch_attempted=True)
                 self._write(fd, state)
-                self.manager.start(self.unit, self.description, self.spec)
+                options = {"credential_directory": self.directory / "credentials"} if self.spec.credentials else {}
+                self.manager.start(self.unit, self.description, self.spec, **options)
                 state["launch_acknowledged"] = True
                 state["phase"] = "running"
                 self._write(fd, state)
