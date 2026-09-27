@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 
 from taste.brains.terminal_broker import (
+    MAX_TERMINAL_OUTPUT_BYTES,
     TerminalBinding,
     TerminalBroker,
     TerminalConflict,
@@ -408,3 +411,96 @@ def test_reopen_requires_exact_binding_and_private_database(tmp_path):
     database.symlink_to(database.with_suffix(".saved"))
     with pytest.raises(TerminalFenced, match="private regular file"):
         TerminalBroker.open(tmp_path / "terminal", binding, env)
+
+
+def test_truncated_binary_receipt_survives_stop_and_reopen_without_reexecution(tmp_path):
+    env = Environment()
+    env.result = TerminalResult(7, b"\xff\x00" * 1024, b"\x80", 3_000_000, 123)
+    owner = broker(tmp_path, env)
+    binding = owner.binding
+
+    async def scenario():
+        assert await owner.execute(request()) == env.result
+        await owner.abort()
+
+    asyncio.run(scenario())
+    owner.close()
+    reopened = TerminalBroker.open(tmp_path / "terminal", binding, env)
+    try:
+        assert asyncio.run(reopened.execute(request())) == env.result
+        assert len(env.calls) == 1 and env.stopped
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("field", ["stdout_dropped_bytes", "stderr_dropped_bytes"])
+@pytest.mark.parametrize("value", [True, -1, 1.5, 2**63, None])
+def test_invalid_truncation_cannot_be_mistaken_for_a_complete_receipt(field, value):
+    with pytest.raises(ValueError, match="dropped byte count"):
+        TerminalResult(0, **{field: value})
+
+
+@pytest.mark.parametrize("field", ["stdout", "stderr"])
+def test_receipts_enforce_stream_limit_before_persistence(field):
+    TerminalResult(0, **{field: b"x" * MAX_TERMINAL_OUTPUT_BYTES})
+    with pytest.raises(ValueError, match="receipt limit"):
+        TerminalResult(0, **{field: b"x" * (MAX_TERMINAL_OUTPUT_BYTES + 1)})
+
+
+@pytest.mark.parametrize("status", ["completed", "pending"])
+def test_legacy_database_upgrade_preserves_receipt_or_fences_incomplete_effect(tmp_path, status):
+    env = Environment()
+    binding = TerminalBinding("trial_1", env.environment_id, time.time() + 60, 100)
+    directory = tmp_path / "terminal"
+    directory.mkdir(mode=0o700)
+    database = directory / "terminal.sqlite3"
+    def encode(value):
+        return json.dumps(asdict(value), sort_keys=True, separators=(",", ":"))
+
+    # Original on-disk format, independent of the current broker constructor.
+    with sqlite3.connect(database) as db:
+        db.executescript("""
+            CREATE TABLE binding (payload TEXT NOT NULL);
+            CREATE TABLE state (phase TEXT NOT NULL);
+            CREATE TABLE events (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL);
+            CREATE TABLE requests (id TEXT PRIMARY KEY, payload TEXT NOT NULL, status TEXT NOT NULL,
+                                   code INTEGER, stdout BLOB, stderr BLOB);
+            INSERT INTO state VALUES ('ready');
+        """)
+        db.execute("INSERT INTO binding VALUES (?)", (encode(binding),))
+        db.execute("INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?)",
+                   (request().request_id, encode(request()), status, 1, b"\xff", b"original error"))
+    database.chmod(0o600)
+    owner = TerminalBroker.open(directory, binding, env)
+
+    async def scenario():
+        if status == "completed":
+            assert await owner.execute(request()) == TerminalResult(1, b"\xff", b"original error")
+        else:
+            assert owner.phase == "fenced"
+            with pytest.raises(TerminalFenced):
+                await owner.execute(request())
+        await owner.abort()
+
+    try:
+        asyncio.run(scenario())
+        assert not env.calls and env.stopped
+        with sqlite3.connect(database) as db:
+            assert db.execute("PRAGMA user_version").fetchone() == (1,)
+    finally:
+        owner.close()
+
+
+def test_unknown_receipt_version_refuses_open_and_releases_controller_lease(tmp_path):
+    owner = broker(tmp_path)
+    binding, env = owner.binding, owner.backend
+    owner.close()
+    database = tmp_path / "terminal" / "terminal.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute("PRAGMA user_version=2")
+    with pytest.raises(TerminalFenced, match="unsupported terminal receipt schema"):
+        TerminalBroker.open(tmp_path / "terminal", binding, env)
+    with sqlite3.connect(database) as db:
+        db.execute("PRAGMA user_version=1")
+    recovered = TerminalBroker.open(tmp_path / "terminal", binding, env)
+    recovered.close()

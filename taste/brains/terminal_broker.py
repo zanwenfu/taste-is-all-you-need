@@ -33,6 +33,8 @@ from typing import Protocol
 
 from taste.brains.owned_thread import start_owned_thread
 
+MAX_TERMINAL_OUTPUT_BYTES = 1024 * 1024  # Per stream, before persistence or IPC.
+
 
 class TerminalFenced(RuntimeError):
     """This environment may not accept another terminal effect."""
@@ -93,15 +95,25 @@ class TerminalRequest:
 
 @dataclass(frozen=True)
 class TerminalResult:
+    """Captured stream prefixes and exact byte counts discarded while draining."""
+
     return_code: int
     stdout: bytes = b""
     stderr: bytes = b""
+    stdout_dropped_bytes: int = 0
+    stderr_dropped_bytes: int = 0
 
     def __post_init__(self):
         if type(self.return_code) is not int:
             raise ValueError("terminal return code must be an integer")
         if not isinstance(self.stdout, bytes) or not isinstance(self.stderr, bytes):
             raise ValueError("terminal output must preserve bytes")
+        for output, dropped in ((self.stdout, self.stdout_dropped_bytes),
+                                (self.stderr, self.stderr_dropped_bytes)):
+            if len(output) > MAX_TERMINAL_OUTPUT_BYTES:
+                raise ValueError("terminal stream exceeds the 1 MiB receipt limit")
+            if type(dropped) is not int or not 0 <= dropped <= 2**63 - 1:
+                raise ValueError("dropped byte count must be a nonnegative SQLite integer")
 
 
 class TerminalBackend(Protocol):
@@ -200,11 +212,28 @@ class TerminalBroker:
                 raise TerminalConflict("terminal binding differs from the admitted trial")
             if self._db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                 raise TerminalFenced("terminal database integrity check failed")
+            self._upgrade_schema()
             if self._db.execute("SELECT 1 FROM requests WHERE status='pending' LIMIT 1").fetchone():
                 self._fence("recovered incomplete request")
         except BaseException:
             self._release()
             raise
+
+    def _upgrade_schema(self):
+        version = self._db.execute("PRAGMA user_version").fetchone()[0]
+        columns = [row[1] for row in self._db.execute("PRAGMA table_info(requests)")]
+        legacy = ["id", "payload", "status", "code", "stdout", "stderr"]
+        current = [*legacy, "stdout_dropped_bytes", "stderr_dropped_bytes"]
+        if version == 0 and columns == legacy:
+            # Old transports retained all bytes. Upgrade atomically under the
+            # controller lease; pending effects still fence below, never replay.
+            with self._db:
+                self._db.execute("BEGIN IMMEDIATE")
+                for column in current[len(legacy):]:
+                    self._db.execute(f"ALTER TABLE requests ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+                self._db.execute("PRAGMA user_version=1")
+        elif version != 1 or columns != current:
+            raise TerminalFenced("unsupported terminal receipt schema")
 
     def _identity(self):
         if self.backend.environment_id != self.binding.environment_id:
@@ -239,7 +268,7 @@ class TerminalBroker:
 
     def lookup(self, request: TerminalRequest):
         self._check()
-        row = self._db.execute("SELECT payload,status,code,stdout,stderr FROM requests WHERE id=?",
+        row = self._db.execute("SELECT payload,status,code,stdout,stderr,stdout_dropped_bytes,stderr_dropped_bytes FROM requests WHERE id=?",
                                (request.request_id,)).fetchone()
         if row is None:
             return None
@@ -247,7 +276,7 @@ class TerminalBroker:
             raise TerminalConflict("terminal request ID was reused with different inputs")
         if row[1] != "completed":
             raise TerminalFenced("terminal request has no confirmed completed receipt")
-        return TerminalResult(row[2], row[3], row[4])
+        return TerminalResult(*row[2:])
 
     def _fence(self, reason):
         with self._db:
@@ -258,9 +287,10 @@ class TerminalBroker:
         if not isinstance(result, TerminalResult):
             raise TypeError("backend returned no TerminalResult")
         with self._db:
-            self._db.execute("UPDATE requests SET status=?,code=?,stdout=?,stderr=? WHERE id=?",
+            self._db.execute("UPDATE requests SET status=?,code=?,stdout=?,stderr=?,stdout_dropped_bytes=?,stderr_dropped_bytes=? WHERE id=?",
                              ("completed" if completed else "uncertain", result.return_code,
-                              result.stdout, result.stderr, request.request_id))
+                              result.stdout, result.stderr, result.stdout_dropped_bytes,
+                              result.stderr_dropped_bytes, request.request_id))
             self._event("completed" if completed else "late_result", {"request_id": request.request_id})
 
     async def execute(self, request: TerminalRequest) -> TerminalResult:
