@@ -151,6 +151,20 @@ def test_preparation_rejects_invalid_or_replayed_input_before_mutation(tmp_path,
     assert not (output / "result.json").exists()
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="write-permission rejection requires an unprivileged process")
+def test_unwritable_worktree_parent_fails_before_partial_repository_creation(tmp_path, goal, policy):
+    path, digest = preparation(tmp_path, goal, policy)
+    mode = tmp_path.stat().st_mode & 0o777
+    tmp_path.chmod(0o500)
+    try:
+        with pytest.raises(GoalInputError, match="enclosing workspace"):
+            perform(path, digest, tmp_path / "result", operation="prepare")
+        assert not (tmp_path / "workspace/.git").exists()
+        assert not (tmp_path / "result").exists()
+    finally:
+        tmp_path.chmod(mode)
+
+
 @pytest.mark.parametrize("damage", ["missing", "symlink", "hardlink", "fifo", "large", "mode", "uid",
                                      "directory_mode", "directory_symlink", "intent", "binding", "duplicate"])
 def test_observer_rejects_incomplete_unbound_or_unsafe_exchange(tmp_path, damage):

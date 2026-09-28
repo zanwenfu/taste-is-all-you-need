@@ -270,6 +270,24 @@ Workers receive their own assignment grants and Azure authentication; the
 coordinator's credential-directory hint is removed at their process boundary.
 Preparation and settlement require no provider or terminal credentials.
 
+`AzureGoalService` in `taste.brains.azure_goal_service` binds these operations to
+an `OwnedProcessScope` and a durable result exchange. `create(...)` admits a
+fresh `prepare`, `run`, or `settle` service; `run(timeout_seconds=...)` launches
+it once, while `recover()` only drains and inspects the original service.
+Results are read after confirmed whole-scope drainage, with exact input,
+operation, goal identity and cost-accounting checks. A missing result remains
+incomplete; after drainage, use a separate credential-free settlement operation.
+An ambiguous launch stays fenced even if a result file exists. The owner must
+protect input, scope and exchange paths from model writes. Only a `run` service
+receives the private Azure credential. Place the fresh workspace in a separate
+service-owned state directory: memory worktrees are created beside the workspace.
+Preparation rejects an unwritable parent before initializing Git.
+`grading_ready()` admits settled bounded
+outcomes with known spending; benchmark reward still comes from the verifier.
+`scripts/check_azure_goal_service.py` exercises real Linux services for completion,
+a lost provider reply and SIGKILL during dispatch using mocked HTTP and no paid
+calls. Its independent `--cleanup-only` command drains the recorded scopes.
+
 An existing or partly initialized worker run is refused by the fresh-launch
 entrypoint; it never resets the allowance on restart. Explicit interrupted-worker
 recovery, Harbor lifecycle/grading, scaling checks and a bounded live Azure pilot

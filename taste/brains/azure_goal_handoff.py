@@ -73,6 +73,11 @@ def _preparation(value):
     root = Path(value["repo_root"])
     if not root.is_absolute() or str(root.resolve(strict=True)) != str(root) or not root.is_dir():
         raise GoalInputError("Azure preparation requires an existing canonical workspace")
+    # Memory branches live in sibling .taste-worktrees directories. A fresh
+    # trial needs a writable enclosing state directory, separate from the
+    # outside owner's protected input, credentials and result exchange paths.
+    if not os.access(root, os.W_OK | os.X_OK) or not os.access(root.parent, os.W_OK | os.X_OK):
+        raise GoalInputError("Azure preparation requires a writable enclosing workspace directory")
     goal, policy = Goal.from_dict(value["goal"]), AzureExecutionPolicy.from_dict(value["policy"])
     if goal.budget_usd is None or goal.budget_usd <= 0:
         raise GoalInputError("Azure preparation requires a positive goal budget")
