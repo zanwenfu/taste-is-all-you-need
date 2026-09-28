@@ -397,6 +397,21 @@ capture or verification. The trusted test script is installed during controlled
 fixture setup; this does not validate released task images or general task
 admission. Each case uses the cached image, no task network and no paid calls.
 
+The same fixture's `service-*` modes add a helper service with its own filesystem
+and original Docker identity. The real terminal action writes to that service
+over a private loopback connection; the main container has no external network.
+Before helper artifacts are copied, `ArtifactHandoff.drain_main()` confirms the
+original main container has stopped. Failed stop attempts, restarted services or
+incorrect service names cannot yield valid evidence, even when Harbor continues
+after an error. Receipts bind each capture to its service and original container;
+limits apply across services, and overlapping verifier paths are rejected.
+Helper cleanup must also complete before verifier creation. The modes
+`kill-service-copy` and `kill-service-verifier` exercise independent cleanup after
+controller death. Cleanup of a restarted helper retains the identity conflict
+and records removal separately; the restarted service is never re-admitted for
+collection. Released-task collection hooks, filtered/mode-preserving output
+and general service topology still require admission and validation.
+
 These fixtures export logs, artifacts and rewards through
 `taste.benchmarks.output_snapshot`, with no host output mounts. It checks the
 original Docker identity before and after a bounded archive download, validates

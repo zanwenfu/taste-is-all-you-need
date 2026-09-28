@@ -68,6 +68,8 @@ def install(counter, mode):
                            else "printf correct > /tmp/agent-result")
                 if mode.startswith("separate-"):
                     command += "; mkdir -p /tmp/evidence; printf '\\000\\377data' > /tmp/evidence/raw.bin"
+                    if mode.startswith("separate-service-") or mode.startswith("separate-kill-service-"):
+                        command += "; python3 -c \"import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8765/submit', data=b'correct', timeout=2).read() == b'ok'\""
                     if mode == "separate-missing":
                         command += "; rm /tmp/agent-result"
                     elif mode == "separate-link":
