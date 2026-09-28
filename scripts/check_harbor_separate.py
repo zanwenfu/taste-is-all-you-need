@@ -521,7 +521,10 @@ async def check(args):
             assert failure.exception_type == "OutputSnapshotError", failure
             assert not (root / "verifier-intent.json").exists() and not (root / "artifacts-sealed.json").exists()
             if args.mode == "service-cleanup-failure":
-                assert "helper service has unconfirmed cleanup" in failure.exception_message
+                # Harbor retains the first cleanup error in result.json. The
+                # later verifier-admission rejection is retained in its log.
+                assert failure.exception_message == "controlled helper stop failure"
+                assert "OutputSnapshotError: helper service has unconfirmed cleanup" in (trial.paths.trial_dir / "trial.log").read_text()
                 assert read(root, "helper-stop-error.json")["error"] == "controlled helper stop failure"
                 assert not (root / "helper-drain.json").exists()
             else:
