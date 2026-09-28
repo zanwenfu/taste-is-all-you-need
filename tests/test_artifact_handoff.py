@@ -33,9 +33,12 @@ async def collect(item, target):
 
 def test_http_capture_seals_original_bytes_and_returned_receipts_cannot_change_authority(collection):
     item, target = collection
-    asyncio.run(collect(item, target))
+    collected = asyncio.run(collect(item, target))
+    collected["entries"].clear()
+    collected["binding"].clear()
     receipts = item.seal()
     assert receipts[0]["source"] == "/tmp/result" and receipts[0]["bytes"] == 7
+    assert receipts[0]["binding"]["container_id"]
     assert target.read_bytes() == b"correct"
     receipts[0]["entries"].clear()
     assert len(item.verify()[0]["entries"]) == 1

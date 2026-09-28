@@ -138,7 +138,7 @@ class ArtifactHandoff:
             self._pending.add(source)
             claimed = True
 
-            def copy():
+            def capture():
                 function = download_snapshot if kind == "directory" else download_file_snapshot
                 summary = function(self._backend, source, target.destination, deadline_unix=deadline_unix, limits=self.limits)
                 fingerprint = _fingerprint(target, self.limits)
@@ -147,14 +147,14 @@ class ArtifactHandoff:
                 return {"source": source, "destination": str(target.destination), "kind": kind,
                         "binding": asdict(self._backend.binding), "snapshot": summary, **fingerprint}
 
-            operation = start_owned_thread(copy)
+            operation = start_owned_thread(capture)
             await asyncio.wait((operation,))
             receipt = operation.result()
             if (sum(row["bytes"] for row in self._receipts.values()) + receipt["bytes"] > self.limits.total_bytes
                     or sum(len(row["entries"]) for row in self._receipts.values()) + len(receipt["entries"]) > self.limits.entries):
                 raise OutputSnapshotError("artifact collection exceeded its aggregate limit")
             self._receipts[source] = receipt
-            return receipt
+            return copy.deepcopy(receipt)
         except BaseException:
             self.phase = "failed"
             if operation is not None:
