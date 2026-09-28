@@ -33,6 +33,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from taste.brains.owned_thread import start_owned_thread
 from taste.brains.process_credentials import (
     MAX_CREDENTIALS,
     ScopeCredential,
@@ -487,7 +488,10 @@ class OwnedProcessScope:
             self.start()
             return self.wait(timeout_seconds=timeout_seconds, _cancel_wait=cancelled)
 
-        driver = asyncio.create_task(asyncio.to_thread(_owned_call, drive))
+        # Executor futures survive asyncio.run's cancellation of every Task.
+        # A cancelled Task wrapper could finish while its manager thread still
+        # launches or stops a service, before the outside owner can proceed.
+        driver = start_owned_thread(_owned_call, drive)
         try:
             await asyncio.wait((driver,))
             return driver.result()
@@ -495,7 +499,7 @@ class OwnedProcessScope:
             cancelled.set()
             reason = ("asynchronous caller cancelled" if isinstance(original, asyncio.CancelledError)
                       else "asynchronous scope operation failed")
-            cleanup = asyncio.create_task(asyncio.to_thread(_owned_call, lambda: self.stop(reason)))
+            cleanup = start_owned_thread(_owned_call, lambda: self.stop(reason))
             failures = []
             for task in (driver, cleanup):
                 try:
@@ -512,7 +516,7 @@ class OwnedProcessScope:
 
     async def stop_async(self, reason: str = "external cancellation") -> dict[str, Any]:
         """Recover/drain without launch, retaining ownership through cancellation."""
-        cleanup = asyncio.create_task(asyncio.to_thread(_owned_call, lambda: self.stop(reason)))
+        cleanup = start_owned_thread(_owned_call, lambda: self.stop(reason))
         try:
             await asyncio.wait((cleanup,))
             return cleanup.result()

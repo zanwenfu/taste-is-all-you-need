@@ -11,6 +11,7 @@ from taste.brains.process_scope import OwnedProcessScope, ScopeSpec
 from taste.resources import ResourceCleanupError, resource_failures
 from tests.test_goal_cancellation import _leaves, wait_event
 from tests.test_process_scope import Manager, state
+from tests.test_thread_shutdown_ownership import cancel_loop_tasks
 
 
 @pytest.fixture
@@ -37,7 +38,8 @@ def test_normal_async_execution_returns_only_after_drain_and_release(scope):
 
 
 @pytest.mark.parametrize("boundary", ["launch", "stop"])
-def test_repeated_cancellation_waits_for_inflight_manager_operation(scope, boundary):
+@pytest.mark.parametrize("whole_loop", [False, True])
+def test_repeated_cancellation_waits_for_inflight_manager_operation(scope, boundary, whole_loop):
     entered, release, operation_done = threading.Event(), threading.Event(), threading.Event()
 
     def delayed():
@@ -66,7 +68,7 @@ def test_repeated_cancellation_waits_for_inflight_manager_operation(scope, bound
         try:
             await wait_event(entered)
             for _ in range(3):
-                task.cancel()
+                cancel_loop_tasks() if whole_loop else task.cancel()
                 await asyncio.sleep(0.02)
                 assert not task.done() and not operation_done.is_set()
             release.set()
@@ -173,7 +175,8 @@ def test_thread_interrupt_cannot_halt_the_loop_before_cleanup(scope, failure):
     assert not scope.manager.units and not scope.manager.populated
 
 
-def test_async_recovery_never_launches_and_waits_through_cancellation(scope):
+@pytest.mark.parametrize("whole_loop", [False, True])
+def test_async_recovery_never_launches_and_waits_through_cancellation(scope, whole_loop):
     scope.start()
     entered, release = threading.Event(), threading.Event()
 
@@ -188,7 +191,7 @@ def test_async_recovery_never_launches_and_waits_through_cancellation(scope):
         try:
             await wait_event(entered)
             for _ in range(3):
-                task.cancel()
+                cancel_loop_tasks() if whole_loop else task.cancel()
                 await asyncio.sleep(0.02)
                 assert not task.done()
             release.set()

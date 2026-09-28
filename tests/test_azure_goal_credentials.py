@@ -36,6 +36,7 @@ from tests.test_azure_terminal_policy import bound
 from tests.test_azure_worker_process import BOOTSTRAP
 from tests.test_goal_cancellation import wait_event
 from tests.test_terminal_broker import Environment
+from tests.test_thread_shutdown_ownership import cancel_loop_tasks
 
 goal, policy, sdk_transport = _goal, _policy, _sdk_transport
 
@@ -141,7 +142,8 @@ def test_private_issuer_must_bind_exact_goal_uid_and_terminal_scope(prepared, tm
         load_azure_goal_credentials(config, source["CREDENTIALS_DIRECTORY"])
 
 
-def test_cancelled_preflight_retains_probe_thread_and_never_composes_a_host(prepared, tmp_path, monkeypatch):
+@pytest.mark.parametrize("whole_loop", [False, True])
+def test_cancelled_preflight_retains_probe_thread_and_never_composes_a_host(prepared, tmp_path, monkeypatch, whole_loop):
     config, policy = prepared
     source = install(tmp_path, config, credential(config, policy, "/tmp/taste-unused-issuer.sock"))
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -163,7 +165,7 @@ def test_cancelled_preflight_retains_probe_thread_and_never_composes_a_host(prep
         try:
             await wait_event(entered)
             for _ in range(3):
-                task.cancel()
+                cancel_loop_tasks() if whole_loop else task.cancel()
                 await asyncio.sleep(0.01)
                 assert not task.done() and not finished.is_set()
         finally:

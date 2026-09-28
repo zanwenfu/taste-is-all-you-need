@@ -36,6 +36,7 @@ from taste.brains.central_host import (
 )
 from taste.brains.central_planner import Goal, _goal_path
 from taste.brains.central_runtime import GoalOutcome, _digest, _goal_root
+from taste.brains.owned_thread import start_owned_thread
 from taste.brains.python_process import isolated_python_argv
 from taste.llm import MODEL_MONITOR, MODEL_PLANNER
 from taste.memstore import Store
@@ -226,9 +227,9 @@ async def execute_goal(config: GoalProcessInput, *, mode="run", host_factory=com
                     "max_generations", "wall_clock_seconds", "max_planner_failures",
                 )})
             # Settlement must never enter run(), plan, launch, or refresh a bound.
-            task = asyncio.create_task(asyncio.to_thread(
+            task = start_owned_thread(
                 _owned_call, lambda: host.stop_and_drain("outer process scope terminated"),
-            ))
+            )
             try:
                 await asyncio.wait((task,))
                 return task.result()

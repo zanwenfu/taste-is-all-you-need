@@ -33,6 +33,7 @@ from tests.test_brains_central_runtime import (
     simple_goal,
 )
 from tests.test_goal_cancellation import _leaves, wait_event
+from tests.test_thread_shutdown_ownership import cancel_loop_tasks
 
 
 @pytest.fixture
@@ -189,7 +190,8 @@ def test_settlement_keeps_unknown_provider_spending_and_never_plans(prepared):
 
 
 @pytest.mark.parametrize("mode", ["run", "settle"])
-def test_repeated_cancellation_waits_for_owned_operation_and_closes_afterward(prepared, mode):
+@pytest.mark.parametrize("whole_loop", [False, True])
+def test_repeated_cancellation_waits_for_owned_operation_and_closes_afterward(prepared, mode, whole_loop):
     config, factory, transport, launcher, hosts = prepared
     entered, release, closed = threading.Event(), threading.Event(), threading.Event()
 
@@ -225,7 +227,7 @@ def test_repeated_cancellation_waits_for_owned_operation_and_closes_afterward(pr
         try:
             await wait_event(entered)
             for _ in range(3):
-                task.cancel()
+                cancel_loop_tasks() if whole_loop else task.cancel()
                 await asyncio.sleep(0.02)
                 # host.closed takes the lifecycle lock held by the driver;
                 # querying it here would block this event loop, not observe it.

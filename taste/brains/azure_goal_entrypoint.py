@@ -27,6 +27,7 @@ from taste.brains.goal_entrypoint import (
     load_goal_input,
     prepare_goal_process,
 )
+from taste.brains.owned_thread import start_owned_thread
 from taste.brains.python_process import isolated_python_argv
 from taste.providers.azure_openai import AZURE_MONITOR_MODEL, AZURE_PLANNER_MODEL
 from taste.providers.base import ProtocolFailure
@@ -85,7 +86,7 @@ async def execute_azure_goal(config, *, mode="run", environment=None, systemd_cr
         if terminal_credential_provider is not None:
             # Check broker reachability and the private coordinator role before
             # paying for a plan. Retain the bounded probe thread on cancellation.
-            probe = asyncio.create_task(asyncio.to_thread(_owned_call, terminal_credential_provider.ping))
+            probe = start_owned_thread(_owned_call, terminal_credential_provider.ping)
             try:
                 await asyncio.wait((probe,))
                 probe.result()
