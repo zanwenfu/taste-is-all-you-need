@@ -382,18 +382,37 @@ case and keep the Harbor and Azure Python environments separate. These controlle
 fixtures do not yet admit arbitrary Terminal Bench tasks or produce benchmark
 scores.
 
-The fixture exports logs, artifacts and rewards through
+`scripts/check_harbor_separate.py` extends this lifecycle to a second, separately
+owned verifier container. The actual Harbor collector transfers a regular file,
+a directory containing binary data, and the conventional artifacts directory.
+`ArtifactHandoff` requires successful bounded captures **and** a complete matching
+Harbor collection manifest, then checks the captured bytes before verifier
+uploads. Missing files, links, altered bytes and failures after a successful copy
+prevent verifier creation. A valid reward is withheld if verifier cleanup fails;
+zero is a valid reward, while missing and non-finite rewards remain errors.
+The `kill-copy` and `kill-verifier` modes require independent `--cleanup-only`
+execution through `ExecStopPost`, followed by `--observe-owner-death`. Both original
+container identities must drain, even when the controller dies during artifact
+capture or verification. The trusted test script is installed during controlled
+fixture setup; this does not validate released task images or general task
+admission. Each case uses the cached image, no task network and no paid calls.
+
+These fixtures export logs, artifacts and rewards through
 `taste.benchmarks.output_snapshot`, with no host output mounts. It checks the
 original Docker identity before and after a bounded archive download, validates
-all entries before writing, and creates only ordinary files in an empty private
-destination. Links, special/sparse files, path escapes, duplicates, stale output
+all entries before writing, and creates only ordinary files. Directory snapshots
+require an empty private destination; individual files require an unused name in
+a private parent. Links, special/sparse files, path escapes, duplicates, stale output
 and excess data are refused. Defaults cap archives at 16 MiB, individual files
 at 4 MiB, total file data at 8 MiB and entries at 1,024. These are explicit
 admission limits, not silent truncation. Additional real fixture modes
 `reward-symlink`, `reward-fifo` and `reward-oversize` require a verifier download
 error and no reward. The controller must retain ownership of in-flight copies
-through cancellation and must not grade a failed snapshot. This initial path
-does not support arbitrary artifact destinations or filtered downloads.
+through cancellation and must not grade a failed snapshot. Artifact handoffs also
+cap aggregate file bytes and entries across all declared outputs. Source modes
+and ownership are not applied to host files. Larger outputs, executable-mode
+preservation, links, arbitrary destinations and filtered downloads need explicit
+admission before running tasks that require them.
 
 ## Quickstart with a real Claude
 

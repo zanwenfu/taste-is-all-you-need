@@ -66,6 +66,12 @@ def install(counter, mode):
             if number == 1:
                 command = ("touch /tmp/owner-command-started; (sleep 30 &); sleep 30" if mode == "killed-owner"
                            else "printf correct > /tmp/agent-result")
+                if mode.startswith("separate-"):
+                    command += "; mkdir -p /tmp/evidence; printf '\\000\\377data' > /tmp/evidence/raw.bin"
+                    if mode == "separate-missing":
+                        command += "; rm /tmp/agent-result"
+                    elif mode == "separate-link":
+                        command += "; ln -s /etc/passwd /tmp/evidence/outside"
                 output = [function_call(json.dumps({"command": command, "cwd": "/tmp", "timeout_seconds": 3}),
                                         name="terminal_exec", call_id="terminal_call")]
             elif number == 2:
