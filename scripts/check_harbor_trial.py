@@ -86,7 +86,7 @@ class SnapshotDockerEnvironment(BrokerDockerEnvironment):
         target.mkdir(mode=0o700, parents=True, exist_ok=True)
         target.chmod(0o700)
         operation = start_owned_thread(download_snapshot, self.taste_service.broker.backend,
-            source_dir, target, deadline_unix=self.taste_service.broker.binding.deadline_unix)
+            source_dir, target, deadline_unix=self.taste_service.broker.backend.binding.deadline_unix)
         try:
             await asyncio.wait((operation,))
             summary = operation.result()

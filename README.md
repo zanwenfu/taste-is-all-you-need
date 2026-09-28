@@ -289,9 +289,23 @@ a lost provider reply and SIGKILL during dispatch using mocked HTTP and no paid
 calls. Its independent `--cleanup-only` command drains the recorded scopes.
 
 An existing or partly initialized worker run is refused by the fresh-launch
-entrypoint; it never resets the allowance on restart. Explicit interrupted-worker
-recovery, Harbor lifecycle/grading, scaling checks and a bounded live Azure pilot
-remain integration work before a full Terminal Bench run.
+entrypoint; it never resets the allowance on restart. The remaining full-benchmark
+gates include a runnable Harbor adapter with faithful task admission, broader
+recovery/scaling checks and a bounded live Azure pilot.
+
+`AzureTerminalTrial` in `taste.benchmarks.azure_terminal_trial` owns an Azure goal
+and an already admitted Docker task container. `create(...)` persists their
+original identities and limits in a private controller directory. `run(api_key=...)`
+prepares the goal, issues private terminal grants, runs it in a separate
+unprivileged service, drains that service and settles without credentials before
+sealing the live container for grading. Unknown spending blocks grading. The
+container deadline may extend beyond the agent deadline to allow the verifier
+and output downloads to finish; neither deadline is renewed on recovery.
+Call `close()` after grading or on failure, before Harbor removes the container.
+An independent watchdog must call `cleanup_trial(directory)` after controller
+death. It drains the saved scopes and original container, removes the private
+launch credential and preserves pending terminal receipts without replay.
+Drainage alone does not settle an interrupted goal's spending.
 
 The controller-side `DockerTerminalBackend` in `taste.brains.docker_terminal`
 implements bounded non-TTY terminal transport over an explicit local Docker
@@ -354,8 +368,19 @@ proof before container removal, an empty original cgroup, and retention of the
 cached image. Run each mode in a bounded systemd unit with the independent
 owner-label cleanup described in the script. Telemetry is disabled and no image
 pulls or paid calls occur. This validates the grading/cleanup handoff for that
-fixture; the production Azure Harbor runner and broader task admission remain
-unfinished.
+fixture.
+
+`scripts/check_azure_harbor.py` connects the actual Azure planner, workers,
+monitors, issuer and `AzureTerminalTrial` to the same pinned Harbor Trial and
+official verifier. Only provider HTTP is mocked. Its modes cover completion,
+worker death after a terminal effect, a lost planner reply, and verifier output
+collection after the agent deadline. `killed-owner` kills the Harbor/controller
+process during an active terminal command; run its independent `--cleanup-only`
+command through systemd `ExecStopPost`, then use `--observe-owner-death` to check
+drainage and retained uncertainty. Use a fresh 32-character hex owner token per
+case and keep the Harbor and Azure Python environments separate. These controlled
+fixtures do not yet admit arbitrary Terminal Bench tasks or produce benchmark
+scores.
 
 The fixture exports logs, artifacts and rewards through
 `taste.benchmarks.output_snapshot`, with no host output mounts. It checks the
