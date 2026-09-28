@@ -155,11 +155,11 @@ def test_limits_cannot_be_disabled(field, value):
         SnapshotLimits(**{field: value})
 
 
-def serve_archive(daemon, payload, *, extra_length=0, chunked=False, after=None, source="/logs/verifier"):
+def serve_archive(daemon, payload, *, extra_length=0, chunked=False, after=None, source="/logs/verifier", container_id=CONTAINER):
     def handle(handler, path):
         if "/archive?" not in path:
             return False
-        assert path == f"/containers/{CONTAINER}/archive?path={quote(source, safe='')}"
+        assert path == f"/containers/{container_id}/archive?path={quote(source, safe='')}"
         handler.send_response(200)
         handler.send_header("Content-Type", "application/x-tar")
         handler.send_header("Connection", "close")

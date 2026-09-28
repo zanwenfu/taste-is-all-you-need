@@ -12,9 +12,12 @@ import copy
 import hashlib
 import json
 import os
+import re
 import stat
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 
 from taste.benchmarks.output_snapshot import (
     DEFAULT_LIMITS,
@@ -35,6 +38,7 @@ class ArtifactTarget:
     source: str
     destination: Path
     kind: str
+    service: str = "main"
 
     def __post_init__(self):
         if (not isinstance(self.source, str) or not self.source.startswith("/")
@@ -46,6 +50,8 @@ class ArtifactTarget:
             raise ValueError("artifact destination must be an absolute host path")
         if self.kind not in {"file", "directory"}:
             raise ValueError("artifact kind must be file or directory")
+        if not isinstance(self.service, str) or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}", self.service) is None:
+            raise ValueError("artifact service must be an admitted compose service name")
         object.__setattr__(self, "destination", destination)
 
 
@@ -109,13 +115,13 @@ class ArtifactHandoff:
     to the host; executables/links require a separately admitted transfer policy.
     """
 
-    def __init__(self, backend, targets, *, limits=DEFAULT_LIMITS):
+    def __init__(self, backend, targets, *, service_backends=None, limits=DEFAULT_LIMITS):
         targets = tuple(targets)
         if (not isinstance(backend, DockerTerminalBackend)
                 or not isinstance(limits, SnapshotLimits) or not 1 <= len(targets) <= 64
                 or any(not isinstance(target, ArtifactTarget) for target in targets)):
             raise ValueError("a bounded nonempty artifact contract is required")
-        self.targets = {target.source: target for target in targets}
+        self.targets = MappingProxyType({target.source: target for target in targets})
         if len(self.targets) != len(targets):
             raise ValueError("artifact sources must be unique")
         for i, target in enumerate(targets):
@@ -123,29 +129,79 @@ class ArtifactHandoff:
                 a, b = target.destination, other.destination
                 if a == b or a in b.parents or b in a.parents:
                     raise ValueError("artifact host destinations overlap")
-        self._backend = DockerTerminalBackend(backend.binding)
+        needed = {target.service for target in targets} - {"main"}
+        services = {} if service_backends is None else service_backends
+        if (not isinstance(services, Mapping) or set(services) != needed or len(services) > 15
+                or any(not isinstance(value, DockerTerminalBackend) for value in services.values())):
+            raise ValueError("each artifact service needs exactly one original Docker binding")
+        bound = {"main": DockerTerminalBackend(backend.binding),
+                 **{name: DockerTerminalBackend(value.binding) for name, value in services.items()}}
+        identities = {(value.binding.socket_path, value.environment_id) for value in bound.values()}
+        if len(identities) != len(bound):
+            raise ValueError("different artifact services cannot alias the same container")
+        self._backends = MappingProxyType(bound)
+        self._backend = bound["main"]
+        self._main_stopped, self._main_draining = False, False
         self.limits, self.phase = limits, "collecting"
         self._pending, self._receipts = set(), {}
 
-    async def collect(self, source, destination, kind, *, deadline_unix):
+    async def drain_main(self):
+        """Stop the original main container before reading helper-service state.
+
+        The trial owner must first settle agent processes and seal terminal
+        grants. Harbor can swallow a stop_service error; retain it here so no
+        later helper capture or seal can turn that failure into a valid result.
+        Independent lifecycle cleanup remains mandatory after controller death.
+        """
+        operation = None
+        try:
+            required = {source for source, target in self.targets.items() if target.service == "main"}
+            if (self.phase != "collecting" or self._main_draining or self._pending
+                    or not required.issubset(self._receipts)):
+                raise OutputSnapshotError("main artifact collection must finish before main drainage")
+            self._main_draining = True
+            operation = start_owned_thread(self._backend.stop_and_confirm)
+            await asyncio.wait((operation,))
+            if operation.result() != self._backend.environment_id or self.phase != "collecting":
+                raise OutputSnapshotError("main container drainage did not confirm its original identity")
+            self._main_stopped = True
+            return asdict(self._backend.binding)
+        except BaseException:
+            self.phase = "failed"
+            if operation is not None:
+                await _settle(operation)
+            raise
+        finally:
+            self._main_draining = False
+
+    async def collect(self, source, destination, kind, *, deadline_unix, service=None):
         target = self.targets.get(source)
         operation, claimed = None, False
         try:
-            if (self.phase != "collecting" or target is None
+            service = "main" if service is None else service
+            if (self.phase != "collecting" or self._main_draining or target is None or target.service != service
                     or target.destination != Path(destination) or target.kind != kind
-                    or source in self._pending or source in self._receipts):
+                    or source in self._pending or source in self._receipts
+                    or (service != "main" and not self._main_stopped)):
                 raise OutputSnapshotError("artifact copy differs from its unused admitted target")
             self._pending.add(source)
             claimed = True
 
             def capture():
+                # A service name is not authority to rediscover a replacement
+                # container. Copies use the original binding, including start.
+                backend = self._backends[target.service]
+                if service != "main":
+                    self._backend.stop_and_confirm()
                 function = download_snapshot if kind == "directory" else download_file_snapshot
-                summary = function(self._backend, source, target.destination, deadline_unix=deadline_unix, limits=self.limits)
+                summary = function(backend, source, target.destination, deadline_unix=deadline_unix, limits=self.limits)
                 fingerprint = _fingerprint(target, self.limits)
                 if fingerprint["bytes"] != summary["bytes"]:
                     raise OutputSnapshotError("artifact bytes changed after capture")
-                return {"source": source, "destination": str(target.destination), "kind": kind,
-                        "binding": asdict(self._backend.binding), "snapshot": summary, **fingerprint}
+                if service != "main":
+                    self._backend.stop_and_confirm()
+                return {"source": source, "destination": str(target.destination), "kind": kind, "service": service,
+                        "binding": asdict(backend.binding), "snapshot": summary, **fingerprint}
 
             operation = start_owned_thread(capture)
             await asyncio.wait((operation,))
@@ -166,7 +222,8 @@ class ArtifactHandoff:
 
     def seal(self):
         """Refuse incomplete collection even if upstream swallowed its errors."""
-        if (self.phase != "collecting" or self._pending
+        if (self.phase != "collecting" or self._pending or self._main_draining
+                or (len(self._backends) > 1 and not self._main_stopped)
                 or set(self._receipts) != set(self.targets)):
             self.phase = "failed"
             raise OutputSnapshotError("artifact collection did not complete")
@@ -204,7 +261,8 @@ class ArtifactHandoff:
                 expected = {"source": target.source, "destination": "artifacts/" +
                     target.destination.relative_to(artifacts_root).as_posix(), "type": target.kind,
                     "status": "ok", "service": row.get("service"), "exclude": []}
-                if row != expected or row["service"] not in (None, "main"):
+                service = "main" if row.get("service") is None else row["service"]
+                if row != expected or service != target.service:
                     raise OutputSnapshotError("Harbor did not report the exact successful artifact collection")
                 seen.add(row["source"])
             return self.seal()
