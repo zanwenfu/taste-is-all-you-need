@@ -1,0 +1,44 @@
+#cloud-config
+# Keep the runtime identity separate from the SSH administrator.
+# Explicit primary groups must exist before cloud-init invokes useradd.
+groups:
+  - bugbash
+  - tasteadmin
+users:
+  # Azure supplies tasteadmin as the default user and attaches its SSH key.
+  - default
+  - name: tasteadmin
+    uid: 1001
+    primary_group: tasteadmin
+    groups: [adm, systemd-journal]
+    lock_passwd: true
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+  - name: bugbash
+    uid: 1000
+    primary_group: bugbash
+    lock_passwd: true
+    shell: /bin/bash
+ssh_pwauth: false
+disable_root: true
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - git
+  - jq
+  - python3-pip
+  - python3-venv
+write_files:
+  - path: /etc/docker/daemon.json
+    owner: root:root
+    permissions: '0644'
+    content: |
+      {"log-driver": "local"}
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - [git, config, --system, user.name, Taste Test Runner]
+  - [git, config, --system, user.email, taste-test@localhost]
+  - [bash, -ceu, 'test "$(id -u bugbash)" = 1000; test "$(id -g bugbash)" = 1000; test "$(id -G bugbash)" = 1000; test "$(id -u tasteadmin)" = 1001']

@@ -1,0 +1,245 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "name": {
+      "type": "string",
+      "defaultValue": "taste-test-eus2",
+      "minLength": 3,
+      "maxLength": 40
+    },
+    "sshPublicKey": {
+      "type": "string",
+      "minLength": 40
+    },
+    "sshSourceCidr": {
+      "type": "string",
+      "minLength": 9,
+      "maxLength": 18,
+      "metadata": {
+        "description": "Operator IPv4 address with /32. Never use a public wildcard."
+      }
+    },
+    "cloudInit": {
+      "type": "string",
+      "metadata": {
+        "description": "Base64-encoded cloud-init.yaml; contains no secrets."
+      }
+    },
+    "shutdownUtc": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 4,
+      "metadata": {
+        "description": "Daily UTC deallocation time, HHmm. This is not a spending cap."
+      }
+    }
+  },
+  "variables": {
+    "tags": {
+      "project": "taste-is-all-you-need",
+      "purpose": "isolated-tests",
+      "funding": "azure-startup-credits",
+      "owner": "taste"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[concat(parameters('name'), '-nsg')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "SSH-from-operator",
+            "properties": {
+              "priority": 100,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "22",
+              "sourceAddressPrefix": "[parameters('sshSourceCidr')]",
+              "destinationAddressPrefix": "*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "[concat(parameters('name'), '-vnet')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.73.0.0/24"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "tests",
+            "properties": {
+              "addressPrefix": "10.73.0.0/26",
+              "defaultOutboundAccess": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2024-05-01",
+      "name": "[concat(parameters('name'), '-ip')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "publicIPAddressVersion": "IPv4"
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2024-05-01",
+      "name": "[concat(parameters('name'), '-nic')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', concat(parameters('name'), '-vnet'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', concat(parameters('name'), '-nsg'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', concat(parameters('name'), '-ip'))]"
+      ],
+      "properties": {
+        "enableAcceleratedNetworking": true,
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', concat(parameters('name'), '-nsg'))]"
+        },
+        "ipConfigurations": [
+          {
+            "name": "primary",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', concat(parameters('name'), '-vnet'), 'tests')]"
+              },
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', concat(parameters('name'), '-ip'))]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2024-11-01",
+      "name": "[parameters('name')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', concat(parameters('name'), '-nic'))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "Standard_D4as_v7"
+        },
+        "storageProfile": {
+          "diskControllerType": "NVMe",
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "ubuntu-26_04-lts",
+            "sku": "server",
+            "version": "26.04.202609020"
+          },
+          "osDisk": {
+            "name": "[concat(parameters('name'), '-os')]",
+            "createOption": "FromImage",
+            "deleteOption": "Delete",
+            "diskSizeGB": 128,
+            "caching": "ReadWrite",
+            "managedDisk": {
+              "storageAccountType": "Premium_LRS"
+            }
+          }
+        },
+        "osProfile": {
+          "computerName": "[parameters('name')]",
+          "adminUsername": "tasteadmin",
+          "customData": "[parameters('cloudInit')]",
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "provisionVMAgent": true,
+            "ssh": {
+              "publicKeys": [
+                {
+                  "path": "/home/tasteadmin/.ssh/authorized_keys",
+                  "keyData": "[parameters('sshPublicKey')]"
+                }
+              ]
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(parameters('name'), '-nic'))]",
+              "properties": {
+                "primary": true,
+                "deleteOption": "Delete"
+              }
+            }
+          ]
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.DevTestLab/schedules",
+      "apiVersion": "2018-09-15",
+      "name": "[concat('shutdown-computevm-', parameters('name'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('name'))]"
+      ],
+      "properties": {
+        "status": "Enabled",
+        "taskType": "ComputeVmShutdownTask",
+        "dailyRecurrence": {
+          "time": "[parameters('shutdownUtc')]"
+        },
+        "timeZoneId": "UTC",
+        "targetResourceId": "[resourceId('Microsoft.Compute/virtualMachines', parameters('name'))]",
+        "notificationSettings": {
+          "status": "Disabled",
+          "timeInMinutes": 30
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "publicIp": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', concat(parameters('name'), '-ip')), '2024-05-01').ipAddress]"
+    },
+    "vmId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Compute/virtualMachines', parameters('name'))]"
+    }
+  }
+}
