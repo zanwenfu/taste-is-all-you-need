@@ -129,6 +129,11 @@ class ArtifactHandoff:
                 a, b = target.destination, other.destination
                 if a == b or a in b.parents or b in a.parents:
                     raise ValueError("artifact host destinations overlap")
+                # Harbor uploads every service's artifact into the verifier's
+                # main filesystem at its source path, regardless of host path.
+                a, b = PurePosixPath(target.source), PurePosixPath(other.source)
+                if a == b or a in b.parents or b in a.parents:
+                    raise ValueError("artifact verifier paths overlap across the collection")
         needed = {target.service for target in targets} - {"main"}
         services = {} if service_backends is None else service_backends
         if (not isinstance(services, Mapping) or set(services) != needed or len(services) > 15

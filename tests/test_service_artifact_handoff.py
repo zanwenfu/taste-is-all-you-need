@@ -185,3 +185,14 @@ def test_unbound_extra_or_aliased_services_are_rejected_before_io(services, mapp
 def test_admitted_artifact_targets_are_read_only(services):
     with pytest.raises(TypeError):
         services.item.targets["/tmp/result"] = services.targets[1]
+
+
+@pytest.mark.parametrize("service", ["main", "evidence"])
+def test_disjoint_host_paths_cannot_overwrite_each_other_in_the_verifier(services, service):
+    targets = [replace(services.targets[0], source="/tmp/output", kind="directory"),
+               replace(services.targets[1], source="/tmp/output/file", service=service)]
+    before = len(services.daemon.calls)
+    with pytest.raises(ValueError, match="verifier paths overlap"):
+        ArtifactHandoff(services.main, targets,
+                        service_backends={"evidence": services.helper} if service == "evidence" else {})
+    assert len(services.daemon.calls) == before
