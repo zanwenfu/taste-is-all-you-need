@@ -54,7 +54,7 @@ def _parts(name, limits):
     return tuple(parts)
 
 
-def _decode(payload, root_name, limits):
+def _decode(payload, root_name, limits, *, single_file=False):
     if type(payload) is not bytes or len(payload) > limits.archive_bytes:
         raise OutputSnapshotError("output archive exceeded its byte limit")
     root = _parts(root_name, limits)
@@ -73,12 +73,14 @@ def _decode(payload, root_name, limits):
                 if item.sparse is not None or not (item.isdir() or item.isreg()):
                     raise OutputSnapshotError("output links, sparse files and special files are refused")
                 relative = parts[1:]
+                if single_file and (relative or not item.isreg()):
+                    raise OutputSnapshotError("output archive must contain exactly its regular file root")
                 if item.isdir():
                     if item.size != 0:
                         raise OutputSnapshotError("output directory carries unexpected data")
                     directories.add(relative)
                     continue
-                if not relative or not 0 <= item.size <= limits.file_bytes:
+                if (not relative and not single_file) or item.name.endswith("/") or not 0 <= item.size <= limits.file_bytes:
                     raise OutputSnapshotError("output file exceeded its byte limit")
                 total += item.size
                 if total > limits.total_bytes:
@@ -90,7 +92,9 @@ def _decode(payload, root_name, limits):
                 if len(data) != item.size:
                     raise OutputSnapshotError("output file was truncated")
                 files[relative] = data
-        if () not in directories:
+        if single_file and set(files) != {()}:
+            raise OutputSnapshotError("output archive omitted its regular file root")
+        if not single_file and () not in directories:
             raise OutputSnapshotError("output archive omitted its directory root")
         for path in directories | files.keys():
             for size in range(1, len(path)):
@@ -155,13 +159,38 @@ def extract_snapshot(payload: bytes, destination: Path, root_name: str, *, limit
     return {"files": len(files), "bytes": sum(map(len, files.values())), "archive_bytes": len(payload)}
 
 
-def download_snapshot(backend: DockerTerminalBackend, source: str, destination: Path, *,
-                      deadline_unix: float, limits=DEFAULT_LIMITS):
-    """Read-only Docker API copy, bound to the original container and deadline.
+def extract_file_snapshot(payload: bytes, destination: Path, root_name: str, *, limits=DEFAULT_LIMITS):
+    """Validate a one-file archive before exclusively creating its private host file.
 
-    The caller owns this synchronous operation until it returns, including on
-    async cancellation. It must not delete the container before it completes.
-    A stopped container can be copied; this function never starts or executes it.
+    Its existing parent must be private. An existing destination (including a
+    link) is never replaced. Failed writes remain incomplete and cannot be used
+    for grading or retried into the same destination.
+    """
+    if not isinstance(limits, SnapshotLimits):
+        raise TypeError("validated snapshot limits are required")
+    _, files = _decode(payload, root_name, limits, single_file=True)
+    destination = Path(destination)
+    if not destination.is_absolute() or destination.name in ("", ".", ".."):
+        raise OutputSnapshotError("snapshot destination must name an absolute file")
+    descriptor = _private_directory(destination.parent)
+    try:
+        fd = os.open(destination.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=descriptor)
+        with os.fdopen(fd, "wb") as output:
+            output.write(files[()])
+            output.flush()
+            os.fsync(output.fileno())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return {"files": 1, "bytes": len(files[()]), "archive_bytes": len(payload)}
+
+
+def _download_archive(backend, source, deadline_unix, limits):
+    """Read bytes and confirm the original identity before host publication.
+
+    Both file and directory snapshots use this same bounded transport. A
+    stopped container can be copied; this never starts or executes it.
     """
     if not isinstance(backend, DockerTerminalBackend) or not isinstance(limits, SnapshotLimits):
         raise TypeError("a bound Docker backend and validated snapshot limits are required")
@@ -169,7 +198,7 @@ def download_snapshot(backend: DockerTerminalBackend, source: str, destination: 
         raise ValueError("a finite absolute snapshot deadline is required")
     if (not isinstance(source, str) or not source.startswith("/") or source.endswith("/")
             or not source[1:] or PurePosixPath(source).as_posix() != source):
-        raise OutputSnapshotError("a canonical absolute container directory is required")
+        raise OutputSnapshotError("a canonical absolute container path is required")
     _parts(source[1:], limits)
     deadline = time.monotonic() + min(10, deadline_unix - time.time(),
                                      backend.binding.deadline_unix - time.time())
@@ -193,6 +222,24 @@ def download_snapshot(backend: DockerTerminalBackend, source: str, destination: 
                 if len(data) > limits.archive_bytes:
                     raise OutputSnapshotError("output archive exceeded its byte limit")
         backend._inspect(wire, deadline)
-        return extract_snapshot(bytes(data), destination, PurePosixPath(source).name, limits=limits)
+        return bytes(data)
     finally:
         wire.cancel()
+
+
+def download_snapshot(backend: DockerTerminalBackend, source: str, destination: Path, *,
+                      deadline_unix: float, limits=DEFAULT_LIMITS):
+    """Read-only directory copy, bound to the original container and deadline.
+
+    The caller owns this synchronous operation until it returns, including on
+    async cancellation. It must not delete the container before it completes.
+    """
+    payload = _download_archive(backend, source, deadline_unix, limits)
+    return extract_snapshot(payload, destination, PurePosixPath(source).name, limits=limits)
+
+
+def download_file_snapshot(backend: DockerTerminalBackend, source: str, destination: Path, *,
+                           deadline_unix: float, limits=DEFAULT_LIMITS):
+    """Read-only file copy with the same ownership and deadline contract as directories."""
+    payload = _download_archive(backend, source, deadline_unix, limits)
+    return extract_file_snapshot(payload, destination, PurePosixPath(source).name, limits=limits)

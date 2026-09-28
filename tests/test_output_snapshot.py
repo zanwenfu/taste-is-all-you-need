@@ -6,13 +6,16 @@ import os
 import tarfile
 import time
 from dataclasses import replace
+from urllib.parse import quote
 
 import pytest
 
 from taste.benchmarks.output_snapshot import (
     OutputSnapshotError,
     SnapshotLimits,
+    download_file_snapshot,
     download_snapshot,
+    extract_file_snapshot,
     extract_snapshot,
 )
 from taste.brains.terminal_broker import TerminalConflict
@@ -152,11 +155,11 @@ def test_limits_cannot_be_disabled(field, value):
         SnapshotLimits(**{field: value})
 
 
-def serve_archive(daemon, payload, *, extra_length=0, chunked=False, after=None):
+def serve_archive(daemon, payload, *, extra_length=0, chunked=False, after=None, source="/logs/verifier"):
     def handle(handler, path):
         if "/archive?" not in path:
             return False
-        assert path == f"/containers/{CONTAINER}/archive?path=%2Flogs%2Fverifier"
+        assert path == f"/containers/{CONTAINER}/archive?path={quote(source, safe='')}"
         handler.send_response(200)
         handler.send_header("Content-Type", "application/x-tar")
         handler.send_header("Connection", "close")
@@ -207,3 +210,95 @@ def test_original_deadline_is_not_extended_for_download(daemon, destination):
     with pytest.raises(TimeoutError):
         download_snapshot(owner, "/logs/verifier", destination, deadline_unix=time.time() + 5)
     assert len(daemon.calls) == calls and not list(destination.iterdir())
+
+
+def file_archive(*entries):
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as output:
+        for name, data, kind in entries:
+            item = tarfile.TarInfo(name)
+            item.type, item.size, item.mode = kind, len(data), 0o4777
+            if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                item.linkname, item.size = data.decode(), 0
+            output.addfile(item, io.BytesIO(data) if item.isreg() else None)
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize("data", [b"", bytes(range(256))])
+def test_individual_file_snapshot_preserves_binary_bytes_without_metadata(destination, data):
+    payload = file_archive(("result.bin", data, tarfile.REGTYPE))
+    target = destination / "renamed.bin"
+    summary = extract_file_snapshot(payload, target, "result.bin")
+    assert summary == {"files": 1, "bytes": len(data), "archive_bytes": len(payload)}
+    assert target.read_bytes() == data and target.stat().st_mode & 0o7777 == 0o600
+    assert target.stat().st_uid == os.geteuid() and target.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("entries", [[], [("result", b"", tarfile.DIRTYPE)],
+    [("result", b"/private", tarfile.SYMTYPE)], [("result", b"/private", tarfile.LNKTYPE)],
+    [("result", b"", tarfile.FIFOTYPE)], [("result/", b"1", tarfile.REGTYPE)],
+    [("result/child", b"1", tarfile.REGTYPE)], [("foreign", b"1", tarfile.REGTYPE)],
+    [("result", b"1", tarfile.REGTYPE), ("result", b"2", tarfile.REGTYPE)],
+    [("result", b"1", tarfile.REGTYPE), ("result/child", b"2", tarfile.REGTYPE)],
+])
+def test_individual_file_rejects_wrong_shape_before_creating_any_output(destination, entries):
+    with pytest.raises(OutputSnapshotError):
+        extract_file_snapshot(file_archive(*entries), destination / "target", "result")
+    assert not list(destination.iterdir())
+
+
+@pytest.mark.parametrize("existing", ["file", "symlink", "directory"])
+def test_individual_file_never_replaces_an_existing_host_target(destination, existing):
+    target = destination / "target"
+    canary = destination / "canary"
+    canary.write_bytes(b"old")
+    if existing == "file":
+        target.write_bytes(b"old")
+    elif existing == "symlink":
+        target.symlink_to(canary)
+    else:
+        target.mkdir()
+    with pytest.raises(FileExistsError):
+        extract_file_snapshot(file_archive(("result", b"new", tarfile.REGTYPE)), target, "result")
+    assert canary.read_bytes() == b"old"
+    assert target.is_dir() if existing == "directory" else target.read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("damage", ["parent_link", "parent_public", "truncated", "oversize"])
+def test_individual_file_failed_admission_has_no_host_output(destination, damage):
+    payload = file_archive(("result", b"data", tarfile.REGTYPE))
+    target, limits = destination / "target", SnapshotLimits()
+    if damage == "parent_link":
+        link = destination.parent / "link"
+        link.symlink_to(destination, target_is_directory=True)
+        target = link / "target"
+    elif damage == "parent_public":
+        destination.chmod(0o755)
+    elif damage == "truncated":
+        payload = payload[:514]
+    else:
+        limits = SnapshotLimits(file_bytes=2)
+    with pytest.raises((OutputSnapshotError, OSError)):
+        extract_file_snapshot(payload, target, "result", limits=limits)
+    assert not list(destination.iterdir())
+
+
+@pytest.mark.parametrize("failure", [None, "restarted", "truncated"])
+def test_individual_file_crosses_real_docker_http_boundary(daemon, destination, failure):
+    owner = backend(daemon)
+    source = "/app/file with space.bin"
+    payload = file_archive(("file with space.bin", bytes(range(256)), tarfile.REGTYPE))
+
+    def restart():
+        daemon.info["State"]["StartedAt"] = "replacement"
+    serve_archive(daemon, payload, source=source, after=restart if failure == "restarted" else None,
+                  extra_length=10 if failure == "truncated" else 0)
+    target = destination / "target"
+    if failure:
+        with pytest.raises((OutputSnapshotError, TerminalConflict)):
+            download_file_snapshot(owner, source, target, deadline_unix=time.time() + 5)
+        assert not target.exists()
+    else:
+        download_file_snapshot(owner, source, target, deadline_unix=time.time() + 5)
+        assert target.read_bytes() == bytes(range(256))
+    assert all(method == "GET" for method, _, _ in daemon.calls)
