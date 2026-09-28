@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 import os
 import stat
 from dataclasses import asdict, dataclass
@@ -171,6 +172,45 @@ class ArtifactHandoff:
             raise OutputSnapshotError("artifact collection did not complete")
         self.phase = "sealed"
         return self.verify()
+
+    def seal_harbor_manifest(self, payload: bytes, artifacts_root: Path):
+        """Also require Harbor's complete successful collection report.
+
+        A wrapper can fail after our bytes were captured (for example while
+        recording a receipt). Native Harbor records that failure and continues;
+        it must not be masked by a successful low-level snapshot.
+        """
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise OutputSnapshotError("duplicate artifact manifest field")
+                result[key] = value
+            return result
+
+        try:
+            if type(payload) is not bytes or len(payload) > 65536:
+                raise OutputSnapshotError("artifact manifest exceeded its limit")
+            rows = json.loads(payload, object_pairs_hook=unique)
+            if not isinstance(rows, list) or len(rows) != len(self.targets):
+                raise OutputSnapshotError("artifact manifest is incomplete")
+            seen = set()
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(row.get("source"), str):
+                    raise OutputSnapshotError("invalid artifact manifest entry")
+                target = self.targets.get(row["source"])
+                if target is None or row["source"] in seen:
+                    raise OutputSnapshotError("artifact manifest has an unadmitted or duplicate source")
+                expected = {"source": target.source, "destination": "artifacts/" +
+                    target.destination.relative_to(artifacts_root).as_posix(), "type": target.kind,
+                    "status": "ok", "service": row.get("service"), "exclude": []}
+                if row != expected or row["service"] not in (None, "main"):
+                    raise OutputSnapshotError("Harbor did not report the exact successful artifact collection")
+                seen.add(row["source"])
+            return self.seal()
+        except BaseException:
+            self.phase = "failed"
+            raise
 
     def verify(self):
         """Check captured bytes before upload; return receipts for durable reporting."""

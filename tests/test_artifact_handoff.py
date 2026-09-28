@@ -1,5 +1,6 @@
 """A best-effort collector cannot turn incomplete artifact copies into grading."""
 import asyncio
+import json
 import os
 import tarfile
 import threading
@@ -52,6 +53,32 @@ def test_directory_snapshot_detects_new_files_before_upload(collection, daemon):
     (target / "injected").chmod(0o600)
     with pytest.raises(OutputSnapshotError, match="changed"):
         item.verify()
+
+
+@pytest.mark.parametrize("damage", [None, "failed", "skipped", "destination", "source", "duplicate", "missing", "filter"])
+def test_harbor_report_cannot_mask_a_failure_after_successful_capture(collection, damage):
+    item, target = collection
+    asyncio.run(collect(item, target))
+    row = {"source": "/tmp/result", "destination": "artifacts/file", "type": "file",
+           "status": "ok", "service": None, "exclude": []}
+    rows = [row]
+    if damage in {"failed", "skipped"}:
+        row["status"] = damage
+    elif damage in {"destination", "source"}:
+        row[damage] = "/other"
+    elif damage == "duplicate":
+        rows.append(row)
+    elif damage == "missing":
+        rows = []
+    elif damage == "filter":
+        row["exclude"] = ["*"]
+    if damage is None:
+        item.seal_harbor_manifest(json.dumps(rows).encode(), target.parent)
+        assert item.phase == "sealed"
+    else:
+        with pytest.raises(OutputSnapshotError):
+            item.seal_harbor_manifest(json.dumps(rows).encode(), target.parent)
+        assert item.phase == "failed"
 
 
 @pytest.mark.parametrize("damage", ["content", "delete", "link", "mode", "hardlink"])
