@@ -293,6 +293,13 @@ entrypoint; it never resets the allowance on restart. The remaining full-benchma
 gates include a runnable Harbor adapter with faithful task admission, broader
 recovery/scaling checks and a bounded live Azure pilot.
 
+For [Errata Bench](https://errata-bench.vercel.app/docs), Azure workers
+now retain tool evidence outside memory rollback and export internal ATIF traces
+on shutdown. Those traces preserve failed/unfinished work; they are not yet the
+complete trial record or final developer reply required for a scored Errata run.
+Full benchmark instructions use bounded 512 KiB file/observation handoffs, with
+model request budgets admitted separately.
+
 `AzureTerminalTrial` in `taste.benchmarks.azure_terminal_trial` owns an Azure goal
 and an already admitted Docker task container. `create(...)` persists their
 original identities and limits in a private controller directory. `run(api_key=...)`
