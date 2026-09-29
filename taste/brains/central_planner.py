@@ -35,6 +35,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
+from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import POLICY_KEY, AzureExecutionPolicy
 from taste.brains.contract import Contract
 from taste.brains.delivery import validate_artifact_path
@@ -375,6 +376,7 @@ class Goal:
         object.__setattr__(
             self, "metadata", _freeze(_mapping(self.metadata, "metadata"), "metadata")
         )
+        benchmark_reply.required(self.metadata)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1981,7 +1983,7 @@ class CentralPlanner:
             "complete": False,
             "completion_reason": "",
             "assessment": assessment,
-            "metadata": {},
+            "metadata": {"final_reply": ""} if benchmark_reply.required(request.goal.metadata) else {},
         }
 
     @staticmethod
@@ -2204,6 +2206,14 @@ class CentralPlanner:
         }
         if self.azure_policy is not None:
             self.azure_policy.configure_prompt(payload)
+        if benchmark_reply.required(request.goal.metadata):
+            payload["rules"]["benchmark_final_reply"] = (
+                "For a complete proposal, metadata.final_reply is your actual final response "
+                "to the developer's task, not an internal completion reason or a worker summary. "
+                "Write the response yourself using the observed evidence; state limitations "
+                "and uncertainty honestly. Do not claim tests or effects without evidence. "
+                "For an active proposal it must be the empty string. Maximum 128 KiB of UTF-8."
+            )
         return _pretty(payload)
 
     @staticmethod
@@ -2399,6 +2409,8 @@ class CentralPlanner:
                 if self.azure_policy is not None:
                     self.azure_policy.validate_assignment(assignment)
             metadata = _mapping(raw["metadata"], "PlannerProposal.metadata")
+            if benchmark_reply.required(request.goal.metadata):
+                benchmark_reply.validate(metadata, complete=raw["complete"])
             proposal_digest = _digest(_canonical(raw))
             plan = PlanRevision(
                 plan_id=f"plan.{proposal_digest.removeprefix('sha256:')}",
