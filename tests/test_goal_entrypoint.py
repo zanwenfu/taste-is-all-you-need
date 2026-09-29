@@ -296,7 +296,7 @@ def test_input_rejects_duplicate_fields_extra_configuration_and_file_replacement
     path.write_bytes(raw + b" ")
     with pytest.raises(GoalInputError, match="digest"):
         load_goal_input(path, hashlib.sha256(raw).hexdigest())
-    path.write_bytes(b" " * 65537)
+    path.write_bytes(b" " * (512 * 1024 + 1))
     with pytest.raises(GoalInputError, match="size"):
         load_goal_input(path, hashlib.sha256(path.read_bytes()).hexdigest())
 

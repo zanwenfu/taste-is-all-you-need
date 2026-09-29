@@ -26,6 +26,7 @@ from taste.brains.azure_goal_service import AzureGoalService
 from taste.brains.central_planner import Goal
 from taste.brains.docker_terminal import DockerTerminalBackend, DockerTerminalBinding
 from taste.brains.goal_entrypoint import GoalInputError, _canonical, _decode
+from taste.brains.input_limits import MAX_GOAL_INPUT_BYTES
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.process_scope import OwnedProcessScope, _owned_call
 from taste.brains.terminal_broker import TerminalBroker, _settle
@@ -68,7 +69,7 @@ def _json_bytes(value):
 
 
 def _load_config(fd, root):
-    raw = _read(fd, "trial.json", 65536, uid=os.geteuid(), mode=0o600)
+    raw = _read(fd, "trial.json", MAX_GOAL_INPUT_BYTES, uid=os.geteuid(), mode=0o600)
     value = _decode(raw)
     binding = _validate_config(value, root)
     return value, binding, hashlib.sha256(raw).hexdigest()
@@ -98,7 +99,7 @@ def _validate_config(value, root):
             or type(value["wall_clock_seconds"]) not in (int, float)
             or not math.isfinite(value["wall_clock_seconds"])
             or not 0 < value["wall_clock_seconds"] <= 604800
-            or len(_json_bytes(value)) > 65536):
+            or len(_json_bytes(value)) > MAX_GOAL_INPUT_BYTES):
         raise GoalInputError("invalid terminal trial limits")
     return binding
 

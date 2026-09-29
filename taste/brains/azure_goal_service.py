@@ -31,6 +31,7 @@ from taste.brains.goal_entrypoint import (
     _decode,
     load_goal_input,
 )
+from taste.brains.input_limits import MAX_GOAL_INPUT_BYTES
 from taste.brains.process_credentials import ScopeCredential
 from taste.brains.process_scope import OwnedProcessScope, ScopeSpec
 
@@ -99,7 +100,7 @@ class AzureGoalService:
             config = load_goal_input(path, digest)
             _policy(config)
             return config
-        raw = _read(None, path, 65536)
+        raw = _read(None, path, MAX_GOAL_INPUT_BYTES)
         if hashlib.sha256(raw).hexdigest() != digest:
             raise GoalInputError("preparation input digest differs")
         value = _decode(raw)
@@ -128,7 +129,7 @@ class AzureGoalService:
             # The original deadline may expire while the outside owner is
             # absent. Observation must not renew it or reject cleanup solely
             # because it is old; preparation freshness is enforced at launch.
-            raw = _read(None, self.input_path, 65536)
+            raw = _read(None, self.input_path, MAX_GOAL_INPUT_BYTES)
             if hashlib.sha256(raw).hexdigest() != self.input_sha256:
                 raise GoalInputError("preparation input digest differs")
             source = _decode(raw)

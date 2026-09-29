@@ -33,6 +33,7 @@ from taste.brains.goal_entrypoint import (
     load_goal_input,
     python_source_digest,
 )
+from taste.brains.input_limits import MAX_GOAL_INPUT_BYTES
 from taste.brains.python_process import isolated_python_argv
 from taste.memstore.store import _check_name
 
@@ -50,8 +51,8 @@ def preparation_bytes(repo_root, session, goal, policy, *, max_generations, wall
              "python_source_sha256": python_source_digest()}
     _preparation(value)
     raw = (_canonical(value) + "\n").encode()
-    if len(raw) > 65536:
-        raise GoalInputError("Azure preparation input exceeds 64 KiB")
+    if len(raw) > MAX_GOAL_INPUT_BYTES:
+        raise GoalInputError("Azure preparation input exceeds 512 KiB")
     return raw
 
 
@@ -213,7 +214,7 @@ def handoff_command(input_path, input_sha256, output_dir, *, operation, python_e
 def perform(input_path, digest, output_dir, *, operation):
     _arguments(digest, operation)
     if operation == "prepare":
-        raw = _read(None, input_path, 65536)
+        raw = _read(None, input_path, MAX_GOAL_INPUT_BYTES)
         if hashlib.sha256(raw).hexdigest() != digest:
             raise GoalInputError("preparation input digest differs")
         value = _decode(raw)

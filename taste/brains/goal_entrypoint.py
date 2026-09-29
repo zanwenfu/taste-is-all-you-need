@@ -36,6 +36,7 @@ from taste.brains.central_host import (
 )
 from taste.brains.central_planner import Goal, _goal_path
 from taste.brains.central_runtime import GoalOutcome, _digest, _goal_root
+from taste.brains.input_limits import MAX_GOAL_INPUT_BYTES
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.python_process import isolated_python_argv
 from taste.llm import MODEL_MONITOR, MODEL_PLANNER
@@ -43,7 +44,7 @@ from taste.memstore import Store
 from taste.memstore.store import _check_name
 
 _SCHEMA = "taste.brains/GoalProcessInput/1"
-_MAX_INPUT_BYTES = 65536
+_MAX_INPUT_BYTES = MAX_GOAL_INPUT_BYTES
 
 
 class GoalInputError(ValueError):
@@ -125,7 +126,7 @@ class GoalProcessInput:
             raise GoalInputError("prepared deadline must include its timezone")
         object.__setattr__(self, "run_limits_json", _canonical(limits))
         if len(self.to_bytes()) > _MAX_INPUT_BYTES:
-            raise GoalInputError("goal input exceeds 64 KiB")
+            raise GoalInputError("goal input exceeds 512 KiB")
 
     @property
     def limits(self):
@@ -142,7 +143,7 @@ class GoalProcessInput:
     @classmethod
     def from_bytes(cls, raw: bytes):
         if len(raw) > _MAX_INPUT_BYTES:
-            raise GoalInputError("goal input exceeds 64 KiB")
+            raise GoalInputError("goal input exceeds 512 KiB")
         value = _decode(raw)
         fields = {"schema", "repo_root", "session", "goal", "prepared_state_id", "run_limits",
                   "python_source_sha256", "planner_model", "monitor_model", "planner_max_tokens"}

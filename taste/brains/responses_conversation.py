@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from taste.brains.input_limits import MAX_WORKER_OBSERVATION_BYTES
 from taste.brains.responses_session import (
     ResponsesConflict,
     ResponsesFenced,
@@ -263,8 +264,8 @@ class ResponsesConversation:
         """Durably supply a contract or feedback; this alone accepts no inbox message."""
         if not isinstance(identifier, str) or not identifier or len(identifier) > 256:
             raise ValueError("worker input requires a stable identifier")
-        if not isinstance(content, str) or len(content.encode()) > 65_536:
-            raise ValueError("worker input must be text of at most 64 KiB")
+        if not isinstance(content, str) or len(content.encode()) > MAX_WORKER_OBSERVATION_BYTES:
+            raise ValueError("worker input must be text of at most 512 KiB")
         with self.branch._mutation_lock:
             if self.branch._responses_active:
                 raise ResponsesConflict("cannot insert feedback during an active Responses turn")
