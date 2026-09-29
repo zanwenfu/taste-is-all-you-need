@@ -18,8 +18,9 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from taste.benchmarks.worker_trajectory import worker_trajectory
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
-from taste.brains.azure_worker_runtime import AzureWorkerRuntime
+from taste.brains.azure_worker_runtime import AzureWorkerRuntime, _atomic_report, _json
 from taste.brains.monitor import MonitorBrain
 from taste.brains.responses_monitor import ResponsesMonitorJudge
 from taste.brains.responses_session import ResponsesSession
@@ -111,6 +112,15 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
     finally:
         # Model and monitor operations retain ownership through cancellation;
         # runtime return/exception cannot leave a live provider thread behind.
+        if session is not None:
+            try:
+                rows = session.conversation_audit()
+                if rows:
+                    _atomic_report(session.directory / "trajectory.worker.json",
+                        _json(worker_trajectory(rows, run_id=session.binding.run_id)))
+            except Exception as exc:
+                print(f"Azure worker trace failed: {type(exc).__name__}", file=sys.stderr, flush=True)
+                outcome = WorkerExitCode.RUNTIME_FAILURE
         for resource in (session, branch, store if owned else None):
             if resource is not None:
                 try:

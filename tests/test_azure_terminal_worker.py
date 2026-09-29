@@ -95,6 +95,16 @@ def test_worker_executes_task_terminal_then_certifies_artifact_without_leaking_c
             assert t.credential.socket_path not in model_wire + result.to_json()
             transcript = worker.store.state(result.final_state_id).transcript.turns
             assert t.credential.token not in json.dumps(transcript)
+            trace_path = run_directory(worker.store, result.run_id) / "worker/trajectory.worker.json"
+            trace = json.loads(trace_path.read_text())
+            assert t.credential.token not in trace_path.read_text()
+            terminal_steps = [step for step in trace["steps"]
+                              if any(call["function_name"] == "terminal_exec" for call in step.get("tool_calls", []))]
+            assert len(terminal_steps) == 1
+            observed = json.loads(terminal_steps[0]["observation"]["results"][0]["content"])
+            assert observed["stdout"]["dropped_bytes"] == 9000
+            assert observed["stdout"]["encoding"] == "base64"
+            assert trace["extra"]["complete_attempt"] is False
             assert worker.store.state(result.final_state_id).read("output.txt") == "correct"
             assert calls["worker"] == 3
     asyncio.run(scenario())
