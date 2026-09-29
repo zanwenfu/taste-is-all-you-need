@@ -28,6 +28,8 @@ packages:
   - ca-certificates
   - curl
   - docker.io
+  - docker-buildx
+  - nftables
   - git
   - jq
   - python3-pip

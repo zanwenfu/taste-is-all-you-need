@@ -53,6 +53,12 @@ identities and successful `cloud-init status --wait` before executing tests.
 Only the administrator runs bounded Docker/systemd fixtures; unit tests run as
 `bugbash` without access to the Docker socket. No model keys are installed.
 
+Install the Docker Buildx plugin and nftables explicitly for benchmark image
+builds and Harbor's network restrictions. On the current Ubuntu host,
+`docker-buildx` 0.30.1-0ubuntu1 passed a network-disabled scratch-image build,
+load and artifact-copy check; its temporary image/container were removed.
+The presence of nftables does not substitute for Harbor's live egress check.
+
 Rebuild the worker and Harbor virtual environments separately from recorded
 package versions. Transfer source and audit evidence with hash verification.
 Recreate containers and use new owner tokens: old process IDs, cgroups, broker
