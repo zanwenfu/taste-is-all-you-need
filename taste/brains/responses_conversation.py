@@ -150,6 +150,7 @@ class ResponsesConversation:
             events = self._events()
             if not events:
                 self._append("binding", binding=self._binding)
+            self.session.reconcile_conversation_audit(self._events())
             self._context()
 
     def _events(self):
@@ -162,7 +163,10 @@ class ResponsesConversation:
                     if str(event.get("kind", "")).startswith(_PREFIX)]
 
     def _append(self, kind, **payload):
-        self.branch.turn(kind=_PREFIX + kind, **_copy(payload))
+        event = {"kind": _PREFIX + kind, **_copy(payload)}
+        identifier = self.session.record_conversation_event(self._events(), event)
+        self.branch.turn(**event)
+        self.session.publish_conversation_event(identifier)
 
     def _request(self, messages):
         return {**_copy(self._request_config), "messages": _copy(messages)}

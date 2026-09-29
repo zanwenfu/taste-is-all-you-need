@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from taste.brains import responses_audit
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.worker_protocol import ModelCallAccounting
 from taste.llm import LLM, BudgetExceeded
@@ -195,6 +196,7 @@ class ResponsesSession:
             self._audit()
             if self._db.execute("SELECT 1 FROM calls WHERE status IN ('pending','unknown') LIMIT 1").fetchone():
                 self._fence()
+            responses_audit.initialize(self._db)
         except BaseException:
             self._release()
             raise
@@ -290,6 +292,22 @@ class ResponsesSession:
         """Validate SDK/credential configuration without dispatch or spending."""
         self._check()
         self._llm.ensure_ready(self.binding.model)
+
+    def record_conversation_event(self, events, event):
+        self._check()
+        return responses_audit.record(self._db, responses_audit.prefix_id(events), event)
+
+    def publish_conversation_event(self, identifier):
+        self._check()
+        responses_audit.published(self._db, identifier)
+
+    def reconcile_conversation_audit(self, events):
+        self._check()
+        responses_audit.reconcile(self._db, events)
+
+    def conversation_audit(self):
+        self._check()
+        return responses_audit.snapshot(self._db)
 
     def pin_context(self, context_id: str, value: dict[str, Any]) -> dict[str, Any]:
         """Persist the first observation before its potentially paid request.
