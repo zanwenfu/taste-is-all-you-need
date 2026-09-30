@@ -46,6 +46,10 @@ class DockerTransportError(RuntimeError):
     """An unconfirmed transport outcome, never an ordinary command exit."""
 
 
+class _ContainerMissing(DockerTransportError):
+    """The local daemon explicitly reported the exact container ID absent."""
+
+
 def _remaining(deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -126,6 +130,9 @@ class _Wire:
         with self.request(method, path, deadline, body) as response:
             if response.status not in statuses:
                 # Daemon error bodies can contain task data; don't echo them.
+                if (response.status == 404 and method == "GET"
+                        and re.fullmatch(r"/containers/[0-9a-f]{64}/json", path)):
+                    raise _ContainerMissing("Docker reports the original container absent")
                 raise DockerTransportError(f"Docker control request returned HTTP {response.status}")
             data = bytearray()
             while True:
@@ -383,24 +390,35 @@ class DockerTerminalBackend:
         with self._stop_lock:
             deadline = time.monotonic() + CONTROL_SECONDS
             wire = _Wire(self.binding.socket_path)
-            info = self._inspect(wire, deadline)
-            if info["State"]["Running"]:
-                wire.control("POST", f"/containers/{self.environment_id}/stop?t=1", deadline,
-                             statuses=(204, 304))
-            if self._inspect(wire, deadline)["State"]["Running"]:
-                raise TerminalFenced("Docker still reports the container running")
-            if not (CGROUP_ROOT / "cgroup.controllers").is_file():
-                raise TerminalFenced("local cgroup v2 proof is unavailable")
-            events = CGROUP_ROOT / self.binding.cgroup_path.lstrip("/") / "cgroup.events"
-            while True:
-                _remaining(deadline)
-                try:
-                    state = dict(line.split() for line in events.read_text().splitlines())
-                except FileNotFoundError:
-                    break
-                if state.get("populated") == "0":
-                    break
-                if state.get("populated") != "1":
-                    raise TerminalFenced("unrecognized container cgroup state")
-                time.sleep(min(0.02, _remaining(deadline)))
+            try:
+                info = self._inspect(wire, deadline)
+                if info["State"]["Running"]:
+                    wire.control("POST", f"/containers/{self.environment_id}/stop?t=1", deadline,
+                                 statuses=(204, 304))
+                if self._inspect(wire, deadline)["State"]["Running"]:
+                    raise TerminalFenced("Docker still reports the container running")
+            except _ContainerMissing:
+                # Native Harbor may remove the container before END even with
+                # delete=False. An exact daemon 404 alone is not drain proof:
+                # the original, durably bound cgroup must also be empty. No
+                # readmission, replacement container or lost-daemon shortcut.
+                if self.binding.compose_project is None:
+                    raise
+            self._confirm_cgroup_empty(deadline)
             return self.environment_id
+
+    def _confirm_cgroup_empty(self, deadline):
+        if not (CGROUP_ROOT / "cgroup.controllers").is_file():
+            raise TerminalFenced("local cgroup v2 proof is unavailable")
+        events = CGROUP_ROOT / self.binding.cgroup_path.lstrip("/") / "cgroup.events"
+        while True:
+            _remaining(deadline)
+            try:
+                state = dict(line.split() for line in events.read_text().splitlines())
+            except FileNotFoundError:
+                return
+            if state.get("populated") == "0":
+                return
+            if state.get("populated") != "1":
+                raise TerminalFenced("unrecognized container cgroup state")
+            time.sleep(min(0.02, _remaining(deadline)))

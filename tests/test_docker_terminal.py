@@ -262,6 +262,60 @@ def test_legacy_binding_does_not_accept_compose_labels_as_ownership(daemon):
     assert not any(path.endswith("/exec") for _, path, _ in daemon.calls)
 
 
+@pytest.mark.parametrize("cgroup", ["empty", "removed", "live", "malformed", "unavailable"])
+def test_native_removed_container_needs_original_cgroup_drain_proof(daemon, monkeypatch, cgroup):
+    executor = backend(daemon, **compose(daemon))
+    daemon.override = lambda handler, _path: (daemon.reply(handler, {"message": "not found"}, status=404) or True)
+    if cgroup == "removed":
+        (daemon.group / "cgroup.events").unlink()
+        daemon.group.rmdir()
+    elif cgroup == "unavailable":
+        (daemon.cgroups / "cgroup.controllers").unlink()
+    else:
+        (daemon.group / "cgroup.events").write_text({"empty": "populated 0\n",
+            "live": "populated 1\n", "malformed": "unknown 0\n"}[cgroup])
+    monkeypatch.setattr(transport, "CONTROL_SECONDS", 0.1)
+    if cgroup in {"empty", "removed"}:
+        assert executor.stop_and_confirm() == CONTAINER
+    else:
+        with pytest.raises((TerminalFenced, TimeoutError)):
+            executor.stop_and_confirm()
+    with pytest.raises(TerminalFenced):
+        executor.execute(request())
+    assert not any(method == "POST" for method, _, _ in daemon.calls)
+
+
+@pytest.mark.parametrize("native,status", [(False, 404), (True, 403), (True, 500)])
+def test_daemon_failure_is_not_native_container_removal_proof(daemon, native, status):
+    executor = backend(daemon, **(compose(daemon) if native else {}))
+    (daemon.group / "cgroup.events").write_text("populated 0\n")
+    daemon.override = lambda handler, _path: (daemon.reply(handler, {}, status=status) or True)
+    with pytest.raises(DockerTransportError):
+        executor.stop_and_confirm()
+
+
+def test_native_removal_between_stop_and_confirmation_uses_original_cgroup(daemon):
+    executor = backend(daemon, **compose(daemon))
+    def disappeared(handler, path):
+        if path.endswith("/json") and not daemon.info["State"]["Running"]:
+            daemon.reply(handler, {}, status=404)
+            return True
+    daemon.override = disappeared
+    assert executor.stop_and_confirm() == CONTAINER
+    assert sum(path.endswith("/stop?t=1") for _, path, _ in daemon.calls) == 1
+    assert (daemon.group / "cgroup.events").read_text().startswith("populated 0")
+
+
+def test_native_removed_container_cannot_execute_or_readmit_a_command(daemon):
+    executor = backend(daemon, **compose(daemon))
+    (daemon.group / "cgroup.events").write_text("populated 0\n")
+    daemon.override = lambda handler, _path: (daemon.reply(handler, {}, status=404) or True)
+    with pytest.raises(DockerTransportError):
+        executor.execute(request())
+    assert executor.stop_and_confirm() == CONTAINER
+    assert not any(method == "POST" for method, _, _ in daemon.calls)
+
+
 @pytest.mark.parametrize("upgrade,chunked", [(True, False), (False, False), (False, True)])
 def test_real_http_binary_stream_and_exit_receipt_reopen(daemon, tmp_path, upgrade, chunked):
     daemon.upgrade, daemon.chunked = upgrade, chunked

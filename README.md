@@ -313,7 +313,10 @@ unprivileged service, drains that service and settles without credentials before
 sealing the live container for grading. Unknown spending blocks grading. The
 container deadline may extend beyond the agent deadline to allow the verifier
 and output downloads to finish; neither deadline is renewed on recovery.
-Call `close()` after grading or on failure, before Harbor removes the container.
+Call `close()` after grading or on failure. For native Compose bindings,
+cleanup also handles Harbor having removed the original container: it requires
+an explicit daemon absence response and an empty original cgroup. A failed
+daemon request or a live cgroup cannot establish successful cleanup.
 An independent watchdog must call `cleanup_trial(directory)` after controller
 death. It drains the saved scopes and original container, removes the private
 launch credential and preserves pending terminal receipts without replay.
@@ -321,16 +324,26 @@ Drainage alone does not settle an interrupted goal's spending.
 
 The controller-side `DockerTerminalBackend` in `taste.brains.docker_terminal`
 implements bounded non-TTY terminal transport over an explicit local Docker
-socket (API v1.51, Linux cgroup v2). It binds the full container ID, ownership
-label and original start time, captures bounded binary stream prefixes with
+socket (API v1.51, Linux cgroup v2). It binds the full container ID, original
+start time and either a reserved ownership label or Harbor's native Compose
+project/main-service identity and exact image ID. A fixed admitted execution
+user preserves Harbor's agent-user setting without a task override. It captures
+bounded binary stream prefixes with
 durable dropped-byte counts, and confirms exit status through Docker's exec API.
-Stopping requires both a stopped container and an empty original cgroup.
+Stopping requires an empty original cgroup and a stopped container (or confirmed
+removal for a native Compose binding).
 Persist the original `DockerTerminalBinding` outside task write access for recovery.
 The lifecycle owner must create the isolated container with restart disabled
 and independently stop/remove it if the controller dies. Workers must not receive
 the Docker socket. `scripts/check_docker_terminal.py` exercises this transport in
 five serial disposable containers; its invocation documents the outside cleanup
 requirement.
+
+`scripts/check_native_harbor_terminal.py` checks native Harbor container labels,
+configured non-root user, working directory, resource limits, standard log
+mounts, shared verification and controller-death cleanup without an environment
+subclass or extra Compose file. It is a synthetic terminal integration check;
+it does not exercise model-only egress or claim an official benchmark score.
 
 `TerminalService` and `TerminalClient` in `taste.brains.terminal_service` connect
 workers to that broker over a bounded Linux Unix-socket protocol. Peer UID checks
