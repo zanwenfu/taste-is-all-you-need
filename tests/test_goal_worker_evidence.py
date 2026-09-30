@@ -1,6 +1,7 @@
 """Cross-check provider receipts against conversation publication crash windows."""
 
 import asyncio
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ worker, sdk_transport = _worker, _sdk_transport
 
 def test_prepared_but_unlaunched_worker_is_recorded_without_false_missing_evidence(tmp_path, sdk_transport):
     sent, _ = sdk_transport(lambda *_: pytest.fail("an unlaunched worker cannot call a model"))
-    with (Store.open(tmp_path / "repo", "no-launch") as store,
+    with (closing(Store.open(tmp_path / "repo", "no-launch")) as store,
           CentralSupervisor(store, launcher=NoLaunchLauncher()) as supervisor):
         source = replace(assignment(), base_state_id=supervisor.integration.head.id)
         prepared = supervisor.prepare(source, wall_timeout_seconds=20)
