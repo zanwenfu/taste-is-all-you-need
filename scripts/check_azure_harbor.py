@@ -27,12 +27,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["HARBOR_TELEMETRY"] = "0"
 
 from harbor.agents.base import BaseAgent
+from harbor.agents.capabilities import AgentCapabilities
+from harbor.models.trajectories import Trajectory
 from harbor.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig, TrialConfig
 from harbor.trial.trial import Trial
 
 from scripts.check_docker_terminal import cleanup, cli, empty_cgroup
 from scripts.check_harbor_trial import SnapshotDockerEnvironment
 from taste.benchmarks.azure_terminal_trial import AzureTerminalTrial, cleanup_trial
+from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import AzureExecutionPolicy
 from taste.brains.azure_goal_handoff import _write
 from taste.brains.central_planner import Goal
@@ -95,6 +98,8 @@ class OwnedAzureEnvironment(SnapshotDockerEnvironment):
 
 
 class AzureTerminalAgent(BaseAgent):
+    capabilities = AgentCapabilities(atif=True)
+
     def __init__(self, *, owner_token, worker_python, worker_uid, mode, **kwargs):
         super().__init__(**kwargs)
         self.owner_token, self.worker_python, self.worker_uid, self.mode = owner_token, worker_python, worker_uid, mode
@@ -130,7 +135,8 @@ class AzureTerminalAgent(BaseAgent):
         manager = FixtureManager(root / "exchange/calls.jsonl", self.mode)
         self.owner = AzureTerminalTrial.create(root, self.backend,
             Goal(goal_id="harbor-terminal", task=instruction,
-                 success_criteria=("/tmp/agent-result contains the exact bytes correct",), budget_usd=100),
+                 success_criteria=("/tmp/agent-result contains the exact bytes correct",), budget_usd=100,
+                 metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA}),
             policy, service_uid=self.worker_uid, python_executable=self.worker_python,
             max_generations=3, wall_clock_seconds=self.agent_seconds, max_planner_failures=1, manager=manager)
         environment.taste_owner = self.owner
@@ -145,6 +151,13 @@ class AzureTerminalAgent(BaseAgent):
             assert json.loads(cli("inspect", self.backend.environment_id).stdout)[0]["State"]["Running"]
             context.cost_usd = outcome.budget.known_spent_usd
             context.metadata["goal_outcome"] = outcome.to_dict()
+            # Actual shared-verifier consumption, after the agent process scope
+            # drains and terminal requests are sealed. Harbor later snapshots
+            # the guest log directory; keep the controller copy authoritative.
+            assert self.owner.trajectory_path is not None
+            trace = Trajectory.model_validate_json(self.owner.trajectory_path.read_bytes())
+            assert trace.extra["evidence_complete"] and len(trace.subagent_trajectories) == 3
+            await environment.upload_file(self.owner.trajectory_path, "/logs/agent/trajectory.json")
         finally:
             if death is not None:
                 self._owner_death_cancelled = True
@@ -221,8 +234,12 @@ async def check(args):
         'network_mode = "public"\n')
     (task / "tests/test.sh").write_text("#!/bin/bash\nset -euo pipefail\n" +
         ("sleep 35\n" if args.mode == "late-verifier" else "") +
-        "python3 - <<'PY'\nfrom pathlib import Path\n"
+        "python3 - <<'PY'\nfrom pathlib import Path\nimport json\n"
         "assert Path('/tmp/agent-result').read_bytes() == b'correct'\n"
+        "trace = json.loads(Path('/logs/agent/trajectory.json').read_bytes())\n"
+        "assert trace['extra']['evidence_complete']\n"
+        "assert trace['steps'][-1]['message'] == 'Wrote correct to /tmp/agent-result and retained the terminal evidence.'\n"
+        "assert len(trace['subagent_trajectories']) == 3\n"
         "Path('/logs/verifier/reward.txt').write_text('1\\n')\nPY\n")
     overlay = directory / "compose.json"
     overlay.write_text(json.dumps({"services": {"main": {
@@ -253,6 +270,7 @@ async def check(args):
             assert counts["planner"] == 2 and counts["worker"] == 3 and counts["terminal"] == 1
             assert trial.agent.owner.outcome.complete and trial.agent.owner.outcome.budget.enforceable
             assert trial.agent.owner.outcome.delivered_assignment_ids == ("terminal-result",)
+            assert (trial.agent.logs_dir / "trajectory.json").read_bytes() == trial.agent.owner.trajectory_path.read_bytes()
             if args.mode == "late-verifier":
                 assert time.time() > trial.agent.agent_deadline
         else:

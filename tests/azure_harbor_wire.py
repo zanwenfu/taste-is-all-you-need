@@ -59,6 +59,9 @@ def install(counter, mode):
                 assignment["outputs"][0].update(artifact_id="terminal-evidence", path="output.txt")
             result.update(complete=delivered, completion_reason="certified terminal evidence delivered" if delivered else "",
                           rationale="one terminal action with a certified evidence artifact")
+            if "final_reply" in result["metadata"]:
+                result["metadata"]["final_reply"] = (
+                    "Wrote correct to /tmp/agent-result and retained the terminal evidence." if delivered else "")
             result["assessment"] = [{"criterion_id": item["criterion_id"], "verdict": "met" if delivered else "not_met",
                 "evidence": "delivered terminal evidence" if delivered else "no result yet"} for item in payload["standing_criteria"]]
             output = [message(json.dumps(result))]
