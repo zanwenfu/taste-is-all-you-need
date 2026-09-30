@@ -116,7 +116,7 @@ def _planner(host, plan, gaps):
                 and audit.request_id == plan.metadata["request_id"]):
             proposal = _load_json(response, "final planner response")
             if (_digest(_canonical(proposal)) != plan.metadata["proposal_digest"]
-                    or proposal["metadata"] != dict(plan.metadata["proposal"])):
+                    or proposal["metadata"] != plan.to_dict()["metadata"]["proposal"]):
                 raise GoalInputError("final reply is not bound to its accepted model proposal")
             final.append((benchmark_reply.validate(proposal["metadata"], complete=True), audit))
     if plan is not None and plan.complete and len(final) != 1:

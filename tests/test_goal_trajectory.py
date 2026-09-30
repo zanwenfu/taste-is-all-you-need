@@ -50,6 +50,9 @@ def test_all_real_worker_attempts_and_monitor_costs_survive_settlement(
         requests.append(payload)
         result = proposal(payload, complete=len(requests) == 3)
         result["metadata"]["final_reply"] = FINAL if result["complete"] else ""
+        # PlanRevision freezes nested JSON arrays as tuples internally; compare
+        # the actual proposal with its wire representation during export.
+        result["metadata"]["evidence"] = ["retained", {"observed": True}]
         for assignment in result["assignments"]:
             assignment["assignment_id"] += "-" + str(len(requests))
             assignment["contract"]["identity"] += "-" + str(len(requests))
