@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 import tracemalloc
-from dataclasses import replace
+from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -166,6 +166,100 @@ def daemon(tmp_path, monkeypatch):
 
 def backend(daemon, **kwargs):
     return DockerTerminalBackend.admit(daemon.socket, CONTAINER, TOKEN, time.time() + 20, **kwargs)
+
+
+def compose(daemon):
+    daemon.info["Image"] = "sha256:" + "d" * 64
+    daemon.info["Config"]["Labels"] = {
+        transport.COMPOSE_PROJECT_LABEL: "harbor-trial-unique",
+        "com.docker.compose.service": "main", "com.docker.compose.oneoff": "False",
+        "com.docker.compose.container-number": "1",
+    }
+    return {"compose_project": "harbor-trial-unique", "image_id": daemon.info["Image"]}
+
+
+@pytest.mark.parametrize("user", [None, "1000", "1000:1001", "agent:task"])
+def test_native_compose_identity_and_fixed_user_survive_broker_recovery(daemon, tmp_path, user):
+    executor = backend(daemon, **compose(daemon), exec_user=user)
+    # Container has only native Compose labels. Recovery receives the original
+    # serialized binding, not another opportunity to admit current daemon state.
+    original = transport.DockerTerminalBinding(**json.loads(json.dumps(asdict(executor.binding))))
+    assert original == executor.binding
+    owner = TerminalBroker.create(tmp_path / "ledger",
+        TerminalBinding(TOKEN, CONTAINER, original.deadline_unix, 3), executor)
+    try:
+        result = asyncio.run(owner.execute(request()))
+    finally:
+        owner.close()
+    recovered = TerminalBroker.open(tmp_path / "ledger", owner.binding, DockerTerminalBackend(original))
+    async def replay():
+        assert await recovered.execute(request()) == result
+        assert await recovered.execute(request(request_id="second", cwd="/workspace")) == result
+        await recovered.abort()
+    try:
+        asyncio.run(replay())
+        assert recovered.phase == "stopped"
+    finally:
+        recovered.close()
+    creates = [body for _, path, body in daemon.calls if path.endswith("/exec")]
+    assert len(creates) == 2  # First request was replayed from its receipt.
+    assert [body["WorkingDir"] for body in creates] == ["/tmp", "/workspace"]
+    assert all(body.get("User") == user for body in creates)
+    assert all(("User" in body) == (user is not None) for body in creates)
+    assert not any(path.endswith(("/create", "/update", "/restart")) for _, path, _ in daemon.calls)
+
+
+@pytest.mark.parametrize("fault", ["project", "service", "oneoff", "number", "image", "restart"])
+@pytest.mark.parametrize("when", ["before_admission", "after_recovery"])
+def test_native_compose_rejects_other_containers_and_identity_drift(daemon, fault, when):
+    options = compose(daemon)
+    executor = backend(daemon, **options) if when == "after_recovery" else None
+    if fault == "image":
+        daemon.info["Image"] = "sha256:" + "e" * 64
+    elif fault == "restart":
+        daemon.info["State"]["StartedAt"] = "different_start"
+        if when == "before_admission":
+            # Change between the admission and confirmation inspections.
+            def change_start(handler, path):
+                if path.endswith("/json") and len(daemon.calls) == 1:
+                    info = copy.deepcopy(daemon.info)
+                    info["State"]["StartedAt"] = STARTED
+                    daemon.reply(handler, info)
+                    return True
+            daemon.override = change_start
+    else:
+        key, value = {"project": (transport.COMPOSE_PROJECT_LABEL, "another-trial"),
+            "service": ("com.docker.compose.service", "egress-control"),
+            "oneoff": ("com.docker.compose.oneoff", "True"),
+            "number": ("com.docker.compose.container-number", "2")}[fault]
+        daemon.info["Config"]["Labels"][key] = value
+    with pytest.raises(TerminalConflict):
+        if executor is None:
+            backend(daemon, **options)
+        else:
+            recovered = DockerTerminalBackend(transport.DockerTerminalBinding(**asdict(executor.binding)))
+            recovered.execute(request())
+    assert not any(path.endswith("/exec") for _, path, _ in daemon.calls)
+
+
+@pytest.mark.parametrize("changes", [
+    {"compose_project": ""}, {"compose_project": "-bad"}, {"compose_project": "../task"},
+    {"compose_project": "UPPER"}, {"image_id": None}, {"image_id": "ubuntu:latest"},
+    {"image_id": "sha256:" + "x" * 64}, {"exec_user": 1000}, {"exec_user": True},
+    {"exec_user": ""}, {"exec_user": "1000:1000:1000"}, {"exec_user": "root\n"},
+    {"exec_user": "root\0"},
+])
+def test_invalid_native_binding_is_rejected_before_daemon_access(daemon, changes):
+    with pytest.raises(ValueError):
+        backend(daemon, **{**compose(daemon), **changes})
+    assert not daemon.calls
+
+
+def test_legacy_binding_does_not_accept_compose_labels_as_ownership(daemon):
+    compose(daemon)
+    with pytest.raises(TerminalConflict, match="ownership label"):
+        backend(daemon)
+    assert not any(path.endswith("/exec") for _, path, _ in daemon.calls)
 
 
 @pytest.mark.parametrize("upgrade,chunked", [(True, False), (False, False), (False, True)])

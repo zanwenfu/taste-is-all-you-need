@@ -7,7 +7,7 @@ recovery must use that original binding, not admit the container again.
 
 This is not the worker credential boundary or the outside death watchdog.
 The lifecycle owner must create an isolated container with restart disabled,
-reserve its ownership label, and stop/remove it even if this controller dies.
+reserve its ownership label or Compose project, and stop/remove it even if this controller dies.
 Neither task containers nor model workers should receive the Docker socket.
 """
 
@@ -34,6 +34,7 @@ from taste.brains.terminal_broker import (
 
 API_VERSION = "v1.51"
 OWNER_LABEL = "taste.terminal.owner"
+COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 CONTROL_BYTES = 1024 * 1024
 READ_BYTES = 65536
 CONTROL_SECONDS = 10
@@ -204,6 +205,9 @@ class DockerTerminalBinding:
     cgroup_path: str
     deadline_unix: float
     output_limit: int = 65536
+    compose_project: str | None = None
+    image_id: str | None = None
+    exec_user: str | None = None
 
     def __post_init__(self):
         if (not isinstance(self.socket_path, str) or not self.socket_path.startswith("/")
@@ -226,6 +230,17 @@ class DockerTerminalBinding:
             raise ValueError("a finite positive task deadline is required")
         if type(self.output_limit) is not int or not 1 <= self.output_limit <= MAX_TERMINAL_OUTPUT_BYTES:
             raise ValueError("output limit must be between 1 byte and 1 MiB per stream")
+        if self.compose_project is not None and (not isinstance(self.compose_project, str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", self.compose_project) is None
+                or self.image_id is None):
+            raise ValueError("native Compose admission requires a project and exact image ID")
+        if self.image_id is not None and (not isinstance(self.image_id, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", self.image_id) is None):
+            raise ValueError("an exact Docker image ID is required")
+        if self.exec_user is not None and (not isinstance(self.exec_user, str)
+                or re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.\-$]{0,255}"
+                                r"(?::[a-zA-Z0-9_][a-zA-Z0-9_.\-$]{0,255})?", self.exec_user) is None):
+            raise ValueError("Docker exec user must be a fixed user or user:group")
 
 
 class DockerTerminalBackend:
@@ -242,11 +257,21 @@ class DockerTerminalBackend:
         return self.binding.container_id
 
     @classmethod
-    def admit(cls, socket_path, container_id, owner_token, deadline_unix, *, output_limit=65536):
+    def admit(cls, socket_path, container_id, owner_token, deadline_unix, *, output_limit=65536,
+              compose_project=None, image_id=None, exec_user=None):
+        """Bind a running container without modifying its published settings.
+
+        Native Harbor callers reserve a unique Compose project externally and
+        supply its exact main-container ID and image ID. The owner token still
+        scopes the broker and independent watchdog; it need not be a task label.
+        Persist the returned binding before launch and reuse it for recovery.
+        ``exec_user`` is the admitted Harbor agent user, never a model argument.
+        """
         # Validate caller values before constructing any daemon URL. The real
         # start/cgroup binding is captured below, then checked a second time.
         provisional = DockerTerminalBinding(socket_path, container_id, owner_token, "pending",
-                                            f"/{container_id}", deadline_unix, output_limit)
+                                            f"/{container_id}", deadline_unix, output_limit,
+                                            compose_project, image_id, exec_user)
         if deadline_unix <= time.time():
             raise TerminalFenced("Docker task admission deadline expired")
         wire = _Wire(socket_path)
@@ -263,7 +288,8 @@ class DockerTerminalBackend:
         if len(paths) != 1:
             raise TerminalFenced("cannot identify the original container cgroup")
         backend = cls(DockerTerminalBinding(socket_path, container_id, owner_token,
-                      info["State"].get("StartedAt"), paths[0], deadline_unix, output_limit))
+                      info["State"].get("StartedAt"), paths[0], deadline_unix, output_limit,
+                      compose_project, image_id, exec_user))
         confirmed = backend._inspect(wire, deadline)
         if confirmed["State"]["Running"] is not True or confirmed["State"].get("Pid") != pid:
             raise TerminalFenced("container changed during terminal admission")
@@ -273,9 +299,19 @@ class DockerTerminalBackend:
     def _check_container(info, binding, *, original_start=True):
         if (not isinstance(info, dict) or info.get("Id") != binding.container_id
                 or not isinstance(info.get("Config"), dict)
-                or not isinstance(info["Config"].get("Labels"), dict)
-                or info["Config"]["Labels"].get(OWNER_LABEL) != binding.owner_token):
+                or not isinstance(info["Config"].get("Labels"), dict)):
             raise TerminalConflict("Docker container identity or ownership label changed")
+        labels = info["Config"]["Labels"]
+        if binding.compose_project is None:
+            if labels.get(OWNER_LABEL) != binding.owner_token:
+                raise TerminalConflict("Docker container identity or ownership label changed")
+        elif any(labels.get(key) != expected for key, expected in {
+                COMPOSE_PROJECT_LABEL: binding.compose_project,
+                "com.docker.compose.service": "main", "com.docker.compose.oneoff": "False",
+                "com.docker.compose.container-number": "1"}.items()):
+            raise TerminalConflict("Docker Compose main-container ownership changed")
+        if binding.image_id is not None and info.get("Image") != binding.image_id:
+            raise TerminalConflict("Docker container image differs from admission")
         state, config = info.get("State"), info.get("HostConfig")
         if (not isinstance(state, dict) or type(state.get("Running")) is not bool
                 or state.get("Paused") is not False or state.get("Restarting") is not False
@@ -307,10 +343,14 @@ class DockerTerminalBackend:
             info = self._inspect(wire, deadline)
             if info["State"]["Running"] is not True:
                 raise TerminalFenced("Docker terminal never restarts a stopped container")
-            created = wire.control("POST", f"/containers/{self.environment_id}/exec", deadline, {
+            command = {
                 "AttachStdout": True, "AttachStderr": True, "AttachStdin": False,
                 "Tty": False, "Cmd": ["/bin/sh", "-c", request.command], "WorkingDir": request.cwd,
-            }, statuses=(201,))
+            }
+            if self.binding.exec_user is not None:
+                command["User"] = self.binding.exec_user
+            created = wire.control("POST", f"/containers/{self.environment_id}/exec", deadline,
+                                   command, statuses=(201,))
             exec_id = created.get("Id") if isinstance(created, dict) else None
             if not _full_id(exec_id):
                 raise DockerTransportError("Docker did not identify the created exec")
