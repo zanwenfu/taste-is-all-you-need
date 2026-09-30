@@ -295,8 +295,13 @@ recovery/scaling checks and a bounded live Azure pilot.
 
 For [Errata Bench](https://errata-bench.vercel.app/docs), Azure workers
 now retain tool evidence outside memory rollback and export internal ATIF traces
-on shutdown. Those traces preserve failed/unfinished work; they are not yet the
-complete trial record or final developer reply required for a scored Errata run.
+on shutdown. Benchmark goals can require an explicit coordinator final reply;
+credential-free settlement exports it with every worker attempt, planner receipt
+and monitor call into one ATIF document. The outside trial owner checks the
+input, source, outcome and trace hashes before allowing grading. Missing evidence
+or unknown cost remains visible and blocks that admission. This path is tested
+with Harbor's shared verifier and Errata's actual ATIF reader; a production
+benchmark adapter and a bounded live pilot remain required before a scored run.
 Full benchmark instructions use bounded 512 KiB file/observation handoffs, with
 model request budgets admitted separately.
 

@@ -168,6 +168,28 @@ def test_real_process_handoff_binds_trace_and_retains_unknown_cost_without_crede
         (tmp_path / "settle/trajectory.json").write_bytes(damage)
         with pytest.raises(GoalInputError):
             read_trajectory(tmp_path / "settle", config, outcome, service_uid=os.geteuid())
+    if not lost_reply:
+        # Fail each publication boundary in a real credential-free process.
+        # A partial trajectory/manifest is never a successful exchange, and a
+        # new settlement can recover the evidence without another paid call.
+        for index, target in enumerate(("trajectory.json", "trajectory-manifest.json", "result.json")):
+            failure = bootstrap + "\nfrom taste.brains import azure_goal_handoff as handoff\n"
+            failure += "original_write = handoff._write\n"
+            failure += "def fail_write(fd, name, data, **kwargs):\n"
+            failure += "    if name == " + repr(target) + ": raise OSError('simulated publication failure')\n"
+            failure += "    return original_write(fd, name, data, **kwargs)\n"
+            failure += "handoff._write = fail_write\n"
+            output = tmp_path / f"failed-export-{index}"
+            child = process(path, digest, output, "settle", env, failure)
+            assert child.returncode == 70
+            assert (output / "intent.json").exists() and not (output / "result.json").exists()
+            with pytest.raises(FileNotFoundError):
+                read_trajectory(output, config, outcome, service_uid=os.geteuid())
+        output = tmp_path / "recovered-export"
+        child = process(path, digest, output, "settle", env, bootstrap)
+        assert child.returncode == 0, child.stderr
+        _, recovered, _ = read_trajectory(output, config, outcome, service_uid=os.geteuid())
+        assert recovered["steps"] == trace["steps"]
     assert counter.read_text().splitlines() == ["one Azure planner request"]
 
 
