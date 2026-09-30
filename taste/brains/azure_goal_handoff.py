@@ -21,6 +21,7 @@ import time
 import uuid
 from pathlib import Path
 
+from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import AzureExecutionPolicy
 from taste.brains.azure_goal_entrypoint import _policy, _run, prepare_azure_goal_process
 from taste.brains.central_planner import Goal
@@ -103,9 +104,9 @@ def _read(fd, name, maximum, *, uid=None, mode=None):
         return data
 
 
-def _write(fd, name, data):
-    if len(data) > MAX_RESULT_BYTES:
-        raise GoalInputError("Azure goal result exceeds 1 MiB")
+def _write(fd, name, data, *, maximum=MAX_RESULT_BYTES):
+    if len(data) > maximum:
+        raise GoalInputError("Azure goal result exceeds its admitted byte limit")
     temporary = ".handoff-" + uuid.uuid4().hex
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
     try:
@@ -188,6 +189,33 @@ def settled_outcome(value, config: GoalProcessInput):
         raise GoalInputError("goal handoff has invalid identity or accounting") from None
 
 
+def read_trajectory(directory, config, outcome, *, service_uid):
+    """Read exact settled evidence after the owner has drained its whole scope."""
+    from taste.benchmarks.goal_trajectory import MAX_TRAJECTORY_BYTES
+
+    digest = hashlib.sha256(config.to_bytes()).hexdigest()
+    value, _ = read_handoff(directory, digest, "settle", service_uid=service_uid)
+    if settled_outcome(value, config) != outcome:
+        raise GoalInputError("trajectory settlement outcome changed")
+    fd = _open_result_directory(directory, service_uid)
+    try:
+        manifest = _decode(_read(fd, "trajectory-manifest.json", 2048, uid=service_uid, mode=0o600))
+        raw = _read(fd, "trajectory.json", MAX_TRAJECTORY_BYTES, uid=service_uid, mode=0o600)
+    finally:
+        os.close(fd)
+    expected = {"schema": "taste.brains/GoalTrajectoryHandoff/1", "input_sha256": digest,
+                "outcome_sha256": hashlib.sha256(_canonical(outcome.to_dict()).encode()).hexdigest(),
+                "trajectory_sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+    trace = _decode(raw)
+    if (manifest != expected or trace.get("schema_version") != "ATIF-v1.7"
+            or trace.get("session_id") != config.goal.goal_id
+            or trace.get("extra", {}).get("input_sha256") != digest
+            or trace.get("extra", {}).get("outcome") != outcome.to_dict()
+            or trace.get("extra", {}).get("python_source_sha256") != config.python_source_sha256):
+        raise GoalInputError("trajectory differs from its admitted goal, source or settlement")
+    return raw, trace, expected["trajectory_sha256"]
+
+
 def grading_ready(outcome):
     """Model completion is separate from benchmark reward; this is only admission."""
     return (outcome.budget.enforceable and outcome.budget.reserved_usd == 0
@@ -240,7 +268,23 @@ def perform(input_path, digest, output_dir, *, operation):
         else:
             # The production entrypoint owns signals, host closure and worker
             # drainage. A cancelled call publishes no successful result here.
-            outcome = asyncio.run(_run(config, operation, systemd_credentials=True))
+            observer = None
+            if operation == "settle" and benchmark_reply.required(config.goal.metadata):
+                def observer(host, outcome):
+                    from taste.benchmarks.goal_trajectory import (
+                        MAX_TRAJECTORY_BYTES,
+                        encode_trajectory,
+                        goal_trajectory,
+                    )
+
+                    raw = encode_trajectory(goal_trajectory(host, config, outcome))
+                    _write(fd, "trajectory.json", raw, maximum=MAX_TRAJECTORY_BYTES)
+                    manifest = {"schema": "taste.brains/GoalTrajectoryHandoff/1", "input_sha256": digest,
+                        "outcome_sha256": hashlib.sha256(_canonical(outcome.to_dict()).encode()).hexdigest(),
+                        "trajectory_sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+                    _write(fd, "trajectory-manifest.json", (_canonical(manifest) + "\n").encode())
+            outcome = asyncio.run(_run(config, operation, systemd_credentials=True,
+                                      **({"on_settled": observer} if observer is not None else {})))
             result = settled_outcome(outcome.to_dict(), config).to_dict()
         _write(fd, "result.json", (_canonical({**binding, "result": result}) + "\n").encode())
         return result

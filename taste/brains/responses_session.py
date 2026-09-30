@@ -309,6 +309,31 @@ class ResponsesSession:
         self._check()
         return responses_audit.snapshot(self._db)
 
+    def call_evidence(self):
+        """Detach all attempts, including lost replies, for settled trial export.
+
+        This never dispatches or replays a request. Keep provider-only transcript
+        fields (including encrypted reasoning) out of the public projection.
+        """
+        self._check()
+        self._audit()
+        rows, size = [], 0
+        for identifier, request, status, result, digest, error in self._db.execute(
+                "SELECT id,request,status,result,digest,error_type FROM calls ORDER BY rowid"):
+            size += len(request.encode()) + (len(result.encode()) if result is not None else 0)
+            if len(rows) >= self.binding.max_calls or size > responses_audit.MAX_AUDIT_BYTES:
+                raise ResponsesConflict("Responses call evidence exceeds its admitted limits")
+            value = {"request_id": identifier, "request": json.loads(request),
+                     "status": status, "error_type": error, "completion": None, "cost_usd": None}
+            if status == "completed":
+                completion = self._receipt(result, digest)
+                payload = _completion_payload(completion)
+                value["completion"] = {key: payload[key] for key in (
+                    "text_blocks", "tool_calls", "stop_reason", "model", "provider", "usage")}
+                value["cost_usd"] = self._receipt_cost(completion)
+            rows.append(value)
+        return rows
+
     def pin_context(self, context_id: str, value: dict[str, Any]) -> dict[str, Any]:
         """Persist the first observation before its potentially paid request.
 

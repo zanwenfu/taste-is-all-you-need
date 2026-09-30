@@ -19,6 +19,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import AzureExecutionPolicy
 from taste.brains.azure_goal_credentials import encode_azure_goal_credentials
 from taste.brains.azure_goal_handoff import _read, _write, grading_ready, preparation_bytes
@@ -236,6 +237,7 @@ class AzureTerminalTrial:
             instance.broker = instance.service = None
             instance.started = instance.closed = False
             instance.outcome = None
+            instance.trajectory_path = None
             instance.preparation_sha = instance._input("prepare.json", raw)
             return instance
         except BaseException:
@@ -289,11 +291,23 @@ class AzureTerminalTrial:
             self.outcome = settled.value
             _write(self.fd, "outcome.json", _json_bytes({"input_sha256": digest,
                 "result_sha256": settled.result_sha256, "outcome": self.outcome.to_dict()}))
+            trajectory_sha = None
+            if benchmark_reply.required(config.goal.metadata):
+                from taste.benchmarks.goal_trajectory import MAX_TRAJECTORY_BYTES
+                from taste.brains.azure_goal_handoff import read_trajectory
+
+                raw, trace, trajectory_sha = read_trajectory(self.root / "exchange/settle", config, self.outcome,
+                                                            service_uid=self.config["service_uid"])
+                _write(self.fd, "trajectory.json", raw, maximum=MAX_TRAJECTORY_BYTES)
+                self.trajectory_path = self.root / "controller/trajectory.json"
+                if trace["extra"].get("evidence_complete") is not True:
+                    raise GoalInputError("terminal goal evidence is incomplete; preserve the diagnostic trajectory")
             if not grading_ready(self.outcome):
                 raise GoalInputError("terminal goal is not settled within its admitted budget")
             self.service.seal_for_grading()
             _write(self.fd, "grading.json", _json_bytes({"input_sha256": digest,
-                "result_sha256": settled.result_sha256, "binding": asdict(self.broker.binding)}))
+                "result_sha256": settled.result_sha256, "binding": asdict(self.broker.binding),
+                **({"trajectory_sha256": trajectory_sha} if trajectory_sha is not None else {})}))
             return self.outcome
         except BaseException as original:
             try:

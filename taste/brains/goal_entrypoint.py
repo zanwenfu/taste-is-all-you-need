@@ -206,10 +206,13 @@ def _validate_admission(store, config):
             raise GoalInputError("prepared goal or deadline differs from durable state")
 
 
-async def execute_goal(config: GoalProcessInput, *, mode="run", host_factory=compose_central_runtime) -> GoalOutcome:
+async def execute_goal(config: GoalProcessInput, *, mode="run", host_factory=compose_central_runtime,
+                       on_settled=None) -> GoalOutcome:
     """Hold ownership through repeated cancellation, drainage and resource close."""
     if mode not in {"run", "settle"}:
         raise GoalInputError("mode must be run or settle")
+    if on_settled is not None and mode != "settle":
+        raise GoalInputError("settled evidence can only be exported during settlement")
     if config.python_source_sha256 != python_source_digest():
         raise GoalInputError("Python source differs from prepared launch input")
     # Check before writable composition so recovery cannot silently create a
@@ -233,7 +236,7 @@ async def execute_goal(config: GoalProcessInput, *, mode="run", host_factory=com
             )
             try:
                 await asyncio.wait((task,))
-                return task.result()
+                outcome = task.result()
             except BaseException as original:
                 try:
                     await _await_owned_task(task)
@@ -241,6 +244,9 @@ async def execute_goal(config: GoalProcessInput, *, mode="run", host_factory=com
                     if cleanup is not original:
                         raise BaseExceptionGroup("goal settlement failed", [original, cleanup]) from None
                 raise
+            if on_settled is not None:
+                on_settled(host, outcome)
+            return outcome
 
 
 def load_goal_input(path: Path, expected_sha256: str) -> GoalProcessInput:

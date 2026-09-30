@@ -73,7 +73,7 @@ def _policy(config):
 
 
 async def execute_azure_goal(config, *, mode="run", environment=None, systemd_credentials=False,
-                             terminal_credential_provider=None):
+                             terminal_credential_provider=None, on_settled=None):
     policy = _policy(config)
     if type(systemd_credentials) is not bool:
         raise GoalInputError("systemd credential selection must be boolean")
@@ -98,7 +98,7 @@ async def execute_azure_goal(config, *, mode="run", environment=None, systemd_cr
                         raise BaseExceptionGroup("terminal readiness probe and settlement failed",
                                                  [original, cleanup]) from None
                 raise
-    return await execute_goal(config, mode=mode,
+    return await execute_goal(config, mode=mode, on_settled=on_settled,
                               host_factory=partial(_host_factory, policy=policy, environment=environment,
                                                    settlement_only=mode == "settle",
                                                    terminal_credential_provider=terminal_credential_provider))
@@ -118,9 +118,10 @@ def azure_goal_command(input_path, expected_sha256, *, mode="run", python_execut
     )
 
 
-async def _run(config, mode, systemd_credentials=False):
+async def _run(config, mode, systemd_credentials=False, on_settled=None):
     loop = asyncio.get_running_loop()
-    task = asyncio.create_task(execute_azure_goal(config, mode=mode, systemd_credentials=systemd_credentials))
+    task = asyncio.create_task(execute_azure_goal(config, mode=mode, systemd_credentials=systemd_credentials,
+                                               on_settled=on_settled))
     installed = []
     try:
         for caught in (signal.SIGTERM, signal.SIGINT):
