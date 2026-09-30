@@ -2,17 +2,39 @@
 
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
-from taste.benchmarks.goal_trajectory import _worker_calls
+from taste.benchmarks.goal_trajectory import _worker_calls, _workers
 from taste.benchmarks.worker_trajectory import worker_trajectory
 from taste.brains.goal_entrypoint import GoalInputError
+from taste.brains.supervisor import CentralSupervisor
+from taste.memstore import Store
+from tests.test_azure_worker_policy import assignment
+from tests.test_brains_central_host import NoLaunchLauncher
 from tests.test_responses_conversation import install, make, tool
 from tests.test_responses_conversation import sdk_transport as _sdk_transport
 from tests.test_responses_conversation import worker as _worker
 
 worker, sdk_transport = _worker, _sdk_transport
+
+
+def test_prepared_but_unlaunched_worker_is_recorded_without_false_missing_evidence(tmp_path, sdk_transport):
+    sent, _ = sdk_transport(lambda *_: pytest.fail("an unlaunched worker cannot call a model"))
+    with (Store.open(tmp_path / "repo", "no-launch") as store,
+          CentralSupervisor(store, launcher=NoLaunchLauncher()) as supervisor):
+        source = replace(assignment(), base_state_id=supervisor.integration.head.id)
+        prepared = supervisor.prepare(source, wall_timeout_seconds=20)
+        stopped = supervisor.stop(prepared.run_id, "budget_blocked")
+        assert stopped.recovery_status == "complete"
+        gaps = []
+        traces, cost = _workers(SimpleNamespace(store=store), supervisor.runs(), gaps)
+        assert not gaps and not sent and cost == 0
+        assert len(traces) == 1 and traces[0]["extra"]["not_launched"]
+        assert traces[0]["extra"]["run_id"] == prepared.run_id
+        assert not any(s["source"] == "agent" for s in traces[0]["steps"])
 
 
 def test_paid_reply_before_conversation_publication_is_retained_without_inventing_effects(

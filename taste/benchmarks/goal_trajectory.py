@@ -164,6 +164,19 @@ def _workers(host, runs, gaps):
         azure = policy.azure_config({"AZURE_OPENAI_BASE_URL": policy.worker.endpoint,
                                      "AZURE_OPENAI_API_KEY": "settlement-no-dispatch"})
         directory = run_directory(host.store, run.run_id)
+        # The supervisor writes a deadline in its durable spawn intent BEFORE
+        # launching. A prepared run stopped before that intent owes no model
+        # journal. Preserve that attempt explicitly without inventing activity
+        # or misclassifying a legitimate bounded stop as missing evidence.
+        if run.pid is None and run.deadline_at is None and run.launch_token is None:
+            if not run.terminal or run.recovery_status != "complete" or os.path.lexists(directory):
+                raise GoalInputError("unlaunched worker has inconsistent settlement evidence")
+            traces.append(_trajectory(run.run_id, "taste-azure-worker", [
+                {"step_id": 1, "source": "system",
+                 "message": "Worker settled before any durable spawn intent; no model or tool call was launched."}],
+                run_id=run.run_id, assignment_id=run.assignment.assignment_id,
+                phase=run.phase, not_launched=True, call_statuses=[]))
+            continue
         for role, binding in (("worker", policy.worker), ("monitor", policy.monitor)):
             path = directory / role
             if not os.path.lexists(path):
