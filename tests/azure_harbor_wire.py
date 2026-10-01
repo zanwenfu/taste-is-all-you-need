@@ -80,7 +80,7 @@ def install(counter, mode):
                 output = [function_call(json.dumps({"command": command, "cwd": "/tmp", "timeout_seconds": 3}),
                                         name="terminal_exec", call_id="terminal_call")]
             elif number == 2:
-                output = [function_call(json.dumps({"path": "output.txt", "content": "correct", "executable": False}),
+                output = [function_call(json.dumps({"artifact": "output.txt", "body": "correct", "executable": False}),
                                         name="write_artifact", call_id="artifact_call")]
             else:
                 output = [message(json.dumps(accepted(request)))]

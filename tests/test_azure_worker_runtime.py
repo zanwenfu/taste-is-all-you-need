@@ -93,7 +93,7 @@ def install(sdk_transport, *, worker_reply=None, monitor_reply=None, hook=None):
             if worker_reply is not None:
                 output = worker_reply(calls[role], payload)
             elif calls[role] == 1:
-                output = [function_call(json.dumps({"path": "output.txt", "content": "correct", "executable": False}),
+                output = [function_call(json.dumps({"artifact": "output.txt", "body": "correct", "executable": False}),
                                         name="write_artifact")]
             else:
                 output = [message(json.dumps(accepted(payload)))]

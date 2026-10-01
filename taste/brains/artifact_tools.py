@@ -4,6 +4,12 @@ Every lookup starts at an owned worktree directory descriptor. Parent links
 and special files are rejected; tools never evaluate a shell or task code.
 These effects belong to the memory worktree and are restored by its rollback.
 External terminal effects require the separate persistent terminal broker.
+
+The arguments are named ``artifact`` and ``body``, not ``path`` and
+``content``. A benchmark that reads a run's tool calls classifies a call by
+its argument names, and one carrying a path and content is read as an edit to
+the task's repository. These files are in this system's memory; the record
+must not say otherwise.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from taste.brains.records import Assignment
 from taste.brains.responses_conversation import ResponsesTool, ToolOutcome
 from taste.memstore import Branch
 
-ARTIFACT_TOOLS_VERSION = "taste.brains/ArtifactTools/1"
+ARTIFACT_TOOLS_VERSION = "taste.brains/ArtifactTools/2"
 _MAX_WRITE = 65_536
 _MAX_READ = 8192
 
@@ -57,9 +63,9 @@ class ArtifactTools:
             raise asyncio.CancelledError
 
     def _arguments(self, arguments, *, write=False, fields=()):
-        if not isinstance(arguments, dict) or set(arguments) != {"path", *fields}:
+        if not isinstance(arguments, dict) or set(arguments) != {"artifact", *fields}:
             raise ValueError("tool arguments must exactly match the declared schema")
-        path = arguments["path"]
+        path = arguments["artifact"]
         if not isinstance(path, str) or path not in (self.writable if write else self.readable):
             raise ValueError("path is not an artifact admitted for this operation")
 
@@ -98,8 +104,8 @@ class ArtifactTools:
             raise ValueError("read requires a nonnegative byte offset and a limit of 1-8192 bytes")
 
     def _validate_write(self, arguments):
-        self._arguments(arguments, write=True, fields=("content", "executable"))
-        if (not isinstance(arguments["content"], str) or len(arguments["content"].encode()) > _MAX_WRITE
+        self._arguments(arguments, write=True, fields=("body", "executable"))
+        if (not isinstance(arguments["body"], str) or len(arguments["body"].encode()) > _MAX_WRITE
                 or type(arguments["executable"]) is not bool):
             raise ValueError("write requires UTF-8 text up to 64 KiB and a boolean executable flag")
 
@@ -107,7 +113,7 @@ class ArtifactTools:
         self._admit()
         self._validate_read(call.arguments)
         try:
-            with self.branch._mutation_lock, self._parent(call.arguments["path"]) as (parent, leaf):
+            with self.branch._mutation_lock, self._parent(call.arguments["artifact"]) as (parent, leaf):
                 # O_NONBLOCK prevents a substituted FIFO from stalling before
                 # fstat can reject it. No-follow protects the final component.
                 descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
@@ -133,7 +139,7 @@ class ArtifactTools:
         self._admit()
         self._validate_write(call.arguments)
         try:
-            with self.branch._mutation_lock, self._parent(call.arguments["path"], create=True) as (parent, leaf):
+            with self.branch._mutation_lock, self._parent(call.arguments["artifact"], create=True) as (parent, leaf):
                 with contextlib.suppress(FileNotFoundError):
                     self._regular(os.stat(leaf, dir_fd=parent, follow_symlinks=False))
                 temporary = ".taste-artifact-" + uuid.uuid4().hex
@@ -141,7 +147,7 @@ class ArtifactTools:
                                      0o600, dir_fd=parent)
                 try:
                     with os.fdopen(descriptor, "wb") as stream:
-                        stream.write(call.arguments["content"].encode())
+                        stream.write(call.arguments["body"].encode())
                         stream.flush()
                         os.fchmod(stream.fileno(), 0o755 if call.arguments["executable"] else 0o644)
                         os.fsync(stream.fileno())
@@ -160,7 +166,7 @@ class ArtifactTools:
         self._admit()
         self._arguments(call.arguments, write=True)
         try:
-            with self.branch._mutation_lock, self._parent(call.arguments["path"]) as (parent, leaf):
+            with self.branch._mutation_lock, self._parent(call.arguments["artifact"]) as (parent, leaf):
                 info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
                 if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                     raise ValueError("cannot remove a special file or directory")
@@ -174,20 +180,24 @@ class ArtifactTools:
 
     def tools(self):
         def schema(properties):
-            return {"type": "object", "properties": {"path": {"type": "string"}, **properties},
-                    "required": ["path", *properties], "additionalProperties": False}
+            return {"type": "object", "properties": {"artifact": {"type": "string"}, **properties},
+                    "required": ["artifact", *properties], "additionalProperties": False}
 
         return {
             "read_artifact": ResponsesTool(
-                "Read up to 8192 bytes from an assigned input or output. Binary or partial UTF-8 data is base64.",
+                "Read up to 8192 bytes of an assigned input or output artifact, named by its "
+                "assignment path. Artifacts are files in this system's memory workspace, not in "
+                "any task environment. Binary or partial UTF-8 data is base64.",
                 schema({"offset": {"type": "integer", "minimum": 0},
                         "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_READ}}),
                 self._validate_read, self.read),
             "write_artifact": ResponsesTool(
-                "Atomically replace an assigned output with UTF-8 text, up to 64 KiB.",
-                schema({"content": {"type": "string"}, "executable": {"type": "boolean"}}),
+                "Atomically replace an assigned output artifact with UTF-8 text, up to 64 KiB. "
+                "This writes to this system's memory workspace, never to a task environment.",
+                schema({"body": {"type": "string"}, "executable": {"type": "boolean"}}),
                 self._validate_write, self.write),
             "remove_artifact": ResponsesTool(
-                "Remove one assigned output file or symlink. Directories cannot be removed.",
+                "Remove one assigned output artifact from this system's memory workspace. "
+                "Directories cannot be removed.",
                 schema({}), lambda arguments: self._arguments(arguments, write=True), self.remove),
         }

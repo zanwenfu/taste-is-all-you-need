@@ -47,11 +47,11 @@ def worker(tmp_path):
 
 
 def write_args(path="output.txt", content="result", executable=False):
-    return {"path": path, "content": content, "executable": executable}
+    return {"artifact": path, "body": content, "executable": executable}
 
 
 def read_args(path="output.txt", offset=0, limit=8192):
-    return {"path": path, "offset": offset, "limit": limit}
+    return {"artifact": path, "offset": offset, "limit": limit}
 
 
 def invoke(worker, name, arguments):
@@ -68,9 +68,9 @@ def test_nested_atomic_write_read_mode_and_removal(worker):
                                         "next_offset": 9, "eof": True, "executable": True}
     assert not invoke(worker, "write_artifact", write_args("nested/output.txt", "new")).is_error
     assert path.stat().st_mode & 0o777 == 0o644
-    assert not invoke(worker, "remove_artifact", {"path": "nested/output.txt"}).is_error
+    assert not invoke(worker, "remove_artifact", {"artifact": "nested/output.txt"}).is_error
     assert not path.exists()
-    assert not invoke(worker, "remove_artifact", {"path": "nested/output.txt"}).is_error
+    assert not invoke(worker, "remove_artifact", {"artifact": "nested/output.txt"}).is_error
     assert not list(path.parent.glob(".taste-artifact-*"))
 
 
@@ -78,7 +78,7 @@ def test_nested_atomic_write_read_mode_and_removal(worker):
     write_args("input.txt"), write_args("../outside"), write_args(".git/config"),
     write_args("/tmp/outside"), write_args("nested/../output.txt"), write_args("output.txt/child"),
     write_args(content="x" * 65_537), write_args(executable=1),
-    {**write_args(), "extra": True}, {"path": "output.txt"}, write_args(content="\ud800"),
+    {**write_args(), "extra": True}, {"artifact": "output.txt"}, write_args(content="\ud800"),
 ])
 def test_invalid_write_is_rejected_before_any_effect(worker, arguments):
     with pytest.raises(ValueError):
@@ -116,7 +116,7 @@ def test_special_files_and_links_cannot_escape_or_block(worker, tmp_path, damage
     assert invoke(worker, "read_artifact", read_args(relative)).is_error
     assert invoke(worker, "write_artifact", write_args(relative)).is_error
     assert target.read_text() == "protected"
-    result = invoke(worker, "remove_artifact", {"path": relative})
+    result = invoke(worker, "remove_artifact", {"artifact": relative})
     assert result.is_error == (damage in {"parent_symlink", "fifo", "directory"})
     assert target.read_text() == "protected"
 

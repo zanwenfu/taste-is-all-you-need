@@ -11,6 +11,6 @@ def replies(number, payload):
         return [function_call(json.dumps({"command": "produce evidence", "cwd": "/tmp", "timeout_seconds": 3}),
                               name="terminal_exec", call_id="terminal_call")]
     if number == 2:
-        return [function_call(json.dumps({"path": "output.txt", "content": "correct", "executable": False}),
+        return [function_call(json.dumps({"artifact": "output.txt", "body": "correct", "executable": False}),
                               name="write_artifact", call_id="artifact_call")]
     return [message(json.dumps(accepted(payload)))]
