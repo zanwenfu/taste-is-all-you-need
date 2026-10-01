@@ -29,13 +29,13 @@ from taste.brains.goal_entrypoint import (
 )
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.python_process import isolated_python_argv
-from taste.providers.azure_openai import AZURE_MONITOR_MODEL, AZURE_PLANNER_MODEL
+from taste.providers.azure_openai import AZURE_PLANNER_MODEL
 from taste.providers.base import ProtocolFailure
 
 
 def _host_factory(*args, policy, environment, planner_model, monitor_model, planner_max_tokens,
                   settlement_only=False, **kwargs):
-    if (planner_model != AZURE_PLANNER_MODEL or monitor_model != AZURE_MONITOR_MODEL
+    if (planner_model != AZURE_PLANNER_MODEL or monitor_model != policy.worker_model
             or planner_max_tokens != policy.planner_max_output_tokens):
         raise GoalInputError("Azure goal model options differ from the admitted policy")
     return compose_azure_central_runtime(*args, policy=policy, environment=environment,
@@ -51,18 +51,19 @@ def prepare_azure_goal_process(
         repo_root, session, policy.bind_goal(goal), max_generations=max_generations,
         wall_clock_seconds=wall_clock_seconds, max_planner_failures=max_planner_failures,
         deadline_at=datetime.fromtimestamp(policy.deadline_unix, UTC),
-        planner_model=AZURE_PLANNER_MODEL, monitor_model=AZURE_MONITOR_MODEL,
+        planner_model=AZURE_PLANNER_MODEL, monitor_model=policy.worker_model,
         planner_max_tokens=policy.planner_max_output_tokens,
         # Preparing admission cannot launch or call a model and therefore
         # requires neither an API key nor a terminal issuer capability.
         host_factory=partial(_host_factory, policy=policy, environment=environment, settlement_only=True),
+        share_task=True,
     )
 
 
 def _policy(config):
     try:
         policy = AzureExecutionPolicy.from_dict(config.goal.metadata.get(POLICY_KEY))
-        if (config.planner_model != AZURE_PLANNER_MODEL or config.monitor_model != AZURE_MONITOR_MODEL
+        if (config.planner_model != AZURE_PLANNER_MODEL or config.monitor_model != policy.worker_model
                 or config.planner_max_tokens != policy.planner_max_output_tokens
                 or datetime.fromisoformat(config.limits["deadline_at"].replace("Z", "+00:00")).timestamp()
                 != datetime.fromtimestamp(policy.deadline_unix, UTC).timestamp()):

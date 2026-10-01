@@ -250,3 +250,48 @@ def test_settlement_composition_refuses_even_direct_model_and_launch_calls(tmp_p
         with pytest.raises(RuntimeError, match="settlement"):
             runtime.launcher.launch(None)
         assert runtime.planner_llm._providers == {} and not sent
+
+
+def test_every_role_can_run_on_the_planner_model_through_one_deployment(policy, goal):
+    """A benchmark run reported as one model uses that model for every role."""
+    from taste.providers.azure_openai import AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
+
+    # The larger model's worst-case call is dearer, so its caps must admit one.
+    single = replace(policy, worker_model=AZURE_PLANNER_MODEL, worker_deployment=policy.planner_deployment,
+                     worker_effort="medium", worker_budget_usd=40, monitor_budget_usd=40)
+    with pytest.raises(ValueError, match="cannot admit even one bounded call"):
+        replace(policy, worker_model=AZURE_PLANNER_MODEL, worker_deployment=policy.planner_deployment)
+    route = single.azure_config(environment())
+    assert [(item.model, item.deployment) for item in route.deployments] == [
+        (AZURE_PLANNER_MODEL, "gpt-6-astra")]
+    wire = single.to_dict()
+    assert wire["worker_model"] == AZURE_PLANNER_MODEL and wire["worker_effort"] == "medium"
+    assert AzureExecutionPolicy.from_dict(wire) == single
+    assert single.worker_resources()["worker_effort"] == "medium"
+    # The original choices keep their original wire form and digest.
+    assert "worker_model" not in policy.to_dict() and "worker_effort" not in policy.to_dict()
+    assert "worker_effort" not in policy.worker_resources()
+    assert AzureExecutionPolicy.from_dict(policy.to_dict()) == policy
+    assert single.bind_goal(goal).metadata != policy.bind_goal(goal).metadata
+
+    payload = {"required_output_shape": {"assignments": [{"model": "", "contract": {}, "resources": {}}]},
+               "rules": {}}
+    single.configure_prompt(payload)
+    assert payload["required_output_shape"]["assignments"][0]["model"] == AZURE_PLANNER_MODEL
+    assert "worker_context" in payload["rules"]
+
+    for damaged in ({**wire, "worker_model": AZURE_WORKER_MODEL},  # the original choice is never written
+                    {**wire, "worker_effort": "low"}):
+        with pytest.raises(ValueError, match="invalid Azure execution policy"):
+            AzureExecutionPolicy.from_dict(damaged)
+
+
+@pytest.mark.parametrize("changes,match", [
+    ({"worker_model": "gpt-6-luna"}, "no verified Azure deployment"),
+    ({"worker_model": "gpt-6-astra-2026-09-03"}, "exactly one deployment"),
+    ({"worker_deployment": "gpt-6-astra"}, "exactly one deployment"),
+    ({"worker_effort": "maximum"}, "reasoning effort"),
+])
+def test_worker_model_and_effort_are_admitted_not_assumed(policy, changes, match):
+    with pytest.raises(ValueError, match=match):
+        replace(policy, **changes)

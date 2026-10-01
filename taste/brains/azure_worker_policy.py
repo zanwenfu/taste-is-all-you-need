@@ -16,12 +16,7 @@ from taste.brains.responses_session import ResponsesBinding
 from taste.brains.worker_admission import EntrypointConfig, EntrypointInputError
 from taste.brains.worker_protocol import _assignment_monitor_budget_usd, assignment_run_id
 from taste.pricing import table_sha
-from taste.providers.azure_openai import (
-    AZURE_MONITOR_MODEL,
-    AZURE_WORKER_MODEL,
-    AzureDeployment,
-    AzureOpenAIConfig,
-)
+from taste.providers.azure_openai import AZURE_MODELS, AzureDeployment, AzureOpenAIConfig
 from taste.providers.base import ProtocolFailure
 
 AZURE_WORKER_POLICY_SCHEMA = "taste.brains/AzureWorkerPolicy/1"
@@ -32,21 +27,27 @@ _FIELDS = frozenset({
 })
 
 
+_EFFORTS = ("medium", "high")  # "low" is the original choice and is not written.
+
+
 @dataclass(frozen=True)
 class AzureWorkerPolicy:
     worker: ResponsesBinding
     monitor: ResponsesBinding
     monitor_batch_size: int
+    effort: str = "low"
 
     @classmethod
     def from_assignment(cls, assignment: Assignment) -> AzureWorkerPolicy:
         raw = assignment.resources.get("azure_openai")
-        if not isinstance(raw, Mapping) or set(raw) != _FIELDS:
+        if not isinstance(raw, Mapping) or set(raw) - {"worker_effort"} != _FIELDS:
             raise EntrypointInputError("assignment requires one exact Azure worker policy")
         if raw["schema"] != AZURE_WORKER_POLICY_SCHEMA or raw["pricing_sha"] != table_sha():
             raise EntrypointInputError("Azure policy schema or admitted pricing table changed")
-        if assignment.model != AZURE_WORKER_MODEL:
-            raise EntrypointInputError("this Azure worker policy requires the verified dated worker model")
+        if assignment.model not in AZURE_MODELS:
+            raise EntrypointInputError("this Azure worker policy requires a verified dated worker model")
+        if "worker_effort" in raw and raw["worker_effort"] not in _EFFORTS:
+            raise EntrypointInputError("Azure worker reasoning effort is not admitted")
         try:
             monitor_budget = _assignment_monitor_budget_usd(assignment)
             # Worker and monitor currently share one served model. They must
@@ -55,7 +56,7 @@ class AzureWorkerPolicy:
             if raw["worker_deployment"] != raw["monitor_deployment"]:
                 raise ValueError("worker and monitor deployment routes disagree")
             route = AzureOpenAIConfig(raw["endpoint"], "policy-validation-only", (
-                AzureDeployment(AZURE_WORKER_MODEL, raw["worker_deployment"]),
+                AzureDeployment(assignment.model, raw["worker_deployment"]),
             ))
             if route.base_url != raw["endpoint"]:
                 raise ValueError("Azure endpoint must use its canonical trailing slash")
@@ -70,7 +71,7 @@ class AzureWorkerPolicy:
                 max_request_bytes=raw["max_request_bytes"], deadline_unix=raw["deadline_unix"],
             )
             monitor = ResponsesBinding(
-                run_id=worker.run_id + ".monitor", model=AZURE_MONITOR_MODEL, role="monitor",
+                run_id=worker.run_id + ".monitor", model=assignment.model, role="monitor",
                 endpoint=route.base_url, deployment=raw["monitor_deployment"], budget_usd=monitor_budget,
                 max_calls=raw["monitor_max_calls"], max_output_tokens=raw["monitor_max_output_tokens"],
                 max_request_bytes=raw["max_request_bytes"], deadline_unix=raw["deadline_unix"],
@@ -80,7 +81,7 @@ class AzureWorkerPolicy:
         except (ValueError, TypeError, ProtocolFailure) as exc:
             # Do not echo arbitrary policy values into launch diagnostics.
             raise EntrypointInputError("Azure routing or spending limits are invalid") from exc
-        return cls(worker, monitor, batch)
+        return cls(worker, monitor, batch, raw.get("worker_effort", "low"))
 
     def validate_launch(self, config: EntrypointConfig) -> None:
         if (config.expected_model != self.worker.model or config.monitor_model != self.monitor.model

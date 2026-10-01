@@ -43,6 +43,12 @@ ASSIGNMENT_PATH = "assignment.json"
 
 WORKER_REPORT_PATH = "worker-report.json"
 
+# The goal's original task, verbatim, placed in the integration branch before
+# any plan exists. Every worker branch inherits it and is shown it whole: an
+# assignment is the coordinator's summary, and a summary of a long developer
+# conversation loses the details the work depends on.
+GOAL_TASK_PATH = "goal-task.md"
+
 
 WORKER_RESULT_SCHEMA = {
     "type": "object",

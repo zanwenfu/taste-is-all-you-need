@@ -15,13 +15,17 @@ from taste.brains.terminal_worker_policy import TERMINAL_POLICY_KEY, TerminalWor
 from taste.brains.worker_admission import EntrypointInputError
 from taste.pricing import max_call_cost_usd, table_sha
 from taste.providers.azure_openai import (
+    AZURE_MODELS,
     AZURE_PLANNER_MODEL,
     AZURE_WORKER_MODEL,
     AzureDeployment,
     AzureOpenAIConfig,
 )
 
+WORKER_EFFORTS = ("low", "medium", "high")
+
 POLICY_KEY = "azure_execution"
+_ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low"}
 
 
 @dataclass(frozen=True)
@@ -41,12 +45,23 @@ class AzureExecutionPolicy:
     monitor_batch_size: int = 8
     pricing_sha: str = ""
     terminal: TerminalWorkerPolicy | None = None
+    # The served model workers and their monitors run on, and how hard workers
+    # reason. Both are part of the trial's disclosed configuration. A worker
+    # on the planner's model uses the planner's deployment: one model, one route.
+    worker_model: str = AZURE_WORKER_MODEL
+    worker_effort: str = "low"
 
     def __post_init__(self):
         if self.terminal is not None and (
                 not isinstance(self.terminal, TerminalWorkerPolicy)
                 or self.terminal.binding.deadline_unix != self.deadline_unix):
             raise ValueError("terminal policy must share the original Azure goal deadline")
+        if self.worker_model not in AZURE_MODELS:
+            raise ValueError("worker model has no verified Azure deployment and price")
+        if (self.worker_model == AZURE_PLANNER_MODEL) != (self.worker_deployment == self.planner_deployment):
+            raise ValueError("one served model must use exactly one deployment")
+        if self.worker_effort not in WORKER_EFFORTS:
+            raise ValueError("worker reasoning effort must be low, medium or high")
         route = self.azure_config({"AZURE_OPENAI_BASE_URL": self.endpoint,
                                    "AZURE_OPENAI_API_KEY": "policy-validation-only"})
         if route.base_url != self.endpoint:
@@ -56,7 +71,7 @@ class AzureExecutionPolicy:
         if type(self.monitor_batch_size) is not int or not 1 <= self.monitor_batch_size <= 1000:
             raise ValueError("monitor batch size must be between 1 and 1000")
         for role in ("worker", "monitor", "planner"):
-            model = AZURE_PLANNER_MODEL if role == "planner" else AZURE_WORKER_MODEL
+            model = AZURE_PLANNER_MODEL if role == "planner" else self.worker_model
             budget = self.worker_budget_usd if role == "planner" else getattr(self, f"{role}_budget_usd")
             tokens = getattr(self, f"{role}_max_output_tokens")
             ResponsesBinding(
@@ -74,6 +89,11 @@ class AzureExecutionPolicy:
     def to_dict(self):
         value = asdict(self)
         value.pop("terminal")
+        # Written only when they differ from the original fixed choices, so
+        # earlier policies keep their exact wire form and digests.
+        for name, original in _ORIGINAL_CHOICES.items():
+            if value[name] == original:
+                value.pop(name)
         if self.terminal is None:
             return {"schema": "taste.brains/AzureExecutionPolicy/1", **value}
         return {"schema": "taste.brains/AzureExecutionPolicy/2", **value,
@@ -81,9 +101,12 @@ class AzureExecutionPolicy:
 
     @classmethod
     def from_dict(cls, value):
-        names = {item.name for item in fields(cls)} - {"terminal"}
         if not isinstance(value, Mapping):
             raise ValueError("invalid Azure execution policy fields or schema")
+        chosen = set(_ORIGINAL_CHOICES) & set(value)
+        if any(value[name] == _ORIGINAL_CHOICES[name] for name in chosen):
+            raise ValueError("invalid Azure execution policy fields or schema")
+        names = ({item.name for item in fields(cls)} - {"terminal"} - set(_ORIGINAL_CHOICES)) | chosen
         if value.get("schema") == "taste.brains/AzureExecutionPolicy/1" and set(value) == {"schema", *names}:
             return cls(**{key: value[key] for key in names})
         if value.get("schema") == "taste.brains/AzureExecutionPolicy/2" and set(value) == {"schema", "terminal", *names}:
@@ -103,7 +126,8 @@ class AzureExecutionPolicy:
     def azure_config(self, environment):
         result = AzureOpenAIConfig.from_environment(environment, deployments=(
             AzureDeployment(AZURE_PLANNER_MODEL, self.planner_deployment),
-            AzureDeployment(AZURE_WORKER_MODEL, self.worker_deployment),
+            *(() if self.worker_model == AZURE_PLANNER_MODEL
+              else (AzureDeployment(self.worker_model, self.worker_deployment),)),
         ))
         if result.base_url != self.endpoint:
             raise ValueError("host Azure endpoint differs from the execution policy")
@@ -118,11 +142,12 @@ class AzureExecutionPolicy:
             "monitor_max_calls": self.monitor_max_calls, "monitor_max_output_tokens": self.monitor_max_output_tokens,
             "max_request_bytes": self.max_request_bytes, "monitor_batch_size": self.monitor_batch_size,
             "pricing_sha": self.pricing_sha,
+            **({} if self.worker_effort == "low" else {"worker_effort": self.worker_effort}),
         }
 
     def configure_prompt(self, payload):
         exemplar = payload["required_output_shape"]["assignments"][0]
-        exemplar["model"] = AZURE_WORKER_MODEL
+        exemplar["model"] = self.worker_model
         exemplar["contract"].update(budget_usd=self.worker_budget_usd, max_turns=self.worker_max_calls)
         exemplar["resources"].update(monitor_budget_usd=self.monitor_budget_usd, azure_openai=self.worker_resources())
         payload["rules"].update(
@@ -135,6 +160,11 @@ class AzureExecutionPolicy:
                 "harness_does_for_it": "checkpoint, certify and deliver the named outputs to integration",
             },
             azure_execution_policy=self.to_dict(),
+            worker_context=(
+                "Every worker is shown the goal's original task, verbatim, before its "
+                "assignment. contract.task should say what that worker must do and check; "
+                "it need not restate the task."
+            ),
         )
         if self.terminal is not None:
             exemplar["resources"][TERMINAL_POLICY_KEY] = self.terminal.to_dict()
@@ -154,6 +184,7 @@ class AzureExecutionPolicy:
             if assignment.resources.get(TERMINAL_POLICY_KEY) != self.terminal.to_dict():
                 raise ValueError("assignment differs from the goal's terminal policy")
         if (assignment.resources.get("azure_openai") != self.worker_resources()
+                or assignment.model != self.worker_model
                 or assignment.resources.get("monitor_budget_usd") != self.monitor_budget_usd
                 or assignment.contract.budget_usd != self.worker_budget_usd
                 or assignment.contract.max_turns != self.worker_max_calls

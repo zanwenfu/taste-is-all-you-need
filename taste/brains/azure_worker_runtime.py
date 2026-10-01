@@ -20,6 +20,7 @@ import time
 from dataclasses import asdict, dataclass
 
 from taste.brains.artifact_tools import ArtifactTools
+from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.contract import CONTRACT_PATH
 from taste.brains.monitor import MonitorBrain
 from taste.brains.records import ArtifactRef, Assignment, WorkerReport
@@ -28,7 +29,12 @@ from taste.brains.responses_feedback import ResponsesFeedback, WorkerClaim
 from taste.brains.responses_session import ResponsesFenced, ResponsesSession
 from taste.brains.terminal_tools import TerminalTools
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
-from taste.brains.worker_protocol import ASSIGNMENT_PATH, WORKER_REPORT_PATH, ContractMismatch
+from taste.brains.worker_protocol import (
+    ASSIGNMENT_PATH,
+    GOAL_TASK_PATH,
+    WORKER_REPORT_PATH,
+    ContractMismatch,
+)
 from taste.memstore import Branch, State
 
 SYSTEM = """You are a worker executing one immutable Taste assignment.
@@ -48,6 +54,14 @@ concrete evidence and all submitted feedback handled. Use blocked when the
 available capabilities cannot complete the task. A tool-free continue response
 will receive a new turn, subject to the same original limits.
 """
+
+
+ORIGINAL_TASK = (
+    "For reference, this is the original task the whole system was given, exactly as the "
+    "developer wrote it. It is context, not your instruction: your own work is the assignment "
+    "that follows, and only that. Where the assignment summarises something, this text is the "
+    "authority on what was actually asked.\n\n"
+)
 
 
 def _json(value):
@@ -120,13 +134,18 @@ class AzureWorkerRuntime:
         if terminal_policy is not None:
             if terminal_client is None or terminal_client.credential.grant != terminal_policy.grant(assignment):
                 raise ContractMismatch("Azure terminal client differs from the admitted assignment")
-            terminal = TerminalTools(terminal_client)
+            terminal = TerminalTools(terminal_client, workdir=terminal_policy.workdir)
             tools.update(terminal.tools())
             system += "\n" + terminal.instructions()
         elif terminal_client is not None:
             raise ContractMismatch("Azure assignment does not admit a terminal client")
-        self.conversation = ResponsesConversation(branch, session, system=system, tools=tools)
+        self.conversation = ResponsesConversation(
+            branch, session, system=system, tools=tools,
+            effort=AzureWorkerPolicy.from_assignment(assignment).effort)
         self.feedback = ResponsesFeedback(self.conversation, assignment)
+        original = self.prepared.read(GOAL_TASK_PATH)
+        if original is not None:
+            self.conversation.observe("goal_task", ORIGINAL_TASK + original)
         self.conversation.observe("assignment", assignment.to_json())
 
     def _pending_inbox(self):

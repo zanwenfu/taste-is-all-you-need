@@ -334,3 +334,34 @@ def test_supervisor_collects_and_delivers_actual_azure_report(worker, sdk_transp
     assert not delivered.conflicts
     assert supervisor.integration.head.read("output.txt") == "correct"
     assert supervisor.integration.head.read(WORKER_REPORT_PATH) is None
+
+
+def test_worker_is_shown_the_original_task_whole_before_its_assignment(worker, sdk_transport):
+    """An assignment is the coordinator's summary; the developer's own words are the authority."""
+    from taste.brains.azure_worker_runtime import ORIGINAL_TASK
+    from taste.brains.worker_protocol import GOAL_TASK_PATH
+
+    original = "Developer: the importer drops rows.\r\n" + "\n".join(f"turn {n}: detail" for n in range(4000))
+    branch = worker.store.branch("worker")
+    branch.write(GOAL_TASK_PATH, original)
+    branch.checkpoint("the goal's original task, as every worker branch inherits it")
+    branch.close()
+    install_assignment(worker, worker.assignment)
+    sent, _calls, _ = install(sdk_transport)
+
+    assert run(worker) == WorkerExitCode.COMPLETED
+    first = json.loads(sent[0].content)
+    inputs = [item["content"] for item in first["input"] if item.get("role") == "user"]
+    assert inputs[0] == ORIGINAL_TASK + original, "the task must reach the model unabridged"
+    assert json.loads(inputs[1])["assignment_id"] == worker.assignment.assignment_id
+    # The worker cannot change it, and it is not one of its products.
+    final = worker.store.view(worker.assignment.worker).head
+    assert final.read(GOAL_TASK_PATH) == original
+    assert report(worker).completed
+
+
+def test_worker_without_a_shared_task_sees_only_its_assignment(worker, sdk_transport):
+    sent, _calls, _ = install(sdk_transport)
+    assert run(worker) == WorkerExitCode.COMPLETED
+    inputs = [item["content"] for item in json.loads(sent[0].content)["input"] if item.get("role") == "user"]
+    assert len(inputs) == 1 and json.loads(inputs[0])["assignment_id"] == worker.assignment.assignment_id

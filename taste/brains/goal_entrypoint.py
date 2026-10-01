@@ -39,6 +39,7 @@ from taste.brains.central_runtime import GoalOutcome, _digest, _goal_root
 from taste.brains.input_limits import MAX_GOAL_INPUT_BYTES
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.python_process import isolated_python_argv
+from taste.brains.worker_protocol import GOAL_TASK_PATH
 from taste.llm import MODEL_MONITOR, MODEL_PLANNER
 from taste.memstore import Store
 from taste.memstore.store import _check_name
@@ -171,12 +172,14 @@ def _closing_host(host):
 def prepare_goal_process(
     repo_root, session, goal, *, max_generations, wall_clock_seconds, deadline_at,
     max_planner_failures=3, planner_model=MODEL_PLANNER, monitor_model=MODEL_MONITOR,
-    planner_max_tokens=8192, host_factory=compose_central_runtime,
+    planner_max_tokens=8192, host_factory=compose_central_runtime, share_task=False,
 ) -> GoalProcessInput:
     """Prepare once before launch; the owner persists the returned exact bytes.
 
     The Python-only factory seam replaces external boundaries in tests. Input
     files cannot name an import, factory, executable, or environment override.
+    With ``share_task`` the goal's task is committed to the integration branch
+    before any plan, so each worker branch carries the original text.
     """
     if not isinstance(goal, Goal) or goal.budget_usd is None or goal.budget_usd <= 0:
         raise GoalInputError("goal processes require a positive finite budget")
@@ -184,6 +187,13 @@ def prepare_goal_process(
         repo_root, session, goal, planner_model=planner_model, monitor_model=monitor_model,
         planner_max_tokens=planner_max_tokens, python_executable=sys.executable,
     )) as host:
+        if share_task:
+            shared = host.integration.head.read(GOAL_TASK_PATH)
+            if shared is None:
+                host.integration.write(GOAL_TASK_PATH, goal.task)
+                host.integration.checkpoint("the goal's original task, for every worker")
+            elif shared != goal.task:
+                raise GoalInputError("integration already carries another goal's task")
         limits = host.prepare_run(max_generations=max_generations, wall_clock_seconds=wall_clock_seconds,
                                   deadline_at=deadline_at, max_planner_failures=max_planner_failures)
         return GoalProcessInput(

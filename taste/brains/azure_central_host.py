@@ -8,7 +8,7 @@ from taste.brains.azure_worker_launch import worker_command_factory
 from taste.brains.central_host import compose_central_runtime
 from taste.brains.supervisor import SubprocessLauncher
 from taste.llm import LLM
-from taste.providers.azure_openai import AZURE_MONITOR_MODEL, AZURE_PLANNER_MODEL
+from taste.providers.azure_openai import AZURE_PLANNER_MODEL
 from taste.providers.base import ProtocolFailure
 
 
@@ -66,7 +66,7 @@ def compose_azure_central_runtime(
         )
     host = compose_central_runtime(
         repo_root, session, bound_goal, store=store, planner_llm=llm, launcher=launcher,
-        planner_model=AZURE_PLANNER_MODEL, monitor_model=AZURE_MONITOR_MODEL,
+        planner_model=AZURE_PLANNER_MODEL, monitor_model=policy.worker_model,
         planner_max_tokens=policy.planner_max_output_tokens, azure_policy=policy,
         owns_planner_sdk=True,
         default_wall_timeout_seconds=default_wall_timeout_seconds,
