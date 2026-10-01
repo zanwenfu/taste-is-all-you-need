@@ -101,7 +101,9 @@ def install(sdk_transport, *, worker_reply=None, monitor_reply=None, hook=None):
         else:
             text = monitor_reply(role, payload) if monitor_reply else verdict(terminal=role == "terminal")
             output = [message(text)]
-        return httpx.Response(200, json=response(model="gpt-6-sol", output=output),
+        # A scripted reply is the response's output, or its whole altered shape.
+        shape = output if isinstance(output, dict) else {"output": output}
+        return httpx.Response(200, json=response(model="gpt-6-sol", **shape),
                               headers={"x-ms-served-model": policy_assignment().model})
     sent, options = sdk_transport(handle)
     return sent, calls, options
@@ -192,6 +194,30 @@ def test_a_worker_told_why_its_claim_was_refused_states_it_again_and_completes(w
     result = report(worker)
     assert result.completed and not result.uncertain and calls["worker"] == 3
     assert len(refusals) == 1 and "were not in your inputs" in str(refusals[0])
+    assert worker.store.state(result.final_state_id).read("output.txt") == "correct"
+
+
+def test_a_worker_whose_reply_was_cut_off_is_told_so_and_carries_on(worker, sdk_transport):
+    told = []
+
+    def write(body):
+        return function_call(json.dumps({"artifact": "output.txt", "body": body, "executable": False}),
+                             name="write_artifact")
+
+    def replies(number, payload):
+        if number == 1:
+            # The output limit fell inside a tool call. It must not run.
+            return {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+                    "output": [message("Writing the whole file"), write("cut short")]}
+        told.extend(item["content"] for item in payload["input"]
+                    if item.get("role") == "user" and "output limit" in str(item["content"]))
+        return [write("correct")] if number == 2 else [message(json.dumps(accepted(payload)))]
+
+    _, calls, _ = install(sdk_transport, worker_reply=replies)
+    assert run(worker) == WorkerExitCode.COMPLETED
+    result = report(worker)
+    assert result.completed and not result.uncertain and calls["worker"] == 3
+    assert told and "no tool call in it ran" in str(told[0])
     assert worker.store.state(result.final_state_id).read("output.txt") == "correct"
 
 

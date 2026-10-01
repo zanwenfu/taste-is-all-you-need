@@ -58,8 +58,10 @@ class TrialSettings:
     lost_workers: int = 2           # killed workers whose full caps the budget can still carry
     worker_max_calls: int = 150
     monitor_max_calls: int = 80
-    worker_max_output_tokens: int = 8192
-    monitor_max_output_tokens: int = 2048
+    # Reasoning counts against these. A worker writes whole files in one
+    # command; a reply that reaches its limit runs nothing and is redone.
+    worker_max_output_tokens: int = 16384
+    monitor_max_output_tokens: int = 4096
     planner_max_output_tokens: int = 16384
     max_request_bytes: int = 1_048_576
     monitor_batch_size: int = 8

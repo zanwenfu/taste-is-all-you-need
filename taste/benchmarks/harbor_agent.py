@@ -171,7 +171,13 @@ class TasteAgent(BaseAgent):
                 self._record(goal.goal_id, instruction, outcome, context, started)
             finally:
                 if self.owner.sealed:
-                    await self.owner.release()
+                    try:
+                        await self.owner.release()
+                    except Exception as failure:
+                        # The record is written and the container is sealed
+                        # and running. A resource this owner could not free
+                        # is no reason to keep the trial from its verifier.
+                        context.metadata["taste"]["release_failed"] = type(failure).__name__
 
     def _record(self, goal_id, instruction, outcome, context, started):
         owner, flags = self.owner, list(self.owner.audit_flags)

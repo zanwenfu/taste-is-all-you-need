@@ -216,6 +216,22 @@ def test_incomplete_response_never_exposes_executable_tool_calls(transport, reas
     assert result.tool_calls == ()
 
 
+def test_a_reply_cut_short_is_kept_as_text_and_never_replayed_as_native_items(transport):
+    # Sent back, a reasoning item whose following call was withheld is refused
+    # by the API, and the conversation that could have continued ends there.
+    reasoning = {"type": "reasoning", "id": "rs_test", "summary": [], "encrypted_content": "opaque"}
+    partial = message("Writing the file in one")
+    partial["status"] = "incomplete"
+    provider, _ = transport(response(status="incomplete", output=[reasoning, partial, function_call()],
+                                    incomplete_details={"reason": "max_output_tokens"}))
+    result = provider.complete(request())
+    assert result.stop_reason == "max_tokens" and result.tool_calls == ()
+    assert result.summary_text == "Writing the file in one"
+    assert list(result.transcript_blocks) == [{"type": "text", "text": "Writing the file in one"}]
+    assert provider._to_input([{"role": "assistant", "content": list(result.transcript_blocks)}]) == [
+        {"role": "assistant", "content": "Writing the file in one"}]
+
+
 def test_refusal_is_not_reported_as_success(transport):
     item = copy.deepcopy(message("unused"))
     item["content"] = [{"type": "refusal", "refusal": "Cannot do this."}]

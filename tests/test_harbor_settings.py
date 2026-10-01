@@ -53,7 +53,8 @@ def test_caps_are_what_a_role_may_spend_plus_one_worst_case_call():
     settings = TrialSettings(spend_cap_usd=10, worker_spend_cap_usd=4, monitor_spend_cap_usd=1,
                              lost_workers=2)
     worker, monitor, goal = settings.budgets()
-    call = max_call_cost_usd(AZURE_PLANNER_MODEL, max_output_tokens=8192, cap_on="billed")
+    call = max_call_cost_usd(AZURE_PLANNER_MODEL, max_output_tokens=settings.worker_max_output_tokens,
+                             cap_on="billed")
     assert worker == pytest.approx(4 + call)
     # A role is admitted another call only while its real spending is under its allowance.
     assert worker - call == pytest.approx(4) and monitor > 1

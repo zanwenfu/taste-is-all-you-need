@@ -25,7 +25,12 @@ from taste.brains.contract import CONTRACT_PATH
 from taste.brains.monitor import MonitorBrain
 from taste.brains.records import ArtifactRef, Assignment, WorkerReport
 from taste.brains.responses_conversation import ResponsesConversation
-from taste.brains.responses_feedback import InvalidWorkerClaim, ResponsesFeedback, WorkerClaim
+from taste.brains.responses_feedback import (
+    InvalidWorkerClaim,
+    ResponsesFeedback,
+    TruncatedWorkerReply,
+    WorkerClaim,
+)
 from taste.brains.responses_session import ResponsesFenced, ResponsesSession
 from taste.brains.terminal_tools import TerminalTools
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
@@ -64,6 +69,13 @@ CLAIM_REFUSED = (
     "Your last reply was not accepted as your claim: {reason}\n"
     "Nothing you did was lost. Reply again with exactly one JSON object, without markdown, "
     "with the fields status, summary, evidence, accepted_inbox_ids and accepted_verdicts."
+)
+# A long file written in one command is the usual cause.
+REPLY_TRUNCATED = (
+    "Your last reply reached the output limit before it ended, so no tool call in it ran "
+    "and nothing was changed by it. Everything before it stands. Continue in smaller steps: "
+    "write a long file in several commands, each appending a part, and keep each reply "
+    "short. If you were stating your final claim, state it more briefly."
 )
 
 
@@ -184,8 +196,10 @@ class AzureWorkerRuntime:
                 if refused > CLAIM_CORRECTIONS:
                     raise
                 request = self.conversation.completed_turn().request_id
-                self.conversation.observe("claim_refused." + request,
-                                          CLAIM_REFUSED.format(reason=reason))
+                self.conversation.observe(
+                    "claim_refused." + request,
+                    REPLY_TRUNCATED if isinstance(reason, TruncatedWorkerReply)
+                    else CLAIM_REFUSED.format(reason=reason))
                 await self.monitor.drain(None)
                 continue
             refused = 0

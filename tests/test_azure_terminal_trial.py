@@ -254,6 +254,42 @@ def test_cancellation_waits_for_goal_scope_then_still_hands_over_for_grading(tri
     run_scenario(trial, scenario())
 
 
+def test_a_cancellation_during_settlement_waits_for_the_record_and_the_seal(trial, monkeypatch):
+    # The goal has finished and its reply exists. Stopping here would throw
+    # both away and stop the container the benchmark is about to grade.
+    entered, release = threading.Event(), threading.Event()
+
+    async def settling(config, mode, **_kwargs):
+        if mode == "settle":
+            entered.set()
+            assert release.wait(5)
+        return GoalOutcome(config.goal.goal_id, "complete", True, 1, 1,
+            budget=BudgetState(config.goal.budget_usd, 1, 0, planner_spent_usd=1))
+    monkeypatch.setattr("taste.brains.azure_goal_handoff._run", settling)
+
+    async def scenario():
+        task = asyncio.create_task(trial.run(api_key="private-test-key"))
+        while not entered.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        try:
+            await asyncio.sleep(0.03)
+            assert not task.done() and not trial.test_stops
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert trial.sealed and not trial.closed and not trial.test_stops
+        assert trial.outcome is not None and trial.outcome.complete
+        assert trial.manager.operations == ["prepare", "run", "settle"]
+        assert trial.audit_flags == ("owner_cancelled",)
+        outcome = json.loads((trial.root / "controller/outcome.json").read_text())
+        assert outcome["outcome"]["complete"] is True
+        await trial.release()
+        assert trial.closed and not trial.test_stops
+    run_scenario(trial, scenario())
+
+
 def test_watchdog_rejects_live_owner_and_recovers_after_owner_lease_is_released(trial):
     with pytest.raises(BlockingIOError):
         cleanup_trial(trial.root, manager=trial.manager)

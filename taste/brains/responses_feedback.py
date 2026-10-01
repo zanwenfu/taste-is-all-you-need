@@ -54,6 +54,10 @@ class InvalidWorkerClaim(ContractMismatch):
     """
 
 
+class TruncatedWorkerReply(InvalidWorkerClaim):
+    """The model's reply reached its output limit before it ended; nothing in it ran."""
+
+
 @dataclass(frozen=True)
 class WorkerClaim:
     status: str
@@ -65,6 +69,8 @@ class WorkerClaim:
 
 def parse_worker_claim(turn: CompletedResponsesTurn) -> WorkerClaim:
     reply = turn.completion
+    if reply.stop_reason == "max_tokens" and not reply.tool_calls:
+        raise TruncatedWorkerReply("it reached the output limit before it ended")
     if reply.stop_reason != "end_turn" or reply.tool_calls:
         raise ContractMismatch("worker claim requires a complete, tool-free model reply")
     text = reply.summary_text

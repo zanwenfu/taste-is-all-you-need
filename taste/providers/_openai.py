@@ -335,6 +335,13 @@ class OpenAIProvider:
                 # model's own context across a tool call.
                 transcript.append({"type": _NATIVE, "item": native})
 
+        if status != "completed":
+            # A reply cut short is kept as the text it reached, not as items
+            # to send back. Its tool calls were already withheld; a reasoning
+            # item whose following item is gone, or half a message, is refused
+            # by the API when replayed, which would end a conversation that
+            # could otherwise be told to continue in smaller steps.
+            transcript = [{"type": "text", "text": text} for text in texts if text]
         if refused:
             stop = "refusal"
             calls.clear()

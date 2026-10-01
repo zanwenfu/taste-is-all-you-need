@@ -48,6 +48,9 @@ _SCHEMA = "taste.benchmarks/AzureTerminalTrial/1"
 _OPERATIONS = ("prepare", "run", "settle")
 # Credential-free settlement: reopening the goal and exporting its evidence.
 SETTLE_SECONDS = 90
+# Preparation is a few seconds of local work. Measured at 7 s alone, it shares
+# its machine with other trials and their image builds.
+PREPARE_SECONDS = 120
 
 
 def _protected(path):
@@ -268,7 +271,7 @@ class AzureTerminalTrial:
         return hashlib.sha256(raw).hexdigest()
 
     def _operation(self, name, input_name, digest, *, credential=None):
-        runtime = SETTLE_SECONDS if name == "settle" else min(30 if name == "prepare" else 604800,
+        runtime = SETTLE_SECONDS if name == "settle" else min(PREPARE_SECONDS if name == "prepare" else 604800,
                                                               max(0.001, self.policy.deadline_unix - time.time()))
         return AzureGoalService.create(self.root / "controller" / name, self.root / input_name,
             digest, self.root / "exchange" / name, operation=name, uid=self.config["service_uid"],
@@ -289,7 +292,8 @@ class AzureTerminalTrial:
         self.started = True
         flags, cancelled = [], None
         try:
-            prepared = await self._operation("prepare", "prepare.json", self.preparation_sha).run(timeout_seconds=40)
+            prepared = await self._operation("prepare", "prepare.json", self.preparation_sha).run(
+                timeout_seconds=PREPARE_SECONDS + 10)
             config = prepared.value
             digest = self._input("goal.json", config.to_bytes())
             self.broker = TerminalBroker.create(self.root / "controller/terminal", self.policy.terminal.binding, self.backend)
@@ -318,7 +322,23 @@ class AzureTerminalTrial:
                 flags.append("goal_service_failed")
             try:
                 trajectory_sha, settled_sha = None, None
-                settled = await self._operation("settle", "goal.json", digest).run(timeout_seconds=SETTLE_SECONDS + 10)
+                # The benchmark's time limit may also arrive here, after the
+                # goal has ended. Stopping now would discard a finished run's
+                # reply and stop its container, so settlement, which is
+                # bounded, runs to its end and the cancellation is reported
+                # once the environment is sealed.
+                settling = asyncio.ensure_future(
+                    self._operation("settle", "goal.json", digest).run(timeout_seconds=SETTLE_SECONDS + 10))
+                while not settling.done():
+                    try:
+                        await asyncio.wait((settling,))
+                    except asyncio.CancelledError as exc:
+                        cancelled = cancelled or exc
+                        task = asyncio.current_task()
+                        while task is not None and task.cancelling():
+                            task.uncancel()
+                        flags.append("owner_cancelled")
+                settled = settling.result()
                 settled_sha = settled.result_sha256
                 if result is not None and result.value != settled.value:
                     flags.append("outcome_changed_in_settlement")
