@@ -15,11 +15,14 @@ from taste.brains.monitor_judge import (
     ASSIGNMENT_PATH,
     JUDGEMENT_SCHEMA,
     TERMINAL_JUDGEMENT_SCHEMA,
+    TRANSCRIPT_VIEW_BYTES,
     LLMMonitorJudge,
     MonitorObservationError,
     MonitorResponseError,
     build_monitor_observation,
     build_terminal_observation,
+    judge_event,
+    judge_transcript,
     parse_monitor_response,
     parse_terminal_response,
 )
@@ -459,3 +462,65 @@ def test_a_non_string_suggestion_is_still_refused() -> None:
     }
     with pytest.raises(MonitorResponseError, match="suggestion"):
         parse_monitor_response(json.dumps(raw))
+
+
+def _responses_turns(commands: int, *, output_chars: int) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = [{"kind": "responses_binding", "binding": {
+        "run_id": "run-1", "model": "worker-model",
+        "request_config": {"system": "S" * 4000, "effort": "low", "tools": [{"name": "terminal_exec"}]}}}]
+    for number in range(commands):
+        call = {"id": f"call-{number}", "name": "terminal_exec",
+                "arguments": {"command": f"run-step-{number}"}}
+        turns += [
+            {"kind": "responses_request", "id": f"response.{number}", "request_sha": "0" * 64},
+            {"kind": "responses_completion", "id": f"response.{number}", "completion": {
+                "text_blocks": [], "tool_calls": [{**call, "raw_arguments": "{}"}], "stop_reason": "tool_use",
+                "model": "worker-model", "provider": "openai", "usage": {}, "provenance": {},
+                "effective_sampling": {},
+                "transcript_blocks": [{"type": "reasoning", "encrypted_content": "Z" * 6000}]}},
+            {"kind": "responses_tool_intent", "effect_id": f"effect-{number}", "call": call},
+            {"kind": "responses_tool_result", "effect_id": f"effect-{number}", "call": call,
+             "result": {"is_error": False,
+                        "content": f"exit 0\nSTART-{number}\n" + "x" * output_chars + f"\nEND-{number}\n"}},
+        ]
+    return turns
+
+
+def test_judge_view_keeps_every_command_and_drops_only_opaque_bulk() -> None:
+    turns = _responses_turns(40, output_chars=20_000)
+    view = judge_transcript(turns)
+    encoded = json.dumps(view)
+    assert isinstance(view, list) and len(view) == len(turns)
+    assert len(encoded) <= TRANSCRIPT_VIEW_BYTES
+    # Each command, the start and the end of its output survive; ciphertext and the
+    # system prompt do not take the room the receipts need.
+    for number in range(40):
+        assert f"run-step-{number}" in encoded and f"START-{number}" in encoded and f"END-{number}" in encoded
+    assert "encrypted_content" not in encoded and "SSSS" not in encoded
+    assert "[cut: " in encoded and "more characters of this text]" in encoded
+    # A short run is shown exactly.
+    short = judge_transcript(_responses_turns(2, output_chars=10))
+    assert short[4]["content"] == "exit 0\nSTART-0\n" + "x" * 10 + "\nEND-0\n"
+
+
+def test_judge_view_leaves_other_harness_turns_untouched() -> None:
+    turn = {"message_type": "AssistantMessage", "content": [{"type": "text", "text": "hello"}]}
+    assert judge_event(turn) is turn
+    assert judge_transcript([turn]) == [turn]
+
+
+def test_terminal_certifier_sees_the_receipts_of_a_responses_worker(store: Store) -> None:
+    """Measured live: raw turns overflowed the allowance and hid every receipt."""
+    brain, item = scaffold(store)
+    assert item is not None
+    for turn in _responses_turns(12, output_chars=9000):
+        brain.branch.turn(**turn)
+    work_state = brain.checkpoint("immutable terminal work")
+    observation = json.loads(build_terminal_observation(brain.contract, work_state, {}, []).payload)
+    transcript = observation["state"]["transcript"]
+    assert isinstance(transcript, list), "the transcript fell back to an opaque prefix and suffix"
+    results = [entry for entry in transcript if entry.get("kind") == "responses_tool_result"]
+    assert len(results) == 12
+    assert all(f"START-{n}" in entry["content"] and f"END-{n}" in entry["content"]
+               for n, entry in enumerate(results))
+    brain.close()
