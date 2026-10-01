@@ -1,9 +1,19 @@
 """Outside owner of one Azure goal and its authoritative terminal container.
 
 The caller admits the container and enforces the owner's lifetime independently.
-After run(), grading uses the still-live, sealed container. close() must finish
-before Harbor removes it. After owner death, cleanup_trial() drains the saved
-scopes and original container without restarting an issuer, goal or paid call.
+After run(), grading uses the still-live, sealed container. An owner that also
+owns the container's removal calls close(), which stops it; under a benchmark
+runner that removes the container itself, release() frees everything else and
+leaves the sealed container to that runner's verifier. After owner death,
+cleanup_trial() drains the saved scopes and original container without
+restarting an issuer, goal or paid call.
+
+The benchmark, not this owner, decides the task's result. Once the goal's
+processes have drained and no command can run, the container is handed over
+for grading whatever our own audit found: incomplete evidence, unsettled
+accounting or a failed settlement are recorded as audit flags beside the
+trajectory, never used to withhold the environment from its verifier. Only an
+environment that can no longer be graded at all ends run() with an error.
 """
 from __future__ import annotations
 
@@ -36,6 +46,8 @@ from taste.brains.terminal_service import TerminalService
 
 _SCHEMA = "taste.benchmarks/AzureTerminalTrial/1"
 _OPERATIONS = ("prepare", "run", "settle")
+# Credential-free settlement: reopening the goal and exporting its evidence.
+SETTLE_SECONDS = 90
 
 
 def _protected(path):
@@ -235,9 +247,10 @@ class AzureTerminalTrial:
             instance.root, instance.fd, instance.config = root, fd, config
             instance.backend, instance.policy, instance.manager = backend, policy, manager
             instance.broker = instance.service = None
-            instance.started = instance.closed = False
+            instance.started = instance.closed = instance.sealed = False
             instance.outcome = None
             instance.trajectory_path = None
+            instance.audit_flags = ()
             instance.preparation_sha = instance._input("prepare.json", raw)
             return instance
         except BaseException:
@@ -255,17 +268,26 @@ class AzureTerminalTrial:
         return hashlib.sha256(raw).hexdigest()
 
     def _operation(self, name, input_name, digest, *, credential=None):
-        runtime = 30 if name == "settle" else min(30 if name == "prepare" else 604800,
-                                                  max(0.001, self.policy.deadline_unix - time.time()))
+        runtime = SETTLE_SECONDS if name == "settle" else min(30 if name == "prepare" else 604800,
+                                                              max(0.001, self.policy.deadline_unix - time.time()))
         return AzureGoalService.create(self.root / "controller" / name, self.root / input_name,
             digest, self.root / "exchange" / name, operation=name, uid=self.config["service_uid"],
             python_executable=self.config["python_executable"], runtime_seconds=runtime,
             grace_seconds=3, credential=credential, manager=self.manager)
 
     async def run(self, *, api_key):
+        """Run the goal once, then hand the sealed environment to its grader.
+
+        Returns the settled outcome, or None when settlement itself failed.
+        ``audit_flags`` then says what our own evidence or accounting lacks.
+        A cancellation that arrives while the goal runs (the benchmark's own
+        time limit) still seals the environment before it is re-raised, so the
+        benchmark grades a timed-out attempt as it would any other agent's.
+        """
         if self.started or self.closed:
             raise GoalInputError("terminal trial was already admitted; recover without replay")
         self.started = True
+        flags, cancelled = [], None
         try:
             prepared = await self._operation("prepare", "prepare.json", self.preparation_sha).run(timeout_seconds=40)
             config = prepared.value
@@ -281,40 +303,90 @@ class AzureTerminalTrial:
             try:
                 result = await runner.run(timeout_seconds=min(604800,
                     max(0.001, self.policy.deadline_unix - time.time()) + 15))
+            except asyncio.CancelledError as exc:
+                # run_async drained the scope before raising. Finish the
+                # handoff with this cancellation set aside, then report it.
+                cancelled = exc
+                task = asyncio.current_task()
+                while task is not None and task.cancelling():
+                    task.uncancel()
+                flags.append("owner_cancelled")
             except Exception:
                 # Never start settlement until original-scope drainage is
                 # proved. A missing launch acknowledgement cannot pass here.
                 await runner.scope.stop_async("settle terminal goal after execution failure")
-            settled = await self._operation("settle", "goal.json", digest).run(timeout_seconds=40)
-            if result is not None and result.value != settled.value:
-                raise GoalInputError("goal result changed during credential-free settlement")
-            self.outcome = settled.value
-            _write(self.fd, "outcome.json", _json_bytes({"input_sha256": digest,
-                "result_sha256": settled.result_sha256, "outcome": self.outcome.to_dict()}))
-            trajectory_sha = None
-            if benchmark_reply.required(config.goal.metadata):
-                from taste.benchmarks.goal_trajectory import MAX_TRAJECTORY_BYTES
-                from taste.brains.azure_goal_handoff import read_trajectory
+                flags.append("goal_service_failed")
+            try:
+                trajectory_sha, settled_sha = None, None
+                settled = await self._operation("settle", "goal.json", digest).run(timeout_seconds=SETTLE_SECONDS + 10)
+                settled_sha = settled.result_sha256
+                if result is not None and result.value != settled.value:
+                    flags.append("outcome_changed_in_settlement")
+                self.outcome = settled.value
+                _write(self.fd, "outcome.json", _json_bytes({"input_sha256": digest,
+                    "result_sha256": settled.result_sha256, "outcome": self.outcome.to_dict()}))
+                if benchmark_reply.required(config.goal.metadata):
+                    from taste.benchmarks.goal_trajectory import MAX_TRAJECTORY_BYTES
+                    from taste.brains.azure_goal_handoff import read_trajectory
 
-                raw, trace, trajectory_sha = read_trajectory(self.root / "exchange/settle", config, self.outcome,
-                                                            service_uid=self.config["service_uid"])
-                _write(self.fd, "trajectory.json", raw, maximum=MAX_TRAJECTORY_BYTES)
-                self.trajectory_path = self.root / "controller/trajectory.json"
-                if trace["extra"].get("evidence_complete") is not True:
-                    raise GoalInputError("terminal goal evidence is incomplete; preserve the diagnostic trajectory")
-            if not grading_ready(self.outcome):
-                raise GoalInputError("terminal goal is not settled within its admitted budget")
+                    raw, trace, trajectory_sha = read_trajectory(self.root / "exchange/settle", config, self.outcome,
+                                                                service_uid=self.config["service_uid"])
+                    _write(self.fd, "trajectory.json", raw, maximum=MAX_TRAJECTORY_BYTES)
+                    self.trajectory_path = self.root / "controller/trajectory.json"
+                    if trace["extra"].get("evidence_complete") is not True:
+                        flags.append("evidence_incomplete")
+                if not grading_ready(self.outcome):
+                    flags.append("accounting_unsettled")
+            except Exception as exc:
+                # Our record of the run is missing or unusable. The task's
+                # state in the container is unaffected and is still graded.
+                flags.append("settlement_failed:" + type(exc).__name__)
+            # Every goal process has drained, so no command can start. A fenced
+            # or stopped environment raises here: it cannot be graded at all.
             self.service.seal_for_grading()
+            self.sealed = True
+            self.audit_flags = tuple(dict.fromkeys(flags))
             _write(self.fd, "grading.json", _json_bytes({"input_sha256": digest,
-                "result_sha256": settled.result_sha256, "binding": asdict(self.broker.binding),
+                "result_sha256": settled_sha, "binding": asdict(self.broker.binding),
+                "audit_flags": list(self.audit_flags),
                 **({"trajectory_sha256": trajectory_sha} if trajectory_sha is not None else {})}))
+            if cancelled is not None:
+                raise cancelled
             return self.outcome
         except BaseException as original:
+            if self.sealed:
+                raise  # The environment is already handed over; never stop it here.
             try:
                 await self.close()
             except BaseException as failure:
                 raise BaseExceptionGroup("terminal goal and cleanup failed", [original, failure]) from None
             raise
+
+    async def release(self):
+        """Free this owner's resources and leave the sealed container to its grader.
+
+        For a benchmark runner that verifies and then removes the container
+        itself. Scopes are confirmed drained, the terminal service stops
+        serving, private launch material is removed and the handoff is
+        recorded. An unsealed trial is closed instead, stopping its container.
+        """
+        if self.closed:
+            return
+        if not self.sealed:
+            return await self.close()
+        receipts = []
+        for path in _scope_paths(self.root):
+            receipts.append(await OwnedProcessScope(path, manager=self.manager).stop_async(
+                "terminal trial handed to its grader"))
+        await self.service.release()
+        _write(self.fd, "handoff.json", _json_bytes({
+            "schema": "taste.benchmarks/TerminalTrialHandoff/1",
+            "container_id": self.backend.environment_id, "container_stopped": False,
+            "scopes": receipts, "audit_flags": list(self.audit_flags)}))
+        _remove_launch_material(self.root)
+        self.broker.close()
+        os.close(self.fd)
+        self.closed = True
 
     async def close(self):
         if self.closed:

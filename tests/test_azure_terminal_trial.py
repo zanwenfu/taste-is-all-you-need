@@ -139,27 +139,90 @@ def test_missing_run_report_uses_separate_settlement_after_original_drain(trial)
     run_scenario(trial, scenario())
 
 
-def test_unknown_cost_is_retained_and_stops_task_before_grading(trial, monkeypatch):
+def test_unsettled_accounting_is_flagged_and_the_task_is_still_graded(trial, monkeypatch):
     async def unknown(config, mode, **_kwargs):
         return GoalOutcome(config.goal.goal_id, "budget_blocked", False, 1, 1,
             budget=BudgetState(config.goal.budget_usd, 0, 0, unknown_planner_attempt_ids=("lost-call",)))
     monkeypatch.setattr("taste.brains.azure_goal_handoff._run", unknown)
-    with pytest.raises(GoalInputError, match="not settled"):
-        asyncio.run(trial.run(api_key="private-test-key"))
-    assert trial.closed and trial.test_stops == [trial.backend.environment_id]
-    assert not (trial.root / "controller/grading.json").exists()
-    saved = json.loads((trial.root / "controller/outcome.json").read_text())
-    assert saved["outcome"]["budget"]["unknown_planner_attempt_ids"] == ["lost-call"]
+
+    async def scenario():
+        outcome = await trial.run(api_key="private-test-key")
+        # Our audit lacks an exact cost. The task's container is unaffected
+        # and its grader still receives it, sealed, with the gap on record.
+        assert not outcome.complete and trial.audit_flags == ("accounting_unsettled",)
+        assert trial.sealed and trial.broker.phase == "sealed" and not trial.test_stops
+        grading = json.loads((trial.root / "controller/grading.json").read_text())
+        assert grading["audit_flags"] == ["accounting_unsettled"]
+        saved = json.loads((trial.root / "controller/outcome.json").read_text())
+        assert saved["outcome"]["budget"]["unknown_planner_attempt_ids"] == ["lost-call"]
+    run_scenario(trial, scenario())
+
+
+@pytest.mark.parametrize("stop_reason", ["planner_failed", "runtime_error"])
+def test_a_goal_that_ended_badly_still_leaves_its_container_for_grading(trial, monkeypatch, stop_reason):
+    async def failed(config, mode, **_kwargs):
+        return GoalOutcome(config.goal.goal_id, stop_reason, False, 1, 3,
+            budget=BudgetState(config.goal.budget_usd, 1, 0, planner_spent_usd=1))
+    monkeypatch.setattr("taste.brains.azure_goal_handoff._run", failed)
+
+    async def scenario():
+        outcome = await trial.run(api_key="private-test-key")
+        assert outcome.stop_reason == stop_reason and trial.sealed and not trial.test_stops
+        assert trial.audit_flags == ("accounting_unsettled",)
+    run_scenario(trial, scenario())
+
+
+def test_failed_settlement_is_flagged_and_does_not_withhold_the_container(trial, monkeypatch):
+    async def work(config, mode, **_kwargs):
+        if mode == "settle":
+            raise RuntimeError("the goal's own record cannot be reopened")
+        return GoalOutcome(config.goal.goal_id, "complete", True, 1, 1,
+            budget=BudgetState(config.goal.budget_usd, 1, 0, planner_spent_usd=1))
+    monkeypatch.setattr("taste.brains.azure_goal_handoff._run", work)
+
+    async def scenario():
+        assert await trial.run(api_key="private-test-key") is None
+        assert len(trial.audit_flags) == 1 and trial.audit_flags[0].startswith("settlement_failed:")
+        assert trial.sealed and trial.broker.phase == "sealed" and not trial.test_stops
+        assert not (trial.root / "controller/outcome.json").exists()
+        assert json.loads((trial.root / "controller/grading.json").read_text())["result_sha256"] is None
+    run_scenario(trial, scenario())
+
+
+def test_release_hands_the_sealed_container_to_its_grader_and_frees_everything_else(trial):
+    async def scenario():
+        await trial.run(api_key="private-test-key")
+        socket = trial.root / "rpc/terminal.sock"
+        assert socket.exists()
+        await trial.release()
+        assert trial.closed and not trial.test_stops, "release must not stop the container"
+        handoff = json.loads((trial.root / "controller/handoff.json").read_text())
+        assert handoff["container_stopped"] is False and len(handoff["scopes"]) == 3
+        assert not (trial.root / "rpc").exists()
+        assert not (trial.root / "controller/run/credentials").exists()
+        assert not (trial.root / "controller/drain.json").exists()
+        await trial.release()  # Idempotent once closed.
+        # The outside watchdog still drains the original container afterwards.
+        record = cleanup_trial(trial.root, manager=trial.manager)
+        assert record["container_stopped"] and trial.test_stops == [trial.backend.environment_id]
+    run_scenario(trial, scenario())
+
+
+def test_release_of_an_unsealed_trial_stops_its_container(trial):
+    async def scenario():
+        await trial.release()
+        assert trial.closed and trial.test_stops == [trial.backend.environment_id]
+    run_scenario(trial, scenario())
 
 
 @pytest.mark.parametrize("whole_loop", [False, True])
-def test_cancellation_waits_for_goal_scope_and_then_stops_terminal(trial, monkeypatch, whole_loop):
+def test_cancellation_waits_for_goal_scope_then_still_hands_over_for_grading(trial, monkeypatch, whole_loop):
     entered, release = threading.Event(), threading.Event()
 
     async def blocked(config, mode, **_kwargs):
         entered.set()
         assert release.wait(5)
-        return GoalOutcome(config.goal.goal_id, "complete", True, 1, 1,
+        return GoalOutcome(config.goal.goal_id, "wall_clock", False, 1, 1,
             budget=BudgetState(config.goal.budget_usd, 0, 0))
     monkeypatch.setattr("taste.brains.azure_goal_handoff._run", blocked)
 
@@ -176,12 +239,18 @@ def test_cancellation_waits_for_goal_scope_and_then_stops_terminal(trial, monkey
             assert not task.done() and not trial.test_stops
         finally:
             release.set()
+        # The benchmark's own time limit cancelled the agent. It is reported
+        # as that cancellation, after the environment was sealed for grading.
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert trial.closed and not trial.manager.populated
-        assert trial.manager.operations == ["prepare", "run"]
-        assert trial.test_stops == [trial.backend.environment_id]
-        assert not (trial.root / "controller/grading.json").exists()
+        assert trial.sealed and not trial.closed and not trial.manager.populated
+        assert trial.manager.operations == ["prepare", "run", "settle"]
+        assert trial.broker.phase == "sealed" and not trial.test_stops
+        assert trial.audit_flags == ("owner_cancelled",)
+        grading = json.loads((trial.root / "controller/grading.json").read_text())
+        assert grading["audit_flags"] == ["owner_cancelled"]
+        await trial.release()
+        assert trial.closed and not trial.test_stops
     run_scenario(trial, scenario())
 
 
