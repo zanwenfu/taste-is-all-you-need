@@ -161,13 +161,14 @@ def test_duplicate_or_unverified_deployment_bindings_are_rejected():
     assert "azure-test-only" not in repr(config())
 
 
-@pytest.mark.parametrize("failure", ["lost_reply", "429", "bad_usage", "wrong_snapshot", "missing_snapshot", "redirect"])
+@pytest.mark.parametrize("failure", ["lost_reply", "500", "bad_usage", "wrong_snapshot", "missing_snapshot", "redirect"])
 def test_failed_dispatch_retains_budget_and_fences_all_further_calls(sdk_transport, failure):
     def handler(wire):
         if failure == "lost_reply":
             raise httpx.ReadError("reply lost", request=wire)
-        if failure == "429":
-            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+        if failure == "500":
+            # A server error may follow a reply that was produced and charged.
+            return httpx.Response(500, json={"error": {"message": "server error"}})
         if failure == "redirect":
             return httpx.Response(307, headers={"location": "https://api.openai.com/v1/responses"})
         if failure == "bad_usage":
@@ -187,6 +188,58 @@ def test_failed_dispatch_retains_budget_and_fences_all_further_calls(sdk_transpo
     with pytest.raises(ProtocolFailure, match="unsettled"):
         invoke(llm)
     assert len(sent) == 1
+
+
+def refused(seconds="0"):
+    return httpx.Response(429, json={"error": {"code": "rate_limit_exceeded", "message": "rate limited"}},
+                          headers={"retry-after": seconds})
+
+
+def test_a_rate_limit_refusal_is_waited_out_and_the_same_request_sent_again(sdk_transport, monkeypatch):
+    # The service declined to run the request: nothing was produced, nothing
+    # billed. Treated as a lost paid reply it ended a worker's whole run.
+    waits = []
+    monkeypatch.setattr("taste.providers._openai.time.sleep", waits.append)
+    refusals = iter([refused("7"), refused("not-a-number")])
+
+    def handler(wire):
+        return next(refusals, None) or success(wire)
+
+    sent, _ = sdk_transport(handler)
+    cap = max_call_cost_usd(AZURE_WORKER_MODEL, max_output_tokens=128)
+    llm = LLM(azure_openai=config(), budget_usd=10 * cap, cap_on="billed")
+    completion = llm.call(model=AZURE_WORKER_MODEL, system="Be precise.", messages=[], max_tokens=128,
+                          effort="low", timeout_seconds=600)
+    assert completion.provenance["served_model"] == AZURE_WORKER_MODEL
+    # What the service asked for, then a bounded default when it did not say.
+    assert waits == [7.0, 4.0] and len(sent) == 3
+    assert len({wire.content for wire in sent}) == 1, "the request sent again is the same request"
+    # One call was made and paid for; its reservation was released on settlement.
+    assert llm.stats.totals.calls == 1 and llm._reserved_usd == 0
+    assert invoke(llm).provenance["served_model"] == AZURE_WORKER_MODEL
+
+
+def test_a_refusal_that_outlasts_the_bounded_waits_fails_as_before(sdk_transport, monkeypatch):
+    monkeypatch.setattr("taste.providers._openai.time.sleep", lambda _seconds: None)
+    sent, _ = sdk_transport(lambda _wire: refused("1"))
+    cap = max_call_cost_usd(AZURE_WORKER_MODEL, max_output_tokens=128)
+    llm = LLM(azure_openai=config(), budget_usd=cap, cap_on="billed")
+    with pytest.raises(InfraFailure):
+        llm.call(model=AZURE_WORKER_MODEL, system="Be precise.", messages=[], max_tokens=128,
+                 effort="low", timeout_seconds=600)
+    assert len(sent) == 6 and llm.stats.totals.calls == 0
+    with pytest.raises(ProtocolFailure, match="unsettled"):
+        invoke(llm)
+
+
+def test_a_refusal_is_not_waited_out_past_the_calls_own_deadline(sdk_transport, monkeypatch):
+    waits = []
+    monkeypatch.setattr("taste.providers._openai.time.sleep", waits.append)
+    sent, _ = sdk_transport(lambda _wire: refused("30"))
+    llm = LLM(azure_openai=config())
+    with pytest.raises(InfraFailure):
+        invoke(llm)  # two seconds allowed; the service asks for thirty
+    assert len(sent) == 1 and waits == []
 
 
 def test_separate_llms_do_not_reuse_other_azure_credentials(sdk_transport):

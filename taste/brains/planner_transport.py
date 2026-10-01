@@ -696,9 +696,12 @@ class LLMPlannerTransport:
         max_tokens: int = 8192,
         max_prompt_bytes: int = 192 * 1024,
         deadline_unix: float | None = None,
+        effort: str | None = None,
     ) -> None:
         if not isinstance(store, Store):
             raise TypeError("planner transport store must be a Store")
+        if effort is not None and (not isinstance(effort, str) or not effort):
+            raise ValueError("planner reasoning effort must be a nonempty string or None")
         if not isinstance(control, Branch) or control.store is not store:
             raise ValueError("planner transport control must be the exact writable Store branch")
         if not isinstance(journal, Branch) or journal.store is not store or journal is control:
@@ -728,6 +731,10 @@ class LLMPlannerTransport:
         self.max_tokens = max_tokens
         self.max_prompt_bytes = max_prompt_bytes
         self.deadline_unix = deadline_unix
+        # None leaves the provider's default, which for the current models is
+        # close to no reasoning at all: measured, 72 reasoning tokens in the
+        # four planner calls of one real trial.
+        self.effort = effort
         self.journal_branch = journal.name
         self._ensure_ready = ensure_ready
         self._bound_remaining_usd: float | None = None
@@ -829,6 +836,10 @@ class LLMPlannerTransport:
             config["azure_route"] = route
         if self.deadline_unix is not None:
             config["deadline_unix"] = self.deadline_unix
+        if self.effort is not None:
+            # Like the route: written only when chosen, so receipts made
+            # without it keep their identity.
+            config["effort"] = self.effort
         return config
 
     def _binding(self, *, system: str, prompt: str) -> dict[str, Any]:
@@ -1316,6 +1327,7 @@ class LLMPlannerTransport:
                     max_tokens=self.max_tokens,
                     temperature=0.0,
                     role="planner",
+                    **({} if self.effort is None else {"effort": self.effort}),
                     **call_options,
                 )
             except Exception as exc:

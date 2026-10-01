@@ -54,6 +54,24 @@ def test_reopened_planner_cannot_replay_paid_receipt_under_another_route(tmp_pat
         assert evidence(altered, "azure-attempt") == original_receipt
 
 
+def test_a_chosen_reasoning_effort_is_sent_and_bound_into_the_receipt(tmp_path, sdk_transport):
+    sent, _ = sdk_transport(success)
+    root = tmp_path / "repo"
+    with closing(Store.open(root, "azure-planner")) as store:
+        # Unchosen, the request names no effort: the provider's default applies.
+        call(planner(store), "default-effort")
+        assert "reasoning" not in json.loads(sent[0].content)
+        reasoning = planner(store, effort="medium")
+        call(reasoning, "chosen-effort")
+        assert json.loads(sent[1].content)["reasoning"] == {"effort": "medium"}
+    with closing(Store.open(root, "azure-planner")) as store:
+        # A receipt made at one effort is not replayed as if made at another.
+        with pytest.raises(PlannerReceiptError, match="call config"):
+            call(planner(store, effort="high"), "chosen-effort")
+        assert call(planner(store, effort="medium"), "chosen-effort").telemetry.cost_known
+        assert len(sent) == 2
+
+
 def test_rotated_azure_key_replays_old_receipt_and_only_new_request_uses_new_key(tmp_path, sdk_transport):
     sent, _ = sdk_transport(success)
     root = tmp_path / "repo"

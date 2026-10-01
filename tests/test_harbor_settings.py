@@ -34,6 +34,11 @@ def test_one_named_model_runs_every_role_through_one_deployment():
     assert policy.max_assignments == 1 and policy.worker_grace_seconds == 45.0
     assert policy.terminal.workdir == "/Users/alex/workspace/cli"
     assert policy.terminal.max_timeout_seconds == 600 and policy.max_request_bytes == 1_048_576
+    # The coordinator reasons unless a trial says otherwise, and the run says which.
+    assert policy.planner_effort == "medium" and settings.disclosure()["coordinator_effort"] == "medium"
+    default = policy_for(TrialSettings.from_options({"planner_effort": ""}))
+    assert default.planner_effort == "" and "planner_effort" not in default.to_dict()
+    assert TrialSettings(planner_effort="").disclosure()["coordinator_effort"] == "provider default"
 
 
 def test_a_cheaper_worker_model_keeps_its_own_route():
@@ -92,6 +97,7 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
     ({"spend_cap_usd": "0"}, "must be positive"),
     ({"handoff_seconds": "nan"}, "must be positive"),
     ({"max_generations": "many"}, "wrong type"),
+    ({"planner_effort": "extreme"}, "planner reasoning effort"),
     ({"workers": 3}, "unknown trial setting"),
 ])
 def test_settings_are_admitted_not_guessed(options, match):

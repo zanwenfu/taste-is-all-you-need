@@ -28,7 +28,9 @@ because the facade reserved a budget for precisely that ceiling.
 from __future__ import annotations
 
 import json
+import math
 import os
+import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import replace
@@ -45,6 +47,11 @@ from taste.providers.base import (
 )
 
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+
+# On the Azure route: how many times one call is sent again after the service
+# refused it for its rate limit, and the longest single wait.
+_THROTTLE_RESENDS = 5
+_THROTTLE_WAIT_SECONDS = 60.0
 
 # Blocks carrying provider-native items through the canonical transcript.
 _NATIVE = "_openai_item"
@@ -66,6 +73,8 @@ class OpenAIProvider:
         self._azure = azure
         self._api_key = azure.api_key if azure is not None else api_key or os.environ.get("OPENAI_API_KEY")
         self._client: Any = None
+        # Rate-limit refusals this provider waited out (see _create).
+        self.throttled = 0
 
     def ensure_ready(self) -> None:
         if not self._api_key:
@@ -132,7 +141,7 @@ class OpenAIProvider:
         # that never applied, so the drop is recorded instead.
         dropped = ["temperature"] if request.sampling.temperature is not None else []
 
-        raw = client.responses.with_raw_response.create(**kwargs)
+        raw = self._create(client, kwargs, request.timeout_seconds)
         # Validate counters before the SDK's permissive model construction:
         # it can coerce strings/bools into integer counters, concealing an
         # incompatible wire schema from the accounting boundary.
@@ -153,6 +162,38 @@ class OpenAIProvider:
                 "region": raw.headers.get("x-ms-region", ""),
             })
         return completion
+
+    def _create(self, client: Any, kwargs: dict[str, Any], timeout_seconds: float | None) -> Any:
+        """Send one request; on the Azure route, wait out a rate-limit refusal.
+
+        A 429 is the service declining to process the request. Nothing ran, so
+        nothing was billed, and sending the same request again cannot pay
+        twice. Every other failure may hide a reply that was produced and
+        charged; those stay with the caller's explicit settlement and are
+        never sent again here.
+
+        Without this, one refusal ended a worker's whole run at unknown cost.
+        The waits are bounded in number and length and by the call's own
+        deadline; a refusal that outlasts them is raised as before.
+        """
+        if self._azure is None:
+            return client.responses.with_raw_response.create(**kwargs)
+        import openai
+
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        for resend in range(_THROTTLE_RESENDS + 1):
+            if deadline is not None:
+                kwargs["timeout"] = max(0.001, deadline - time.monotonic())
+            try:
+                return client.responses.with_raw_response.create(**kwargs)
+            except openai.RateLimitError as refusal:
+                pause = _throttle_wait(refusal, resend)
+                if resend == _THROTTLE_RESENDS or (
+                        deadline is not None and time.monotonic() + pause >= deadline):
+                    raise
+                self.throttled += 1
+                time.sleep(pause)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def is_retryable(self, exc: Exception) -> bool:
         if self._azure is not None:
@@ -337,6 +378,23 @@ class OpenAIProvider:
             raw={"input_tokens": total_prompt, "cached_tokens": cached,
                  "cache_write_tokens": written},
         )
+
+
+def _throttle_wait(refusal: Any, resend: int) -> float:
+    """Seconds to wait after a rate-limit refusal: what the service asked, within bounds."""
+    headers = getattr(getattr(refusal, "response", None), "headers", None) or {}
+    asked = None
+    for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        try:
+            asked = float(headers.get(name)) * scale
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(asked):
+            break
+        asked = None
+    if asked is None:
+        asked = 2.0 ** (resend + 1)
+    return min(max(asked, 0.25), _THROTTLE_WAIT_SECONDS)
 
 
 def _instructions(system: list[dict[str, Any]]) -> str:

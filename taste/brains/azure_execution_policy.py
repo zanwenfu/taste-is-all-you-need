@@ -26,7 +26,8 @@ WORKER_EFFORTS = ("low", "medium", "high")
 
 POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
-                     "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None}
+                     "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
+                     "planner_effort": ""}
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,9 @@ class AzureExecutionPolicy:
     worker_wall_seconds: float = 900.0
     # The most assignments one plan may hold; None leaves it to the planner.
     max_assignments: int | None = None
+    # How hard the coordinator reasons. Empty leaves the provider's default,
+    # which for these models is close to none.
+    planner_effort: str = ""
 
     def __post_init__(self):
         if self.terminal is not None and (
@@ -71,6 +75,8 @@ class AzureExecutionPolicy:
             raise ValueError("one served model must use exactly one deployment")
         if self.worker_effort not in WORKER_EFFORTS:
             raise ValueError("worker reasoning effort must be low, medium or high")
+        if self.planner_effort not in ("", *WORKER_EFFORTS):
+            raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
         for name, ceiling in (("worker_grace_seconds", 600), ("worker_wall_seconds", 604800)):
             value = getattr(self, name)
             if type(value) not in (int, float) or not 0 < value <= ceiling:

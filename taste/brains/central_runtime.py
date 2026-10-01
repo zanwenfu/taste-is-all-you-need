@@ -84,6 +84,10 @@ _TERMINAL_CURRENT_PHASES = frozenset({"terminal", "report_accepted", "delivered"
 # cancelled or crashed run does not: its owner has withdrawn the time for one.
 _CLOSING_STOPS = frozenset({"wall_clock", "generation_bound", "budget_blocked", "planner_failed"})
 _CLOSING_MINIMUM_SECONDS = 5.0
+# Between cycles that changed nothing: how often the live workers are looked
+# at, and the longest the coordinator goes without a full durable cycle.
+IDLE_POLL_SECONDS = 0.25
+IDLE_HEARTBEAT_SECONDS = 30.0
 
 
 class CoordinatorError(RuntimeError):
@@ -556,6 +560,10 @@ class CentralRuntime:
         self.control_lock = control_lock
         self.default_wall_timeout_seconds = float(default_wall_timeout_seconds)
         self.communication = communication
+        # While its workers work and nothing changes, run() watches them this
+        # often and makes a durable cycle only this often. See _await_change.
+        self.idle_poll_seconds = IDLE_POLL_SECONDS
+        self.idle_heartbeat_seconds = IDLE_HEARTBEAT_SECONDS
         self.clock = clock
         self.fault_injector = fault_injector
         self._lock = threading.RLock()
@@ -1984,6 +1992,34 @@ class CentralRuntime:
             limits, _ = self._bind_run_limits(expected, deadline_at=deadline_at)
             return dict(limits)
 
+    def _await_change(self, runs: Sequence[SupervisorRun], limit: float) -> None:
+        """After a cycle that changed nothing, wait for something a cycle could act on.
+
+        A cycle is durable: it records its intent, its decisions and its
+        result. Run back to back while a worker was simply working, cycles
+        were the coordinator's main cost. Measured on a real nine-minute
+        trial: 184 cycles, 852 control commits and seven CPU-minutes, each
+        cycle slower than the one before because the history it audits had
+        grown.
+
+        What a cycle can newly find while its workers work is a process that
+        ended or announced readiness, a deadline, or a stop request. Those
+        are watched here without recording anything. Whatever else may have
+        arrived, such as a message in the coordinator's inbox, is found at
+        the next heartbeat.
+        """
+        waited, pause = 0.0, self.supervisor.poll_interval
+        heartbeat = min(self.idle_heartbeat_seconds, limit)
+        while waited < heartbeat:
+            if self._stop_signal.is_set() or self._remaining_wall() <= 0:
+                return
+            if not self.supervisor.quiet(runs, deadline_at=self._deadline_at):
+                return
+            step = min(pause, heartbeat - waited)
+            time.sleep(step)
+            waited += step
+            pause = min(pause * 2, max(self.idle_poll_seconds, self.supervisor.poll_interval))
+
     def run(
         self,
         *,
@@ -2041,6 +2077,7 @@ class CentralRuntime:
                 return self._finish_run("cancelled", self._requested_stop_detail or "")
 
         started = clock()
+        unchanged = None
         _, deadline = self._bind_run_limits(expected)
         # Work, including every worker's own allowance, ends this long before
         # the trial's deadline. The reserve is spent on the closing reply.
@@ -2107,9 +2144,15 @@ class CentralRuntime:
                     break
                 if between_cycles is not None:
                     between_cycles()
+                    continue
+                left = max(0.0, wall_clock_seconds - (clock() - started))
+                seen = (outcome.plan.plan_id, outcome.status,
+                        tuple((run.run_id, run.sequence) for run in outcome.runs))
+                if seen == unchanged:
+                    self._await_change(outcome.runs, left)
                 else:
-                    time.sleep(min(self.supervisor.poll_interval,
-                                   max(0.0, wall_clock_seconds - (clock() - started))))
+                    time.sleep(min(self.supervisor.poll_interval, left))
+                unchanged = seen
         except _StopRequested as exc:
             stop_reason, detail = "cancelled", str(exc)
         except _WallDeadlineReached as exc:

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1344,6 +1346,83 @@ def test_run_stops_at_the_generation_bound_without_claiming_completion(store: St
     assert outcome.stop_reason == "generation_bound"
     assert not outcome.complete
     assert outcome.generations == 3
+
+
+class WorkingHandle(FakeHandle):
+    """A worker that works for a while, then reports and exits on its own."""
+
+    def __init__(self, pid: int, seconds: float, finish: Callable[[], None]) -> None:
+        super().__init__(pid)
+        self.until = time.monotonic() + seconds
+        self.finish = finish
+
+    def poll(self) -> ProcessExit | None:
+        if self.exit is None and time.monotonic() >= self.until:
+            self.finish()
+            self.exit = ProcessExit(exit_code=0, reaped=True)
+        return self.exit
+
+
+def test_a_working_worker_costs_no_cycles_and_its_exit_is_noticed_at_once(store: Store) -> None:
+    # Measured on a real trial: 184 durable cycles and 852 control commits in
+    # nine minutes, nearly all of them made while a worker was simply working.
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            return (assignment_for(request, "build", "worker-build", "product.txt"),)
+        return complete_response(request, prompt)
+
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(), ScriptedTransport(respond), launcher)
+    worked = 1.5
+
+    def launch(spec):
+        launcher.launch_calls.append(spec.run_id)
+        return launcher.handles.setdefault(spec.run_id, WorkingHandle(
+            7000, worked, lambda: install_report(runtime, "build")))
+
+    launcher.launch = launch
+    cycles: list[str] = []
+    cycle = runtime.cycle
+
+    def counted(**kwargs):
+        outcome = cycle(**kwargs)
+        cycles.append(outcome.status)
+        return outcome
+
+    runtime.cycle = counted
+    began = time.monotonic()
+    outcome = runtime.run(max_generations=5, wall_clock_seconds=60.0)
+    elapsed = time.monotonic() - began
+    assert outcome.stop_reason == "complete" and outcome.complete
+    # Plan, spawn, readiness, one cycle that finds nothing new, then the exit
+    # and the replan. Polled every 50 ms it was one cycle after another.
+    assert len(cycles) <= 9, cycles
+    # The exit ends the wait: it is not left for the heartbeat to find.
+    assert worked <= elapsed < worked + 10 < runtime.idle_heartbeat_seconds
+
+
+def test_quiet_says_whether_a_reconcile_could_record_anything_new(store: Store) -> None:
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(), ScriptedTransport(one_assignment_response_runtime), launcher)
+    supervisor = runtime.supervisor
+    assert runtime.cycle().status == "planned"
+    assert not supervisor.quiet(supervisor.runs()), "a planned run has not been started"
+    for _ in range(4):
+        runs = runtime.cycle().runs
+        if supervisor.quiet(runs):
+            break
+    assert supervisor.quiet(runs) and runs[0].phase == "ready"
+    # A deadline the run has not been shortened to is something to record.
+    assert not supervisor.quiet(runs, deadline_at=datetime.now(UTC) + timedelta(seconds=1))
+    assert not supervisor.quiet(()), "nothing live is nothing to wait for"
+    handle = launcher.handles[runs[0].run_id]
+    handle.exit = ProcessExit(exit_code=0, reaped=True)
+    assert not supervisor.quiet(runs), "a process that ended must be recorded"
+    handle.exit = None
+    # A stale view, of a run this supervisor holds no process for, is never quiet.
+    assert supervisor.quiet(runs)
+    supervisor._handles.clear()
+    assert not supervisor.quiet(runs)
 
 
 def test_run_stops_on_the_wall_clock(store: Store) -> None:

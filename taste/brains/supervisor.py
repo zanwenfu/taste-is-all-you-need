@@ -2763,6 +2763,39 @@ class CentralSupervisor:
                 return self._terminalize(run, handle, ProcessExit(), reason="wall_timeout")
             return run
 
+    def quiet(
+        self, runs: Sequence[SupervisorRun], *, deadline_at: datetime | None = None,
+    ) -> bool:
+        """Whether polling these runs now would find nothing new to record.
+
+        True only when at least one run is live and every live run is a
+        started process that is still running, whose readiness is either
+        recorded already or not yet announced, and which is inside its
+        deadline. It reads no durable state and records none: a driver asks
+        it to decide whether another reconcile is worth making. ``runs`` is
+        the view a reconcile just returned. Anything unexpected answers
+        False, which costs the caller one ordinary reconcile.
+        """
+        now, live = self.clock(), 0
+        with self._lock:
+            for run in runs:
+                if run.terminal:
+                    continue
+                handle = self._handles.get(run.run_id)
+                if (run.phase not in {"spawned", "ready"} or run.stop_reason is not None
+                        or handle is None or run.deadline_at is None):
+                    return False
+                try:
+                    deadline = _parse_time(run.deadline_at)
+                    if now >= deadline or (deadline_at is not None and deadline > deadline_at):
+                        return False
+                    if handle.poll() is not None or (run.ready_at is None and handle.ready()):
+                        return False
+                except Exception:
+                    return False
+                live += 1
+        return live > 0
+
     def wait(self, run_id: str, *, active_generation: int) -> SupervisorRun:
         """Wait through the persisted hard wall deadline."""
         while True:

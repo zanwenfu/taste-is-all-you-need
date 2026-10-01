@@ -20,7 +20,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 
 from taste.brains import benchmark_reply
-from taste.brains.azure_execution_policy import AzureExecutionPolicy
+from taste.brains.azure_execution_policy import WORKER_EFFORTS, AzureExecutionPolicy
 from taste.brains.central_planner import Goal
 from taste.brains.terminal_broker import TerminalBinding
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
@@ -49,6 +49,9 @@ class TrialSettings:
     deployment: str = ""            # empty: the deployment is named after its model
     worker_deployment: str = ""
     worker_effort: str = "low"
+    # The coordinator writes every contract and the final reply, in a few
+    # calls a trial. Left at the provider's default it does not reason at all.
+    planner_effort: str = "medium"
     spend_cap_usd: float = 15.0
     worker_spend_cap_usd: float = 6.0
     monitor_spend_cap_usd: float = 2.0
@@ -66,7 +69,9 @@ class TrialSettings:
     max_commands: int = 600
     command_seconds: float = 600.0
     worker_grace_seconds: float = 45.0
-    reply_reserve_seconds: float = 150.0
+    # Held back for the closing reply: a stopped worker's grace, then one
+    # reasoning planner call (measured at 40 to 60 seconds without reasoning).
+    reply_reserve_seconds: float = 210.0
     handoff_seconds: float = 150.0
 
     @classmethod
@@ -98,6 +103,11 @@ class TrialSettings:
                 raise ValueError(f"{name} must be positive and finite")
         if self.lost_workers < 0 or self.max_assignments < 1:
             raise ValueError("lost_workers and max_assignments must be nonnegative and positive")
+        # Refused when the agent is built, not when the first plan is made.
+        if self.worker_effort not in WORKER_EFFORTS:
+            raise ValueError("worker reasoning effort must be low, medium or high")
+        if self.planner_effort not in ("", *WORKER_EFFORTS):
+            raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
 
     @property
     def models(self):
@@ -148,6 +158,7 @@ class TrialSettings:
             pricing_sha=table_sha(),
             terminal=TerminalWorkerPolicy(binding, self.command_seconds, workdir),
             worker_model=worker, worker_effort=self.worker_effort,
+            planner_effort=self.planner_effort,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
             worker_wall_seconds=604800.0, max_assignments=self.max_assignments,
@@ -165,6 +176,8 @@ class TrialSettings:
         worker_cap, monitor_cap, goal = self.budgets()
         return {"coordinator_model": served, "worker_model": worker_served,
                 "monitor_model": worker_served, "worker_effort": self.worker_effort,
+                "coordinator_effort": self.planner_effort or "provider default",
+                "monitor_effort": "low",
                 "spend_cap_usd": self.spend_cap_usd, "admission_budgets_usd": {
                     "worker": worker_cap, "monitor": monitor_cap, "goal": goal},
                 "max_assignments_per_plan": self.max_assignments,
