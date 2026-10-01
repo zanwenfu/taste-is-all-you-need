@@ -71,6 +71,10 @@ def _trajectory(identifier, name, steps, **extra):
 
 def _planner(host, plan, gaps):
     steps, final, costs = [], [], []
+    # A reply exists in a complete plan, or in the closing plan of a run that
+    # stopped short: the coordinator's account of unfinished work.
+    closing = plan is not None and benchmark_reply.is_closing(plan.metadata.get("operation_id"))
+    replying = plan is not None and (plan.complete or closing)
     audits = host.planner.planner_attempts(host.goal.goal_id)
     receipts = {item.request_id: item for item in host.planner._paired_transport_evidences()}
     _step(steps, "system", PLANNER_SYSTEM)
@@ -112,15 +116,15 @@ def _planner(host, plan, gaps):
             value["model_name"] = telemetry.model
         if telemetry.usage is not None:
             value["metrics"] = _metrics(telemetry.usage.to_dict(), telemetry.billed_usd)
-        if (plan is not None and plan.complete and audit.status == "accepted"
-                and audit.request_id == plan.metadata["request_id"]):
+        if replying and audit.status == "accepted" and audit.request_id == plan.metadata["request_id"]:
             proposal = _load_json(response, "final planner response")
             if (_digest(_canonical(proposal)) != plan.metadata["proposal_digest"]
                     or proposal["metadata"] != plan.to_dict()["metadata"]["proposal"]):
                 raise GoalInputError("final reply is not bound to its accepted model proposal")
-            final.append((benchmark_reply.validate(proposal["metadata"], complete=True), audit))
-    if plan is not None and plan.complete and len(final) != 1:
-        raise GoalInputError("complete benchmark goal has no unique accepted model reply")
+            final.append((benchmark_reply.validate(proposal["metadata"], complete=plan.complete,
+                                                   closing=closing), audit))
+    if replying and len(final) != 1:
+        raise GoalInputError("benchmark goal has no unique accepted model reply")
     return _trajectory(host.goal.goal_id + ".planner", "taste-coordinator", steps), final, math.fsum(costs)
 
 
@@ -253,7 +257,8 @@ def goal_trajectory(host, config, outcome):
                "phase": r.phase, "terminal_reason": r.terminal_reason,
                "recovery_status": r.recovery_status} for r in runs],
         evidence_complete=not gaps, complete_attempt=not gaps, gaps=sorted(set(gaps)),
-        final_reply_present=bool(final), goal_complete=outcome.complete)
+        final_reply_present=bool(final), goal_complete=outcome.complete,
+        closing_reply=bool(final) and not outcome.complete)
     if final:
         reply, audit = final[0]
         result["steps"].append({"step_id": 2, "source": "agent", "message": reply,

@@ -11,6 +11,7 @@ import pytest
 
 from taste.brains.central_planner import (
     PLANNER_ROOT,
+    PLANNER_SYSTEM,
     CentralPlanner,
     Goal,
     InvalidPlannerOutput,
@@ -2031,3 +2032,67 @@ def test_the_planner_is_told_what_a_worker_cannot_do(store: Store, goal: Goal) -
     assert "integration" in capabilities, (
         "the planner is not told who moves work to the integration branch"
     )
+
+
+def _with_assignment_field(prompt: str, **extra: Any) -> str:
+    request = request_from_prompt(prompt)
+    raw = json.loads(proposal(prompt, assignment_for(request)))
+    raw["assignments"][0].update(extra)
+    return json.dumps(raw, sort_keys=True)
+
+
+def test_worker_key_restating_the_identity_is_tolerated(store: Store, goal: Goal) -> None:
+    """Measured live: a second model family added it to three of five proposals."""
+    central, _ = planner(store, lambda _id, _system, prompt: _with_assignment_field(prompt, worker="worker-parser"))
+    try:
+        plan = central.plan(goal)
+        assert plan.assignments[0].worker == "worker-parser"
+        assert "worker" not in plan.assignments[0].to_dict()
+    finally:
+        central.control.close()
+
+
+def test_worker_key_naming_another_branch_is_still_refused(store: Store, goal: Goal) -> None:
+    central, _ = planner(store, lambda _id, _system, prompt: _with_assignment_field(prompt, worker="someone-else"))
+    try:
+        with pytest.raises(InvalidPlannerOutput, match="unknown fields"):
+            central.plan(goal)
+    finally:
+        central.control.close()
+
+
+def test_planner_system_prompt_names_no_worker_field() -> None:
+    assert "Assignment.worker field" not in PLANNER_SYSTEM
+    assert "contract.identity names the worker's physical execution branch" in PLANNER_SYSTEM
+
+
+def test_next_prompt_says_why_earlier_proposals_were_refused(store: Store, goal: Goal) -> None:
+    prompts: list[dict[str, Any]] = []
+
+    def response(_id: str, _system: str, prompt: str) -> str:
+        prompts.append(json.loads(prompt))
+        if len(prompts) < 3:
+            return _with_assignment_field(prompt, priority="high" if len(prompts) == 1 else "low")
+        return proposal(prompt, assignment_for(request_from_prompt(prompt)))
+
+    central, _ = planner(store, response)
+    try:
+        for operation in ("first", "second"):
+            with pytest.raises(InvalidPlannerOutput):
+                central.revise(goal, operation_id=operation)
+        central.revise(goal, operation_id="third")
+        assert "earlier_rejections" not in prompts[0]
+        assert [item["detail"] for item in prompts[1]["earlier_rejections"]] == [
+            "Assignment has unknown fields ['priority']; put extensions in metadata"]
+        assert len(prompts[2]["earlier_rejections"]) == 2
+        assert prompts[2]["earlier_rejections"][0]["category"] == "invalid_output"
+        assert "earlier_rejections_note" in prompts[2]["rules"]
+        # Rebuilding a prompt later from its immutable request gives the same
+        # bytes, though more rejections may exist by then.
+        requests = [PlanningRequest.from_json(central.control.head.read(path))
+                    for path in sorted(planner_files(store)) if path.endswith("/request.json")]
+        rebuilt = {item.operation_id: json.loads(central._prompt(item)) for item in requests}
+        assert rebuilt["second"] == prompts[1] and rebuilt["third"] == prompts[2]
+        assert rebuilt["first"] == prompts[0]
+    finally:
+        central.control.close()

@@ -939,6 +939,17 @@ class PlannerAttemptAudit:
     telemetry: PlannerTelemetry
 
 
+# Measured live: a correct final reply ended "details are saved in
+# reports/calc-repair-verification.txt", a file in this system's memory that
+# the developer has never seen and that is not in their repository.
+_REPLY_AUDIENCE = (
+    "The developer sees only this reply and their own environment. They cannot see workers, "
+    "monitors, plans, assignments, artifact ids, or any file in this system's memory "
+    "workspace such as worker reports and evidence artifacts. Do not mention those or their "
+    "paths, and do not point to them as where details are saved. Describe what was changed "
+    "and observed in the developer's environment."
+)
+
 PLANNER_SYSTEM = """You are the central planner for a durable multi-agent system.
 Return exactly one JSON object and no markdown. It must use schema
 taste.brains/PlannerProposal/1 and echo every request/world binding exactly.
@@ -947,8 +958,9 @@ Every assignment must declare explicit dependencies, immutable ArtifactRef
 inputs, and unique ArtifactSpec outputs. Never invent a state, blob, artifact,
 failure, or completed result. A completion is only a claim over the supplied
 durable world; malformed or stale output will be retained and rejected.
-The Assignment.worker field is a physical execution-branch identity. It must
-be fresh: never reuse any branch already present in observed_heads. A same-plan
+contract.identity names the worker's physical execution branch. An Assignment
+has no separate worker field; adding one is rejected. The identity must be
+fresh: never reuse any branch already present in observed_heads. A same-plan
 dependency delays launch but does not make its producer's future bytes visible;
 work that consumes a newly produced artifact must be reissued in a later plan
 revision against the new integration state and an exact ArtifactRef.
@@ -2204,6 +2216,13 @@ class CentralPlanner:
                 "monitor_budget_usd_if_present_must_be_positive_finite": True,
             },
         }
+        rejections = self._earlier_rejections(request)
+        if rejections:
+            payload["earlier_rejections"] = rejections
+            payload["rules"]["earlier_rejections_note"] = (
+                "Earlier proposals for this goal were refused by the parser for the "
+                "listed reasons. They changed nothing. Do not repeat those mistakes."
+            )
         if self.azure_policy is not None:
             self.azure_policy.configure_prompt(payload)
         if benchmark_reply.required(request.goal.metadata):
@@ -2212,9 +2231,72 @@ class CentralPlanner:
                 "to the developer's task, not an internal completion reason or a worker summary. "
                 "Write the response yourself using the observed evidence; state limitations "
                 "and uncertainty honestly. Do not claim tests or effects without evidence. "
-                "For an active proposal it must be the empty string. Maximum 128 KiB of UTF-8."
+                "For an active proposal it must be the empty string. Maximum 128 KiB of UTF-8. "
+                + _REPLY_AUDIENCE
             )
+            if benchmark_reply.is_closing(request.operation_id):
+                # The run is over. This proposal assigns nothing; it is where
+                # the coordinator says what was and was not done.
+                payload["required_output_shape"]["assignments"] = []
+                payload["rules"].update(
+                    non_complete_requires_assignments=False,
+                    closing_proposal=(
+                        "This is the closing proposal. The run has ended before the plan was "
+                        "complete; the world's closing trigger says why. No further work can be "
+                        "assigned, so assignments must be []. Set complete to true only if the "
+                        "observed world already meets every standing criterion; otherwise false "
+                        "with completion_reason \"\"."
+                    ),
+                    benchmark_final_reply=(
+                        "metadata.final_reply is required and must not be empty: it is your "
+                        "final response to the developer. Say what was done, what the observed "
+                        "evidence establishes, and what was not finished or not verified. Do "
+                        "not claim a result, test run or effect that the evidence does not "
+                        "show. Maximum 128 KiB of UTF-8. " + _REPLY_AUDIENCE
+                    ),
+                )
         return _pretty(payload)
+
+    def _earlier_rejections(self, request: PlanningRequest, limit: int = 3) -> list[dict[str, str]]:
+        """Why this goal's earlier proposals were refused, for the next attempt.
+
+        A rejection used to leave no trace in the next prompt, so the planner
+        repeated it: measured live, the same unknown field three times, each a
+        paid call, until the failure limit ended the goal. The reasons are
+        read from immutable attempt records made before this request existed,
+        so a prompt rebuilt later from the same request is byte-identical.
+        """
+        def moment(text: str) -> datetime:
+            return datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+
+        state = self.control.head
+        prefix = f"{PLANNER_ROOT}/operations/"
+        created = moment(request.created_at)
+        found: list[tuple[datetime, dict[str, str]]] = []
+        for path in state.files():
+            if not (path.startswith(prefix) and "/attempts/" in path and path.endswith("/outcome.json")):
+                continue
+            raw = state.record(path)
+            if (not isinstance(raw, dict) or raw.get("status") != "rejected"
+                    or not isinstance(raw.get("at"), str)):
+                continue
+            try:
+                at = moment(raw["at"])
+            except ValueError:
+                continue
+            if at >= created:
+                continue
+            root = path[: path.index("/attempts/")]
+            origin = state.record(f"{root}/request.json")
+            if (not isinstance(origin, dict) or not isinstance(origin.get("goal"), dict)
+                    or origin["goal"].get("goal_id") != request.goal.goal_id):
+                continue
+            found.append((at, {
+                "at": raw["at"],
+                "category": str(raw.get("category") or ""),
+                "detail": str(raw.get("detail") or "")[:600],
+            }))
+        return [item for _at, item in sorted(found, key=lambda pair: pair[0])[-limit:]]
 
     @staticmethod
     def _validate_assessment(
@@ -2342,9 +2424,18 @@ class CentralPlanner:
         tamper signal, and silently overwriting it would turn evidence into a
         shrug.
         """
-        if not isinstance(item, Mapping) or "contract_digest" in item:
+        if not isinstance(item, Mapping):
             return item
         contract = item.get("contract")
+        # Measured with a second model family: three of five live proposals
+        # carried "worker": <contract.identity>, a harmless restatement of the
+        # property, and each cost a paid planner call. A worker naming another
+        # branch is still a contradiction and is still refused below.
+        if (isinstance(contract, Mapping) and "worker" in item
+                and item["worker"] == contract.get("identity")):
+            item = {key: value for key, value in item.items() if key != "worker"}
+        if "contract_digest" in item:
+            return item
         if not isinstance(contract, Mapping):
             return item
         try:
@@ -2399,7 +2490,12 @@ class CentralPlanner:
             )
             if not isinstance(raw["complete"], bool):
                 raise ValueError("proposal complete must be a boolean")
-            if raw["complete"] == bool(assignments):
+            closing = (benchmark_reply.required(request.goal.metadata)
+                       and benchmark_reply.is_closing(request.operation_id))
+            if closing:
+                if assignments:
+                    raise ValueError("a closing proposal cannot assign further work")
+            elif raw["complete"] == bool(assignments):
                 raise ValueError(
                     "complete plans must be empty and active plans must have assignments"
                 )
@@ -2410,7 +2506,7 @@ class CentralPlanner:
                     self.azure_policy.validate_assignment(assignment)
             metadata = _mapping(raw["metadata"], "PlannerProposal.metadata")
             if benchmark_reply.required(request.goal.metadata):
-                benchmark_reply.validate(metadata, complete=raw["complete"])
+                benchmark_reply.validate(metadata, complete=raw["complete"], closing=closing)
             proposal_digest = _digest(_canonical(raw))
             plan = PlanRevision(
                 plan_id=f"plan.{proposal_digest.removeprefix('sha256:')}",

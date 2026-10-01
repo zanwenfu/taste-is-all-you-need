@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
+from taste.brains import benchmark_reply
 from taste.brains.central_planner import (
     PLANNER_ROOT,
     CentralPlanner,
@@ -77,6 +78,12 @@ OPERATION_RESULT_SCHEMA = "taste.brains/CentralPlannerOperationResult/1"
 
 _STABLE_ID = re.compile(r"[^\x00-\x1f\x7f]{1,256}\Z")
 _TERMINAL_CURRENT_PHASES = frozenset({"terminal", "report_accepted", "delivered", "conflict"})
+
+
+# Stops after which a benchmark goal still owes the developer a reply. A
+# cancelled or crashed run does not: its owner has withdrawn the time for one.
+_CLOSING_STOPS = frozenset({"wall_clock", "generation_bound", "budget_blocked", "planner_failed"})
+_CLOSING_MINIMUM_SECONDS = 5.0
 
 
 class CoordinatorError(RuntimeError):
@@ -492,6 +499,9 @@ class CentralRuntime:
     The runtime validates object identity so separately opened writable branch
     leases or look-alike locks cannot accidentally split central truth.
     """
+
+    # Why the last closing reply could not be produced, when it could not.
+    closing_failure: str | None = None
 
     def __init__(
         self,
@@ -1104,7 +1114,7 @@ class CentralRuntime:
             report = self._load_report_for_accounting(run)
             if report is not None:
                 if report.cost_usd is None:
-                    unknown.append(run.run_id)
+                    self._charge_lost_cost(run, reservations, unknown)
                 else:
                     worker_costs.append(report.cost_usd)
                 continue
@@ -1113,7 +1123,7 @@ class CentralRuntime:
                 # missing or corrupt.  Treating that as $0 would violate the
                 # global goal budget.
                 if run.pid is not None or run.deadline_at is not None:
-                    unknown.append(run.run_id)
+                    self._charge_lost_cost(run, reservations, unknown)
                 continue
             ceiling = self._assignment_cost_ceiling(run.assignment)
             if ceiling is None:
@@ -1140,6 +1150,26 @@ class CentralRuntime:
             worker_spent,
             planner_spent,
         )
+
+    def _charge_lost_cost(self, run: SupervisorRun, reservations: list[float], unknown: list[str]) -> None:
+        """Account for an ended run whose exact spending cannot be read.
+
+        A worker killed during a model call leaves no usage for that call: its
+        exact cost is lost for good. Calling the whole goal's budget unprovable
+        then stopped every later worker and planner call, including the reply
+        owed at the end, which is how one timeout used to end a trial. An
+        Azure worker cannot outspend its caps: each journal admits a call only
+        while its known spend plus that call's worst case fits. So its ended
+        run stays charged at the assignment's full ceiling, as a reservation
+        that is never released. The budget remains a proof; the outcome still
+        shows unsettled accounting through that nonzero reservation. Harnesses
+        without such a pre-dispatch bound keep the unknown classification.
+        """
+        ceiling = self._assignment_cost_ceiling(run.assignment)
+        if ceiling is None or "azure_openai" not in run.assignment.resources:
+            unknown.append(run.run_id)
+        else:
+            reservations.append(ceiling)
 
     @staticmethod
     def _assignment_cost_ceiling(assignment: Assignment) -> float | None:
@@ -1489,7 +1519,8 @@ class CentralRuntime:
             trigger.to_dict(),
         )
 
-    def _operation_id(self, plan: PlanRevision, triggers: Sequence[RuntimeTrigger]) -> str:
+    def _operation_id(self, plan: PlanRevision, triggers: Sequence[RuntimeTrigger], *,
+                      closing: bool = False) -> str:
         identity = {
             "goal_id": self.goal.goal_id,
             "plan_id": plan.plan_id,
@@ -1498,7 +1529,10 @@ class CentralRuntime:
                 trigger.to_dict() for trigger in sorted(triggers, key=lambda item: item.trigger_id)
             ],
         }
-        return "runtime-revise." + hashlib.sha256(_canonical(identity).encode()).hexdigest()
+        # The prefix is part of the immutable request, so the planner's prompt
+        # and parser know a closing proposal without any other channel.
+        prefix = benchmark_reply.CLOSING_OPERATION_PREFIX if closing else "runtime-revise."
+        return prefix + hashlib.sha256(_canonical(identity).encode()).hexdigest()
 
     def _planner_operation_epochs(self, base_id: str) -> tuple[dict[str, Any], ...]:
         root = _planner_operation_root(self.goal.goal_id, base_id)
@@ -1757,10 +1791,12 @@ class CentralRuntime:
         cycle: _Cycle,
         plan: PlanRevision,
         triggers: tuple[RuntimeTrigger, ...],
+        *,
+        closing: bool = False,
     ) -> PlanRevision:
         for trigger in triggers:
             self._record_trigger(cycle, trigger)
-        base_id = self._operation_id(plan, triggers)
+        base_id = self._operation_id(plan, triggers, closing=closing)
         operation_id = self._select_planner_operation(base_id)
         call_ceiling = self._authorize_planner_call(
             self._budget(self.supervisor.runs()),
@@ -2006,9 +2042,12 @@ class CentralRuntime:
 
         started = clock()
         _, deadline = self._bind_run_limits(expected)
+        # Work, including every worker's own allowance, ends this long before
+        # the trial's deadline. The reserve is spent on the closing reply.
+        reserve = benchmark_reply.closing_reserve(self.goal.metadata)
         self._remaining_wall = lambda: min(wall_clock_seconds - (clock() - started),
-                                            (deadline - self.clock()).total_seconds())
-        self._deadline_at = deadline
+                                            (deadline - self.clock()).total_seconds()) - reserve
+        self._deadline_at = deadline - timedelta(seconds=reserve)
         stop_reason = "generation_bound"
         detail = ""
         try:
@@ -2084,7 +2123,57 @@ class CentralRuntime:
         finally:
             self._remaining_wall = None
             self._deadline_at = None
+        if reserve and stop_reason in _CLOSING_STOPS:
+            self._closing_reply(stop_reason, detail, deadline)
         return self._finish_run(stop_reason, detail)
+
+    def _closing_reply(self, stop_reason: str, detail: str, deadline: datetime) -> None:
+        """Drain the workers, then ask the coordinator once for its final reply.
+
+        A run stopped by its clock, its generation bound, its budget or its
+        planner used to end with no reply at all, because a reply existed only
+        inside a complete plan. The stop stands; this adds what the coordinator
+        can honestly say about the work so far. It is one ordinary, audited
+        planning operation whose proposal assigns nothing. Any failure here
+        leaves the goal without a reply and is recorded; it never replaces the
+        original stop reason or delays its durable outcome.
+        """
+        self.closing_failure = None
+        try:
+            with self._lock:
+                self.planner.bind_goal(self.goal)
+                plan = self.planner.current_plan(self.goal.goal_id)
+                if plan is None or plan.complete:
+                    return
+                runs = self.supervisor.runs()
+                self._validate_supervisor_scope(runs)
+                for run in runs:
+                    stopped = self.supervisor.stop(run.run_id, stop_reason)
+                    if stopped.recovery_status != "complete":
+                        raise SupervisorError(f"worker {run.run_id} recovery is {stopped.recovery_status}")
+                remaining = (deadline - self.clock()).total_seconds()
+                if remaining < _CLOSING_MINIMUM_SECONDS:
+                    raise CoordinatorError("too little time remains for a closing reply")
+                bind_deadline = getattr(self.planner.transport, "bind_deadline", None)
+                if callable(bind_deadline):
+                    bind_deadline(remaining_seconds=remaining)
+                cycle = self._begin_cycle(plan)
+                trigger = RuntimeTrigger(
+                    kind="closing", subject_id=self.goal.goal_id,
+                    detail=f"the run ended ({stop_reason}); no further work can be assigned",
+                    evidence={"stop_reason": stop_reason, "detail": detail[:1024]},
+                )
+                revised = self._replan(cycle, plan, (trigger,), closing=True)
+                runs = self.supervisor.runs()
+                self._complete_cycle(cycle, CycleOutcome(
+                    cycle_id=cycle.cycle_id, status="closed", plan=revised,
+                    runs=runs, budget=self._budget(runs),
+                ))
+        except CoordinatorCorruption:
+            raise
+        except (CoordinatorError, SupervisorError, InvalidPlannerOutput, RejectedPlannerOperation,
+                StalePlanningWorld, PlannerTransportError) as exc:
+            self.closing_failure = f"{type(exc).__name__}: {exc}"[:1024]
 
     def outcome(self) -> GoalOutcome | None:
         """The recorded answer for this goal, if the run already ended."""
