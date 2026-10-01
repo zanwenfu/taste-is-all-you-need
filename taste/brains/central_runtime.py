@@ -15,6 +15,7 @@ another model decision, process spawn, or product projection.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -2239,6 +2240,14 @@ class CentralRuntime:
                     stopped = self.supervisor.stop(run.run_id, stop_reason)
                     if stopped.recovery_status != "complete":
                         raise SupervisorError(f"worker {run.run_id} recovery is {stopped.recovery_status}")
+                    if stopped.phase == "terminal" and stopped.assignment.generation == plan.generation:
+                        # A worker stopped in good order has settled its call
+                        # and written its report. No ordinary cycle follows to
+                        # collect it, and without it the coordinator closes
+                        # knowing nothing of what that worker ran or changed.
+                        # A killed worker, or an unusable report, adds nothing.
+                        with contextlib.suppress(SupervisorError):
+                            self.supervisor.collect(run.run_id, active_generation=plan.generation)
                 remaining = (deadline - self.clock()).total_seconds()
                 if remaining < _CLOSING_MINIMUM_SECONDS:
                     raise CoordinatorError("too little time remains for a closing reply")

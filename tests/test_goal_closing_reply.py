@@ -11,10 +11,12 @@ from taste.brains import benchmark_reply
 from taste.brains.central_host import compose_central_runtime
 from taste.brains.central_planner import PlanningRequest
 from tests.test_brains_central_runtime import (
+    FakeHandle,
     FakeLauncher,
     ScriptedTransport,
     WorkingHandle,
     assignment_for,
+    install_report,
     proposal,
     simple_goal,
 )
@@ -106,6 +108,35 @@ def test_run_out_of_time_drains_workers_then_asks_once_for_the_reply(make_host):
     calls = len(seen)
     assert host.run(max_generations=5, wall_clock_seconds=15) == outcome
     assert len(seen) == calls
+
+
+def test_the_closing_reply_is_asked_with_the_report_of_a_worker_stopped_in_good_order(make_host):
+    # Measured on a real trial: the stopped worker had written its report, no
+    # cycle followed to collect it, and the coordinator closed knowing nothing
+    # of the tests that worker had already run.
+    seen: list[PlanningRequest] = []
+    launcher = FakeLauncher()
+    host = make_host(replying_goal(reserve=10), responder(seen=seen), launcher=launcher)
+
+    class ReportsWhenStopped(FakeHandle):
+        def terminate_tree(self, grace_seconds):
+            if self.exit is None:
+                install_report(host.runtime, "build-1", completed=False)
+            return super().terminate_tree(grace_seconds)
+
+    def launch(spec):
+        launcher.launch_calls.append(spec.run_id)
+        return launcher.handles.setdefault(spec.run_id, ReportsWhenStopped(7000))
+
+    launcher.launch = launch
+    outcome = host.run(max_generations=5, wall_clock_seconds=15)
+
+    assert host.runtime.closing_failure is None, host.runtime.closing_failure
+    assert outcome.stop_reason == "wall_clock" and final_reply(host) == REPLY
+    closing = [item for item in seen if benchmark_reply.is_closing(item.operation_id)]
+    (observed,) = closing[0].world.outcomes
+    assert observed.run.phase == "report_accepted"
+    assert observed.report is not None and observed.report.terminal_reason == "incomplete"
 
 
 def test_no_plan_is_started_in_the_last_seconds_of_working_time(make_host):

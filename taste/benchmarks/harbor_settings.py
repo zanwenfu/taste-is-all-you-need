@@ -140,7 +140,7 @@ class TrialSettings:
     def deadlines(self, started_unix, agent_timeout_seconds):
         """(goal deadline, container deadline) inside a benchmark's fixed agent time."""
         goal_seconds = agent_timeout_seconds - self.handoff_seconds
-        if goal_seconds <= self.reply_reserve_seconds + 60:
+        if goal_seconds <= self.reply_reserve_seconds + max(60.0, self.plan_seconds):
             raise ValueError("the agent's time is too short for work, a closing reply and handoff")
         return started_unix + goal_seconds, started_unix + agent_timeout_seconds + 3600
 
