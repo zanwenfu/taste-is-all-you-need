@@ -56,6 +56,7 @@ result metadata (`agent_result.metadata.taste.configuration`).
 | `worker_spend_cap_usd`, `monitor_spend_cap_usd` | 6, 2 | The same, for one worker and its monitor. |
 | `max_assignments` | 1 | Assignments one plan may hold. One container and a serial terminal make one worker at a time the honest default. |
 | `reply_reserve_seconds` | 210 | Held back from working time for the coordinator's closing reply. |
+| `plan_seconds` | 90 | No new plan is started with less working time than this; the run closes instead. |
 | `handoff_seconds` | 150 | Held back after that for settlement, the record and the handoff. |
 | `command_seconds` | 600 | Longest timeout one command may ask for (default per command: 120). |
 | `agent_timeout_sec` | from `task.toml` | Only if the task's published agent time must be overridden for a drill. |
@@ -97,12 +98,35 @@ must be reported as self-graded.
 The dataset on the VM was copied from the local v1.0.2 release folder and
 every file except `README.md` verified against the published `SHA256SUMS`.
 
-## Validated so far
+## Validated so far (2026-10-01, test VM, gpt-6-astra in every role)
 
-- errata-bench's own `StandIn` agent on this VM: image build, egress rule,
-  shared verifier, `answer.json`.
-- The complete goal with real gpt-6 models on synthetic tasks: completion, a
-  run out of time (closing reply), a hanging test.
+Fifteen trials of four errata-bench v1.0.2 tasks, one to five at a time.
+errata-bench's unpaid admission check (`--rows-only`) counts all fifteen as
+gradable; the fourteen run with the official time limit are counted official.
 
-Not yet validated: more than one trial at a time, a full three-attempt run,
-Terminal-Bench's separate verifier, and any environment other than local Docker.
+| What was exercised | Result |
+| --- | --- |
+| Completion, small instruction (2 to 10 KB), three tasks | 80 to 144 s, $0.89 to $1.72, 2 plans, no audit flags |
+| Completion, large instruction (117 KB), twice | 263 and 275 s, $4.27 and $4.46, 2 plans, 13 and 14 commands, no audit flags |
+| Two attempts of one task at once; five trials at once | no interference |
+| The benchmark's own time limit cancels the agent (drill) | sealed within 5 s, `AgentTimeoutError`, commands recorded in order, graded as no answer |
+| Working time runs out (drill) | worker stops in good order, exact cost, closing reply names what was run and what was not verified |
+| A command that ignores TERM and leaves a detached child (`scripts/check_docker_terminal.py`, no model) | ended alone in 1.1 s, container and terminal still usable |
+
+The first run of each kind found a defect, and each was fixed and run again;
+`docs/research_log.md` has the list. The largest was a certifier that could
+not read a long run's evidence: the same 117 KB task cost $18.58 and took
+17 minutes before that fix.
+
+Most errata-bench instructions are large: the median is 75 KB and 32 of the
+55 tasks exceed 64 KB. A full run of 165 trials at the costs above is in the
+region of $500 to $900 for the agent, and its spend caps bound it near
+$3,000. Paid grading is separate.
+
+Not validated: a full three-attempt run, paid grading, more than five trials
+at once on a larger machine, Terminal-Bench's separate verifier, and any
+environment other than local Docker.
+
+Older fixture scripts under `scripts/check_*.py`, other than
+`check_docker_terminal.py`, predate command-scoped timeouts and always-grade
+settlement and have not been re-run.
