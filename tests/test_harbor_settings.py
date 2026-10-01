@@ -1,0 +1,114 @@
+"""A trial's disclosed settings become one exact policy, goal and time split."""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from taste.benchmarks.harbor_settings import (
+    CRITERION,
+    TrialSettings,
+    agent_timeout_seconds,
+    compose_project,
+    served_model,
+)
+from taste.brains import benchmark_reply
+from taste.pricing import max_call_cost_usd
+from taste.providers.azure_openai import AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
+
+ENDPOINT = "https://test-resource.openai.azure.com/openai/v1/"
+
+
+def policy_for(settings, deadline=None):
+    return settings.policy(ENDPOINT, deadline or time.time() + 1500, owner_token="a" * 32,
+                           container_id="c" * 64, workdir="/Users/alex/workspace/cli")
+
+
+def test_one_named_model_runs_every_role_through_one_deployment():
+    settings = TrialSettings.from_options({"model": "gpt-6-astra"})
+    policy = policy_for(settings)
+    assert policy.worker_model == AZURE_PLANNER_MODEL
+    assert policy.planner_deployment == policy.worker_deployment == "gpt-6-astra"
+    assert settings.disclosure()["monitor_model"] == AZURE_PLANNER_MODEL
+    assert policy.max_assignments == 1 and policy.worker_grace_seconds == 45.0
+    assert policy.terminal.workdir == "/Users/alex/workspace/cli"
+    assert policy.terminal.max_timeout_seconds == 600 and policy.max_request_bytes == 1_048_576
+
+
+def test_a_cheaper_worker_model_keeps_its_own_route():
+    settings = TrialSettings.from_options({"model": "gpt-6-astra", "worker_model": "gpt-6-sol",
+                                           "worker_effort": "medium"})
+    policy = policy_for(settings)
+    assert policy.worker_model == AZURE_WORKER_MODEL and policy.worker_deployment == "gpt-6-sol"
+    assert policy.worker_effort == "medium" and policy.planner_deployment == "gpt-6-astra"
+
+
+def test_caps_are_what_a_role_may_spend_plus_one_worst_case_call():
+    settings = TrialSettings(spend_cap_usd=10, worker_spend_cap_usd=4, monitor_spend_cap_usd=1,
+                             lost_workers=2)
+    worker, monitor, goal = settings.budgets()
+    call = max_call_cost_usd(AZURE_PLANNER_MODEL, max_output_tokens=8192, cap_on="billed")
+    assert worker == pytest.approx(4 + call)
+    # A role is admitted another call only while its real spending is under its allowance.
+    assert worker - call == pytest.approx(4) and monitor > 1
+    planner_call = max_call_cost_usd(AZURE_PLANNER_MODEL, max_output_tokens=16384, cap_on="billed")
+    assert goal == pytest.approx(10 + 3 * (worker + monitor) + planner_call)
+    policy = policy_for(settings)
+    assert (policy.worker_budget_usd, policy.monitor_budget_usd) == (worker, monitor)
+    assert settings.goal("trial-1", "task").budget_usd == goal
+
+
+def test_goal_reserves_its_closing_reply_and_names_the_generic_criterion():
+    goal = TrialSettings(reply_reserve_seconds=120).goal("trial-1", "Developer: fix it.\n")
+    assert goal.task == "Developer: fix it.\n" and goal.success_criteria == (CRITERION,)
+    assert benchmark_reply.required(goal.metadata)
+    assert benchmark_reply.closing_reserve(goal.metadata) == 120.0
+
+
+def test_fixed_agent_time_is_split_into_work_reply_and_handoff():
+    settings = TrialSettings(reply_reserve_seconds=150, handoff_seconds=150)
+    goal_deadline, container_deadline = settings.deadlines(1000.0, 1800.0)
+    # 25 minutes of work, 2.5 for the closing reply, 2.5 to settle and hand over.
+    assert goal_deadline == 1000.0 + 1650.0 and container_deadline > 1000.0 + 1800.0
+    with pytest.raises(ValueError, match="too short"):
+        settings.deadlines(1000.0, 300.0)
+
+
+def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
+    task = tmp_path / "task.toml"
+    task.write_text('schema_version = "1.4"\n[agent]\ntimeout_sec = 1800.0\n[verifier]\ntimeout_sec = 600.0\n')
+    assert agent_timeout_seconds(task) == 1800.0
+    assert agent_timeout_seconds(task, "900") == 900.0
+    task.write_text('schema_version = "1.4"\n[agent]\nuser = "root"\n')
+    with pytest.raises(ValueError, match="publishes no agent timeout"):
+        agent_timeout_seconds(task)
+
+
+@pytest.mark.parametrize("options,match", [
+    ({"model": "gpt-6-luna"}, "model must be one of"),
+    ({"model": "gpt-6-sol"}, "coordinator runs on gpt-6-astra"),
+    ({"worker_model": "claude"}, "model must be one of"),
+    ({"spend_cap_usd": "0"}, "must be positive"),
+    ({"handoff_seconds": "nan"}, "must be positive"),
+    ({"max_generations": "many"}, "wrong type"),
+    ({"workers": 3}, "unknown trial setting"),
+])
+def test_settings_are_admitted_not_guessed(options, match):
+    with pytest.raises(ValueError, match=match):
+        TrialSettings.from_options(options)
+
+
+def test_command_line_strings_are_typed():
+    settings = TrialSettings.from_options({"model": "gpt-6-astra", "worker_max_calls": "40",
+                                           "spend_cap_usd": "7.5", "worker_effort": "high"})
+    assert (settings.worker_max_calls, settings.spend_cap_usd, settings.worker_effort) == (40, 7.5, "high")
+    assert served_model("azure/gpt-6-astra") == ("gpt-6-astra", AZURE_PLANNER_MODEL)
+
+
+@pytest.mark.parametrize("session,project", [
+    ("hutusi-amytis-15__AbCdEfG", "hutusi-amytis-15__abcdefg"),
+    ("_starts.with punctuation", "0_starts-with-punctuation"),
+])
+def test_compose_project_matches_harbor_naming(session, project):
+    assert compose_project(session) == project

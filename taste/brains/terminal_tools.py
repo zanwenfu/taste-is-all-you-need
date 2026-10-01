@@ -47,6 +47,37 @@ def _shown(text, limit, stream, request_id):
             + text[-tail:])
 
 
+def render(request_id, timeout_seconds, result):
+    """A command's receipt as the text its worker is given, and a record keeps."""
+    code = result.return_code
+    if result.terminated == "timeout":
+        head = (f"timed out after {timeout_seconds:g}s: the command and its child "
+                f"processes were killed (exit {code}). Output before that:")
+    elif result.terminated == "cancelled":
+        head = f"cancelled: the command and its child processes were killed (exit {code})."
+    else:
+        head = f"exit {code}"
+    out, err = _text(result.stdout), _text(result.stderr)
+    # Whichever stream is short is shown whole; the other takes the rest.
+    if len(out) <= SHOWN_CHARS - _STDERR_SHARE:
+        out_limit, err_limit = len(out), SHOWN_CHARS - len(out)
+    elif len(err) <= _STDERR_SHARE:
+        out_limit, err_limit = SHOWN_CHARS - len(err), len(err)
+    else:
+        out_limit, err_limit = SHOWN_CHARS - _STDERR_SHARE, _STDERR_SHARE
+    parts = [head]
+    if out:
+        parts.append(_shown(out, out_limit, "stdout", request_id))
+    if err:
+        parts.append("[stderr]")
+        parts.append(_shown(err, err_limit, "stderr", request_id))
+    for stream, dropped in (("stdout", result.stdout_dropped_bytes), ("stderr", result.stderr_dropped_bytes)):
+        if dropped:
+            parts.append(f"[cut: {dropped:,} more bytes of {stream} were beyond what is kept "
+                         "and cannot be read]")
+    return "\n".join(part.rstrip("\n") for part in parts) + "\n"
+
+
 class TerminalTools:
     def __init__(self, client: TerminalClient, *, workdir: str | None = None):
         if not isinstance(client, TerminalClient):
@@ -121,33 +152,7 @@ class TerminalTools:
             raise ValueError(f"terminal pages require a stream, a byte offset and a limit of 1-{PAGE_BYTES}")
 
     def _render(self, request, result):
-        code = result.return_code
-        if result.terminated == "timeout":
-            head = (f"timed out after {request.timeout_seconds:g}s: the command and its child "
-                    f"processes were killed (exit {code}). Output before that:")
-        elif result.terminated == "cancelled":
-            head = f"cancelled: the command and its child processes were killed (exit {code})."
-        else:
-            head = f"exit {code}"
-        out, err = _text(result.stdout), _text(result.stderr)
-        # Whichever stream is short is shown whole; the other takes the rest.
-        if len(out) <= SHOWN_CHARS - _STDERR_SHARE:
-            out_limit, err_limit = len(out), SHOWN_CHARS - len(out)
-        elif len(err) <= _STDERR_SHARE:
-            out_limit, err_limit = SHOWN_CHARS - len(err), len(err)
-        else:
-            out_limit, err_limit = SHOWN_CHARS - _STDERR_SHARE, _STDERR_SHARE
-        parts = [head]
-        if out:
-            parts.append(_shown(out, out_limit, "stdout", request.request_id))
-        if err:
-            parts.append("[stderr]")
-            parts.append(_shown(err, err_limit, "stderr", request.request_id))
-        for stream, dropped in (("stdout", result.stdout_dropped_bytes), ("stderr", result.stderr_dropped_bytes)):
-            if dropped:
-                parts.append(f"[cut: {dropped:,} more bytes of {stream} were beyond what is kept "
-                             "and cannot be read]")
-        return "\n".join(part.rstrip("\n") for part in parts) + "\n"
+        return render(request.request_id, request.timeout_seconds, result)
 
     async def execute(self, effect_id, call):
         request = self._request(effect_id, call.arguments)
