@@ -2203,6 +2203,21 @@ class CentralPlanner:
                     "letters, digits, dot, dash or underscore; start with a letter or digit; "
                     "no slashes"
                 ),
+                # Measured live: a task asked for instructions on using a
+                # feature the repository turned out not to have. The contract
+                # required "usable instructions" for it, so an honest worker
+                # could only report itself blocked, its monitor correctly
+                # called the criterion unmet, and a generation went on
+                # rewriting the contract. A contract says what to find out and
+                # do. It cannot settle in advance what is true.
+                "contract_premises": (
+                    "Write a contract from what has been observed, not from what the task "
+                    "assumes. Do not require a result that depends on an unverified fact about "
+                    "the environment: that a command, file, feature or earlier change exists or "
+                    "works. Where such a premise could be false, have the worker establish it "
+                    "first, and word the success criteria so that an accurate, evidenced finding "
+                    "that it is false, with the work that is still possible done, satisfies them."
+                ),
                 "same_plan_dependencies_do_not_transfer_future_artifacts": True,
                 "unique_output_artifact_ids_and_paths": True,
                 "contract_io_must_equal_structured_artifact_paths": True,

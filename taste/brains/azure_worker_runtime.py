@@ -25,7 +25,7 @@ from taste.brains.contract import CONTRACT_PATH
 from taste.brains.monitor import MonitorBrain
 from taste.brains.records import ArtifactRef, Assignment, WorkerReport
 from taste.brains.responses_conversation import ResponsesConversation
-from taste.brains.responses_feedback import ResponsesFeedback, WorkerClaim
+from taste.brains.responses_feedback import InvalidWorkerClaim, ResponsesFeedback, WorkerClaim
 from taste.brains.responses_session import ResponsesFenced, ResponsesSession
 from taste.brains.terminal_tools import TerminalTools
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
@@ -47,13 +47,24 @@ Respect the assignment's scope, criteria and resource limits.
 After tool work, return exactly one JSON object, without markdown, with fields:
 status: \"completed\", \"blocked\", or \"continue\";
 summary: a concise string; evidence: an array of concrete evidence strings;
-accepted_inbox_ids: an array of inbox IDs you have handled;
-accepted_verdicts: an object mapping state IDs to the verdict count you handled.
-Only acknowledge feedback actually present in your inputs. Completion requires
-concrete evidence and all submitted feedback handled. Use blocked when the
-available capabilities cannot complete the task. A tool-free continue response
-will receive a new turn, subject to the same original limits.
+accepted_inbox_ids: an array of inbox IDs you have handled, [] if you received none;
+accepted_verdicts: an object mapping each state_id from your latest verdicts
+input to its \"through\" number, {} if you received no verdicts input.
+Copy ids exactly; only acknowledge feedback actually present in your inputs.
+Completion requires concrete evidence and all submitted feedback handled. Use
+blocked when the available capabilities cannot complete the task. A tool-free
+continue response will receive a new turn, subject to the same original limits.
+A reply that is not such an object is returned to you with the reason.
 """
+
+# How many times in a row a worker is told why its claim was refused before
+# its run ends as failed. Each telling is one more model call inside its caps.
+CLAIM_CORRECTIONS = 2
+CLAIM_REFUSED = (
+    "Your last reply was not accepted as your claim: {reason}\n"
+    "Nothing you did was lost. Reply again with exactly one JSON object, without markdown, "
+    "with the fields status, summary, evidence, accepted_inbox_ids and accepted_verdicts."
+)
 
 
 ORIGINAL_TASK = (
@@ -156,6 +167,7 @@ class AzureWorkerRuntime:
             raise ResponsesFenced("the admitted worker deadline elapsed")
 
     async def _drive(self) -> WorkerClaim:
+        refused = 0
         while True:
             self._check_deadline()
             self.feedback.observe_pending()
@@ -163,7 +175,20 @@ class AzureWorkerRuntime:
             if reply.tool_calls:
                 await self.monitor.drain(None)
                 continue
-            claim = self.feedback.accept_latest()
+            try:
+                claim = self.feedback.accept_latest()
+            except InvalidWorkerClaim as reason:
+                # A slip in the closing message is not a failed assignment.
+                # Say what was wrong and let the worker state its claim again.
+                refused += 1
+                if refused > CLAIM_CORRECTIONS:
+                    raise
+                request = self.conversation.completed_turn().request_id
+                self.conversation.observe("claim_refused." + request,
+                                          CLAIM_REFUSED.format(reason=reason))
+                await self.monitor.drain(None)
+                continue
+            refused = 0
             if claim.status == "blocked":
                 return claim
             if (claim.status == "completed" and not self._pending_inbox()

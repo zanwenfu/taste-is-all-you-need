@@ -130,6 +130,9 @@ def test_default_azure_coordinator_assigns_grant_to_real_worker_and_replays_with
                     assert env.calls[0].actor_id == issued[0].grant.actor_id
                     assert issued[0].token not in json.dumps(payloads)
                     assert "run bounded commands in the shared task container" in payloads[0]["rules"]["worker_capabilities"]["can"]
+                    effects = payloads[0]["rules"]["worker_capabilities"]["terminal_effects"]
+                    # A timeout ends the command. The planner must not be told it ends the container.
+                    assert "killed with its child processes" in effects and "ends the task environment" not in effects
                     assert all(run.reaped for run in runtime.supervisor.runs())
                 with compose_azure_central_runtime(root, "terminal-central", goal, policy=admitted,
                     environment={}, settlement_only=True) as recovered:

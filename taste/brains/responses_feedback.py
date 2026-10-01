@@ -46,6 +46,14 @@ def _loads(text):
     return json.loads(text, object_pairs_hook=unique, parse_constant=invalid)
 
 
+class InvalidWorkerClaim(ContractMismatch):
+    """A reply that is not an acceptable claim, for a reason the worker can correct.
+
+    Its message is written for the worker: what was wrong and what is valid.
+    Integrity failures (context that changed identity) stay ContractMismatch.
+    """
+
+
 @dataclass(frozen=True)
 class WorkerClaim:
     status: str
@@ -61,28 +69,36 @@ def parse_worker_claim(turn: CompletedResponsesTurn) -> WorkerClaim:
         raise ContractMismatch("worker claim requires a complete, tool-free model reply")
     text = reply.summary_text
     if len(text.encode()) > 65_536:
-        raise ContractMismatch("worker claim exceeds its byte limit")
+        raise InvalidWorkerClaim("the reply is longer than 64 KiB")
     try:
-        raw = _loads(text)
+        try:
+            raw = _loads(text)
+        except ValueError as exc:
+            raise ValueError(f"it is not one JSON object ({exc})") from exc
         required = {"status", "summary", "evidence", "accepted_inbox_ids", "accepted_verdicts"}
         if not isinstance(raw, dict) or set(raw) != required:
-            raise ValueError("claim fields do not match the worker schema")
+            raise ValueError("it must be one JSON object with exactly the fields " + ", ".join(sorted(required)))
         if raw["status"] not in {"completed", "blocked", "continue"} or not isinstance(raw["summary"], str):
-            raise ValueError("invalid status or summary")
+            raise ValueError("status must be completed, blocked or continue, and summary a string")
         evidence, inbox, verdicts = raw["evidence"], raw["accepted_inbox_ids"], raw["accepted_verdicts"]
         if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
-            raise ValueError("invalid evidence")
+            raise ValueError("evidence must be an array of strings")
         if raw["status"] == "completed" and not any(item.strip() for item in evidence):
-            raise ValueError("completion requires concrete evidence")
+            raise ValueError("a completed claim needs at least one concrete evidence string")
         if (not isinstance(inbox, list) or not all(isinstance(item, str) and _OBJECT_ID.fullmatch(item) for item in inbox)
                 or len(inbox) != len(set(inbox))):
-            raise ValueError("invalid inbox acknowledgement ids")
-        if (not isinstance(verdicts, dict) or not all(
-                isinstance(key, str) and _OBJECT_ID.fullmatch(key) and type(count) is int and count > 0
-                for key, count in verdicts.items())):
-            raise ValueError("invalid verdict acknowledgement counts")
+            raise ValueError("accepted_inbox_ids must be distinct inbox ids copied from your inputs")
+        if not isinstance(verdicts, dict):
+            raise ValueError("accepted_verdicts must be an object mapping state ids to counts")
+        # An entry that acknowledges zero verdicts acknowledges nothing. Measured
+        # live, one such stray entry cost a finished worker its whole run.
+        verdicts = {key: count for key, count in verdicts.items() if not (type(count) is int and count == 0)}
+        if not all(isinstance(key, str) and _OBJECT_ID.fullmatch(key) and type(count) is int and count > 0
+                   for key, count in verdicts.items()):
+            raise ValueError("accepted_verdicts keys must be state ids copied from a verdicts input, "
+                             "each with a positive whole count")
     except (ValueError, TypeError) as exc:
-        raise ContractMismatch("worker reply is not one valid structured claim") from exc
+        raise InvalidWorkerClaim(str(exc)) from exc
     return WorkerClaim(raw["status"], raw["summary"], tuple(evidence), tuple(inbox), MappingProxyType(verdicts))
 
 
@@ -126,10 +142,17 @@ class ResponsesFeedback:
                     if row["through"] != count:
                         raise ContractMismatch("verdict count differs from its submitted evidence")
                     verdicts[row["state_id"]] = max(verdicts.get(row["state_id"], 0), count)
-        if any(identifier not in delivered for identifier in claim.accepted_inbox_ids):
-            raise ContractMismatch("worker acknowledged an inbox message never submitted to this turn")
-        if any(count > verdicts.get(state, 0) for state, count in claim.accepted_verdicts.items()):
-            raise ContractMismatch("worker acknowledged verdicts never submitted to this turn")
+        unknown = sorted(set(claim.accepted_inbox_ids) - set(delivered))
+        if unknown:
+            raise InvalidWorkerClaim(
+                "accepted_inbox_ids names messages that were not in your inputs: " + ", ".join(unknown)
+                + ". The inbox ids you were given: " + (", ".join(sorted(delivered)) or "none"))
+        excess = {state: count for state, count in claim.accepted_verdicts.items()
+                  if count > verdicts.get(state, 0)}
+        if excess:
+            raise InvalidWorkerClaim(
+                "accepted_verdicts acknowledges more than you were shown: " + _json(excess)
+                + ". The most you may acknowledge: " + _json(verdicts))
         return claim, delivered
 
     def _accepted(self):

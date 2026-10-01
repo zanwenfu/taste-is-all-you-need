@@ -29,6 +29,9 @@ from taste.memstore import Branch
 
 ARTIFACT_TOOLS_VERSION = "taste.brains/ArtifactTools/2"
 _MAX_WRITE = 65_536
+# Said to the worker, and read later by whoever audits the run's tool calls.
+SAVED = "Saved in the memory workspace. Nothing in the task environment was changed."
+REMOVED = "Removed from the memory workspace. Nothing in the task environment was changed."
 _MAX_READ = 8192
 
 
@@ -156,7 +159,7 @@ class ArtifactTools:
                 finally:
                     with contextlib.suppress(FileNotFoundError):
                         os.unlink(temporary, dir_fd=parent)
-            return ToolOutcome("Artifact saved.")
+            return ToolOutcome(SAVED)
         except (OSError, ValueError) as exc:
             # An error after replace may mean the write took effect. The
             # returned error does not assert absence; the worker can read it.
@@ -172,7 +175,7 @@ class ArtifactTools:
                     raise ValueError("cannot remove a special file or directory")
                 os.unlink(leaf, dir_fd=parent)
                 os.fsync(parent)
-            return ToolOutcome("Artifact removed.")
+            return ToolOutcome(REMOVED)
         except FileNotFoundError:
             return ToolOutcome("Artifact is absent.")
         except (OSError, ValueError) as exc:

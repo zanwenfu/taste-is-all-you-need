@@ -195,9 +195,11 @@ class AzureExecutionPolicy:
                                          "read this worker's retained terminal output pages"])
             capabilities["cannot"] = ["run commands on the controller host", "read undeclared memory artifacts"]
             capabilities["terminal_effects"] = (
-                "All workers share one task container with serial terminal actions. Files, packages and services "
-                "persist across successful commands and memory rollback. Active command timeout/cancellation "
-                "ends the task environment. Official benchmark grading remains the outside lifecycle owner's job.")
+                "All workers share one task container and its terminal runs one command at a time. What a "
+                "command changes there (files, packages, services) persists: later workers see it, and "
+                "rolling memory back does not undo it. A command that runs past its timeout is killed with "
+                "its child processes; the container and everything else in it stay as they are. The "
+                "benchmark's own grading happens after this goal ends and is not a worker's job.")
 
     def validate_plan(self, assignments):
         if self.max_assignments is not None and len(assignments) > self.max_assignments:

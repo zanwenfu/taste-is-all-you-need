@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from taste.brains.artifact_tools import ArtifactTools
+from taste.brains.artifact_tools import SAVED, ArtifactTools
 from taste.brains.contract import Contract
 from taste.brains.records import ArtifactRef, ArtifactSpec, Assignment, contract_digest
 from taste.brains.responses_conversation import ResponsesConversation
@@ -207,7 +207,9 @@ def test_real_tool_roundtrip_checkpoint_and_rollback_preserve_paid_receipts(work
         assert len(sent) == 2
         tool_result = [item for item in json.loads(sent[1].content)["input"]
                        if item.get("type") == "function_call_output"]
-        assert "Artifact saved." in tool_result[0]["output"]
+        # The result says which side the write landed on: a reader of the
+        # record must not take it for a change to the task's repository.
+        assert tool_result[0]["output"] == SAVED and "task environment" in SAVED
     finally:
         session.close()
 

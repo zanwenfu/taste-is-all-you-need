@@ -1910,6 +1910,8 @@ def test_the_prompt_states_the_identity_charset(store: Store, goal: Goal) -> Non
     planner.plan(goal)
     rules = json.loads(prompts[0])["rules"]
     assert "worker_identity_charset" in rules
+    # A contract is written from what was observed, never from an unverified premise.
+    assert "unverified fact" in rules["contract_premises"]
 
 
 def test_a_budgeted_exemplar_satisfies_the_rules_it_ships_with(store: Store, goal: Goal) -> None:

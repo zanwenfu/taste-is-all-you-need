@@ -26,13 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.check_docker_terminal import cleanup, cli
 from taste.benchmarks.azure_terminal_trial import AzureTerminalTrial, cleanup_trial
-from taste.brains import benchmark_reply
-from taste.brains.azure_execution_policy import AzureExecutionPolicy
-from taste.brains.central_planner import Goal
+from taste.benchmarks.harbor_settings import TrialSettings
 from taste.brains.docker_terminal import OWNER_LABEL, DockerTerminalBackend
-from taste.brains.terminal_broker import TerminalBinding
-from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
-from taste.pricing import table_sha
+from taste.brains.terminal_broker import MAX_TERMINAL_OUTPUT_BYTES
 
 WORKDIR = "/workspace/calc"
 CHECK = f"cd {WORKDIR} && python3 -m unittest discover -s tests -v"
@@ -180,26 +176,24 @@ async def run(args):
     assert before[0] != 0, "the seeded suite must fail before the agent works"
     seconds = args.minutes * 60
     deadline = time.time() + seconds
-    backend = DockerTerminalBackend.admit("/var/run/docker.sock", container, token, deadline + 120,
-                                          output_limit=65536)
-    binding = TerminalBinding(token, backend.environment_id, deadline, 300)
-    policy = AzureExecutionPolicy(endpoint=endpoint, planner_deployment=args.planner_deployment,
-        worker_deployment=args.worker_deployment, deadline_unix=deadline,
-        worker_budget_usd=args.worker_budget, monitor_budget_usd=args.monitor_budget,
-        worker_max_calls=args.worker_calls, monitor_max_calls=args.worker_calls,
-        worker_max_output_tokens=8192, monitor_max_output_tokens=2048, planner_max_output_tokens=8192,
-        monitor_batch_size=8, pricing_sha=table_sha(),
-        terminal=TerminalWorkerPolicy(binding, args.command_seconds, WORKDIR))
-    goal = Goal(goal_id="smoke-" + token[:12], task=HANG_INSTRUCTION if hang else INSTRUCTION,
-        success_criteria=("the unit test suite passes without edits to the tests",),
-        budget_usd=args.goal_budget, metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA,
-                                               benchmark_reply.RESERVE_KEY: args.reserve})
-    report = {"status": "failed", "paid": True, "token": token, "before_exit": before[0]}
+    backend = DockerTerminalBackend.admit("/var/run/docker.sock", container, token, deadline + 3600,
+                                          output_limit=MAX_TERMINAL_OUTPUT_BYTES)
+    # The same settings, policy and goal a benchmark trial is given.
+    settings = TrialSettings.from_options({
+        "model": args.model, "worker_model": args.worker_model, "worker_effort": args.effort,
+        "reply_reserve_seconds": args.reserve, "command_seconds": args.command_seconds,
+        "max_generations": args.generations, "worker_max_calls": args.worker_calls,
+        "spend_cap_usd": args.spend_cap})
+    policy = settings.policy(endpoint, deadline, owner_token=token,
+                             container_id=backend.environment_id, workdir=WORKDIR)
+    goal = settings.goal("smoke-" + token[:12], HANG_INSTRUCTION if hang else INSTRUCTION)
+    report = {"status": "failed", "paid": True, "token": token, "before_exit": before[0],
+              "configuration": settings.disclosure()}
     owner, started = None, time.time()
     try:
         owner = AzureTerminalTrial.create(root, backend, goal, policy, service_uid=account.pw_uid,
-            python_executable=args.worker_python, max_generations=args.generations,
-            wall_clock_seconds=seconds, max_planner_failures=3)
+            python_executable=args.worker_python, max_generations=settings.max_generations,
+            wall_clock_seconds=seconds, max_planner_failures=settings.max_planner_failures)
         try:
             outcome = await owner.run(api_key=api_key)
             report["run_error"] = None
@@ -265,8 +259,10 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--worker-user", default="bugbash")
     parser.add_argument("--worker-python")
-    parser.add_argument("--planner-deployment", default="gpt-6-astra")
-    parser.add_argument("--worker-deployment", default="gpt-6-sol")
+    parser.add_argument("--model", default="gpt-6-astra", help="the coordinator's model")
+    parser.add_argument("--worker-model", default="gpt-6-astra", help="workers and monitors")
+    parser.add_argument("--effort", default="low", choices=("low", "medium", "high"))
+    parser.add_argument("--spend-cap", type=float, default=10.0, help="what the goal may really spend")
     parser.add_argument("--scenario", choices=("repair", "hang"), default="repair")
     parser.add_argument("--minutes", type=float, default=12)
     parser.add_argument("--reserve", type=float, default=120,
@@ -274,10 +270,7 @@ def main():
     parser.add_argument("--command-seconds", type=float, default=120,
                         help="longest allowance one terminal command may ask for")
     parser.add_argument("--generations", type=int, default=6)
-    parser.add_argument("--worker-calls", type=int, default=40)
-    parser.add_argument("--worker-budget", type=float, default=20.0)
-    parser.add_argument("--monitor-budget", type=float, default=10.0)
-    parser.add_argument("--goal-budget", type=float, default=150.0)
+    parser.add_argument("--worker-calls", type=int, default=60)
     parser.add_argument("--cleanup-only", action="store_true")
     args = parser.parse_args()
     owner_directory(args.owner_token)

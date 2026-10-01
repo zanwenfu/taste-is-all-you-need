@@ -14,6 +14,7 @@ import pytest
 
 from taste.brains.azure_worker_entrypoint import execute_worker, run_directory
 from taste.brains.azure_worker_launch import worker_command
+from taste.brains.azure_worker_runtime import CLAIM_CORRECTIONS
 from taste.brains.communication import Communicator, Message
 from taste.brains.monitor import MonitorBrain
 from taste.brains.monitor_judge import TERMINAL_JUDGEMENT_SCHEMA
@@ -170,6 +171,36 @@ def test_incomplete_workers_cannot_report_success(worker, sdk_transport, bad):
     assert result.cost_usd is not None
     assert len(sent) <= 10
     assert worker.store.view("worker").holder is None
+
+
+def test_a_worker_told_why_its_claim_was_refused_states_it_again_and_completes(worker, sdk_transport):
+    refusals = []
+
+    def replies(number, payload):
+        if number == 1:
+            return [function_call(json.dumps({"artifact": "output.txt", "body": "correct", "executable": False}),
+                                  name="write_artifact")]
+        if number == 2:
+            # Finished work, closed with an acknowledgement of something never shown.
+            return [message(json.dumps({**accepted(payload), "accepted_inbox_ids": ["a" * 40]}))]
+        refusals.extend(item["content"] for item in payload["input"]
+                        if item.get("role") == "user" and "not accepted as your claim" in str(item["content"]))
+        return [message(json.dumps(accepted(payload)))]
+
+    _, calls, _ = install(sdk_transport, worker_reply=replies)
+    assert run(worker) == WorkerExitCode.COMPLETED
+    result = report(worker)
+    assert result.completed and not result.uncertain and calls["worker"] == 3
+    assert len(refusals) == 1 and "were not in your inputs" in str(refusals[0])
+    assert worker.store.state(result.final_state_id).read("output.txt") == "correct"
+
+
+def test_a_worker_that_keeps_misstating_its_claim_ends_failed_within_a_bound(worker, sdk_transport):
+    _, calls, _ = install(sdk_transport, worker_reply=lambda number, payload: [message("still not JSON")])
+    assert run(worker) == WorkerExitCode.INCOMPLETE
+    result = report(worker)
+    assert not result.completed and result.terminal_reason == "runtime_invalidworkerclaim"
+    assert calls["worker"] == 1 + CLAIM_CORRECTIONS
 
 
 @pytest.mark.parametrize("phase", ["monitor", "terminal"])

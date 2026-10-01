@@ -12,7 +12,7 @@ from taste.brains.communication import Communicator, Message
 from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.records import Assignment, contract_digest
 from taste.brains.responses_conversation import ResponsesConversation
-from taste.brains.responses_feedback import ResponsesFeedback
+from taste.brains.responses_feedback import InvalidWorkerClaim, ResponsesFeedback
 from taste.brains.responses_session import ResponsesConflict, ResponsesSession
 from taste.brains.worker_protocol import ASSIGNMENT_PATH, ContractMismatch, assignment_run_id
 from taste.memstore import Store, Verdict
@@ -110,7 +110,7 @@ def test_ack_for_a_message_that_arrived_during_the_call_is_rejected(worker, sdk_
     async def scenario():
         await worker.conversation.step()
         worker.feedback.observe_pending()
-        with pytest.raises(ContractMismatch, match="never submitted"):
+        with pytest.raises(InvalidWorkerClaim, match="were not in your inputs"):
             worker.feedback.accept_latest()
         assert worker.communicator.pending("worker") == tuple(late)
 
@@ -238,9 +238,46 @@ def test_verdict_ack_must_not_exceed_what_the_model_received(worker, sdk_transpo
     async def scenario():
         await worker.conversation.step()
         worker.store.judge(state, Verdict("fail", by="monitor", detail="later"))
-        with pytest.raises(ContractMismatch, match="never submitted"):
+        # The refusal names the most that may be acknowledged, so it can be corrected.
+        with pytest.raises(InvalidWorkerClaim, match="more than you were shown") as refusal:
             worker.feedback.accept_latest()
+        assert json.dumps({state.id: 1}, separators=(",", ":")) in str(refusal.value).replace(" ", "")
         assert len(worker.branch.unacked_verdicts()) == 2
+
+    asyncio.run(scenario())
+
+
+def test_an_entry_acknowledging_zero_verdicts_acknowledges_nothing(worker, sdk_transport):
+    # Measured on a real run: a finished worker closed with one stray entry,
+    # {"ba4fa?": 0}, beside its correct acknowledgement, and lost the whole run.
+    state = worker.branch.head
+    worker.store.judge(state, Verdict("pass", by="monitor", detail="first"))
+    worker.feedback.observe_pending()
+    install(sdk_transport, lambda _wire: claim(verdicts={"ba4fa?": 0, state.id: 1}))
+
+    async def scenario():
+        await worker.conversation.step()
+        accepted = worker.feedback.accept_latest()
+        assert dict(accepted.accepted_verdicts) == {state.id: 1}
+        assert not worker.branch.unacked_verdicts()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("bad,told", [
+    ("not JSON", "not one JSON object"),
+    (json.dumps({**claim(), "extra": "field"}), "exactly the fields"),
+    (json.dumps(claim(status="done")), "completed, blocked or continue"),
+    (json.dumps(claim(evidence=[])), "at least one concrete evidence"),
+    (json.dumps(claim(accepted_verdicts={"ba4fa?": 2})), "state ids copied from a verdicts input"),
+])
+def test_a_refused_claim_says_what_would_be_valid(worker, sdk_transport, bad, told):
+    install(sdk_transport, lambda _wire: bad)
+
+    async def scenario():
+        await worker.conversation.step()
+        with pytest.raises(InvalidWorkerClaim, match=told):
+            worker.feedback.accept_latest()
 
     asyncio.run(scenario())
 
