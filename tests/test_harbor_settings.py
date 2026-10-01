@@ -70,6 +70,8 @@ def test_goal_reserves_its_closing_reply_and_names_the_generic_criterion():
     assert goal.task == "Developer: fix it.\n" and goal.success_criteria == (CRITERION,)
     assert benchmark_reply.required(goal.metadata)
     assert benchmark_reply.closing_reserve(goal.metadata) == 120.0
+    # No plan is started with less working time than it needs to be acted on.
+    assert benchmark_reply.planning_minimum(goal.metadata) == 90.0
 
 
 def test_fixed_agent_time_is_split_into_work_reply_and_handoff():

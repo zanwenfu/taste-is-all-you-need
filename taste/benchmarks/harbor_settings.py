@@ -76,6 +76,9 @@ class TrialSettings:
     # Held back for the closing reply: a stopped worker's grace, then one
     # reasoning planner call (measured at 40 to 60 seconds without reasoning).
     reply_reserve_seconds: float = 210.0
+    # No new plan is started with less working time than this: it could not be
+    # answered and acted on, and the reserve is better spent on the reply.
+    plan_seconds: float = 90.0
     handoff_seconds: float = 150.0
 
     @classmethod
@@ -101,7 +104,7 @@ class TrialSettings:
             raise ValueError("the coordinator runs on gpt-6-astra; name it as the trial's model")
         for name in ("spend_cap_usd", "worker_spend_cap_usd", "monitor_spend_cap_usd",
                      "command_seconds", "worker_grace_seconds", "reply_reserve_seconds",
-                     "handoff_seconds"):
+                     "plan_seconds", "handoff_seconds"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
@@ -172,7 +175,8 @@ class TrialSettings:
         return Goal(goal_id=goal_id, task=instruction, success_criteria=(CRITERION,),
                     budget_usd=self.budgets()[2],
                     metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA,
-                              benchmark_reply.RESERVE_KEY: self.reply_reserve_seconds})
+                              benchmark_reply.RESERVE_KEY: self.reply_reserve_seconds,
+                              benchmark_reply.PLAN_KEY: self.plan_seconds})
 
     def disclosure(self):
         """The configuration a result should be reported with."""
@@ -186,6 +190,7 @@ class TrialSettings:
                     "worker": worker_cap, "monitor": monitor_cap, "goal": goal},
                 "max_assignments_per_plan": self.max_assignments,
                 "reply_reserve_seconds": self.reply_reserve_seconds,
+                "plan_seconds": self.plan_seconds,
                 "handoff_seconds": self.handoff_seconds, "command_seconds": self.command_seconds,
                 "max_request_bytes": self.max_request_bytes}
 

@@ -12,6 +12,9 @@ MAX_REPLY_BYTES = 128 * 1024
 # completion spends them asking the coordinator once for its final reply, as
 # a benchmark's own reference agent is asked for its report when time is up.
 RESERVE_KEY = "benchmark_reply_reserve_seconds"
+# The least working time in which another plan may still be started. A plan
+# asked for in the last seconds cannot be answered, let alone acted on.
+PLAN_KEY = "benchmark_reply_plan_seconds"
 CLOSING_OPERATION_PREFIX = "runtime-closing."
 
 
@@ -23,6 +26,7 @@ def required(metadata):
     if metadata[KEY] != SCHEMA:
         raise ValueError("unsupported benchmark reply contract")
     closing_reserve(metadata)
+    planning_minimum(metadata)
     return True
 
 
@@ -33,6 +37,16 @@ def closing_reserve(metadata):
     value = metadata[RESERVE_KEY]
     if type(value) not in (int, float) or not 10 <= value <= 3600:
         raise ValueError("benchmark reply reserve must be 10-3600 seconds")
+    return float(value)
+
+
+def planning_minimum(metadata):
+    """Seconds of working time a new plan needs; 0 when a goal names none."""
+    if KEY not in metadata or PLAN_KEY not in metadata:
+        return 0.0
+    value = metadata[PLAN_KEY]
+    if type(value) not in (int, float) or not 0 <= value <= 3600:
+        raise ValueError("benchmark planning minimum must be 0-3600 seconds")
     return float(value)
 
 

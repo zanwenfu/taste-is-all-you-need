@@ -13,6 +13,7 @@ from taste.brains.central_planner import PlanningRequest
 from tests.test_brains_central_runtime import (
     FakeLauncher,
     ScriptedTransport,
+    WorkingHandle,
     assignment_for,
     proposal,
     simple_goal,
@@ -105,6 +106,32 @@ def test_run_out_of_time_drains_workers_then_asks_once_for_the_reply(make_host):
     calls = len(seen)
     assert host.run(max_generations=5, wall_clock_seconds=15) == outcome
     assert len(seen) == calls
+
+
+def test_no_plan_is_started_in_the_last_seconds_of_working_time(make_host):
+    # Measured on a real trial: a revision was requested ten seconds before
+    # working time ended, was cut off, and barred the closing reply with it.
+    seen: list[PlanningRequest] = []
+    launcher = FakeLauncher()
+
+    def launch(spec):
+        launcher.launch_calls.append(spec.run_id)
+        # The worker ends without a report two seconds in: a reason to replan.
+        return launcher.handles.setdefault(spec.run_id, WorkingHandle(7000, 2.0, lambda: None))
+
+    launcher.launch = launch
+    goal = replying_goal(reserve=10)
+    goal = replace(goal, metadata={**goal.metadata, benchmark_reply.PLAN_KEY: 4})
+    host = make_host(goal, responder(seen=seen), launcher=launcher)
+    # 15 s of trial, 10 reserved: 5 s of work. At about 2 s the worker is gone
+    # and under 4 s remain, so no revision is asked for.
+    outcome = host.run(max_generations=5, wall_clock_seconds=15)
+
+    assert host.runtime.closing_failure is None, host.runtime.closing_failure
+    assert outcome.stop_reason == "wall_clock" and "too little working time" in outcome.detail
+    kinds = [item.operation_id.split(".", 1)[0] for item in seen]
+    assert kinds == ["runtime-initial", "runtime-closing"], kinds
+    assert final_reply(host) == REPLY
 
 
 def test_generation_bound_also_ends_with_a_reply(make_host):

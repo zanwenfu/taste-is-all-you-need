@@ -1353,6 +1353,12 @@ class LLMPlannerTransport:
                         f"planner provider exception receipt failed: {persist_error}",
                         telemetry=telemetry,
                     ) from persist_error
+                # The unknown outcome is now on durable record and its worst
+                # case stays reserved. The coordinator may plan again inside
+                # what is left of its budget.
+                acknowledge = getattr(self.llm, "acknowledge_uncertain", None)
+                if dispatched and callable(acknowledge):
+                    acknowledge()
                 raise PlannerCompletionError(detail, telemetry=telemetry) from exc
 
             try:

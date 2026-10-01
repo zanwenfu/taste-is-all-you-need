@@ -194,6 +194,35 @@ def test_untrusted_planner_cannot_change_execution_policy(tmp_path, goal, policy
         assert len(sent) == 1 and not runtime.supervisor.runs()
 
 
+def test_a_lost_planner_reply_is_charged_at_its_ceiling_and_the_goal_goes_on(tmp_path, goal, policy, sdk_transport):
+    # One server error on a planner call used to end the goal: the planner's
+    # client refused every later call, the budget was called unprovable, and
+    # not even a closing reply could be asked for.
+    payloads = []
+
+    def handler(wire):
+        payload = json.loads(json.loads(wire.content)["input"][0]["content"])
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return httpx.Response(500, json={"error": {"message": "server error"}})
+        return httpx.Response(200, json=response(
+            model=AZURE_PLANNER_MODEL, output=[message(json.dumps(proposal(payload, complete=True)))]))
+
+    sent, _ = sdk_transport(handler)
+    with host(tmp_path, goal, policy, launcher=NoLaunchLauncher()) as runtime:
+        result = runtime.run(max_generations=3, wall_clock_seconds=60)
+        assert result.complete and result.stop_reason == "complete", result.to_dict()
+        # The lost call was not sent again; the next plan was a new call.
+        assert len(sent) == 2
+        ceiling = runtime.planner.transport.max_billed_call_usd()
+        budget = result.budget
+        # Its exact cost is unknown. It cannot exceed what the call was admitted
+        # against, and that much stays set aside.
+        assert budget.reserved_usd == pytest.approx(ceiling) and ceiling > 0
+        assert budget.enforceable and not budget.unknown_planner_attempt_ids
+        assert budget.known_spent_usd > 0
+
+
 def test_expired_policy_does_not_refresh_planner_deadline_or_dispatch(tmp_path, goal, policy, sdk_transport):
     sent, _ = install_planner(sdk_transport)
     expired = replace(policy, deadline_unix=1)

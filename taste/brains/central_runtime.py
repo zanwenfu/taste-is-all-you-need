@@ -564,6 +564,7 @@ class CentralRuntime:
         # often and makes a durable cycle only this often. See _await_change.
         self.idle_poll_seconds = IDLE_POLL_SECONDS
         self.idle_heartbeat_seconds = IDLE_HEARTBEAT_SECONDS
+        self._plan_minimum = 0.0
         self.clock = clock
         self.fault_injector = fault_injector
         self._lock = threading.RLock()
@@ -1096,10 +1097,14 @@ class CentralRuntime:
         unknown_planner: list[str] = []
         unbounded: list[str] = []
 
+        planner_ceiling = self._planner_call_ceiling()
         for attempt in self.planner.planner_attempts(self.goal.goal_id):
             telemetry = attempt.telemetry
             if not telemetry.cost_known or telemetry.billed_usd is None:
-                unknown_planner.append(attempt.attempt_id)
+                if planner_ceiling is None:
+                    unknown_planner.append(attempt.attempt_id)
+                else:
+                    reservations.append(planner_ceiling)
             else:
                 planner_costs.append(telemetry.billed_usd)
 
@@ -1158,6 +1163,39 @@ class CentralRuntime:
             worker_spent,
             planner_spent,
         )
+
+    def _planner_call_ceiling(self) -> float | None:
+        """The most one planner call can have cost, where that can be proved.
+
+        A planner call whose reply was lost has an unknown cost. Calling the
+        whole budget unprovable for it ended the goal: no further plan and no
+        closing reply. An Azure planner call is admitted against a fixed worst
+        case, one attempt and no resend, so it cannot have cost more than
+        that. It is charged at that ceiling, as a lost worker is charged at
+        its caps; the unknown stays visible as that reservation. Other
+        transports keep the original rule.
+        """
+        if "azure_execution" not in self.goal.metadata:
+            return None
+        ceiling = getattr(self.planner.transport, "max_billed_call_usd", None)
+        try:
+            value = float(ceiling()) if callable(ceiling) else None
+        except Exception:
+            return None
+        return value if value is not None and math.isfinite(value) and value > 0 else None
+
+    def _require_planning_time(self) -> None:
+        """Refuse to start a plan that cannot be answered and acted on in time.
+
+        Measured on a real trial: a revision was requested ten seconds before
+        working time ended. Its call was cut off at the deadline, its cost
+        became unknown, the closing reply was barred with it, and the trial
+        ended with no answer. With too little working time left, the run ends
+        on its clock and the reserve is spent on the reply instead.
+        """
+        remaining = self._remaining_wall
+        if self._plan_minimum and remaining is not None and remaining() < self._plan_minimum:
+            raise _WallDeadlineReached("too little working time remains to start another plan")
 
     def _charge_lost_cost(self, run: SupervisorRun, reservations: list[float], unknown: list[str]) -> None:
         """Account for an ended run whose exact spending cannot be read.
@@ -1802,6 +1840,8 @@ class CentralRuntime:
         *,
         closing: bool = False,
     ) -> PlanRevision:
+        if not closing:
+            self._require_planning_time()
         for trigger in triggers:
             self._record_trigger(cycle, trigger)
         base_id = self._operation_id(plan, triggers, closing=closing)
@@ -2082,6 +2122,7 @@ class CentralRuntime:
         # Work, including every worker's own allowance, ends this long before
         # the trial's deadline. The reserve is spent on the closing reply.
         reserve = benchmark_reply.closing_reserve(self.goal.metadata)
+        self._plan_minimum = benchmark_reply.planning_minimum(self.goal.metadata) if reserve else 0.0
         self._remaining_wall = lambda: min(wall_clock_seconds - (clock() - started),
                                             (deadline - self.clock()).total_seconds()) - reserve
         self._deadline_at = deadline - timedelta(seconds=reserve)
@@ -2103,7 +2144,11 @@ class CentralRuntime:
                 try:
                     bind_deadline = getattr(self.planner.transport, "bind_deadline", None)
                     if callable(bind_deadline):
-                        bind_deadline(remaining_seconds=remaining)
+                        # A plan already being written when working time ends
+                        # may take half the reserve to arrive. Cut off at the
+                        # deadline, it was paid for, unusable and of unknown
+                        # cost; the closing reply keeps the other half.
+                        bind_deadline(remaining_seconds=remaining + reserve / 2)
                     outcome = self.cycle(max_generations=max_generations)
                 except (InvalidPlannerOutput, RejectedPlannerOperation, StalePlanningWorld,
                         PlannerTransportError) as exc:

@@ -388,6 +388,18 @@ class LLM:
             self._reserved_usd += exposure
         return exposure
 
+    def acknowledge_uncertain(self) -> None:
+        """Lift the fence left by a call whose outcome is unknown; keep its reservation.
+
+        For a caller that has durably recorded that call as possibly billed.
+        Its worst-case exposure stays reserved against this LLM's budget for
+        good, so a later call is still admitted only inside the cap. What ends
+        is the refusal of every later call, which made one lost reply the end
+        of a whole goal.
+        """
+        with self._budget_lock:
+            self._azure_uncertain = False
+
     def _release_call_budget(self, exposure: float) -> None:
         if exposure <= 0:
             return
