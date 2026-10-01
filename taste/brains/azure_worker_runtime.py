@@ -174,6 +174,42 @@ class AzureWorkerRuntime:
     def _pending_inbox(self):
         return [item.inbox_id for item in self.feedback.communicator.pending(self.assignment.worker)]
 
+    def _activity(self, *, last=40, limit=12_000):
+        """What this worker's commands did, for a report it could not state itself.
+
+        A stopped or failed worker makes no claim, and the coordinator knows a
+        worker only by its report. With nothing here, a closing reply could
+        say only that nothing was verified, though tests had run and files
+        had changed. These lines are a mechanical record, not a judgement.
+        """
+        try:
+            messages = self.conversation.messages
+        except Exception:
+            return []
+
+        def clip(text, size):
+            text = " ".join(str(text).split())
+            return text if len(text) <= size else text[:size] + " [cut]"
+
+        started, lines = {}, []
+        for message in messages:
+            content = message.get("content")
+            for block in content if isinstance(content, list) else ():
+                if block.get("type") == "tool_use" and block.get("name") == "terminal_exec":
+                    started[block.get("id")] = (block.get("input") or {}).get("command", "")
+                elif block.get("type") == "tool_result" and block.get("tool_use_id") in started:
+                    rows = [row for row in str(block.get("content", "")).splitlines() if row.strip()]
+                    line = f"ran: {clip(started.pop(block['tool_use_id']), 300)} -> {clip(rows[0] if rows else 'no result text', 120)}"
+                    lines.append(line + (f"; last line printed: {clip(rows[-1], 200)}" if len(rows) > 1 else ""))
+        lines.extend(f"started, result not recorded: {clip(command, 300)}" for command in started.values())
+        lines = lines[-last:]
+        while lines and sum(map(len, lines)) > limit:
+            lines.pop(0)
+        if not lines:
+            return []
+        return ["No claim was stated. Mechanical record of this worker's terminal commands, "
+                "oldest first:", *lines]
+
     def _check_deadline(self):
         if time.time() >= self.session.binding.deadline_unix:
             raise ResponsesFenced("the admitted worker deadline elapsed")
@@ -356,7 +392,7 @@ class AzureWorkerRuntime:
             summary=claim.summary if claim is not None else reason,
             metadata={"harness": "azure-responses/1", "durability_ok": not interrupted and not failures,
                       "monitor": monitor_report, "worker_accounting": asdict(worker_cost),
-                      "worker_evidence": list(claim.evidence) if claim is not None else [],
+                      "worker_evidence": list(claim.evidence) if claim is not None else self._activity(),
                       "structured_status": claim.status if claim is not None else None,
                       "feedback_boundary": {"verdicts": verdict_boundary, "pending_inbox_ids": pending},
                       "assignment_digest": "sha256:" + hashlib.sha256(self.assignment.to_json().encode()).hexdigest()},

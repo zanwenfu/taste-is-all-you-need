@@ -1407,6 +1407,90 @@ def test_subprocess_launcher_observes_ready_and_reaps_process_group(store: Store
     assert launcher.recover(supervisor._spec(observed)).poll() is not None
 
 
+# A worker that needs a helper process of its own to finish in good order,
+# as a real worker needs its git readers to write its report.
+WORKER_WITH_HELPER = """
+import signal, subprocess, sys, time
+from pathlib import Path
+from taste.brains.supervisor import mark_worker_ready
+
+ECHO = "import sys\\nfor line in sys.stdin:\\n    sys.stdout.write(line.upper())\\n    sys.stdout.flush()"
+helper = subprocess.Popen([sys.executable, "-c", ECHO], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, text=True)
+
+def finish(*_):
+    time.sleep(0.3)  # the paid call it must settle first
+    helper.stdin.write("report\\n")
+    helper.stdin.flush()
+    Path("report.txt").write_text(helper.stdout.readline())
+    helper.stdin.close()
+    helper.wait()
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, finish)
+Path("helper.pid").write_text(str(helper.pid))
+mark_worker_ready()
+time.sleep(30)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_a_stopped_worker_is_asked_first_and_keeps_its_helpers_while_it_finishes(store: Store) -> None:
+    # Measured on a real trial: the whole tree was signalled at once, the
+    # worker's helpers died first, its report failed with BrokenPipeError, and
+    # its cost was charged at the assignment's ceiling.
+    launcher = SubprocessLauncher(isolated_python_argv(sys.executable, WORKER_WITH_HELPER, []))
+    supervisor = CentralSupervisor(store, launcher=launcher, termination_grace=10)
+    run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    deadline = time.monotonic() + 5
+    observed = supervisor.get(run.run_id)
+    while time.monotonic() < deadline and not observed.ready:
+        time.sleep(0.02)
+        observed = supervisor.poll(run.run_id, active_generation=1)
+    assert observed.ready
+    worktree = store.worktree_path_for("worker-1")
+    helper = int((worktree / "helper.pid").read_text())
+
+    began = time.monotonic()
+    terminal = supervisor.stop(run.run_id, "test_stop")
+
+    assert terminal.phase == "terminal" and terminal.reaped
+    assert (terminal.exit_code, terminal.signal) == (0, None), "the worker was killed, not stopped"
+    # What it wrote while stopping is in the work the supervisor captured.
+    assert store.view("worker-1").head.read("report.txt") == "REPORT\n"
+    assert time.monotonic() - began < 8, "a worker that finished was still waited out"
+    assert supervisor_module._process_identity(helper) in ("", None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_a_worker_that_ignores_the_request_is_still_killed_with_everything_it_started(store: Store) -> None:
+    stubborn = (
+        "import signal, subprocess, sys, time; from pathlib import Path; "
+        "from taste.brains.supervisor import mark_worker_ready; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "child=subprocess.Popen([sys.executable, '-c', "
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)']); "
+        "Path('child.pid').write_text(str(child.pid)); mark_worker_ready(); time.sleep(30)"
+    )
+    launcher = SubprocessLauncher(isolated_python_argv(sys.executable, stubborn, []))
+    supervisor = CentralSupervisor(store, launcher=launcher, termination_grace=0.3)
+    run = supervisor.prepare(assignment_for(supervisor), wall_timeout_seconds=30)
+    supervisor.start(run.run_id, active_generation=1)
+    deadline = time.monotonic() + 5
+    observed = supervisor.get(run.run_id)
+    while time.monotonic() < deadline and not observed.ready:
+        time.sleep(0.02)
+        observed = supervisor.poll(run.run_id, active_generation=1)
+    assert observed.ready
+    child = int((store.worktree_path_for("worker-1") / "child.pid").read_text())
+
+    terminal = supervisor.stop(run.run_id, "test_stop")
+
+    assert terminal.phase == "terminal" and terminal.reaped and terminal.signal == 9
+    assert supervisor_module._process_identity(child) in ("", None)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX descendant identity")
 def test_subprocess_launcher_reaps_a_descendant_that_detaches_its_group(
     store: Store,

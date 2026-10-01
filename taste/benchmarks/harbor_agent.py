@@ -181,6 +181,9 @@ class TasteAgent(BaseAgent):
 
     def _record(self, goal_id, instruction, outcome, context, started):
         owner, flags = self.owner, list(self.owner.audit_flags)
+        # A cancelled run returned nothing, but it was settled before it was
+        # sealed: what it is known to have spent is still reported.
+        outcome = outcome if outcome is not None else owner.outcome
         nested = None
         try:
             if owner.trajectory_path is not None:

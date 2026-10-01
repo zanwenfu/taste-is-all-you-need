@@ -1361,7 +1361,15 @@ def _terminate_tree(handle: _SubprocessHandle, grace_seconds: float) -> ProcessE
     # ancestry observation.  Every discovered birth is persisted before the
     # first signal.
     members.update(handle._observe_members(discover_markers=True))
-    _signal_exact(members, signal.SIGTERM)
+    # The root is asked first, and alone. A worker that stops in good order
+    # settles its paid call and writes its report, and it needs its own helper
+    # processes to do that. Signalled together with it, they died first.
+    # Measured on a real trial: the worker's git readers were gone, its report
+    # failed with BrokenPipeError, the next TERM killed it, and its cost was
+    # charged at the assignment's ceiling. What the root leaves behind is
+    # signalled once it has exited; everything still alive when the grace
+    # ends is killed below, exactly as before.
+    _signal_exact({handle.pid: handle.process_identity}, signal.SIGTERM)
 
     deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
@@ -1376,9 +1384,10 @@ def _terminate_tree(handle: _SubprocessHandle, grace_seconds: float) -> ProcessE
         )
         handle._remember_members(remaining)
         members.update(remaining)
-        _signal_exact(remaining, signal.SIGTERM)
-        if observed is not None and not remaining:
-            return handle._cleanup_result(observed)
+        if observed is not None:
+            _signal_exact(remaining, signal.SIGTERM)
+            if not remaining:
+                return handle._cleanup_result(observed)
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
 
     # Keep the original identities so a daemon that detached from the launch

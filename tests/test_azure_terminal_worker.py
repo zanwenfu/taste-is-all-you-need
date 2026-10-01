@@ -36,6 +36,7 @@ from tests.test_azure_worker_process import BOOTSTRAP
 from tests.test_azure_worker_runtime import install, report
 from tests.test_azure_worker_runtime import worker as _worker
 from tests.test_goal_cancellation import wait_event
+from tests.test_openai_responses import message
 from tests.test_terminal_broker import Environment
 from tests.test_worker_admission import install_assignment
 from tests.test_worker_admission import launch as _launch
@@ -188,6 +189,27 @@ def test_cancelled_worker_waits_for_remote_terminal_settlement_and_reports_uncer
             assert not result.completed and result.uncertain
             assert len(t.env.calls) == len(sent) == 1
             assert worker.store.view(worker.assignment.worker).holder is None
+    asyncio.run(scenario())
+
+
+def test_a_worker_that_states_no_claim_still_reports_what_its_commands_did(worker, sdk_transport, tmp_path):
+    # The coordinator knows a worker only by its report. One stopped at a
+    # deadline, or failed, states no claim; its commands still ran.
+    def scripted(number, payload):
+        return replies(1, payload) if number == 1 else [message("not a claim")]
+
+    install(sdk_transport, worker_reply=scripted)
+
+    async def scenario():
+        async with terminal(worker, tmp_path) as t:
+            t.env.result = TerminalResult(1, b"collected 3 items\n2 passed, 1 failed\n", b"")
+            assert await execute_worker(worker.config, store=worker.store,
+                                        environ=worker.environ) == WorkerExitCode.INCOMPLETE
+            result = report(worker)
+            assert not result.completed and result.terminal_reason == "runtime_invalidworkerclaim"
+            evidence = result.metadata["worker_evidence"]
+            assert evidence[0].startswith("No claim was stated. Mechanical record")
+            assert list(evidence[1:]) == ["ran: produce evidence -> exit 1; last line printed: 2 passed, 1 failed"]
     asyncio.run(scenario())
 
 
