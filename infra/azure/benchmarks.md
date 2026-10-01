@@ -51,7 +51,7 @@ result metadata (`agent_result.metadata.taste.configuration`).
 | --- | --- | --- |
 | `worker_model` | the trial's model | Served model for workers and monitors (`gpt-6-astra` or `gpt-6-sol`). The coordinator is always `gpt-6-astra`. |
 | `worker_effort` | `low` | Worker reasoning effort: `low`, `medium`, `high`. Monitors use `low`. |
-| `planner_effort` | `medium` | The coordinator's reasoning effort. Empty leaves the provider's default, which is close to none. |
+| `planner_effort` | `medium` | The coordinator's reasoning effort. Empty leaves the provider's default. Measured on gpt-6-astra, the level changes little: the model reasons briefly at every level. |
 | `spend_cap_usd` | 15 | What one trial may really spend before it stops and replies. |
 | `worker_spend_cap_usd`, `monitor_spend_cap_usd` | 6, 2 | The same, for one worker and its monitor. |
 | `max_assignments` | 1 | Assignments one plan may hold. One container and a serial terminal make one worker at a time the honest default. |

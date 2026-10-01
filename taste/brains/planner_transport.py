@@ -731,9 +731,7 @@ class LLMPlannerTransport:
         self.max_tokens = max_tokens
         self.max_prompt_bytes = max_prompt_bytes
         self.deadline_unix = deadline_unix
-        # None leaves the provider's default, which for the current models is
-        # close to no reasoning at all: measured, 72 reasoning tokens in the
-        # four planner calls of one real trial.
+        # None names no effort and leaves the provider's default.
         self.effort = effort
         self.journal_branch = journal.name
         self._ensure_ready = ensure_ready

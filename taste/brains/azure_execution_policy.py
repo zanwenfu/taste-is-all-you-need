@@ -60,8 +60,8 @@ class AzureExecutionPolicy:
     worker_wall_seconds: float = 900.0
     # The most assignments one plan may hold; None leaves it to the planner.
     max_assignments: int | None = None
-    # How hard the coordinator reasons. Empty leaves the provider's default,
-    # which for these models is close to none.
+    # The coordinator's reasoning effort. Empty names none and leaves the
+    # provider's default.
     planner_effort: str = ""
 
     def __post_init__(self):
