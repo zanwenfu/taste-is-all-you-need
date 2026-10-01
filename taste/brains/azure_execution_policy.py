@@ -25,7 +25,8 @@ from taste.providers.azure_openai import (
 WORKER_EFFORTS = ("low", "medium", "high")
 
 POLICY_KEY = "azure_execution"
-_ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low"}
+_ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
+                     "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None}
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,14 @@ class AzureExecutionPolicy:
     # on the planner's model uses the planner's deployment: one model, one route.
     worker_model: str = AZURE_WORKER_MODEL
     worker_effort: str = "low"
+    # How long a stopped worker may take to settle its active model call and
+    # write its report before it is killed. A killed worker's exact cost is
+    # lost, so a trial that can afford the wait should allow one call's length.
+    worker_grace_seconds: float = 2.0
+    # A worker's allowance when its assignment names none, inside the goal's.
+    worker_wall_seconds: float = 900.0
+    # The most assignments one plan may hold; None leaves it to the planner.
+    max_assignments: int | None = None
 
     def __post_init__(self):
         if self.terminal is not None and (
@@ -62,6 +71,14 @@ class AzureExecutionPolicy:
             raise ValueError("one served model must use exactly one deployment")
         if self.worker_effort not in WORKER_EFFORTS:
             raise ValueError("worker reasoning effort must be low, medium or high")
+        for name, ceiling in (("worker_grace_seconds", 600), ("worker_wall_seconds", 604800)):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not 0 < value <= ceiling:
+                raise ValueError(f"{name} must be positive and at most {ceiling} seconds")
+            object.__setattr__(self, name, float(value))
+        if self.max_assignments is not None and (
+                type(self.max_assignments) is not int or not 1 <= self.max_assignments <= 64):
+            raise ValueError("max_assignments must be between 1 and 64")
         route = self.azure_config({"AZURE_OPENAI_BASE_URL": self.endpoint,
                                    "AZURE_OPENAI_API_KEY": "policy-validation-only"})
         if route.base_url != self.endpoint:
@@ -166,6 +183,11 @@ class AzureExecutionPolicy:
                 "it need not restate the task."
             ),
         )
+        # The runtime bounds every worker by the goal's own remaining time. A
+        # shorter allowance copied from an example only cuts good work short.
+        exemplar["resources"].pop("wall_timeout_seconds", None)
+        if self.max_assignments is not None:
+            payload["rules"]["most_assignments_per_plan"] = self.max_assignments
         if self.terminal is not None:
             exemplar["resources"][TERMINAL_POLICY_KEY] = self.terminal.to_dict()
             capabilities = payload["rules"]["worker_capabilities"]
@@ -176,6 +198,12 @@ class AzureExecutionPolicy:
                 "All workers share one task container with serial terminal actions. Files, packages and services "
                 "persist across successful commands and memory rollback. Active command timeout/cancellation "
                 "ends the task environment. Official benchmark grading remains the outside lifecycle owner's job.")
+
+    def validate_plan(self, assignments):
+        if self.max_assignments is not None and len(assignments) > self.max_assignments:
+            raise ValueError(
+                f"this goal admits at most {self.max_assignments} assignment(s) per plan; "
+                "issue the next one in a later plan revision")
 
     def validate_assignment(self, assignment):
         allowed = {"azure_openai", "monitor_budget_usd", "wall_timeout_seconds"}

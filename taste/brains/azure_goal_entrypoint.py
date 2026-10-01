@@ -39,7 +39,10 @@ def _host_factory(*args, policy, environment, planner_model, monitor_model, plan
             or planner_max_tokens != policy.planner_max_output_tokens):
         raise GoalInputError("Azure goal model options differ from the admitted policy")
     return compose_azure_central_runtime(*args, policy=policy, environment=environment,
-                                         settlement_only=settlement_only, **kwargs)
+                                         settlement_only=settlement_only,
+                                         supervisor_termination_grace=policy.worker_grace_seconds,
+                                         default_wall_timeout_seconds=policy.worker_wall_seconds,
+                                         **kwargs)
 
 
 def prepare_azure_goal_process(

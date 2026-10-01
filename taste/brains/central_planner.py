@@ -2500,6 +2500,8 @@ class CentralPlanner:
                     "complete plans must be empty and active plans must have assignments"
                 )
             assessment = self._validate_assessment(raw["assessment"], request, raw["complete"])
+            if self.azure_policy is not None:
+                self.azure_policy.validate_plan(assignments)
             for assignment in assignments:
                 self._validate_assignment_budget_caps(assignment, request)
                 if self.azure_policy is not None:
