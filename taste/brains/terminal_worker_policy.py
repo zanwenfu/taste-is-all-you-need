@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import stat
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -21,6 +22,7 @@ from taste.brains.worker_protocol import assignment_run_id
 
 TERMINAL_POLICY_KEY = "task_terminal"
 _SCHEMA = "taste.brains/TerminalWorkerPolicy/1"
+_SCHEMA_WORKDIR = "taste.brains/TerminalWorkerPolicy/2"
 _MAX_CREDENTIAL_BYTES = 8192
 
 
@@ -28,20 +30,36 @@ _MAX_CREDENTIAL_BYTES = 8192
 class TerminalWorkerPolicy:
     binding: TerminalBinding
     max_timeout_seconds: float = 300
+    # The task's own working directory: where a command runs unless it names
+    # another. Public, like the rest of this scope; the task's published value.
+    workdir: str | None = None
 
     def __post_init__(self):
         TerminalGrant(self.binding, "policy_validation", self.max_timeout_seconds)
+        if self.workdir is not None and (
+                not isinstance(self.workdir, str) or not posixpath.isabs(self.workdir)
+                or "\x00" in self.workdir or len(self.workdir.encode()) > 4096
+                or posixpath.normpath(self.workdir) != self.workdir):
+            raise ValueError("terminal working directory must be a normalized absolute path")
 
     def to_dict(self):
-        return {"schema": _SCHEMA, **asdict(self)}
+        value = {"schema": _SCHEMA, "binding": asdict(self.binding),
+                 "max_timeout_seconds": self.max_timeout_seconds}
+        if self.workdir is not None:
+            value.update(schema=_SCHEMA_WORKDIR, workdir=self.workdir)
+        return value
 
     @classmethod
     def from_dict(cls, value):
-        if (not isinstance(value, Mapping) or set(value) != {"schema", "binding", "max_timeout_seconds"}
-                or value["schema"] != _SCHEMA or not isinstance(value["binding"], Mapping)):
+        fields = {"schema", "binding", "max_timeout_seconds"}
+        if (not isinstance(value, Mapping) or not isinstance(value.get("binding"), Mapping)
+                or (value.get("schema"), set(value)) not in (
+                    (_SCHEMA, fields), (_SCHEMA_WORKDIR, {*fields, "workdir"}))
+                or (value["schema"] == _SCHEMA_WORKDIR and value["workdir"] is None)):
             raise ValueError("invalid terminal worker policy")
         try:
-            return cls(TerminalBinding(**value["binding"]), value["max_timeout_seconds"])
+            return cls(TerminalBinding(**value["binding"]), value["max_timeout_seconds"],
+                       value.get("workdir"))
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid terminal worker policy limits") from exc
 

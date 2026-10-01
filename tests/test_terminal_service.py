@@ -50,15 +50,17 @@ def rig(tmp_path):
             service = TerminalService(owner, credentials, max_connections=max_connections)
             await service.start()
             value = SimpleNamespace(owner=owner, env=env, service=service, credentials=credentials,
-                                    a=TerminalClient(credentials[0]), b=TerminalClient(credentials[1]))
+                                    a=TerminalClient(credentials[0]), b=TerminalClient(credentials[1]),
+                                    owner_directory=tmp_path / "ledger", released=False)
             try:
                 yield value
             finally:
                 env.release.set()
                 env.stop_release.set()
                 env.stop_error = None
-                await service.close()
-                owner.close()
+                if not value.released:
+                    await service.close()
+                    owner.close()
 
     return start
 
@@ -484,4 +486,31 @@ def test_trusted_registration_is_exact_and_not_an_rpc_operation(rig):
             response = await raw_reply(r.credentials[0], message(r.credentials[0], operation="authorize", arguments=credential.to_dict()))
             assert response["status"] == "denied"
             assert len(r.env.calls) == 1
+    asyncio.run(scenario())
+
+
+def test_release_leaves_a_sealed_environment_running_for_its_verifier(rig):
+    async def scenario():
+        async with rig() as r:
+            await r.a.execute(req())
+            with pytest.raises(TerminalFenced, match="only a sealed"):
+                await r.service.release()
+            assert r.owner.phase == "ready" and not r.env.stopped
+            r.service.seal_for_grading()
+            socket_path = Path(r.credentials[0].socket_path)
+            assert socket_path.exists()
+            await r.service.release()
+            # No stop was sent: the benchmark's runner owns the container now.
+            assert not r.env.stopped and r.env.stop_calls == 0 and r.owner.phase == "sealed"
+            assert not socket_path.exists()
+            with pytest.raises(rpc.TerminalUnavailable):
+                await r.a.ping()
+            # The broker's lease can be released with the receipts intact.
+            r.owner.close()
+            reopened = TerminalBroker.open(r.owner_directory, r.owner.binding, r.env)
+            try:
+                assert reopened.phase == "sealed" and reopened.lookup(req()) == r.env.result
+            finally:
+                reopened.close()
+            r.released = True
     asyncio.run(scenario())

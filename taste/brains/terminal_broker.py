@@ -3,8 +3,11 @@
 The ledger belongs to the trusted controller, OUTSIDE Git rollback and task
 write access. A request ID identifies an effect, not an attempt: a completed
 request can be read again, but an interrupted request can never be replayed.
-Normal nonzero exits are command results. An uncertain exit, timeout or active
-cancellation ends admission and requires stopping the entire environment.
+Normal nonzero exits are command results. A backend that can end one command
+and confirm its exit turns a timeout or a departed caller into a completed,
+explicitly terminated receipt; the environment and later commands survive.
+Without that confirmation, an uncertain exit, timeout or active cancellation
+still ends admission and requires stopping the entire environment.
 Package/service changes persist between successful requests; this module does
 not promise filesystem or operating-system rollback.
 
@@ -34,6 +37,10 @@ from typing import Protocol
 from taste.brains.owned_thread import start_owned_thread
 
 MAX_TERMINAL_OUTPUT_BYTES = 1024 * 1024  # Per stream, before persistence or IPC.
+# How long a backend may take to end one command and confirm its exit, beyond
+# the command's own allowance. Past it the whole environment is stopped.
+COMMAND_SETTLE_SECONDS = 20
+TERMINATIONS = ("", "timeout", "cancelled")
 
 
 class TerminalFenced(RuntimeError):
@@ -102,10 +109,15 @@ class TerminalResult:
     stderr: bytes = b""
     stdout_dropped_bytes: int = 0
     stderr_dropped_bytes: int = 0
+    # "timeout" or "cancelled": the backend ended this command and confirmed
+    # its exit. The output is what was captured before that; effects may be partial.
+    terminated: str = ""
 
     def __post_init__(self):
         if type(self.return_code) is not int:
             raise ValueError("terminal return code must be an integer")
+        if self.terminated not in TERMINATIONS:
+            raise ValueError("terminal termination cause must be empty, timeout or cancelled")
         if not isinstance(self.stdout, bytes) or not isinstance(self.stderr, bytes):
             raise ValueError("terminal output must preserve bytes")
         for output, dropped in ((self.stdout, self.stdout_dropped_bytes),
@@ -124,6 +136,11 @@ class TerminalBackend(Protocol):
     never create/restart it). It must drain all task descendants and cause any
     in-flight execute call to return. A failed stop must raise, not return a
     receipt. Identity denotes the instance, not an image or human-readable name.
+
+    A backend may also define ``interrupt()``. It then owns each command's
+    allowance: at the request timeout, or when interrupt() is called, execute
+    ends that command alone, confirms its exit and returns a receipt whose
+    ``terminated`` names the cause. If the exit cannot be confirmed it raises.
     """
 
     @property
@@ -175,6 +192,7 @@ class TerminalBroker:
     def __init__(self, directory, binding, backend, *, fresh):
         directory = directory.absolute()
         self.binding, self.backend = binding, backend
+        self._interruptible = callable(getattr(backend, "interrupt", None))
         self._pid, self._fd, self._db = os.getpid(), None, None
         self._operation, self._loop = None, None
         self._interrupt = None
@@ -225,16 +243,19 @@ class TerminalBroker:
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
         columns = [row[1] for row in self._db.execute("PRAGMA table_info(requests)")]
         legacy = ["id", "payload", "status", "code", "stdout", "stderr"]
-        current = [*legacy, "stdout_dropped_bytes", "stderr_dropped_bytes"]
-        if version == 0 and columns == legacy:
-            # Old transports retained all bytes. Upgrade atomically under the
-            # controller lease; pending effects still fence below, never replay.
+        counted = [*legacy, "stdout_dropped_bytes", "stderr_dropped_bytes"]
+        current = [*counted, "terminated"]
+        if (version, columns) in ((0, legacy), (1, counted)):
+            # Old transports retained all bytes and ended no command alone.
+            # Upgrade atomically under the controller lease; pending effects
+            # still fence below, never replay.
             with self._db:
                 self._db.execute("BEGIN IMMEDIATE")
-                for column in current[len(legacy):]:
+                for column in counted[len(columns):]:
                     self._db.execute(f"ALTER TABLE requests ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
-                self._db.execute("PRAGMA user_version=1")
-        elif version != 1 or columns != current:
+                self._db.execute("ALTER TABLE requests ADD COLUMN terminated TEXT NOT NULL DEFAULT ''")
+                self._db.execute("PRAGMA user_version=2")
+        elif version != 2 or columns != current:
             raise TerminalFenced("unsupported terminal receipt schema")
 
     def _identity(self):
@@ -270,7 +291,7 @@ class TerminalBroker:
 
     def lookup(self, request: TerminalRequest):
         self._check()
-        row = self._db.execute("SELECT payload,status,code,stdout,stderr,stdout_dropped_bytes,stderr_dropped_bytes FROM requests WHERE id=?",
+        row = self._db.execute("SELECT payload,status,code,stdout,stderr,stdout_dropped_bytes,stderr_dropped_bytes,terminated FROM requests WHERE id=?",
                                (request.request_id,)).fetchone()
         if row is None:
             return None
@@ -326,11 +347,13 @@ class TerminalBroker:
         if not isinstance(result, TerminalResult):
             raise TypeError("backend returned no TerminalResult")
         with self._db:
-            self._db.execute("UPDATE requests SET status=?,code=?,stdout=?,stderr=?,stdout_dropped_bytes=?,stderr_dropped_bytes=? WHERE id=?",
+            self._db.execute("UPDATE requests SET status=?,code=?,stdout=?,stderr=?,stdout_dropped_bytes=?,stderr_dropped_bytes=?,terminated=? WHERE id=?",
                              ("completed" if completed else "uncertain", result.return_code,
                               result.stdout, result.stderr, result.stdout_dropped_bytes,
-                              result.stderr_dropped_bytes, request.request_id))
-            self._event("completed" if completed else "late_result", {"request_id": request.request_id})
+                              result.stderr_dropped_bytes, result.terminated, request.request_id))
+            self._event("completed" if completed else "late_result",
+                        {"request_id": request.request_id,
+                         **({"terminated": result.terminated} if result.terminated else {})})
 
     async def execute(self, request: TerminalRequest) -> TerminalResult:
         self._on_loop()
@@ -362,7 +385,6 @@ class TerminalBroker:
                 await asyncio.wait((self._operation,))
                 return self._operation.result()
             except asyncio.CancelledError as cancelled:
-                self._closing = True
                 if not self._interrupt.done():
                     self._interrupt.set_result(None)
                 try:
@@ -371,6 +393,11 @@ class TerminalBroker:
                     # durable, but the task environment still needs a stop.
                     with suppress(asyncio.CancelledError):
                         await _settle(self._operation)
+                    if self._ended_alone(request):
+                        # One caller left. Its command has a durable receipt
+                        # and a confirmed exit; other actors keep the environment.
+                        raise cancelled
+                    self._closing = True
                     # Cancellation can race a fully persisted receipt. The
                     # effect stays completed, but the caller still ended the trial.
                     if self.phase != "stopped":
@@ -381,6 +408,12 @@ class TerminalBroker:
                 except BaseException as failure:
                     raise BaseExceptionGroup("terminal cancellation and settlement failed", [cancelled, failure]) from None
                 raise
+
+    def _ended_alone(self, request):
+        if not self._interruptible or self._closing or self.phase != "ready":
+            return False
+        row = self._db.execute("SELECT status FROM requests WHERE id=?", (request.request_id,)).fetchone()
+        return row is not None and row[0] == "completed"
 
     async def _stop_owned(self):
         self._identity()
@@ -401,6 +434,7 @@ class TerminalBroker:
 
     async def _execute_owned(self, request, interrupt):
         effect = None
+        ended_alone = False
         try:
             if interrupt.done():
                 raise asyncio.CancelledError()
@@ -408,9 +442,22 @@ class TerminalBroker:
             if timeout <= 0:
                 raise TimeoutError("terminal deadline expired before execution")
             effect = start_owned_thread(_call, self._execute_backend, request)
-            done, _ = await asyncio.wait((effect, interrupt), timeout=timeout,
+            # An interruptible backend ends an overdue command itself and
+            # returns its receipt; allow it the time to confirm that exit.
+            settle = COMMAND_SETTLE_SECONDS if self._interruptible else 0
+            done, _ = await asyncio.wait((effect, interrupt), timeout=timeout + settle,
                                          return_when=asyncio.FIRST_COMPLETED)
-            if interrupt in done:
+            if interrupt in done and not self._interruptible:
+                raise asyncio.CancelledError()
+            if effect not in done and interrupt in done:
+                await _settle(start_owned_thread(_call, self.backend.interrupt))
+                done, _ = await asyncio.wait((effect,), timeout=settle)
+                if effect not in done:
+                    raise TimeoutError("terminal command could not be ended within its settlement bound")
+                result = effect.result()
+                self._identity()
+                self._record_result(request, result, completed=True)
+                ended_alone = True
                 raise asyncio.CancelledError()
             if effect not in done:
                 raise TimeoutError("terminal execution exceeded its admitted time")
@@ -419,6 +466,8 @@ class TerminalBroker:
             self._record_result(request, result, completed=True)
             return result
         except BaseException as original:
+            if ended_alone:
+                raise
             failures = [original]
             self._closing = True
             try:

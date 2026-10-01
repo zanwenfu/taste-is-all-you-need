@@ -139,3 +139,22 @@ def test_default_azure_coordinator_assigns_grant_to_real_worker_and_replays_with
                 await service.close()
                 owner.close()
     asyncio.run(scenario())
+
+
+def test_task_working_directory_is_public_scope_with_its_own_wire_version(policy):
+    from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
+
+    plain = bound(policy).terminal
+    assert "workdir" not in plain.to_dict() and plain.to_dict()["schema"].endswith("/1")
+    placed = replace(plain, workdir="/Users/alex/workspace/cli")
+    wire = placed.to_dict()
+    assert wire["schema"].endswith("/2") and wire["workdir"] == "/Users/alex/workspace/cli"
+    assert TerminalWorkerPolicy.from_dict(wire) == placed
+    assert TerminalWorkerPolicy.from_dict(plain.to_dict()) == plain
+    for damaged in ({**wire, "workdir": None}, {**plain.to_dict(), "workdir": "/tmp"},
+                    {key: value for key, value in wire.items() if key != "workdir"}):
+        with pytest.raises(ValueError, match="terminal worker policy"):
+            TerminalWorkerPolicy.from_dict(damaged)
+    for unsafe in ("relative/path", "/a/../b", "/trailing/", "/nul\x00byte", ""):
+        with pytest.raises(ValueError, match="working directory"):
+            replace(plain, workdir=unsafe)

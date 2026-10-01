@@ -90,7 +90,7 @@ def test_worker_executes_task_terminal_then_certifies_artifact_without_leaking_c
             assert t.env.calls[0].actor_id == t.credential.grant.actor_id
             assert t.owner.lookup(t.env.calls[0]) == t.env.result
             model_wire = "\n".join(w.content.decode() for w in sent)
-            assert "terminal_exec" in model_wire and "9000" in model_wire
+            assert "terminal_exec" in model_wire and "9,000 more bytes of stdout" in model_wire
             assert t.credential.token not in model_wire + result.to_json()
             assert t.credential.socket_path not in model_wire + result.to_json()
             transcript = worker.store.state(result.final_state_id).transcript.turns
@@ -101,9 +101,10 @@ def test_worker_executes_task_terminal_then_certifies_artifact_without_leaking_c
             terminal_steps = [step for step in trace["steps"]
                               if any(call["function_name"] == "terminal_exec" for call in step.get("tool_calls", []))]
             assert len(terminal_steps) == 1
-            observed = json.loads(terminal_steps[0]["observation"]["results"][0]["content"])
-            assert observed["stdout"]["dropped_bytes"] == 9000
-            assert observed["stdout"]["encoding"] == "base64"
+            # The record holds the text the worker was given, not a re-rendering of it.
+            observed = terminal_steps[0]["observation"]["results"][0]["content"]
+            assert observed == ("exit 0\nverified task evidence\ufffd\n[cut: 9,000 more bytes of stdout "
+                                "were beyond what is kept and cannot be read]\n")
             assert trace["extra"]["complete_attempt"] is False
             assert worker.store.state(result.final_state_id).read("output.txt") == "correct"
             assert calls["worker"] == 3

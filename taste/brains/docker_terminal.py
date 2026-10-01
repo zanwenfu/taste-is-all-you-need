@@ -16,7 +16,9 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import os
 import re
+import signal
 import socket
 import threading
 import time
@@ -38,6 +40,9 @@ COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 CONTROL_BYTES = 1024 * 1024
 READ_BYTES = 65536
 CONTROL_SECONDS = 10
+# Bound for ending one overdue or abandoned command and confirming its exit.
+# It must stay inside the broker's own settlement allowance for that command.
+END_SECONDS = 10
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 PROC_ROOT = Path("/proc")
 
@@ -156,7 +161,15 @@ class _Wire:
             return result
 
 
-def _capture(response, deadline, limit):
+class _Captured:
+    """Stream prefixes and dropped counts, kept when the stream is cut short."""
+
+    def __init__(self):
+        self.streams = [bytearray(), bytearray()]
+        self.dropped = [0, 0]
+
+
+def _capture(response, deadline, limit, captured):
     if response.status == 101:
         if response.getheader("Upgrade", "").lower() != "tcp":
             raise DockerTransportError("invalid Docker stream upgrade")
@@ -170,8 +183,7 @@ def _capture(response, deadline, limit):
     }:
         raise DockerTransportError("Docker did not supply a framed non-TTY stream")
 
-    streams = [bytearray(), bytearray()]
-    dropped = [0, 0]
+    streams, dropped = captured.streams, captured.dropped
 
     def take(count):
         _remaining(deadline)
@@ -185,7 +197,7 @@ def _capture(response, deadline, limit):
                 if not header:
                     if response.status == 200 and response.length not in (None, 0):
                         raise DockerTransportError("truncated Docker HTTP stream")
-                    return bytes(streams[0]), bytes(streams[1]), *dropped
+                    return
                 raise DockerTransportError("truncated Docker stream header")
             header.extend(part)
         if header[0] not in (1, 2) or header[1:4] != b"\0\0\0":
@@ -258,6 +270,7 @@ class DockerTerminalBackend:
         self._lock, self._stop_lock = threading.Lock(), threading.Lock()
         self._closing = False
         self._active = None
+        self._interrupted = False
 
     @property
     def environment_id(self):
@@ -342,7 +355,7 @@ class DockerTerminalBackend:
         with self._lock:
             if self._closing or self._active is not None:
                 raise TerminalFenced("Docker terminal is closed or already executing")
-            self._active = wire
+            self._active, self._interrupted = wire, False
         try:
             allowance = min(request.timeout_seconds, self.binding.deadline_unix - time.time())
             deadline = time.monotonic() + allowance
@@ -361,17 +374,30 @@ class DockerTerminalBackend:
             exec_id = created.get("Id") if isinstance(created, dict) else None
             if not _full_id(exec_id):
                 raise DockerTransportError("Docker did not identify the created exec")
-            with wire.request("POST", f"/exec/{exec_id}/start", deadline,
-                              {"Detach": False, "Tty": False}, upgrade=True) as response:
-                stdout, stderr, out_dropped, err_dropped = _capture(response, deadline, self.binding.output_limit)
-            result = wire.control("GET", f"/exec/{exec_id}/json", deadline)
-            if (not isinstance(result, dict) or result.get("ID") != exec_id
-                    or result.get("ContainerID") != self.environment_id
-                    or result.get("Running") is not False
-                    or type(result.get("ExitCode")) is not int or not 0 <= result["ExitCode"] <= 255):
-                raise DockerTransportError("Docker exec has no confirmed exit for this container")
-            self._inspect(wire, deadline)
-            return TerminalResult(result["ExitCode"], stdout, stderr, out_dropped, err_dropped)
+            captured, failure = _Captured(), None
+            try:
+                with wire.request("POST", f"/exec/{exec_id}/start", deadline,
+                                  {"Detach": False, "Tty": False}, upgrade=True) as response:
+                    _capture(response, deadline, self.binding.output_limit, captured)
+            except (OSError, http.client.HTTPException, DockerTransportError, TerminalFenced) as exc:
+                failure = exc  # TimeoutError is an OSError.
+            with self._lock:
+                stopping, interrupted = self._closing, self._interrupted
+            if stopping:
+                raise failure or TerminalFenced("Docker terminal is stopping its environment")
+            # A departed caller or an overdue command ends that command only.
+            # Any other stream failure stays an unconfirmed transport outcome.
+            terminated = ("cancelled" if interrupted
+                          else "timeout" if isinstance(failure, TimeoutError) else "")
+            if failure is not None and not terminated:
+                raise failure
+            # The start connection may be cut; confirm the exit on a new one.
+            control = _Wire(self.binding.socket_path)
+            settle = time.monotonic() + END_SECONDS if terminated else deadline
+            code = self._exec_exit(control, exec_id, settle, end=bool(terminated))
+            self._inspect(control, settle)
+            return TerminalResult(code, bytes(captured.streams[0]), bytes(captured.streams[1]),
+                                  *captured.dropped, terminated)
         except BaseException:
             with self._lock:
                 self._closing = True
@@ -380,6 +406,77 @@ class DockerTerminalBackend:
             wire.cancel()
             with self._lock:
                 self._active = None
+
+    def interrupt(self):
+        """End only the active command; its execute call returns a ``cancelled`` receipt.
+
+        Used when the command's caller is gone. Unlike stop_and_confirm, the
+        container and its other processes continue. No effect without a command.
+        """
+        with self._lock:
+            if self._active is not None and not self._closing:
+                self._interrupted = True
+                self._active.cancel()
+
+    def _exec_exit(self, wire, exec_id, deadline, *, end):
+        while True:
+            result = wire.control("GET", f"/exec/{exec_id}/json", deadline)
+            if (not isinstance(result, dict) or result.get("ID") != exec_id
+                    or result.get("ContainerID") != self.environment_id
+                    or type(result.get("Running")) is not bool):
+                raise DockerTransportError("Docker exec has no confirmed exit for this container")
+            if result["Running"] is False:
+                code = result.get("ExitCode")
+                if type(code) is not int or not 0 <= code <= 255:
+                    raise DockerTransportError("Docker exec has no confirmed exit for this container")
+                return code
+            if not end:
+                raise DockerTransportError("Docker exec has no confirmed exit for this container")
+            self._kill_exec(result.get("Pid"))
+            time.sleep(min(0.05, _remaining(deadline)))
+
+    def _container_pids(self):
+        base = CGROUP_ROOT / self.binding.cgroup_path.lstrip("/")
+        pids = set()
+        for directory, _children, files in os.walk(base):
+            if "cgroup.procs" in files:
+                try:
+                    text = (Path(directory) / "cgroup.procs").read_text()
+                except OSError:
+                    continue
+                pids.update(int(item) for item in text.split() if item.isdigit())
+        return pids
+
+    def _kill_exec(self, pid):
+        """SIGKILL one exec's process tree, never a process outside this container.
+
+        The daemon reports the exec's host PID. Only PIDs currently in the
+        container's own original cgroup are signalled. A process that detached
+        from the command (a daemon it started) is not its descendant and keeps
+        running, exactly as after a command that returned normally.
+        """
+        if type(pid) is not int or pid <= 0:
+            return
+        members = self._container_pids()
+        parents = {}
+        for member in members:
+            try:
+                fields = (PROC_ROOT / str(member) / "stat").read_text().rsplit(")", 1)[1].split()
+                parents[member] = int(fields[1])
+            except (OSError, IndexError, ValueError):
+                continue
+        doomed, frontier = set(), [pid]
+        while frontier:
+            parent = frontier.pop()
+            for child, owner in parents.items():
+                if owner == parent and child not in doomed:
+                    doomed.add(child)
+                    frontier.append(child)
+        if pid in members:
+            doomed.add(pid)
+        for member in sorted(doomed, reverse=True):
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(member, signal.SIGKILL)
 
     def stop_and_confirm(self):
         with self._lock:

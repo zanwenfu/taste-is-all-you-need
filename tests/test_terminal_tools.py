@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 
 import pytest
 
+from taste.brains import terminal_tools
 from taste.brains.responses_conversation import ResponsesConversation
 from taste.brains.responses_session import ResponsesFenced
 from taste.brains.terminal_broker import TerminalResult
@@ -29,38 +29,84 @@ def call(**changes):
     return ToolCall("provider_call", "terminal_exec", {"command": "do task", "cwd": "/tmp", "timeout_seconds": 3, **changes})
 
 
-def test_pages_preserve_partial_utf8_and_truncation_without_another_command(rig):
+def test_result_reads_like_a_shell_and_long_output_keeps_both_ends(rig):
     async def scenario():
         async with rig() as r:
-            r.env.result = TerminalResult(7, b"a" * 4095 + "🌍".encode() + b"tail", b"\xff\0", 8_000_000, 0)
+            body = "".join(f"line {number}\n" for number in range(4000)).encode()
+            r.env.result = TerminalResult(7, body, b"warning\n", 8_000_000, 0)
             tools = TerminalTools(r.a)
             result = await tools.execute("effect_one", call())
-            first = json.loads(result.content)
-            assert result.is_error and first["request_id"] == "effect_one"
-            assert first["stdout"]["encoding"] == "base64"
-            assert base64.b64decode(first["stdout"]["content"]) == r.env.result.stdout[:4096]
-            assert first["stdout"]["dropped_bytes"] == 8_000_000 and not first["stdout"]["captured_eof"]
+            text = result.content
+            assert result.is_error and text.startswith("exit 7\nline 0\nline 1\n")
+            # The end of long output is what a test run's verdict lives in.
+            assert "line 3999\n[stderr]\nwarning\n" in text
+            cut = f"... [cut: {len(body) - (terminal_tools.SHOWN_CHARS - len('warning' + chr(10))):,} more characters of stdout;"
+            assert cut in text and 'request_id "effect_one"' in text
+            assert "[cut: 8,000,000 more bytes of stdout were beyond what is kept" in text
+            assert len(text) < terminal_tools.SHOWN_CHARS + 600
+            # The cut part is read by page, without running anything again.
             page = await tools.read("page_effect", ToolCall("read", "read_terminal_output", {
-                "request_id": "effect_one", "stream": "stdout", "offset": 4095, "limit": 8}))
-            assert json.loads(page.content)["content"] == "🌍tail"
-            assert json.loads(page.content)["captured_eof"] and len(r.env.calls) == 1
-            assert r.credentials[0].token not in result.content + page.content + tools.instructions()
+                "request_id": "effect_one", "stream": "stdout", "offset": 14, "limit": 14}))
+            assert page.content == (f"stdout bytes 14-28 of {len(body):,} kept for request effect_one; "
+                                    "continue from offset 28\nline 2\nline 3\n")
+            last = await tools.read("page_effect", ToolCall("read", "read_terminal_output", {
+                "request_id": "effect_one", "stream": "stdout", "offset": len(body) - 10}))
+            assert last.content.endswith("line 3999\n") and "8,000,000 more bytes were beyond" in last.content
+            assert len(r.env.calls) == 1
+            assert r.credentials[0].token not in text + page.content + tools.instructions()
             assert r.credentials[0].socket_path not in tools.instructions()
+    asyncio.run(scenario())
+
+
+def test_short_output_is_exact_and_undecodable_bytes_are_marked(rig):
+    async def scenario():
+        async with rig() as r:
+            r.env.result = TerminalResult(0, "héllo 🌍\n".encode() + b"\xff\n", b"")
+            result = await TerminalTools(r.a).execute("effect_one", call())
+            assert result.content == "exit 0\nhéllo 🌍\n\ufffd\n" and not result.is_error
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cause,opening", [
+    ("timeout", "timed out after 3s: the command and its child processes were killed (exit 137). Output before that:\n"),
+    ("cancelled", "cancelled: the command and its child processes were killed (exit 137).\n"),
+])
+def test_ended_command_says_so_before_its_partial_output(rig, cause, opening):
+    async def scenario():
+        async with rig() as r:
+            r.env.result = TerminalResult(137, b"compiling...\n", b"", terminated=cause)
+            result = await TerminalTools(r.a).execute("effect_one", call())
+            assert result.is_error and result.content == opening + "compiling...\n"
     asyncio.run(scenario())
 
 
 def test_worst_case_control_characters_stay_inside_tool_outcome_limit(rig):
     async def scenario():
         async with rig() as r:
-            r.env.result = TerminalResult(0, b"\0" * 1048576, b"\1" * 1048576, 22, 33)
+            r.env.result = TerminalResult(0, "🌍".encode() * 200_000, b"\xff" * 1048576, 22, 33)
             result = await TerminalTools(r.a).execute("effect_one", call())
             assert len(result.content.encode()) < 65536
-            assert json.loads(result.content)["stdout"]["captured_bytes"] == 1048576
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("changes", [{"cwd": "relative"}, {"command": "nul\0"},
-                                     {"timeout_seconds": True}, {"timeout_seconds": 6}])
+def test_working_directory_and_timeout_have_task_defaults(rig):
+    async def scenario():
+        async with rig() as r:
+            tools = TerminalTools(r.a, workdir="/workspace/app")
+            await tools.execute("effect_one", ToolCall("c1", "terminal_exec", {"command": "ls"}))
+            await tools.execute("effect_two", ToolCall("c2", "terminal_exec", {"command": "ls", "cwd": "src/../lib"}))
+            await tools.execute("effect_three", ToolCall("c3", "terminal_exec",
+                                                        {"command": "ls", "cwd": "/etc", "timeout_seconds": 2}))
+            assert [(item.cwd, item.timeout_seconds) for item in r.env.calls] == [
+                ("/workspace/app", 5), ("/workspace/app/lib", 5), ("/etc", 2)]
+            assert "cwd defaults to /workspace/app" in tools.instructions()
+            assert tools.tools()["terminal_exec"].input_schema["required"] == ["command"]
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("changes", [{"cwd": ""}, {"cwd": 7}, {"command": "nul\0"}, {"command": ""},
+                                     {"timeout_seconds": True}, {"timeout_seconds": 6},
+                                     {"timeout_seconds": 0}, {"shell": "bash"}])
 def test_bad_terminal_arguments_are_refused_before_rpc(rig, changes):
     async def scenario():
         async with rig() as r:
@@ -86,13 +132,13 @@ def test_native_responses_turn_carries_durable_terminal_evidence_without_credent
             events = [item for item in first.transcript.turns if item.get("kind") == "responses_tool_result"]
             assert len(events) == 1
             effect_id = events[0]["effect_id"]
-            assert json.loads(events[0]["result"]["content"])["request_id"] == effect_id
+            assert events[0]["result"]["content"] == "exit 0\nstdout\x00\ufffd\n[stderr]\nstderr\n"
             assert await r.a.lookup(effect_id) == r.env.result
             await conversation.step()
             assert len(sent) == 2 and len(r.env.calls) == 1
             wire = json.loads(sent[1].content)
             results = [item for item in wire["input"] if item.get("type") == "function_call_output"]
-            assert json.loads(results[0]["output"])["request_id"] == effect_id
+            assert results[0]["output"] == events[0]["result"]["content"]
             assert r.credentials[0].token not in json.dumps(wire)
             worker.branch.rollback(before, reason="reconsider reasoning only")
             assert await r.a.lookup(effect_id) == r.env.result

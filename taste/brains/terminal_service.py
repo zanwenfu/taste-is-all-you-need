@@ -7,8 +7,10 @@ their group traverse/connect access, never directory write or Docker access.
 
 Client write-EOF means cancellation. The service retains the broker operation
 until it settles, then sends an acknowledgement on the still-readable socket.
-A killed/disconnected client follows the same path. An outside lifecycle owner
-must still stop the environment if this service itself is killed.
+A killed/disconnected client follows the same path. With a transport that can
+end one command, only that command ends and the environment keeps serving the
+other actors. An outside lifecycle owner must still stop the environment if
+this service itself is killed.
 """
 
 from __future__ import annotations
@@ -136,18 +138,20 @@ def _result_payload(result):
             "stdout": base64.b64encode(result.stdout).decode("ascii"),
             "stderr": base64.b64encode(result.stderr).decode("ascii"),
             "stdout_dropped_bytes": result.stdout_dropped_bytes,
-            "stderr_dropped_bytes": result.stderr_dropped_bytes}
+            "stderr_dropped_bytes": result.stderr_dropped_bytes,
+            "terminated": result.terminated}
 
 
 def _decode_result(value):
     if not isinstance(value, dict) or set(value) != {
-        "return_code", "stdout", "stderr", "stdout_dropped_bytes", "stderr_dropped_bytes",
+        "return_code", "stdout", "stderr", "stdout_dropped_bytes", "stderr_dropped_bytes", "terminated",
     }:
         raise TerminalUnavailable("invalid terminal receipt fields")
     try:
         return TerminalResult(value["return_code"], base64.b64decode(value["stdout"], validate=True),
                               base64.b64decode(value["stderr"], validate=True),
-                              value["stdout_dropped_bytes"], value["stderr_dropped_bytes"])
+                              value["stdout_dropped_bytes"], value["stderr_dropped_bytes"],
+                              value["terminated"])
     except (ValueError, TypeError) as exc:
         raise TerminalUnavailable("invalid terminal receipt data") from exc
 
@@ -431,6 +435,36 @@ class TerminalService:
             except BaseException as failure:
                 raise BaseExceptionGroup("terminal service cancellation and shutdown", [original, failure]) from None
             raise
+
+    async def release(self):
+        """Stop serving a sealed environment without stopping it.
+
+        Only after seal_for_grading: no command is active and none can start,
+        so nothing is left to drain. The environment stays alive for an outside
+        verifier whose runner also owns its removal. close() remains the path
+        for every unsealed or failed service and still stops the environment.
+        """
+        self._on_loop()
+        if self._server is None or self.broker.phase != "sealed":
+            raise TerminalFenced("only a sealed terminal service can leave its environment running")
+        self._closing = True
+        self._server.close()
+        for writer in tuple(self._writers):
+            writer.transport.abort()
+        for task in tuple(self._handlers):
+            with suppress(BaseException):
+                await _settle(task)
+        await self._server.wait_closed()
+        if self.broker.phase != "sealed":
+            raise TerminalFenced("terminal environment changed while its service was released")
+        if self._identity is not None:
+            try:
+                info = self.path.lstat()
+            except FileNotFoundError:
+                return
+            if not stat.S_ISSOCK(info.st_mode) or (info.st_dev, info.st_ino) != self._identity:
+                raise TerminalConflict("terminal service socket was replaced")
+            self.path.unlink()
 
     async def _shutdown(self):
         if self._server is not None:

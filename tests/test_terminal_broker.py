@@ -556,8 +556,9 @@ def test_receipts_enforce_stream_limit_before_persistence(field):
         TerminalResult(0, **{field: b"x" * (MAX_TERMINAL_OUTPUT_BYTES + 1)})
 
 
+@pytest.mark.parametrize("version", [0, 1])
 @pytest.mark.parametrize("status", ["completed", "pending"])
-def test_legacy_database_upgrade_preserves_receipt_or_fences_incomplete_effect(tmp_path, status):
+def test_legacy_database_upgrade_preserves_receipt_or_fences_incomplete_effect(tmp_path, status, version):
     env = Environment()
     binding = TerminalBinding("trial_1", env.environment_id, time.time() + 60, 100)
     directory = tmp_path / "terminal"
@@ -579,6 +580,11 @@ def test_legacy_database_upgrade_preserves_receipt_or_fences_incomplete_effect(t
         db.execute("INSERT INTO binding VALUES (?)", (encode(binding),))
         db.execute("INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?)",
                    (request().request_id, encode(request()), status, 1, b"\xff", b"original error"))
+        if version == 1:
+            # The format that counted dropped bytes but ended no command alone.
+            for column in ("stdout_dropped_bytes", "stderr_dropped_bytes"):
+                db.execute(f"ALTER TABLE requests ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+            db.execute("PRAGMA user_version=1")
     database.chmod(0o600)
     owner = TerminalBroker.open(directory, binding, env)
 
@@ -595,7 +601,8 @@ def test_legacy_database_upgrade_preserves_receipt_or_fences_incomplete_effect(t
         asyncio.run(scenario())
         assert not env.calls and env.stopped
         with sqlite3.connect(database) as db:
-            assert db.execute("PRAGMA user_version").fetchone() == (1,)
+            assert db.execute("PRAGMA user_version").fetchone() == (2,)
+            assert db.execute("SELECT terminated FROM requests").fetchall() == [("",)]
     finally:
         owner.close()
 
@@ -606,10 +613,157 @@ def test_unknown_receipt_version_refuses_open_and_releases_controller_lease(tmp_
     owner.close()
     database = tmp_path / "terminal" / "terminal.sqlite3"
     with sqlite3.connect(database) as db:
-        db.execute("PRAGMA user_version=2")
+        db.execute("PRAGMA user_version=3")
     with pytest.raises(TerminalFenced, match="unsupported terminal receipt schema"):
         TerminalBroker.open(tmp_path / "terminal", binding, env)
     with sqlite3.connect(database) as db:
-        db.execute("PRAGMA user_version=1")
+        db.execute("PRAGMA user_version=2")
     recovered = TerminalBroker.open(tmp_path / "terminal", binding, env)
     recovered.close()
+
+
+class Interruptible(Environment):
+    """A transport that can end one command and confirm its exit."""
+
+    def __init__(self, *, ends=True):
+        super().__init__()
+        self.ends, self.interrupts = ends, 0
+        self.ended = threading.Event()
+
+    def execute(self, request):
+        if self.stopped:
+            raise RuntimeError("environment already stopped")
+        self.calls.append(request)
+        self.entered.set()
+        if self.release.is_set():
+            return self.result
+        # Like the real transport: the command's own allowance, then its end.
+        if self.release.wait(request.timeout_seconds):
+            if self.ended.is_set():
+                return TerminalResult(137, b"partial", b"", terminated="cancelled")
+            return self.result
+        return TerminalResult(137, b"partial", b"", terminated="timeout")
+
+    def interrupt(self):
+        self.interrupts += 1
+        if self.ends:
+            self.ended.set()
+            self.release.set()
+
+
+def test_overdue_command_ends_alone_and_the_environment_keeps_serving(tmp_path):
+    env = Interruptible()
+    owner = broker(tmp_path, env)
+    env.release.clear()
+    slow = request("slow", timeout_seconds=0.05)
+
+    async def scenario():
+        result = await owner.execute(slow)
+        assert result == TerminalResult(137, b"partial", b"", terminated="timeout")
+        assert owner.phase == "ready" and not env.stopped and env.stop_calls == 0
+        env.release.set()
+        assert await owner.execute(request("next")) == env.result
+        # The terminated receipt is durable and never replays its effect.
+        assert await owner.execute(slow) == result and len(env.calls) == 2
+        assert ("completed", {"request_id": "slow", "terminated": "timeout"}) in owner.events()
+        owner.seal_for_grading()
+
+    try:
+        asyncio.run(scenario())
+        binding = owner.binding
+    finally:
+        owner.close()
+    reopened = TerminalBroker.open(tmp_path / "terminal", binding, env)
+    try:
+        assert reopened.phase == "sealed"
+        assert reopened.lookup(slow).terminated == "timeout"
+    finally:
+        reopened.close()
+
+
+def test_departed_caller_ends_only_its_own_command(tmp_path):
+    env = Interruptible()
+    owner = broker(tmp_path, env)
+    env.release.clear()
+    abandoned = request("abandoned", timeout_seconds=30)
+
+    async def scenario():
+        errors = []
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, context: errors.append(context))
+        active = asyncio.create_task(owner.execute(abandoned))
+        queued = asyncio.create_task(owner.execute(request("queued", actor_id="worker_B")))
+        await wait_event(env.entered)
+        active.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active
+        assert env.interrupts == 1 and owner.phase == "ready"
+        assert not env.stopped and env.stop_calls == 0
+        # Another actor's queued command runs in the same environment.
+        assert await queued == env.result
+        assert owner.lookup(abandoned) == TerminalResult(137, b"partial", b"", terminated="cancelled")
+        assert [item.request_id for item in env.calls] == ["abandoned", "queued"]
+        owner.seal_for_grading()
+        await asyncio.sleep(0)
+        assert not errors
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        env.release.set()
+        owner.close()
+
+
+def test_command_that_cannot_be_ended_still_stops_the_environment(tmp_path, monkeypatch):
+    import taste.brains.terminal_broker as module
+
+    monkeypatch.setattr(module, "COMMAND_SETTLE_SECONDS", 0.05)
+    env = Interruptible(ends=False)
+    owner = broker(tmp_path, env)
+    env.release.clear()
+    stuck = request("stuck", timeout_seconds=30)
+
+    async def scenario():
+        active = asyncio.create_task(owner.execute(stuck))
+        await wait_event(env.entered)
+        active.cancel()
+        with pytest.raises(BaseExceptionGroup) as failed:
+            await active
+        assert {type(item) for item in _leaves(failed.value)} == {asyncio.CancelledError, TimeoutError}
+        assert env.interrupts == 1
+        # No confirmed exit: the old whole-environment stop is the only proof left.
+        assert owner.phase == "stopped" and env.stopped and env.stop_calls == 1
+        with pytest.raises(TerminalFenced):
+            owner.lookup(stuck)
+        with pytest.raises(TerminalFenced):
+            await owner.execute(request("after"))
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        env.release.set()
+        owner.close()
+
+
+def test_explicit_abort_still_stops_an_interruptible_environment(tmp_path):
+    env = Interruptible()
+    owner = broker(tmp_path, env)
+    env.release.clear()
+
+    async def scenario():
+        active = asyncio.create_task(owner.execute(request("running", timeout_seconds=30)))
+        await wait_event(env.entered)
+        await owner.abort()
+        with pytest.raises(asyncio.CancelledError):
+            await active
+        assert owner.phase == "stopped" and env.stopped
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        env.release.set()
+        owner.close()
+
+
+def test_termination_cause_is_a_closed_set():
+    with pytest.raises(ValueError, match="termination cause"):
+        TerminalResult(0, terminated="maybe")

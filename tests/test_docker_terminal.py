@@ -6,6 +6,8 @@ import asyncio
 import copy
 import json
 import socketserver
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -414,30 +416,61 @@ def test_container_changes_are_refused_before_an_exec_is_created(daemon, fault):
     assert not any(path.endswith("/exec") for _, path, _ in daemon.calls)
 
 
-@pytest.mark.parametrize("ending", ["cancel", "timeout", "abort"])
-def test_active_command_settles_across_http_broker_and_cgroup_boundary(daemon, tmp_path, ending):
+@pytest.mark.parametrize("ending", ["cancel", "timeout"])
+def test_overdue_or_abandoned_command_ends_alone_across_http_and_broker(daemon, tmp_path, ending):
+    executor = backend(daemon)
+    daemon.release.clear()
+    owner = TerminalBroker.create(tmp_path / "ledger",
+        TerminalBinding("trial", CONTAINER, executor.binding.deadline_unix, 3), executor)
+    first = request(timeout_seconds=0.15 if ending == "timeout" else 3)
+
+    async def scenario():
+        active = asyncio.create_task(owner.execute(first))
+        await wait_event(daemon.started)
+        started = time.monotonic()
+        if ending == "cancel":
+            active.cancel()
+            active.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await active
+        else:
+            assert (await active).terminated == "timeout"
+        assert time.monotonic() - started < 1.5, "ending one command waited for its full timeout"
+        receipt = owner.lookup(first)
+        assert receipt.terminated == ("cancelled" if ending == "cancel" else "timeout")
+        assert receipt.return_code == daemon.exec_info["ExitCode"]
+        # Only that command ended. The container was never stopped and the
+        # next command runs in it.
+        assert owner.phase == "ready" and daemon.info["State"]["Running"]
+        assert not any(path.endswith("/stop?t=1") for _, path, _ in daemon.calls)
+        daemon.release.set()
+        after = await owner.execute(request(request_id="next"))
+        assert after == TerminalResult(7, b"out\0\xff", b"error\x80")
+        owner.seal_for_grading()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        daemon.release.set()
+        owner.close()
+
+
+def test_explicit_abort_stops_the_container_during_a_command(daemon, tmp_path):
     executor = backend(daemon)
     daemon.release.clear()
     owner = TerminalBroker.create(tmp_path / "ledger",
         TerminalBinding("trial", CONTAINER, executor.binding.deadline_unix, 3), executor)
 
     async def scenario():
-        active = asyncio.create_task(owner.execute(request(timeout_seconds=0.15 if ending == "timeout" else 3)))
+        active = asyncio.create_task(owner.execute(request(timeout_seconds=3)))
         await wait_event(daemon.started)
         started = time.monotonic()
-        if ending == "cancel":
-            active.cancel()
-            active.cancel()
-        elif ending == "abort":
-            with pytest.raises(BaseExceptionGroup):
-                await owner.abort()
+        await owner.abort()
         with pytest.raises(BaseException) as caught:
             await active
-        leaves = _leaves(caught.value)
-        assert any(isinstance(e, TimeoutError if ending == "timeout" else asyncio.CancelledError) for e in leaves)
-        assert owner.phase == "stopped"
+        assert any(isinstance(item, asyncio.CancelledError) for item in _leaves(caught.value))
+        assert owner.phase == "stopped" and not daemon.info["State"]["Running"]
         assert time.monotonic() - started < 1.5, "shutdown waited for the command timeout"
-        assert not daemon.info["State"]["Running"]
         with pytest.raises(TerminalFenced):
             await owner.execute(request(request_id="late"))
 
@@ -445,6 +478,92 @@ def test_active_command_settles_across_http_broker_and_cgroup_boundary(daemon, t
         asyncio.run(scenario())
     finally:
         owner.close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the host's /proc")
+def test_overdue_command_tree_is_killed_and_nothing_outside_the_container(daemon, monkeypatch):
+    """A real process tree stands in for the exec the daemon reports."""
+    executor = backend(daemon)
+    script = "sleep 300 & sleep 300 & echo $! > /dev/null; wait"
+    root = subprocess.Popen(["sh", "-c", script], start_new_session=True)
+    outside = subprocess.Popen(["sleep", "300"])
+    try:
+        deadline = time.monotonic() + 5
+        children: list[int] = []
+        while len(children) < 2:
+            assert time.monotonic() < deadline, "the stand-in command did not start its children"
+            children = [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdigit()
+                        and _parent(int(entry.name)) == root.pid]
+            time.sleep(0.01)
+        # One child is in the container's cgroup, one is not; an unrelated
+        # process is listed there without descending from the command.
+        (daemon.group / "cgroup.procs").write_text(f"{root.pid}\n{children[0]}\n{outside.pid}\n")
+        monkeypatch.setattr(transport, "PROC_ROOT", Path("/proc"))
+
+        def override(handler, path):
+            if path == f"/exec/{EXEC}/start":
+                daemon.started.set()
+                time.sleep(1)  # Never answers within the command's allowance.
+                return True
+            if path == f"/exec/{EXEC}/json":
+                running = root.poll() is None
+                daemon.reply(handler, {"ID": EXEC, "ContainerID": CONTAINER, "Running": running,
+                                       "Pid": root.pid, "ExitCode": None if running else 137})
+                return True
+            return False
+
+        daemon.override = override
+        result = executor.execute(request(timeout_seconds=0.2))
+        assert result.terminated == "timeout" and result.return_code == 137
+        assert root.poll() is not None, "the command itself survived its timeout"
+        assert not Path(f"/proc/{children[0]}").exists() or _parent(children[0]) != root.pid
+        # Outside the cgroup's command tree nothing was signalled.
+        assert outside.poll() is None
+        assert _state(children[1]) not in (None, "Z"), "a process outside the container was killed"
+    finally:
+        for process in (root, outside):
+            if process.poll() is None:
+                process.kill()
+            process.wait(5)
+        subprocess.run(["pkill", "-KILL", "-s", str(root.pid)], check=False)
+
+
+def _parent(pid):
+    try:
+        return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _state(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def test_exec_that_cannot_be_killed_remains_an_unconfirmed_outcome(daemon, monkeypatch):
+    executor = backend(daemon)
+    monkeypatch.setattr(transport, "END_SECONDS", 0.2)
+
+    def override(handler, path):
+        if path == f"/exec/{EXEC}/start":
+            time.sleep(0.6)
+            return True
+        if path == f"/exec/{EXEC}/json":
+            # Still running, and its PID is not in this container's cgroup.
+            daemon.reply(handler, {"ID": EXEC, "ContainerID": CONTAINER, "Running": True,
+                                   "Pid": 1, "ExitCode": None})
+            return True
+        return False
+
+    daemon.override = override
+    with pytest.raises(TimeoutError):
+        executor.execute(request(timeout_seconds=0.1))
+    # The transport is closed to further commands; only a stop can follow.
+    with pytest.raises(TerminalFenced):
+        executor.execute(request(request_id="late"))
+    assert executor.stop_and_confirm() == CONTAINER
 
 
 @pytest.mark.parametrize("stage", ["headers", "stream"])
@@ -467,9 +586,14 @@ def test_absolute_deadline_bounds_slow_trickle_not_just_idle_time(daemon, stage)
 
     daemon.override = override
     start = time.monotonic()
-    with pytest.raises(TimeoutError):
-        executor.execute(request(timeout_seconds=0.16))
+    result = executor.execute(request(timeout_seconds=0.16))
     assert time.monotonic() - start < 0.7
+    # The absolute allowance ended the command; what had arrived is kept.
+    assert result.terminated == "timeout" and result.return_code == daemon.exec_info["ExitCode"]
+    assert result.stdout == (b"" if stage == "headers" else b"a" * len(result.stdout))
+    assert (len(result.stdout) > 0) == (stage == "stream") and len(result.stdout) < 30
+    daemon.override = None
+    assert executor.execute(request(request_id="next")).terminated == ""
     assert executor.stop_and_confirm() == CONTAINER
 
 
