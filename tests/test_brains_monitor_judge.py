@@ -14,6 +14,7 @@ from taste.brains.monitor import MonitorBrain, Severity
 from taste.brains.monitor_judge import (
     ASSIGNMENT_PATH,
     JUDGEMENT_SCHEMA,
+    MAX_TRANSCRIPT_VIEW_BYTES,
     TERMINAL_JUDGEMENT_SCHEMA,
     TRANSCRIPT_VIEW_BYTES,
     LLMMonitorJudge,
@@ -501,6 +502,24 @@ def test_judge_view_keeps_every_command_and_drops_only_opaque_bulk() -> None:
     # A short run is shown exactly.
     short = judge_transcript(_responses_turns(2, output_chars=10))
     assert short[4]["content"] == "exit 0\nSTART-0\n" + "x" * 10 + "\nEND-0\n"
+
+
+def test_given_room_the_judge_sees_each_result_as_the_worker_did() -> None:
+    # Measured live: thirteen results of about 5,000 characters, one of 14,000,
+    # did not fit 64 KiB whole. The certifier saw each one cut, called it an
+    # evidence gap, and three more workers re-read the code in thinner slices.
+    turns = _responses_turns(13, output_chars=13_900)
+    turns.insert(1, {"kind": "responses_input", "id": "goal_task", "content": "T" * 120_000})
+    crowded = json.dumps(judge_transcript(turns))
+    assert len(crowded) <= TRANSCRIPT_VIEW_BYTES and "[cut: " in crowded
+    roomy = judge_transcript(turns, MAX_TRANSCRIPT_VIEW_BYTES)
+    results = [item for item in roomy if item["kind"] == "responses_tool_result"]
+    assert len(results) == 13 and all("[cut: " not in item["content"] for item in results)
+    assert all(len(item["content"]) > 13_900 for item in results)
+    # The worker's copy of the task is context, shown in brief whatever the room.
+    task = next(item for item in roomy if item.get("id") == "goal_task")
+    assert len(task["content"]) < 4_200 and "more characters of this text]" in task["content"]
+    assert len(json.dumps(roomy)) <= MAX_TRANSCRIPT_VIEW_BYTES
 
 
 def test_judge_view_leaves_other_harness_turns_untouched() -> None:

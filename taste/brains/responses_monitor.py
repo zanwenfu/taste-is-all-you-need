@@ -18,7 +18,14 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from taste.brains.monitor_judge import _SYSTEM_PROMPT, LLMMonitorJudge, PinnedMonitorObservation
+from taste.brains.monitor_judge import (
+    _SYSTEM_PROMPT,
+    MAX_MONITOR_PROMPT_BYTES,
+    MAX_TRANSCRIPT_VIEW_BYTES,
+    TRANSCRIPT_VIEW_BYTES,
+    LLMMonitorJudge,
+    PinnedMonitorObservation,
+)
 from taste.brains.responses_session import ResponsesBinding, ResponsesConflict, ResponsesSession
 from taste.brains.worker_protocol import ModelCallAccounting
 from taste.providers.azure_openai import AzureOpenAIConfig
@@ -88,6 +95,14 @@ class ResponsesMonitorJudge(LLMMonitorJudge):
             _MonitorCalls(directory, binding, azure), model=binding.model,
             max_tokens=binding.max_output_tokens, json_prefill=False,
         )
+        # A certifier held to a 64 KiB view of a long run saw every result
+        # shortened and refused correct work three times over for "an evidence
+        # gap" (measured: a four-minute fix became four workers and $18). The
+        # view grows with what this journal admits; rendering and the request's
+        # own JSON escaping can each enlarge it, so it takes under half.
+        room = binding.max_request_bytes - MAX_MONITOR_PROMPT_BYTES
+        self.transcript_view_bytes = max(TRANSCRIPT_VIEW_BYTES, min(MAX_TRANSCRIPT_VIEW_BYTES, room // 2))
+        self.max_prompt_bytes = max(MAX_MONITOR_PROMPT_BYTES, binding.max_request_bytes * 3 // 4)
 
     def call_accounting(self) -> ModelCallAccounting:
         return self.llm.call_accounting()

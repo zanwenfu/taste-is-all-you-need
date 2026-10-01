@@ -289,31 +289,54 @@ a lost provider reply and SIGKILL during dispatch using mocked HTTP and no paid
 calls. Its independent `--cleanup-only` command drains the recorded scopes.
 
 An existing or partly initialized worker run is refused by the fresh-launch
-entrypoint; it never resets the allowance on restart. The remaining full-benchmark
-gates include a runnable Harbor adapter with faithful task admission, broader
-recovery/scaling checks and a bounded live Azure pilot.
+entrypoint; it never resets the allowance on restart. A native Harbor agent now
+runs benchmark tasks as goals with real models (next section). No full or scored
+benchmark run has been made.
 
-For [Errata Bench](https://errata-bench.vercel.app/docs), Azure workers
-now retain tool evidence outside memory rollback and export internal ATIF traces
-on shutdown. Benchmark goals can require an explicit coordinator final reply;
-credential-free settlement exports it with every worker attempt, planner receipt
-and monitor call into one ATIF document. The outside trial owner checks the
-input, source, outcome and trace hashes before allowing grading. Missing evidence
-or unknown cost remains visible and blocks that admission. This path is tested
-with Harbor's shared verifier and Errata's actual ATIF reader; a production
-benchmark adapter and a bounded live pilot remain required before a scored run.
-Full benchmark instructions use bounded 512 KiB file/observation handoffs, with
-model request budgets admitted separately.
+#### Running a Harbor benchmark task
+
+`taste.benchmarks.harbor_agent:TasteAgent` runs one benchmark task as a goal in
+Harbor's standard Docker environment, as the task is published: no environment
+subclass, extra Compose file, mount or override. The coordinator, its workers
+and their monitors run on the host; only shell commands enter the task
+container. Procedure, settings and what has been validated are in
+[`infra/azure/benchmarks.md`](infra/azure/benchmarks.md).
+
+- Every worker is shown the task verbatim before its assignment. The
+  coordinator writes the final reply. When time, budget, the generation bound
+  or planner failures end a run first, it writes a closing reply from the
+  evidence it has, inside a reserved part of the trial's time.
+- A command that outlives its timeout is ended alone, with its child processes.
+  The container stays usable.
+- The trial leaves one ATIF trajectory in the order things happened: the
+  instruction, every worker step with one tool call each, then the reply.
+  Planner and monitor calls stay in the private record with every model
+  receipt and the terminal ledger.
+- The trial is handed to the benchmark's verifier whatever this system's own
+  audit found. Missing evidence or unsettled cost is recorded as `audit_flags`
+  in the trajectory and the trial metadata. It is never used to withhold a task
+  from grading. A run cancelled by the benchmark's own time limit is sealed
+  first and graded as a timeout.
+
+For [Errata Bench](https://errata-bench.vercel.app/docs) this has been run with
+real models on a handful of tasks (see the guide for the list and the
+measurements). Errata's own unpaid admission check counts those trials as
+gradable and official. No full run and no paid grading has been made, and
+Terminal-Bench is not supported: its official runs use a sandbox this terminal
+transport cannot reach.
 
 `AzureTerminalTrial` in `taste.benchmarks.azure_terminal_trial` owns an Azure goal
 and an already admitted Docker task container. `create(...)` persists their
 original identities and limits in a private controller directory. `run(api_key=...)`
 prepares the goal, issues private terminal grants, runs it in a separate
 unprivileged service, drains that service and settles without credentials before
-sealing the live container for grading. Unknown spending blocks grading. The
+sealing the live container for grading. Unknown spending and incomplete
+evidence are recorded as `audit_flags` and do not withhold grading. The
 container deadline may extend beyond the agent deadline to allow the verifier
 and output downloads to finish; neither deadline is renewed on recovery.
-Call `close()` after grading or on failure. For native Compose bindings,
+Call `release()` to hand the sealed container to a runner that verifies and
+removes it itself, or `close()` to stop it after grading or on failure. For
+native Compose bindings,
 cleanup also handles Harbor having removed the original container: it requires
 an explicit daemon absence response and an empty original cgroup. A failed
 daemon request or a live cgroup cannot establish successful cleanup.
@@ -348,9 +371,11 @@ it does not exercise model-only egress or claim an official benchmark score.
 `TerminalService` and `TerminalClient` in `taste.brains.terminal_service` connect
 workers to that broker over a bounded Linux Unix-socket protocol. Peer UID checks
 and a private random bearer token bind each worker to its immutable assignment,
-task container and original deadline. Disconnecting an active command stops and
-drains the task environment; a completed request can be looked up without running
-it again. The broker serializes all workers' terminal effects in the same container.
+task container and original deadline. A command that outlives its timeout, or
+whose caller disconnects, is ended alone with its child processes and recorded
+as a completed receipt; a transport that cannot end one command stops the whole
+environment instead. A completed request can be looked up without running it
+again. The broker serializes all workers' terminal effects in the same container.
 
 To admit terminal tools, set `AzureExecutionPolicy.terminal` to the public
 `TerminalWorkerPolicy` and give `compose_azure_central_runtime` a trusted
@@ -383,6 +408,13 @@ must still stop/remove the container if the controller dies.
 containers and unprivileged worker processes, including grading a fixture after
 sealing and killing a worker during a command. These checks do not yet constitute
 a Harbor adapter or an official Terminal Bench result.
+
+The fixture scripts described from here on (`check_terminal_service.py`,
+`check_terminal_broker.py`, `check_harbor_trial.py`, `check_azure_harbor.py`,
+`check_harbor_separate.py`) were written before command-scoped timeouts,
+plain-text terminal results and always-grade settlement. They have not been
+re-run since, and at least three of them assert the earlier behaviour.
+`check_docker_terminal.py` is current and was re-run against a real daemon.
 
 `scripts/check_harbor_trial.py` exercises the pinned Harbor revision
 `d611f10b15ffab8afb7b665b3e69e96773044fc8` in a separate server environment.

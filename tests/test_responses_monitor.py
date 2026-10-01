@@ -338,6 +338,19 @@ def test_cancellation_retains_monitor_thread_until_receipt_and_sidecar_settle(
     assert len(sent) == 1
 
 
+def test_the_certifier_view_grows_with_the_request_size_its_journal_admits(tmp_path):
+    # At the original 192 KiB request limit nothing changes; a trial that
+    # admits 1 MiB requests lets its certifier read a long run's results whole.
+    small = ResponsesMonitorJudge.create(
+        tmp_path / "small", binding(role="monitor", run_id="worker-run.small.monitor"), config())
+    assert (small.transcript_view_bytes, small.max_prompt_bytes) == (64 * 1024, 192 * 1024)
+    large = ResponsesMonitorJudge.create(
+        tmp_path / "large", binding(role="monitor", run_id="worker-run.large.monitor",
+                                    max_request_bytes=1_048_576), config())
+    assert large.transcript_view_bytes == 384 * 1024
+    assert large.transcript_view_bytes < large.max_prompt_bytes < 1_048_576
+
+
 @pytest.mark.parametrize("limit", ["budget", "calls", "deadline"])
 def test_limits_survive_reopen_and_replay_does_not_consume_another_allowance(
         tmp_path, sdk_transport, monkeypatch, limit):

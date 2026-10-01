@@ -35,6 +35,7 @@ from taste.pricing import call_cost
 __all__ = [
     "ASSIGNMENT_PATH",
     "JUDGEMENT_SCHEMA",
+    "MAX_TRANSCRIPT_VIEW_BYTES",
     "MONITOR_JUDGEMENT_JSON_SCHEMA",
     "TERMINAL_JUDGEMENT_JSON_SCHEMA",
     "TERMINAL_JUDGEMENT_SCHEMA",
@@ -83,7 +84,10 @@ def _bounded_evidence(value: Any, budget: int) -> Any:
 
 _VIEW_PREFIX = "responses_"
 _VIEW_ARGUMENT_CHARS = 2000
+_VIEW_TASK_CHARS = 4000
 TRANSCRIPT_VIEW_BYTES = 64 * 1024
+# The most of a transcript a certifier is shown when its request limit allows.
+MAX_TRANSCRIPT_VIEW_BYTES = 384 * 1024
 
 
 def _excerpt(text: str, limit: int) -> str:
@@ -125,7 +129,11 @@ def judge_event(turn: dict[str, Any], chars: int = 6000) -> dict[str, Any]:
         return {"kind": kind, "run_id": binding.get("run_id"), "model": binding.get("model"),
                 "tools": [item.get("name") for item in config.get("tools") or [] if isinstance(item, dict)]}
     if name == "input":
-        return {"kind": kind, "id": turn.get("id"), "content": _excerpt(str(turn.get("content", "")), chars)}
+        # The worker's copy of the goal's original task is context, and it can
+        # be a hundred kilobytes. The judge is given the contract whole; what
+        # it lacks room for is the evidence, so the task is shown in brief.
+        limit = min(chars, _VIEW_TASK_CHARS) if turn.get("id") == "goal_task" else chars
+        return {"kind": kind, "id": turn.get("id"), "content": _excerpt(str(turn.get("content", "")), limit)}
     if name == "request":
         return {"kind": kind, "id": turn.get("id")}
     if name == "completion":
@@ -154,7 +162,9 @@ def judge_transcript(turns: list[dict[str, Any]], budget: int = TRANSCRIPT_VIEW_
     shortest excerpts falls back to the generic prefix and suffix.
     """
     view: Any = []
-    for chars in (6000, 3000, 1500, 800, 400, 200):
+    # A terminal result reaches the worker at 14,000 characters at most. Given
+    # room, the certifier sees each one as the worker did, with no second cut.
+    for chars in (16000, 8000, 4000, 2000, 1000, 500, 200):
         view = [judge_event(turn, chars) for turn in turns]
         if len(json.dumps(view, ensure_ascii=True, allow_nan=False, sort_keys=True)) <= budget:
             return view
@@ -259,6 +269,12 @@ Tool results in the transcript are what the tools returned to the worker. A
 terminal command's result is evidence about the shared task environment, which
 is not part of the State's files. A fine verdict still requires positive
 evidence for every criterion.
+A cut shortens your view. It is not a defect in the work: the worker was shown
+more than you are. A command the worker ran, its exit line and the output you
+can see are evidence even where part of that output is cut. Withhold a fine
+verdict for missing text only when a criterion cannot be supported without the
+part that is cut, and then name that criterion. Do not ask for text to be
+displayed again merely so that you can read all of it.
 
 Every historical finding id in the observation must appear exactly once in
 either resolved_finding_ids or unresolved_finding_ids. Mark a finding resolved
@@ -533,6 +549,8 @@ def build_terminal_observation(
     state: Any,
     terminal_context: dict[str, Any],
     historical_findings: list[dict[str, Any]],
+    *,
+    transcript_budget: int = TRANSCRIPT_VIEW_BYTES,
 ) -> PinnedTerminalObservation:
     """Build a terminal prompt from one immutable State, never a live branch head."""
     if not isinstance(terminal_context, dict):
@@ -584,7 +602,7 @@ def build_terminal_observation(
                         turn
                         for turn in head.transcript.turns
                         if turn.get("message_type") not in UNJUDGED_MESSAGE_TYPES
-                    ]),
+                    ], transcript_budget),
                 },
                 "terminal_context": _bounded_evidence(terminal_context, 16 * 1024),
                 "historical_findings": findings,
@@ -796,9 +814,12 @@ class LLMMonitorJudge:
         self.model = model
         self.max_tokens = max_tokens
         self.json_prefill = json_prefill
+        # A judge whose model call admits larger requests may raise these.
+        self.max_prompt_bytes = MAX_MONITOR_PROMPT_BYTES
+        self.transcript_view_bytes = TRANSCRIPT_VIEW_BYTES
 
     def _completion(self, *, system: str, prompt: str) -> tuple[str, str, float]:
-        if len(system.encode("utf-8")) + len(prompt.encode("utf-8")) > MAX_MONITOR_PROMPT_BYTES:
+        if len(system.encode("utf-8")) + len(prompt.encode("utf-8")) > self.max_prompt_bytes:
             raise MonitorObservationError(
                 "exact control records or finding IDs exceed the monitor input budget; no model call made"
             )
@@ -903,6 +924,7 @@ class LLMMonitorJudge:
             state,
             terminal_context,
             historical_findings,
+            transcript_budget=self.transcript_view_bytes,
         )
         raw_response, actual_model, billed_usd = self._completion(
             system=_TERMINAL_SYSTEM_PROMPT,
