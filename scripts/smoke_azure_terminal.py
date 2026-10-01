@@ -67,6 +67,38 @@ INSTRUCTION = (
     "the tests, and confirm the suite passes. When you have finished, reply to the developer "
     "in plain text: say what you changed, what you verified, and anything you did not check.\n"
 )
+# A second defect whose test never returns: running the suite as asked hangs,
+# so the command has to be ended without losing the container.
+HANG_FILES = {
+    "calc/retry.py": (
+        '"""Retry a flaky operation a bounded number of times."""\n\n\n'
+        "def retry(operation, attempts=3):\n"
+        "    failures = 0\n"
+        "    while failures < attempts:\n"
+        "        try:\n"
+        "            return operation()\n"
+        "        except ValueError:\n"
+        "            pass\n"
+        '    raise RuntimeError("operation kept failing")\n'
+    ),
+    "tests/test_retry.py": (
+        "import unittest\n\nfrom calc.retry import retry\n\n\n"
+        "class RetryTest(unittest.TestCase):\n"
+        "    def test_returns_first_success(self):\n"
+        "        self.assertEqual(retry(lambda: 7), 7)\n\n"
+        "    def test_gives_up(self):\n"
+        "        def broken():\n            raise ValueError('no')\n\n"
+        "        with self.assertRaises(RuntimeError):\n            retry(broken)\n\n\n"
+        'if __name__ == "__main__":\n    unittest.main()\n'
+    ),
+}
+HANG_INSTRUCTION = (
+    f"You are continuing work in the repository at {WORKDIR}. The developer says the test run "
+    "`python3 -m unittest discover -s tests -v` never finishes on their machine and at least one "
+    "test fails. Find out why, fix the code without editing the tests, and confirm the whole "
+    "suite passes. When you have finished, reply to the developer in plain text: say what you "
+    "changed, what you verified, and anything you did not check.\n"
+)
 
 
 def owner_directory(token):
@@ -112,8 +144,8 @@ def cleanup_all(token):
     return result
 
 
-def seed(container):
-    for name, body in FILES.items():
+def seed(container, files):
+    for name, body in files.items():
         target = f"{WORKDIR}/{name}"
         cli("exec", container, "/bin/sh", "-c", f"mkdir -p \"$(dirname '{target}')\"")
         done = subprocess.run(
@@ -123,7 +155,10 @@ def seed(container):
 
 
 def suite(container):
-    done = cli("exec", container, "/bin/sh", "-c", CHECK, check=False)
+    # Bounded inside the container: a seeded defect can make the suite hang.
+    done = subprocess.run(["docker", "--host", "unix:///var/run/docker.sock", "exec", container,
+                           "/bin/sh", "-c", f"timeout -s KILL 20 /bin/sh -c '{CHECK}'"],
+                          capture_output=True, timeout=40)
     return done.returncode, (done.stdout + done.stderr).decode(errors="replace")[-1500:]
 
 
@@ -139,7 +174,8 @@ async def run(args):
         "--pids-limit", "256", "--restart", "no", "--label", f"{OWNER_LABEL}={token}",
         "--entrypoint", "/bin/sh", args.image, "-c", "sleep 7200").stdout.decode().strip()
     cli("start", container)
-    seed(container)
+    hang = args.scenario == "hang"
+    seed(container, {**FILES, **(HANG_FILES if hang else {})})
     before = suite(container)
     assert before[0] != 0, "the seeded suite must fail before the agent works"
     seconds = args.minutes * 60
@@ -152,10 +188,12 @@ async def run(args):
         worker_budget_usd=args.worker_budget, monitor_budget_usd=args.monitor_budget,
         worker_max_calls=args.worker_calls, monitor_max_calls=args.worker_calls,
         worker_max_output_tokens=8192, monitor_max_output_tokens=2048, planner_max_output_tokens=8192,
-        monitor_batch_size=8, pricing_sha=table_sha(), terminal=TerminalWorkerPolicy(binding, 120))
-    goal = Goal(goal_id="smoke-" + token[:12], task=INSTRUCTION,
+        monitor_batch_size=8, pricing_sha=table_sha(),
+        terminal=TerminalWorkerPolicy(binding, args.command_seconds, WORKDIR))
+    goal = Goal(goal_id="smoke-" + token[:12], task=HANG_INSTRUCTION if hang else INSTRUCTION,
         success_criteria=("the unit test suite passes without edits to the tests",),
-        budget_usd=args.goal_budget, metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA})
+        budget_usd=args.goal_budget, metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA,
+                                               benchmark_reply.RESERVE_KEY: args.reserve})
     report = {"status": "failed", "paid": True, "token": token, "before_exit": before[0]}
     owner, started = None, time.time()
     try:
@@ -171,6 +209,7 @@ async def run(args):
             report["run_error"] = [type(item).__name__ + ": " + scrub(str(item)[:300], api_key, endpoint)
                                    for item in leaves]
         report["elapsed_seconds"] = round(time.time() - started, 1)
+        report["audit_flags"], report["sealed"] = list(owner.audit_flags), owner.sealed
         if outcome is not None:
             report["outcome"] = outcome.to_dict()
         trajectory = root / "controller/trajectory.json"
@@ -180,14 +219,19 @@ async def run(args):
             report["gaps"] = trace["extra"].get("gaps")
             report["final_reply"] = next((step["message"] for step in reversed(trace["steps"])
                                           if step["source"] == "agent"), None)
+            report["closing_reply"] = trace["extra"].get("closing_reply")
         ledger = root / "controller/terminal/terminal.sqlite3"
         if ledger.exists():
             with sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True) as db:
                 report["terminal_phase"] = db.execute("SELECT phase FROM state").fetchone()[0]
-                report["commands"] = [{"status": status, "code": code,
+                report["commands"] = [{"status": status, "code": code, "terminated": terminated,
                                        "command": json.loads(payload)["command"][:400]}
-                                      for payload, status, code in db.execute(
-                                          "SELECT payload,status,code FROM requests ORDER BY rowid")]
+                                      for payload, status, code, terminated in db.execute(
+                                          "SELECT payload,status,code,terminated FROM requests ORDER BY rowid")]
+        # A benchmark runner verifies in the live container and removes it
+        # itself, so this owner releases without stopping it.
+        if owner.sealed:
+            await owner.release()
         running = json.loads(cli("inspect", container).stdout)[0]["State"]["Running"]
         report["container_running_after_goal"] = running
         if running:
@@ -202,7 +246,9 @@ async def run(args):
         report["cleanup"] = cleanup_all(token)
         (out / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     summary = {name: report.get(name) for name in ("status", "run_error", "elapsed_seconds", "gaps",
-               "terminal_phase", "after_exit", "container_running_after_goal")}
+               "audit_flags", "sealed", "closing_reply", "terminal_phase", "after_exit",
+               "container_running_after_goal")}
+    summary["has_final_reply"] = bool(report.get("final_reply"))
     if "outcome" in report:
         summary.update(stop_reason=report["outcome"]["stop_reason"], complete=report["outcome"]["complete"],
                        generations=report["outcome"]["generations"],
@@ -221,7 +267,12 @@ def main():
     parser.add_argument("--worker-python")
     parser.add_argument("--planner-deployment", default="gpt-6-astra")
     parser.add_argument("--worker-deployment", default="gpt-6-sol")
-    parser.add_argument("--minutes", type=int, default=12)
+    parser.add_argument("--scenario", choices=("repair", "hang"), default="repair")
+    parser.add_argument("--minutes", type=float, default=12)
+    parser.add_argument("--reserve", type=float, default=120,
+                        help="seconds held back for the coordinator's closing reply")
+    parser.add_argument("--command-seconds", type=float, default=120,
+                        help="longest allowance one terminal command may ask for")
     parser.add_argument("--generations", type=int, default=6)
     parser.add_argument("--worker-calls", type=int, default=40)
     parser.add_argument("--worker-budget", type=float, default=20.0)
