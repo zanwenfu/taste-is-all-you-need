@@ -89,7 +89,11 @@ def test_real_process_exchange_and_credential_free_settlement_preserve_cost(tmp_
         outcomes.append(outcome)
         assert grading_ready(outcome) == (not lost_reply)
         assert outcome.complete == (not lost_reply)
-        assert bool(outcome.budget.unknown_planner_attempt_ids) == lost_reply
+        # A lost reply has an unknown cost. It is carried as a reservation of the
+        # most that call could have cost: still not "grading ready", but no
+        # longer a budget nobody can reason about.
+        assert not outcome.budget.unknown_planner_attempt_ids
+        assert (outcome.budget.reserved_usd > 0) == lost_reply
         assert outcome.budget.known_spent_usd >= 0 if lost_reply else outcome.budget.known_spent_usd > 0
         assert counter.read_text().splitlines() == ["one Azure planner request"]
         assert "azure-test-only" not in (result_dir / "result.json").read_text() + child.stdout + child.stderr
