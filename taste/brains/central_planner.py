@@ -947,7 +947,10 @@ _REPLY_AUDIENCE = (
     "monitors, plans, assignments, artifact ids, or any file in this system's memory "
     "workspace such as worker reports and evidence artifacts. Do not mention those or their "
     "paths, and do not point to them as where details are saved. Describe what was changed "
-    "and observed in the developer's environment."
+    "and observed in the developer's environment. Say which files there the work created, "
+    "changed or deleted and left in place, including generated ones such as build output, "
+    "as far as the evidence shows; if the evidence does not show what was left behind, say "
+    "that it was not checked."
 )
 
 PLANNER_SYSTEM = """You are the central planner for a durable multi-agent system.

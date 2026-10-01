@@ -113,6 +113,16 @@ class TerminalTools:
             "Never describe output you were not shown as if you had seen it.\n"
             "- These tools do not run on the controller host and cannot see the memory "
             "workspace; the artifact tools cannot see the container.\n"
+            # Measured on real trials: a build run in place left a binary, and
+            # another 4,553 generated files, in a developer's repository, and
+            # neither worker's claim said so.
+            "- The container is someone's working environment. Change only what your "
+            "assignment needs. Keep build output and scratch files out of the task's own "
+            "directories when you can (/tmp is yours), and remove what you no longer need.\n"
+            "- Before your final claim, look at what your work left behind there (in a git "
+            "repository, `git status --short`). List in your evidence every file it created, "
+            "changed or deleted that is still there, including files a build or a test "
+            "generated. Leave none out for seeming unimportant.\n"
             "Public terminal scope: "
             + json.dumps(self.client.credential.grant.to_dict(), sort_keys=True)
         )

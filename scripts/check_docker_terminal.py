@@ -5,6 +5,11 @@ Use only a cached immutable image with /bin/sh and python3. No network, host
 mounts, image pulls or provider calls. The outside runner must bound this
 process and independently run --cleanup-only for the same unique owner token
 after it exits (including timeout). Docker daemon effects outlive this process.
+
+A command that runs past its timeout, or whose caller is cancelled, is ended
+alone: it and every process it started are killed, its partial output is kept
+as a completed receipt, and the container, its files and the terminal stay
+usable. The two interrupted cases check exactly that against a real daemon.
 """
 
 from __future__ import annotations
@@ -182,22 +187,40 @@ def main():
             await owner.abort()
             record("confirmed OCI exit and working-directory recovery", owner, backend)
             return
-        active = asyncio.create_task(owner.execute(req("hung", HUNG, 0.4 if ending == "timeout" else 10)))
+        began = time.monotonic()
+        active = asyncio.create_task(owner.execute(req("hung", HUNG, 1 if ending == "timeout" else 30)))
         if ending == "cancel":
             deadline = time.monotonic() + 5
             while (await asyncio.to_thread(cli, "cp", f"{backend.environment_id}:/tmp/started", "-", check=False)).returncode != 0:
                 assert time.monotonic() < deadline, "command did not start"
                 await asyncio.sleep(0.02)
             active.cancel()
-            await asyncio.sleep(0.02)
-            active.cancel()
-        try:
-            await active
-        except BaseException as exc:
-            assert any(isinstance(e, TimeoutError if ending == "timeout" else asyncio.CancelledError) for e in leaves(exc))
+            try:
+                await active
+            except BaseException as exc:
+                assert any(isinstance(e, asyncio.CancelledError) for e in leaves(exc))
+            else:
+                raise AssertionError("a cancelled caller received a result")
+            # The ending is on record: asking again replays it, it does not run again.
+            result = await owner.execute(req("hung", HUNG, 30))
         else:
-            raise AssertionError("interrupted exec returned a completed receipt")
-        record(ending, owner, backend)
+            result = await active
+        ended = time.monotonic() - began
+        assert result.terminated == ("timeout" if ending == "timeout" else "cancelled"), result
+        assert ended < 20, "the command was not ended promptly"
+        # It ignored TERM and had started a detached writer. Both are gone...
+        assert owner.phase == "ready"
+        first = await owner.execute(req("ticks_1", "cat /tmp/started; wc -c < /tmp/ticks"))
+        await asyncio.sleep(0.5)
+        second = await owner.execute(req("ticks_2", "wc -c < /tmp/ticks; ps -eo pid,args 2>/dev/null || ls /proc"))
+        assert first.return_code == 0 and first.stdout.startswith(b"started\n"), first
+        assert first.stdout.split()[1] == second.stdout.split()[0], "the command's writer survived it"
+        assert b"while :" not in second.stdout, second.stdout
+        # ...and the container, its files and the terminal are as they were.
+        assert json.loads(cli("inspect", backend.environment_id).stdout)[0]["State"]["Running"] is True
+        assert await owner.execute(req("after", "echo still-usable")) == TerminalResult(0, b"still-usable\n")
+        await owner.abort()
+        record(f"{ending}: the command ended alone after {ended:.1f}s (exit {result.return_code})", owner, backend)
 
     try:
         asyncio.run(regular())

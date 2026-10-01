@@ -100,6 +100,8 @@ def test_working_directory_and_timeout_have_task_defaults(rig):
             assert [(item.cwd, item.timeout_seconds) for item in r.env.calls] == [
                 ("/workspace/app", 5), ("/workspace/app/lib", 5), ("/etc", 2)]
             assert "cwd defaults to /workspace/app" in tools.instructions()
+            # What a worker leaves in the developer's environment is its to report.
+            assert "git status --short" in tools.instructions()
             assert tools.tools()["terminal_exec"].input_schema["required"] == ["command"]
     asyncio.run(scenario())
 
