@@ -344,11 +344,16 @@ def test_the_certifier_view_grows_with_the_request_size_its_journal_admits(tmp_p
     small = ResponsesMonitorJudge.create(
         tmp_path / "small", binding(role="monitor", run_id="worker-run.small.monitor"), config())
     assert (small.transcript_view_bytes, small.max_prompt_bytes) == (64 * 1024, 192 * 1024)
+    assert small.artifact_view_bytes == 8 * 1024
     large = ResponsesMonitorJudge.create(
         tmp_path / "large", binding(role="monitor", run_id="worker-run.large.monitor",
                                     max_request_bytes=1_048_576), config())
     assert large.transcript_view_bytes == 384 * 1024
     assert large.transcript_view_bytes < large.max_prompt_bytes < 1_048_576
+    # A worker may write an artifact of 64 KiB, and its certifier reads all of it.
+    assert large.artifact_view_bytes == 64 * 1024
+    # Both views, at their largest as JSON text, leave 256 KiB of the prompt for the rest.
+    assert large.max_prompt_bytes - (large.transcript_view_bytes + 2 * large.artifact_view_bytes) == 256 * 1024
 
 
 @pytest.mark.parametrize("limit", ["budget", "calls", "deadline"])

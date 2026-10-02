@@ -543,3 +543,43 @@ def test_terminal_certifier_sees_the_receipts_of_a_responses_worker(store: Store
     assert all(f"START-{n}" in entry["content"] and f"END-{n}" in entry["content"]
                for n, entry in enumerate(results))
     brain.close()
+
+
+def test_given_room_the_certifier_reads_a_report_as_large_as_a_worker_may_write(store: Store) -> None:
+    # Measured on three real trials: an evidence report of 8.6, 9.3 and 9.5 KB
+    # reached its certifier as "omitted". The criteria about what the report
+    # records could not be certified, each run was refused, and a second
+    # worker was sent only to write a shorter report.
+    brain, item = scaffold(store)
+    assert item is not None
+    report = "".join(f"check {number}: passed, exit 0\n" for number in range(400))
+    assert 8 * 1024 < len(report) < 64 * 1024
+    brain.branch.write("parser.py", report)
+    work_state = brain.checkpoint("immutable terminal work")
+
+    def shown(**budget: int) -> dict[str, Any]:
+        observation = json.loads(build_terminal_observation(
+            brain.contract, work_state, {}, [], **budget).payload)
+        (artifact,) = observation["state"]["output_artifacts"]
+        return artifact["content"]
+
+    cramped = shown()
+    assert cramped["omitted"] is True and cramped["value"] is None
+    assert shown(artifact_budget=64 * 1024) == {"encoding": "utf-8", "value": report}
+    brain.close()
+
+
+def test_the_judge_passes_its_artifact_room_to_the_final_observation(store: Store) -> None:
+    brain, item = scaffold(store)
+    assert item is not None
+    report = "".join(f"check {number}: passed, exit 0\n" for number in range(400))
+    brain.branch.write("parser.py", report)
+    work_state = brain.checkpoint("immutable terminal work")
+    fake = FakeLLM([FakeTurn(text=terminal_response())], model=MODEL_MONITOR)
+    judge = LLMMonitorJudge(fake)
+    assert judge.artifact_view_bytes == 8 * 1024
+    judge.artifact_view_bytes = 64 * 1024
+    judge.judge_terminal(brain.contract, work_state, {}, [])
+    assert "check 399: passed, exit 0" in fake.calls[0]["messages"][0]["content"]
+    brain.close()
+

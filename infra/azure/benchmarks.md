@@ -145,13 +145,47 @@ the commit messages from 2026-10-01 describe them one by one. The largest was
 a certifier that could not read a long run's evidence: the same 117 KB task
 cost $18.58 and took 17 minutes before that fix.
 
+### Pilot (2026-10-02)
+
+Twelve further tasks, from twelve other repositories, one attempt each and
+two at a time. All twelve completed, and errata-bench's unpaid check counts
+all twelve as gradable and official.
+
+| | |
+| --- | --- |
+| Time per trial | 76 to 714 s, median 273 s, of the 1,440 s of working time |
+| Cost per trial | $0.95 to $8.70, median $2.67, mean $3.67; $44.08 in all |
+| Where the money went | coordinator 29%, workers 41%, monitors 30% |
+| Largest worker request | 382 KB |
+| Audit flags | none |
+
+The pilot found one defect. Four of the twelve trials needed a second worker
+only because the certifier could not read the first worker's evidence report:
+a report over 8 KB reached it as "omitted", and the criteria about what the
+report records could not be certified. The certifier is now shown a report of
+up to the 64 KiB a worker may write. Two of those four tasks were run again:
+
+| Task | Before | After |
+| --- | --- | --- |
+| `blittle-pressy-158` | two workers, 714 s, $8.19 | one worker, 465 s, $5.73 |
+| `melagiri-code-insights-53` | two workers, 446 s, $4.19 | one worker, 266 s, $2.48 |
+
+Three drills on the real service checked the limits added the same day: an
+ordinary trial (169 s, $1.76); a spend cap of $0.50 (stopped at $1.21 known,
+closing reply written, gradable); and a request ceiling of 15 seconds (four
+plans cut off at 15 s each, none sent again, the trial settled and sealed in
+64 s with no reply).
+
+### What a full run would cost
+
 Most errata-bench instructions are large: the median is 75 KB and 32 of the
-55 tasks exceed 64 KB. A full run of 153 trials at the costs above is in the
-region of $450 to $850 for the agent. Its spend caps hold a trial to $23
-and three calls: $15, then a worker and its monitor that were already
-running ($6 and $2), and the one call each of them and the closing reply may
-have in flight. The dearest call recorded cost under $1, so the run is
-bounded near $4,000. Paid grading is separate.
+55 tasks exceed 64 KB. Cost follows instruction size. At the pilot's costs,
+with the certifier fix, a full run of 153 trials is in the region of $550 to
+$750 for the agent. Its spend caps hold a trial to $23 and three calls: $15,
+then a worker and its monitor that were already running ($6 and $2), and the
+one call each of them and the closing reply may have in flight. The dearest
+of 774 calls recorded cost $1.17, so the run is bounded near $4,100. Paid
+grading is separate.
 
 Not validated: a full three-attempt run, paid grading, more than five trials
 at once on a larger machine, Terminal-Bench's separate verifier, and any

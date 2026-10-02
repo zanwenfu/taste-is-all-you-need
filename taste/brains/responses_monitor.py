@@ -20,6 +20,8 @@ from pathlib import Path
 
 from taste.brains.monitor_judge import (
     _SYSTEM_PROMPT,
+    MAX_ARTIFACT_VIEW_BYTES,
+    MAX_INLINE_ARTIFACT_BYTES,
     MAX_MONITOR_PROMPT_BYTES,
     MAX_TRANSCRIPT_VIEW_BYTES,
     TRANSCRIPT_VIEW_BYTES,
@@ -102,6 +104,10 @@ class ResponsesMonitorJudge(LLMMonitorJudge):
         # own JSON escaping can each enlarge it, so it takes under half.
         room = binding.max_request_bytes - MAX_MONITOR_PROMPT_BYTES
         self.transcript_view_bytes = max(TRANSCRIPT_VIEW_BYTES, min(MAX_TRANSCRIPT_VIEW_BYTES, room // 2))
+        # A report over 8 KiB was shown as omitted, and every run whose
+        # criteria spoke of its report was then refused (three of three
+        # measured). A worker may write 64 KiB; with room, that is shown whole.
+        self.artifact_view_bytes = max(MAX_INLINE_ARTIFACT_BYTES, min(MAX_ARTIFACT_VIEW_BYTES, room // 8))
         self.max_prompt_bytes = max(MAX_MONITOR_PROMPT_BYTES, binding.max_request_bytes * 3 // 4)
 
     def call_accounting(self) -> ModelCallAccounting:

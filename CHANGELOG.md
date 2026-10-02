@@ -29,6 +29,14 @@ behaviour and interfaces.
 - A worker's report carries that account (`metadata.model_cost`), and the
   coordinator counts the known part as spent.
 
+### Fixed
+
+- **The certifier can read a worker's report.** An output artifact over 8 KB
+  was shown to the certifier as omitted, so a run whose criteria spoke of its
+  report was refused and a second worker sent to write a shorter one (four of
+  twelve pilot trials). With room in its request limit, the certifier is now
+  shown artifacts of up to the 64 KiB a worker may write.
+
 ## 0.2.0 (2026-10-02)
 
 The first tagged release. Research software, alpha: see "Status" in the

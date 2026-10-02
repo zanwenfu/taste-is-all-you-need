@@ -35,6 +35,8 @@ from taste.pricing import call_cost
 __all__ = [
     "ASSIGNMENT_PATH",
     "JUDGEMENT_SCHEMA",
+    "MAX_ARTIFACT_VIEW_BYTES",
+    "MAX_INLINE_ARTIFACT_BYTES",
     "MAX_TRANSCRIPT_VIEW_BYTES",
     "MONITOR_JUDGEMENT_JSON_SCHEMA",
     "TERMINAL_JUDGEMENT_JSON_SCHEMA",
@@ -64,6 +66,9 @@ TERMINAL_JUDGEMENT_SCHEMA = "taste.brains/TerminalMonitorJudgement/1"
 _TERMINAL_OBSERVATION_SCHEMA = "taste.brains/PinnedTerminalMonitorObservation/1"
 MAX_MONITOR_PROMPT_BYTES = 192 * 1024
 MAX_INLINE_ARTIFACT_BYTES = 8 * 1024
+# The most of one output artifact a certifier is shown when its request limit
+# allows: as much as a worker may write in one.
+MAX_ARTIFACT_VIEW_BYTES = 64 * 1024
 
 
 def _bounded_evidence(value: Any, budget: int) -> Any:
@@ -502,7 +507,8 @@ def build_monitor_observation(
     )
 
 
-def _terminal_artifacts(head: Any, contract: Contract, assignment: Assignment | None) -> list[dict[str, Any]]:
+def _terminal_artifacts(head: Any, contract: Contract, assignment: Assignment | None,
+                        inline_bytes: int = MAX_INLINE_ARTIFACT_BYTES) -> list[dict[str, Any]]:
     if assignment is not None:
         expected = [
             (item.path, item.disposition, item.required, item.artifact_id)
@@ -514,7 +520,7 @@ def _terminal_artifacts(head: Any, contract: Contract, assignment: Assignment | 
     for path, disposition, required, artifact_id in expected:
         blob_id = head.blob(path)
         size = head.byte_size(path)
-        omitted = size is not None and size > MAX_INLINE_ARTIFACT_BYTES
+        omitted = size is not None and size > inline_bytes
         raw = None if omitted else head.read_bytes(path)
         content: dict[str, Any]
         if omitted:
@@ -551,8 +557,15 @@ def build_terminal_observation(
     historical_findings: list[dict[str, Any]],
     *,
     transcript_budget: int = TRANSCRIPT_VIEW_BYTES,
+    artifact_budget: int = MAX_INLINE_ARTIFACT_BYTES,
 ) -> PinnedTerminalObservation:
-    """Build a terminal prompt from one immutable State, never a live branch head."""
+    """Build a terminal prompt from one immutable State, never a live branch head.
+
+    ``artifact_budget`` is the largest output artifact shown whole. Measured
+    on three real trials: an evidence report of 8.6 to 9.5 KB reached its
+    certifier as omitted, the criteria about what the report records could
+    not be certified, and a second worker was sent to write a shorter one.
+    """
     if not isinstance(terminal_context, dict):
         raise MonitorObservationError("terminal context must be a JSON object")
     if not isinstance(historical_findings, list) or not all(
@@ -591,9 +604,10 @@ def build_terminal_observation(
                     ], 16 * 1024),
                     "manifest": _bounded_evidence(json.loads(head.manifest.to_json()), 8 * 1024),
                     "conflicts": _bounded_evidence([conflict.to_dict() for conflict in head.conflicts], 8 * 1024),
+                    # Room for the artifacts shown whole, as JSON text.
                     "output_artifacts": _bounded_evidence(_terminal_artifacts(
-                        head, durable_contract, assignment
-                    ), 48 * 1024),
+                        head, durable_contract, assignment, artifact_budget
+                    ), max(48 * 1024, 2 * artifact_budget)),
                     # The same events the monitor judged, not every recorded
                     # turn: a certifier handed 1,708 token deltas pays for them
                     # in latency and context, and the finished messages beside
@@ -817,6 +831,7 @@ class LLMMonitorJudge:
         # A judge whose model call admits larger requests may raise these.
         self.max_prompt_bytes = MAX_MONITOR_PROMPT_BYTES
         self.transcript_view_bytes = TRANSCRIPT_VIEW_BYTES
+        self.artifact_view_bytes = MAX_INLINE_ARTIFACT_BYTES
 
     def _completion(self, *, system: str, prompt: str) -> tuple[str, str, float]:
         if len(system.encode("utf-8")) + len(prompt.encode("utf-8")) > self.max_prompt_bytes:
@@ -925,6 +940,7 @@ class LLMMonitorJudge:
             terminal_context,
             historical_findings,
             transcript_budget=self.transcript_view_bytes,
+            artifact_budget=self.artifact_view_bytes,
         )
         raw_response, actual_model, billed_usd = self._completion(
             system=_TERMINAL_SYSTEM_PROMPT,

@@ -181,7 +181,7 @@ This is research software at an early stage. What has been shown, and how:
 | --- | --- |
 | Memory layer | Its own test suite, including one test for every defect an independent audit found, and a crash-consistency demo. |
 | Single-process kernel | Recorded real runs with Claude ([feature added in 43 s for $0.10](examples/todo_api/runs/polished.md), [three workers in parallel](examples/parallel_demo/runs/parallel.md)) and the rollback demo above, which CI runs on every push. |
-| Multi-process runtime | About 3,000 tests that need no API key, on Python 3.11, 3.12 and 3.14. With real models: 15 trials of 4 [errata-bench](https://errata-bench.vercel.app/docs) tasks, all accepted by that benchmark's own admission check. |
+| Multi-process runtime | About 3,000 tests that need no API key, on Python 3.11, 3.12 and 3.14. With real models: 29 trials of 16 [errata-bench](https://errata-bench.vercel.app/docs) tasks, all accepted by that benchmark's own admission check. |
 
 What it has **not** shown yet: a full benchmark run or any score, more than
 one worker at a time on a shared task container, and anything on
