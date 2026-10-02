@@ -226,7 +226,6 @@ stream and commit chain exactly.
 | `taste/llm.py`, `taste/providers/`, `taste/pricing.py` | The model facade, providers and the price table. |
 | `examples/` | The demos above. |
 | `infra/azure/` | A test VM template and the benchmark run guide. |
-| `paper/` | Drafts of the write-up. |
 
 ## Documentation
 
