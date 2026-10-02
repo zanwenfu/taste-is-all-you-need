@@ -4,19 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taste"
-version = "0.1.0"
-description = "Agent OS: a git-native harness for long-running agents."
+version = "0.2.0"
+description = "An operating system for AI agents: a central planner, worker processes, observe-only monitors, and git as the memory."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "Zanwen Fu" }]
 keywords = ["agents", "llm", "orchestration", "harness", "agent-os"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # Upper bounds are not caution, they are a correctness requirement. With
 # `anthropic>=0.40.0` alone, a fresh machine installed 1.0.0 -- a major
@@ -43,13 +46,22 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.5",
 ]
+# Everything the multi-process runtime can use: both worker harnesses.
+all = ["openai>=3.0,<4", "claude-agent-sdk==0.2.152"]
 
 [project.scripts]
 taste = "taste.cli:main"
 
 [project.urls]
-Blog = "https://zanwenfu.com/blog/agent_harness_blog"
 Repository = "https://github.com/zanwenfu/taste-is-all-you-need"
+Documentation = "https://github.com/zanwenfu/taste-is-all-you-need/blob/main/docs/architecture.md"
+Issues = "https://github.com/zanwenfu/taste-is-all-you-need/issues"
+Changelog = "https://github.com/zanwenfu/taste-is-all-you-need/blob/main/CHANGELOG.md"
+Blog = "https://zanwenfu.com/blog/agent_harness_blog"
+
+[tool.setuptools]
+# Ship the licence, the notice and the licence of the vendored code with it.
+license-files = ["LICENSE", "NOTICE", "LICENSES/*"]
 
 [tool.setuptools.packages.find]
 include = ["taste*"]

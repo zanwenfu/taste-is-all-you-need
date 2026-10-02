@@ -25,6 +25,14 @@ not been validated is at the end.
   `AZURE_OPENAI_API_KEY`. The key reaches the goal as a private systemd
   credential. It never enters the task container, a prompt or a trajectory.
 
+## Check the host
+
+    sudo infra/azure/check-host.sh
+
+It changes nothing and prints one line per requirement above, with what to do
+about each one that is not met. `run-harbor.sh` runs it first and refuses to
+start a job on a host that fails it.
+
 ## Run
 
     sudo infra/azure/run-harbor.sh <job> <tasks dir> [harbor run options]

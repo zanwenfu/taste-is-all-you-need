@@ -1,0 +1,12 @@
+Taste (taste-is-all-you-need)
+Copyright 2026 Zanwen Fu
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+taste/benchmarks/swebench_log.py and taste/benchmarks/swebench_specs.py
+contain code and tables copied from SWE-bench
+(https://github.com/SWE-bench/SWE-bench), Copyright (c) 2023 Carlos E Jimenez,
+John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press and
+Karthik R Narasimhan, used under the MIT License. That license is reproduced
+in LICENSES/SWE-bench-MIT.txt. Each file's docstring records the upstream
+commit it was taken from.

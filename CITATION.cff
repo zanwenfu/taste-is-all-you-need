@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use Taste in your research, please cite it as below."
+title: "Taste Is All You Need: An Operating System for AI Agents"
+type: software
+authors:
+  - family-names: Fu
+    given-names: Zanwen
+version: "0.2.0"
+date-released: "2026-10-02"
+license: Apache-2.0
+repository-code: "https://github.com/zanwenfu/taste-is-all-you-need"
+url: "https://zanwenfu.com/blog/agent_harness_blog"
+keywords:
+  - AI agents
+  - agent harness
+  - multi-agent systems
+  - LLM orchestration
+  - git

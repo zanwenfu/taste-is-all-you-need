@@ -31,6 +31,12 @@ DOCKER_CONFIG=${DOCKER_CONFIG:-/root/taste-harbor-20260927/docker-config}
 TRIALS=${TASTE_TRIALS_ROOT:-/var/lib/taste-trials}
 
 case $JOB in *[!A-Za-z0-9_-]*|"") echo "job name: letters, digits, - and _ only" >&2; exit 2;; esac
+# Name every unmet requirement now, rather than fail at the first trial.
+if [ "${SKIP_HOST_CHECK:-0}" != 1 ]; then
+  report=$(TASTE_SOURCE="$TASTE_SOURCE" HARBOR_VENV="$HARBOR_VENV" WORKER_PYTHON="$WORKER_PYTHON" \
+           SECRETS="$SECRETS" DOCKER_CONFIG="$DOCKER_CONFIG" TASTE_TRIALS_ROOT="$TRIALS" \
+           "$(dirname "$0")/check-host.sh") || { printf '%s\n' "$report" >&2; exit 1; }
+fi
 [ "$(stat -c %a "$SECRETS")" = 600 ] && [ "$(stat -c %u "$SECRETS")" = 0 ] \
   || { echo "$SECRETS must be a root-only file (mode 600)" >&2; exit 1; }
 # The worker user reads the code but must not be able to change what root runs.

@@ -3,7 +3,8 @@
 > **The harness, not the model, is where agents get their taste.**
 
 [![CI](https://github.com/zanwenfu/taste-is-all-you-need/actions/workflows/ci.yml/badge.svg)](https://github.com/zanwenfu/taste-is-all-you-need/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/tag/zanwenfu/taste-is-all-you-need?sort=semver&label=release)](https://github.com/zanwenfu/taste-is-all-you-need/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
 Taste is an operating system for AI agents. You give it a goal. A **central
@@ -93,11 +94,28 @@ The operating system stays.
 
 Python 3.11 or newer, and git.
 
+To use it as a library, install a release. The name `taste` on PyPI belongs
+to an unrelated project, so install from the tag:
+
+```bash
+pip install "taste[all] @ git+https://github.com/zanwenfu/taste-is-all-you-need@v0.2.0"
+taste --version
+```
+
+To run the demos below, or to work on the code, clone it:
+
 ```bash
 git clone https://github.com/zanwenfu/taste-is-all-you-need
 cd taste-is-all-you-need
 pip install -e '.[dev]'
 ```
+
+| Extra | Adds |
+| --- | --- |
+| `brains` | the Claude Agent SDK worker harness |
+| `openai` | the Azure OpenAI worker harness |
+| `all` | both |
+| `dev` | pytest and ruff |
 
 **See a rollback, no API key needed.** A scripted worker breaks the tests on
 its second step; the monitor catches it, the kernel rolls back, and the retry
@@ -262,10 +280,31 @@ optional dependencies are missing.
   string is a speed bump. The real boundary is a container, or the SDK's
   operating-system sandbox.
 
-## License and credit
+## Citation
 
-MIT, see [LICENSE](LICENSE).
+If you use Taste in your work, please cite it:
 
-The thesis is laid out in [Beyond the Harness](https://zanwenfu.com/blog/agent_harness_blog).
-Feedback, counter-examples and failure modes are wanted: open an issue or
-reach [Zanwen Fu](mailto:zanwen.fu@duke.edu).
+```bibtex
+@software{fu2026taste,
+  author  = {Fu, Zanwen},
+  title   = {Taste Is All You Need: An Operating System for {AI} Agents},
+  year    = {2026},
+  version = {0.2.0},
+  url     = {https://github.com/zanwenfu/taste-is-all-you-need}
+}
+```
+
+GitHub's "Cite this repository" button gives the same from
+[CITATION.cff](CITATION.cff). The thesis behind the system is laid out in
+[Beyond the Harness](https://zanwenfu.com/blog/agent_harness_blog).
+
+## License
+
+Copyright 2026 Zanwen Fu. The code is licensed under
+[Apache-2.0](LICENSE); keep the [NOTICE](NOTICE) with any copy you
+redistribute. Two files under `taste/benchmarks/` are copied from SWE-bench
+under its MIT license, reproduced in `LICENSES/`.
+
+Feedback, counter-examples and failure modes are wanted: open an
+[issue](https://github.com/zanwenfu/taste-is-all-you-need/issues) or reach
+[Zanwen Fu](mailto:zanwen.fu@duke.edu). See [CONTRIBUTING.md](CONTRIBUTING.md).

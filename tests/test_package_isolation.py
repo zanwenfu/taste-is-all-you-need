@@ -65,7 +65,7 @@ def test_the_legacy_public_surface_still_works() -> None:
         "import taste\n"
         "print(taste.__version__, Kernel.__name__, Memory.__name__)\n"
     )
-    assert out == "0.1.0 Kernel Memory"
+    assert out == "0.2.0 Kernel Memory"
 
 
 def test_an_unknown_attribute_still_raises_attribute_error() -> None:
