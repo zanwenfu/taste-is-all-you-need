@@ -114,9 +114,9 @@ gradable; the fourteen run with the official time limit are counted official.
 | A command that ignores TERM and leaves a detached child (`scripts/check_docker_terminal.py`, no model) | ended alone in 1.1 s, container and terminal still usable |
 
 The first run of each kind found a defect, and each was fixed and run again;
-`docs/research_log.md` has the list. The largest was a certifier that could
-not read a long run's evidence: the same 117 KB task cost $18.58 and took
-17 minutes before that fix.
+the commit messages from 2026-10-01 describe them one by one. The largest was
+a certifier that could not read a long run's evidence: the same 117 KB task
+cost $18.58 and took 17 minutes before that fix.
 
 Most errata-bench instructions are large: the median is 75 KB and 32 of the
 55 tasks exceed 64 KB. A full run of 165 trials at the costs above is in the

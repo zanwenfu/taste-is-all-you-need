@@ -20,9 +20,12 @@ htmlcov/
 *.swp
 .taste-runs/
 
-# Internal research/strategy docs — not part of the public project.
-docs/
-docs/eval_protocol.md
+# Internal research and strategy notes are not part of the public project.
+# The public documentation is listed here by name.
+docs/*
+!docs/img/
+!docs/architecture.md
+!docs/azure-harness.md
 
 # Dataset snapshots: 8MB of JSONL, pinned by digest in data/*.sha256
 data/*.jsonl
