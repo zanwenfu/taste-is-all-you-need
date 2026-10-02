@@ -116,6 +116,15 @@ those are graded, so a full run is 153 trials. The other four are
 `Pavel401-BugViper-85`, `Whiteknight07-AiTutor-34`, `entireio-cli-253` and
 `entireio-cli-38`.
 
+**A run is on hold.** On 2026-10-02 errata-bench reported that a v1 task can
+start from a stale or wrong commit
+([its issue 18](https://github.com/zanwenfu/errata-bench/issues/18)): 27 of
+the 55 tasks have a confirmed start. Two of the tasks used below are among
+those it names as wrong, `135yshr-savanna-vet-go-28` and `hutusi-amytis-18`.
+The trials recorded on this page show that this agent runs, settles and is
+accepted for grading. They are not results, and a full run waits for
+errata-bench's next task release.
+
 Grading itself is paid and runs in errata-bench's own environment with the
 judge's key (see errata-bench's running guide). Taste's reply is written by
 gpt-6-astra, which is also errata-bench's judge, so its self-grading check
