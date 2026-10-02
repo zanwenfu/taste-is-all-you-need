@@ -55,13 +55,14 @@ def responder(closing_reply=REPLY, *, budget=None, seen=None):
 def make_host(tmp_path):
     hosts = []
 
-    def make(goal, respond, *, launcher=None, call_ceiling_usd=0.0):
+    def make(goal, respond, *, launcher=None, call_ceiling_usd=0.0, work_record=None):
         root = tmp_path / f"repo-{len(hosts)}"
         root.mkdir()
         host = compose_central_runtime(
             root, "closing-test", goal,
             transport=ScriptedTransport(respond, call_ceiling_usd=call_ceiling_usd),
             launcher=launcher or FakeLauncher(), supervisor_termination_grace=0.05,
+            work_record=work_record,
         )
         hosts.append(host)
         return host
@@ -108,6 +109,33 @@ def test_run_out_of_time_drains_workers_then_asks_once_for_the_reply(make_host):
     calls = len(seen)
     assert host.run(max_generations=5, wall_clock_seconds=15) == outcome
     assert len(seen) == calls
+
+
+def test_the_closing_reply_is_asked_with_what_a_killed_worker_ran(make_host):
+    # A worker that does not exit within its grace period is killed and writes
+    # nothing. The coordinator then closed knowing nothing of that worker,
+    # though its commands had run and may have changed files.
+    seen: list[PlanningRequest] = []
+    killed = []
+
+    def work_record(run):
+        killed.append(run.run_id)
+        return ("ran: pytest -q -> exit 1; last line printed: 2 failed, 10 passed",
+                "started, result not recorded: git stash")
+
+    host = make_host(replying_goal(reserve=10), responder(seen=seen), work_record=work_record)
+    outcome = host.run(max_generations=5, wall_clock_seconds=15)
+
+    assert host.runtime.closing_failure is None, host.runtime.closing_failure
+    assert outcome.stop_reason == "wall_clock" and final_reply(host) == REPLY
+    closing = [item for item in seen if benchmark_reply.is_closing(item.operation_id)]
+    (observed,) = closing[0].world.outcomes
+    assert observed.run.terminal and observed.report is None, "the worker was killed and left no report"
+    assert killed and set(killed) == {observed.run.run_id}
+    asked = json.dumps(closing[0].to_dict())
+    assert "unreported_work" in asked
+    assert "ran: pytest -q -> exit 1; last line printed: 2 failed, 10 passed" in asked
+    assert "started, result not recorded: git stash" in asked
 
 
 def test_the_closing_reply_is_asked_with_the_report_of_a_worker_stopped_in_good_order(make_host):

@@ -107,10 +107,14 @@ class InfraFailure(RuntimeError):
 
     failure_kind = "infra"
 
-    def __init__(self, message: str, *, attempts: int, last_error: Exception | None) -> None:
+    def __init__(self, message: str, *, attempts: int, last_error: Exception | None,
+                 transient: bool = False) -> None:
         super().__init__(f"{message} (attempts={attempts}, last={last_error!r})")
         self.attempts = attempts
         self.last_error = last_error
+        # Whether the same request, asked again, could be answered: a timeout
+        # or a dropped connection, not a request the provider refused as wrong.
+        self.transient = transient
 
 
 @dataclass
@@ -280,6 +284,7 @@ class LLM:
             raise ValueError("Azure-only calls require exactly one attempt")
         self._azure_openai = azure_openai
         self._azure_uncertain = False
+        self._uncertain_exposure = 0.0
         if load_env_file and azure_openai is None:
             load_dotenv(_find_env(env_dir), override=False)
         self._api_keys = dict(api_keys or {})
@@ -399,6 +404,30 @@ class LLM:
         """
         with self._budget_lock:
             self._azure_uncertain = False
+            self._uncertain_exposure = 0.0
+
+    def settle_uncertain(self, charge_usd: float) -> None:
+        """Lift the fence left by a call whose reply was lost, at what that call can have cost.
+
+        For a caller that has the lost request on durable record and has
+        charged it there. The call was reserved at the model's whole context,
+        because nothing here knows what was sent. Its owner does: the charge
+        replaces that reservation and stays for good. A later call is then
+        admitted only if it fits the cap beside everything charged so far.
+        """
+        if (isinstance(charge_usd, bool) or not isinstance(charge_usd, (int, float))
+                or not math.isfinite(charge_usd) or charge_usd < 0):
+            raise ValueError("charge for a lost reply must be finite and non-negative")
+        with self._budget_lock:
+            if not self._azure_uncertain:
+                raise ProtocolFailure("no unsettled Azure call to charge")
+            # An uncapped facade reserved nothing and has nothing to replace.
+            if self.budget_usd is not None:
+                if charge_usd > self._uncertain_exposure:
+                    raise ValueError("charge for a lost reply cannot exceed what was reserved for it")
+                self._reserved_usd += charge_usd - self._uncertain_exposure
+            self._uncertain_exposure = 0.0
+            self._azure_uncertain = False
 
     def _release_call_budget(self, exposure: float) -> None:
         if exposure <= 0:
@@ -480,10 +509,12 @@ class LLM:
                         # Credit exhausted, key revoked, malformed request: an
                         # environment problem, surfaced typed so the kernel never
                         # records it as the agent failing its task.
+                        is_transient = getattr(provider, "is_transient", None)
                         raise InfraFailure(
                             "non-retryable provider error",
                             attempts=attempt + 1,
                             last_error=exc,
+                            transient=bool(callable(is_transient) and is_transient(exc)),
                         ) from exc
                     last_exc = exc
                     if attempt < self.max_attempts - 1:
@@ -508,6 +539,7 @@ class LLM:
                 # in-process fence; the goal journal remains the restart fence.
                 with self._budget_lock:
                     self._azure_uncertain = True
+                    self._uncertain_exposure = exposure
             else:
                 self._release_call_budget(exposure)
 

@@ -75,6 +75,7 @@ from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.records import Assignment, contract_digest
 from taste.brains.worker_protocol import ModelCallAccounting
+from taste.llm import InfraFailure
 from taste.memstore import Store, Verdict
 
 __all__ = [
@@ -131,6 +132,7 @@ UNJUDGED_KINDS = frozenset(
     {
         "responses_binding",
         "responses_request",
+        "responses_lost",
         "runtime_budget_receipt",
         "runtime_budget_connection_intent",
         "runtime_session_bound",
@@ -1470,6 +1472,12 @@ class MonitorBrain:
                         self._validate_terminal_decision(candidate, finding_ids)
                         decision = candidate
                     except Exception as exc:
+                        if isinstance(exc, InfraFailure) and exc.transient:
+                            # A lost reply is not a verdict. Recorded as one, it
+                            # refused the work for good: the same state asked
+                            # again got the same refusal back. Raised, the lost
+                            # call can be given up and the state certified again.
+                            raise
                         failure = f"terminal judge failed: {type(exc).__name__}: {exc}"[:512]
                         decision = self._fail_closed_terminal_decision(finding_ids, failure)
 
@@ -1504,6 +1512,15 @@ class MonitorBrain:
         return await _owned_monitor_call(lambda: self._certify_terminal_sync(state, context))
 
     # ------------------------------------------------------------------ report
+
+    def forfeit_lost_reply(self) -> bool:
+        """Give up a judge call whose reply was lost, if the judge keeps a journal that can.
+
+        True when a call was given up: the same observation can then be
+        judged again, as a new call beside the lost one's charge.
+        """
+        forfeit = getattr(self._judge, "forfeit_lost", None)
+        return bool(callable(forfeit) and forfeit())
 
     def report(self) -> dict[str, Any]:
         """What the central brain reads to decide whether to re-plan."""
@@ -1553,6 +1570,8 @@ class MonitorBrain:
                     "known_cost_usd": accounting.known_cost_usd,
                     "unknown_model_calls": accounting.unknown_calls,
                     "unknown_exposure_usd": accounting.unknown_exposure_usd,
+                    "lost_model_calls": accounting.lost_calls,
+                    "lost_exposure_usd": accounting.lost_exposure_usd,
                 }
             except Exception as exc:
                 cost_known, cost_usd, model_calls = False, None, None

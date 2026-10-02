@@ -209,6 +209,13 @@ class AzureExecutionPolicy:
             capabilities["can"].extend(["run bounded commands in the shared task container",
                                          "read this worker's retained terminal output pages"])
             capabilities["cannot"] = ["run commands on the controller host", "read undeclared memory artifacts"]
+            payload["rules"]["unreported_work"] = (
+                "A trigger's work_record, and the closing trigger's unreported_work, list the terminal "
+                "commands a worker ran before it ended without a report: each command, its exit and the "
+                "last line it printed, read from that worker's recorded turns. A command marked as started "
+                "with no result may or may not have finished. These commands did run in the task container "
+                "and may have changed it. The record is mechanical: it is not a claim by the worker and "
+                "verifies nothing beyond what its lines show.")
             capabilities["terminal_effects"] = (
                 "All workers share one task container and its terminal runs one command at a time. What a "
                 "command changes there (files, packages, services) persists: later workers see it, and "

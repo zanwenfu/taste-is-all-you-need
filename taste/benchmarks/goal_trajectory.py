@@ -195,6 +195,9 @@ def _workers(host, runs, gaps):
             for call in calls:
                 if call["cost_usd"] is not None:
                     costs.append(call["cost_usd"])
+                elif call["status"] == "lost":
+                    # Given up and charged its worst case; the run went on.
+                    gaps.append(role + "_reply_lost:" + run.run_id + ":" + call["request_id"])
                 elif call["status"] != "not_dispatched":
                     gaps.append(role + "_cost_unknown:" + run.run_id + ":" + call["request_id"])
             if role == "worker":

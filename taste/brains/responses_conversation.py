@@ -212,6 +212,14 @@ class ResponsesConversation:
                 context.messages.append({"role": "assistant", "content": list(reply.transcript_blocks)})
                 if stop_at_completion == context.request_id:
                     return context
+            elif kind == "responses_lost":
+                # The reply never came and the journal gave the call up. Memory
+                # holds nothing of it: the next request asks the same again.
+                if (context.request_id != event["id"] or context.completion is not None
+                        or self.session.outcome(event["id"]) != "lost"):
+                    raise ResponsesConflict("worker memory gives up a call that is not lost in its journal")
+                context.request_id = None
+                context.input_since_response = True
             elif kind in {"responses_tool_intent", "responses_tool_result"}:
                 reply = context.completion
                 if reply is None or context.next_tool >= len(reply.tool_calls):
@@ -277,6 +285,29 @@ class ResponsesConversation:
             if context.pending:
                 raise ResponsesFenced("settle the pending Responses turn before adding feedback")
             self._append("input", id=identifier, content=content)
+
+    def forfeit(self) -> str:
+        """Give up the request whose reply was lost, so the next step asks again.
+
+        A request the provider never answered left this conversation waiting
+        on it for good, and the run ended with everything the worker had read
+        and done. The journal charges the lost call its worst case and admits
+        calls again; memory then records that the request is given up. The
+        next step sends the same context as a new call. No tool ran for the
+        lost request, since tools run only from a reply. Returns its id.
+        """
+        with self.branch._mutation_lock:
+            if self.branch._responses_active:
+                raise ResponsesConflict("cannot give up a request during an active Responses turn")
+            context = self._context()
+            if context.request_id is None or context.completion is not None:
+                raise ResponsesConflict("no request is waiting for a reply")
+            request_id = context.request_id
+            # Journal first: a crash after it leaves the charge on record and
+            # this call is made again; one before it leaves nothing changed.
+            self.session.forfeit(request_id)
+            self._append("lost", id=request_id)
+            return request_id
 
     def _check_effect_admission(self):
         if self.session.fenced or self.session.unsettled or time.time() >= self.session.binding.deadline_unix:

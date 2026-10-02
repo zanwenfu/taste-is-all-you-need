@@ -355,6 +355,56 @@ def test_a_request_that_may_have_arrived_is_never_sent_again(sdk_transport, monk
         invoke(llm)
 
 
+@pytest.mark.parametrize("failure,transient", [
+    ("timeout", True), ("dropped", True), ("500", True), ("503", True),
+    ("400", False), ("401", False), ("404", False),
+])
+def test_a_failure_says_whether_asking_again_could_work(sdk_transport, failure, transient):
+    # A request that timed out may be answered if asked again. One the service
+    # refuses as malformed will be refused again.
+    def handler(wire):
+        if failure == "timeout":
+            raise httpx.ReadTimeout("no answer", request=wire)
+        if failure == "dropped":
+            raise httpx.RemoteProtocolError("server disconnected", request=wire)
+        return httpx.Response(int(failure), json={"error": {"message": "refused"}})
+
+    sdk_transport(handler)
+    with pytest.raises(InfraFailure) as raised:
+        ask(LLM(azure_openai=config()), timeout_seconds=600)
+    assert raised.value.transient is transient
+
+
+def test_a_lost_reply_once_charged_stops_blocking_the_calls_after_it(sdk_transport):
+    # The facade refused every call after one whose reply was lost, and kept
+    # that call's whole-window worst case reserved. Its owner, which has the
+    # request on record, can settle it at what that request can have cost.
+    lost = iter([True])
+
+    def handler(wire):
+        if next(lost, False):
+            raise httpx.ReadTimeout("no answer", request=wire)
+        return success(wire)
+
+    sent, _ = sdk_transport(handler)
+    whole = max_call_cost_usd(AZURE_WORKER_MODEL, max_output_tokens=128)
+    llm = LLM(azure_openai=config(), budget_usd=whole + 1.0, cap_on="billed")
+    with pytest.raises(ProtocolFailure, match="no unsettled"):
+        llm.settle_uncertain(0.5)
+    with pytest.raises(InfraFailure):
+        ask(llm, timeout_seconds=600)
+    assert llm._reserved_usd == whole
+    for unusable in (-0.1, float("nan"), True, whole + 0.01):
+        with pytest.raises(ValueError, match="charge"):
+            llm.settle_uncertain(unusable)
+    llm.settle_uncertain(0.5)
+    assert llm._reserved_usd == pytest.approx(0.5)
+    # $0.50 charged and a whole call to come fit the cap; a second lost reply
+    # charged the same would not leave room for a third call.
+    assert ask(llm, timeout_seconds=600).provenance["served_model"] == AZURE_WORKER_MODEL
+    assert len(sent) == 2 and llm._reserved_usd == pytest.approx(0.5)
+
+
 def test_separate_llms_do_not_reuse_other_azure_credentials(sdk_transport):
     sent, _ = sdk_transport(success)
     first, second = LLM(azure_openai=config()), LLM(azure_openai=config(api_key="second-azure"))

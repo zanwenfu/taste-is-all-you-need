@@ -13,6 +13,7 @@ The containing process scope must still bound a provider that never returns.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -158,6 +159,7 @@ class ResponsesSession:
         self._active = None
         self._fenced = False
         self._closed = False
+        self._exposures: dict[int, float] = {}
         self._lease = None
         self._db = None
         self._llm = LLM(azure_openai=azure, budget_usd=binding.budget_usd,
@@ -260,7 +262,8 @@ class ResponsesSession:
     def _audit(self):
         total = 0.0
         for request, status, result, digest in self._db.execute("SELECT request,status,result,digest FROM calls ORDER BY rowid"):
-            if _json(json.loads(request)) != request or status not in {"pending", "unknown", "completed", "not_dispatched"}:
+            if _json(json.loads(request)) != request or status not in {
+                    "pending", "unknown", "completed", "not_dispatched", "lost"}:
                 raise ResponsesConflict("Responses request history is malformed")
             if status == "completed":
                 total = math.fsum((total, self._receipt_cost(self._receipt(result, digest))))
@@ -301,27 +304,105 @@ class ResponsesSession:
     def call_accounting(self) -> ModelCallAccounting:
         self._check()
         counts = dict(self._db.execute("SELECT status,count(*) FROM calls GROUP BY status"))
-        unknown = [request for (request,) in self._db.execute(
-            "SELECT request FROM calls WHERE status IN ('pending','unknown') ORDER BY rowid")]
         return ModelCallAccounting(
             known_cost_usd=self.known_cost_usd,
             completed_calls=counts.get("completed", 0),
-            unknown_calls=len(unknown),
-            unknown_exposure_usd=math.fsum(self._request_exposure(request) for request in unknown),
+            unknown_calls=counts.get("pending", 0) + counts.get("unknown", 0),
+            unknown_exposure_usd=self._exposure_of("pending", "unknown"),
+            lost_calls=counts.get("lost", 0),
+            lost_exposure_usd=self.lost_exposure_usd,
         )
 
-    def _request_exposure(self, request: str) -> float:
+    @property
+    def lost_exposure_usd(self) -> float:
+        """What the calls given up as lost are charged: each one's worst case, for good."""
+        self._check()
+        return self._exposure_of("lost")
+
+    def _exposure_of(self, *statuses: str) -> float:
+        marks = ",".join("?" * len(statuses))
+        return math.fsum(self._request_exposure(rowid, request) for rowid, request in self._db.execute(
+            f"SELECT rowid,request FROM calls WHERE status IN ({marks}) ORDER BY rowid", statuses))
+
+    def _request_exposure(self, rowid: int, request: str) -> float:
         """The most one dispatch of this journaled request can have cost.
 
         A call whose reply was lost was charged as if it had filled the
         model's whole context: about $27 on the model used in benchmark
         trials, for requests that cost under a dollar. The request is on
         record, and it cannot have held more tokens than its bytes.
+
+        A worker's request is its conversation so far and a little more. When
+        the call answered just before it sent the same request less its last
+        messages, the service has already counted that part's tokens, and only
+        what was added needs the byte bound.
         """
-        return max_call_cost_usd(
+        if rowid in self._exposures:
+            return self._exposures[rowid]
+        tokens = request_token_bound(len(request.encode()))
+        earlier = self._db.execute(
+            "SELECT request,result FROM calls WHERE status='completed' AND rowid<? "
+            "ORDER BY rowid DESC LIMIT 1", (rowid,)).fetchone()
+        if earlier is not None:
+            before, after = json.loads(earlier[0]), json.loads(request)
+            sent = before["messages"]
+            if (all(before[name] == after[name] for name in ("system", "tools", "effort"))
+                    and after["messages"][:len(sent)] == sent):
+                usage = json.loads(earlier[1])["usage"]
+                measured = usage["input_tokens"] + usage["cache_read_tokens"] + usage["cache_write_tokens"]
+                added = len(_json(after["messages"][len(sent):]).encode())
+                tokens = min(tokens, measured + request_token_bound(added))
+        exposure = max_call_cost_usd(
             self.binding.model, max_output_tokens=self.binding.max_output_tokens,
-            max_attempts=1, cap_on="billed",
-            max_prompt_tokens=request_token_bound(len(request.encode())))
+            max_attempts=1, cap_on="billed", max_prompt_tokens=tokens)
+        self._exposures[rowid] = exposure
+        return exposure
+
+    def outcome(self, request_id: str) -> str | None:
+        """How a call stands in this journal, or None if it was never asked."""
+        self._check()
+        row = self._db.execute("SELECT status FROM calls WHERE id=?", (request_id,)).fetchone()
+        return None if row is None else row[0]
+
+    def unknown_calls(self) -> tuple[str, ...]:
+        """The calls that were sent and whose outcome is not known, oldest first."""
+        self._check()
+        return tuple(identifier for (identifier,) in self._db.execute(
+            "SELECT id FROM calls WHERE status='unknown' ORDER BY rowid"))
+
+    def forfeit(self, request_id: str) -> float:
+        """Give up a call whose reply was lost, and admit calls again.
+
+        One unanswered request used to close a journal for good, so the run
+        that owned it ended and its work was begun again by another. The
+        reply stays lost and the request is never sent again under this id.
+        Its worst case, bounded by what it sent, is charged against the cap
+        from here on, and whoever asks again does so as a new call that must
+        fit the cap beside it. Returns the charge.
+        """
+        self._check()
+        if self._active is not None:
+            raise ResponsesFenced("cannot give up an active Responses call")
+        row = self._db.execute("SELECT rowid,request,status FROM calls WHERE id=?", (request_id,)).fetchone()
+        if row is None or row[2] not in {"unknown", "lost"}:
+            raise ResponsesConflict("only a call with an unknown outcome can be given up")
+        exposure = self._request_exposure(row[0], row[1])
+        if row[2] == "lost":
+            return exposure
+        with self._db:
+            changed = self._db.execute(
+                "UPDATE calls SET status='lost' WHERE id=? AND status='unknown'", (request_id,))
+            if changed.rowcount != 1:
+                raise ResponsesConflict("Responses call changed while it was being given up")
+            settled = self._db.execute(
+                "SELECT 1 FROM calls WHERE status IN ('pending','unknown') LIMIT 1").fetchone() is None
+            if settled:
+                self._db.execute("UPDATE meta SET value='ready' WHERE key='phase'")
+        self._fenced = not settled
+        with contextlib.suppress(ProtocolFailure):
+            # A facade made after the call was lost holds no reservation for it.
+            self._llm.settle_uncertain(exposure)
+        return exposure
 
     def ensure_ready(self) -> None:
         """Validate SDK/credential configuration without dispatch or spending."""
@@ -410,6 +491,8 @@ class ResponsesSession:
         row = self._db.execute("SELECT status,result,digest FROM calls WHERE id=?", (request_id,)).fetchone()
         if row is None or row[0] == "not_dispatched":
             return None
+        if row[0] == "lost":
+            raise ResponsesFenced("the reply to this Responses call was lost; ask again as a new call")
         if row[0] != "completed":
             raise ResponsesFenced("Responses call has an unknown outcome")
         return self._receipt(row[1], row[2])
@@ -443,7 +526,9 @@ class ResponsesSession:
                 raise ResponsesFenced("Responses session call limit reached")
             exposure = max_call_cost_usd(self.binding.model, max_output_tokens=self.binding.max_output_tokens,
                                          max_attempts=1, cap_on="billed")
-            spent = self.known_cost_usd
+            # What is known to be spent, and what the calls given up as lost
+            # can have cost: both are gone from the cap.
+            spent = math.fsum((self.known_cost_usd, self.lost_exposure_usd))
             if spent + exposure > self.binding.budget_usd:
                 raise BudgetExceeded(spent, self.binding.budget_usd, required_usd=exposure)
             self._llm.ensure_ready(self.binding.model)

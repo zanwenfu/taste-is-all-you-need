@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import math
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -36,6 +36,7 @@ from taste.brains.supervisor import (
     ProcessLauncher,
     SubprocessLauncher,
 )
+from taste.brains.worker_commands import unreported_commands
 from taste.brains.worker_launch import worker_command_factory
 from taste.llm import LLM, MODEL_MONITOR, MODEL_PLANNER
 from taste.memstore import Branch, Store
@@ -344,6 +345,7 @@ def compose_central_runtime(
     supervisor_termination_grace: float = 2.0,
     azure_policy: AzureExecutionPolicy | None = None,
     owns_planner_sdk: bool = False,
+    work_record: Callable[[Any], Sequence[str]] | None = None,
 ) -> CentralRuntimeHost:
     """Build the concrete central coordinator around one exact shared state.
 
@@ -543,6 +545,10 @@ def compose_central_runtime(
             control_lock=lock,
             default_wall_timeout_seconds=default_wall_timeout_seconds,
             communication=concrete_communication,
+            # An Azure worker records every command in its own memory before
+            # running it, so what a killed one ran can be read from there.
+            work_record=work_record if work_record is not None or azure_policy is None
+            else partial(unreported_commands, opened_store),
         )
         return CentralRuntimeHost(
             store=opened_store,

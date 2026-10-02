@@ -53,13 +53,25 @@ class _MonitorCalls:
         request = {"system": system, "messages": messages, "tools": None, "effort": "low"}
         canonical = json.dumps(request, sort_keys=True, ensure_ascii=True,
                                allow_nan=False, separators=(",", ":"))
-        request_id = "monitor." + hashlib.sha256(canonical.encode()).hexdigest()
-        session = ResponsesSession.open(self.directory, self.binding, self.azure)
-        try:
+        first = "monitor." + hashlib.sha256(canonical.encode()).hexdigest()
+
+        async def ask(session):
             # One exact pinned observation/prompt has one paid reply. A crash
             # before the monitor sidecar commits reuses that reply; a pending
             # provider outcome refuses dispatch. No SDK retry can spend twice.
-            return asyncio.run(session.complete(request_id, **request))
+            #
+            # A reply that was lost and given up (see forfeit_lost) is asked
+            # for again as a new call with an id of its own, so that a restart
+            # finds both on the journal.
+            request_id, again = first, 0
+            while session.outcome(request_id) == "lost":
+                again += 1
+                request_id = f"{first}.again-{again}"
+            return await session.complete(request_id, **request)
+
+        session = ResponsesSession.open(self.directory, self.binding, self.azure)
+        try:
+            return asyncio.run(ask(session))
         finally:
             session.close()
 
@@ -67,6 +79,17 @@ class _MonitorCalls:
         session = ResponsesSession.open(self.directory, self.binding, self.azure)
         try:
             return session.call_accounting()
+        finally:
+            session.close()
+
+    def forfeit_lost(self) -> int:
+        """Give up each call whose reply was lost; return how many."""
+        session = ResponsesSession.open(self.directory, self.binding, self.azure)
+        try:
+            lost = session.unknown_calls()
+            for request_id in lost:
+                session.forfeit(request_id)
+            return len(lost)
         finally:
             session.close()
 
@@ -112,6 +135,15 @@ class ResponsesMonitorJudge(LLMMonitorJudge):
 
     def call_accounting(self) -> ModelCallAccounting:
         return self.llm.call_accounting()
+
+    def forfeit_lost(self) -> int:
+        """Give up the judgement whose reply was lost, so that it can be asked again.
+
+        The journal charges the lost call its worst case and admits calls
+        again. Asking again is the caller's decision: a worker being stopped
+        makes no further call.
+        """
+        return self.llm.forfeit_lost()
 
     def ensure_ready(self) -> None:
         calls = self.llm

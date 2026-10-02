@@ -314,6 +314,7 @@ def stack(
     supervisor_type=CentralSupervisor,
     shared=None,
     communication=None,
+    work_record=None,
 ):
     if shared is None:
         lock = threading.RLock()
@@ -346,6 +347,7 @@ def stack(
         control_lock=lock,
         fault_injector=fault,
         communication=communication,
+        work_record=work_record,
     )
     return runtime, (control, integration, lock)
 
@@ -780,6 +782,66 @@ def test_cycles_driven_one_at_a_time_hold_to_the_spend_cap_too(store: Store) -> 
         for _ in range(4):
             runtime.cycle()
     assert len(launcher.launch_calls) == 1 and len(transport.calls) == 1
+
+
+def test_a_worker_that_died_without_a_report_is_planned_around_with_what_it_ran(store: Store) -> None:
+    # A worker killed after its grace period writes nothing. The coordinator
+    # then knew only that the run had ended, though its commands had run and
+    # may have changed files. The host can say what the run's own recorded
+    # turns show, and the next plan is made knowing it.
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            return (assignment_for(request, "build", "worker-build", "product.txt"),)
+        return complete_response(request, prompt)
+
+    asked = []
+
+    def work_record(run):
+        asked.append(run.run_id)
+        return ("ran: make test -> exit 2; last line printed: 3 failed",
+                "started, result not recorded: make install")
+
+    transport = ScriptedTransport(respond)
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(), transport, launcher, work_record=work_record)
+    runtime.cycle()
+    runtime.cycle()
+    (run,) = runtime.supervisor.runs()
+    launcher.handles[run.run_id].exit = ProcessExit(signal=9, reaped=True)
+    outcome = runtime.cycle()
+
+    (trigger,) = [item for item in outcome.triggers if item.subject_id == "build"]
+    assert trigger.kind in {"invalid_report", "worker_terminal"}
+    assert trigger.evidence["work_record"] == (
+        "ran: make test -> exit 2; last line printed: 3 failed",
+        "started, result not recorded: make install")
+    assert asked and set(asked) == {run.run_id}
+    # The record is in what the planner is given for the next plan.
+    assert "started, result not recorded: make install" in json.dumps(transport.calls[-1].to_dict())
+
+
+def test_a_host_that_cannot_say_what_a_dead_worker_ran_changes_nothing(store: Store) -> None:
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            return (assignment_for(request, "build", "worker-build", "product.txt"),)
+        return complete_response(request, prompt)
+
+    def unreadable(run):
+        raise OSError("the worker's turns cannot be read")
+
+    for number, hook in enumerate((None, unreadable, lambda run: ())):
+        opened = Store.open(store.root.parent / f"repo-{number}", "runtime-test")
+        try:
+            launcher = FakeLauncher()
+            runtime, _ = stack(opened, simple_goal(), ScriptedTransport(respond), launcher, work_record=hook)
+            runtime.cycle()
+            runtime.cycle()
+            (run,) = runtime.supervisor.runs()
+            launcher.handles[run.run_id].exit = ProcessExit(signal=9, reaped=True)
+            (trigger,) = [item for item in runtime.cycle().triggers if item.subject_id == "build"]
+            assert "work_record" not in trigger.evidence
+        finally:
+            opened.close()
 
 
 def test_global_budget_counts_planner_cost_and_both_worker_reservations(

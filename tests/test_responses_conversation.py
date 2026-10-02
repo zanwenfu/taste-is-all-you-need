@@ -16,6 +16,7 @@ from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.monitor import Judgement, MonitorBrain, Severity, TerminalDecision
 from taste.brains.responses_conversation import ResponsesConversation, ResponsesTool, ToolOutcome
 from taste.brains.responses_session import ResponsesConflict, ResponsesFenced, ResponsesSession
+from taste.llm import InfraFailure
 from taste.memstore import Store
 from tests.test_azure_openai import config, httpx
 from tests.test_azure_openai import sdk_transport as _sdk_transport
@@ -264,6 +265,106 @@ def test_active_response_blocks_competing_drivers_and_feedback(worker, sdk_trans
 
     asyncio.run(scenario())
     assert len(sent) == 1
+
+
+def install_with_loss(sdk_transport, *outputs):
+    """Like install, but an output of None is a request the service never answers."""
+    pending = iter(outputs)
+
+    def handle(wire):
+        output = next(pending)
+        if output is None:
+            raise httpx.ReadTimeout("no answer", request=wire)
+        return httpx.Response(200, json=response(model="gpt-6-sol", output=output),
+                              headers={"x-ms-served-model": binding().model})
+
+    sent, _ = sdk_transport(handle)
+    return sent
+
+
+def waiting_request(worker):
+    """The request memory holds with no reply yet."""
+    return [turn["id"] for turn in worker.branch.view.pending_turns()
+            if turn["kind"] == "responses_request"][-1]
+
+
+def test_a_lost_reply_is_given_up_and_the_same_question_asked_as_a_new_call(worker, sdk_transport):
+    # The worker ran a tool, asked for its next step, and was never answered.
+    # That used to end its run. Everything it had read and done was thrown
+    # away with it, and another worker began the assignment again.
+    sent = install_with_loss(sdk_transport, [tool()], None, [message("completed")])
+    effects = []
+
+    async def write(effect_id, call):
+        effects.append(effect_id)
+        worker.branch.write("artifact.txt", call.arguments["text"])
+        return ToolOutcome("artifact saved")
+
+    conversation = make(worker, execute=write)
+    conversation.observe("contract", worker.contract.brief())
+
+    async def lose_one_reply_and_go_on():
+        await conversation.step()
+        seen = conversation.messages
+        with pytest.raises(InfraFailure):
+            await conversation.step()
+        with pytest.raises(ResponsesFenced):
+            await conversation.step()  # not asked again until the lost call is on record as lost
+        lost = conversation.forfeit()
+        assert worker.session.outcome(lost) == "lost"
+        assert conversation.messages == seen, "nothing the worker had read or done was lost"
+        reply = await conversation.step()
+        assert reply.summary_text == "completed"
+        assert conversation.completed_turn().request_id != lost
+        with pytest.raises(ResponsesConflict, match="no request"):
+            conversation.forfeit()
+
+    asyncio.run(lose_one_reply_and_go_on())
+    assert len(sent) == 3 and len(effects) == 1
+    # What was asked again is what was lost, word for word, as a new call.
+    assert json.loads(sent[1].content)["input"] == json.loads(sent[2].content)["input"]
+    accounting = worker.session.call_accounting()
+    assert (accounting.completed_calls, accounting.lost_calls, accounting.unknown_calls) == (2, 1, 0)
+    # The record reads the same after a checkpoint and a fresh start.
+    worker.branch.checkpoint("work after a lost reply")
+    assert make(worker).completed_turn().completion.summary_text == "completed"
+
+
+def test_a_give_up_interrupted_after_the_journal_is_finished_in_memory(worker, sdk_transport):
+    install_with_loss(sdk_transport, None, [message("completed")])
+    conversation = make(worker)
+    conversation.observe("contract", worker.contract.brief())
+
+    async def scenario():
+        with pytest.raises(InfraFailure):
+            await conversation.step()
+        # The journal recorded the give-up; the process died before memory did.
+        lost = waiting_request(worker)
+        worker.session.forfeit(lost)
+        assert make(worker).forfeit() == lost
+        assert (await make(worker).step()).summary_text == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_memory_cannot_give_up_a_call_its_journal_has_not(worker, sdk_transport):
+    install_with_loss(sdk_transport, None)
+    conversation = make(worker)
+    conversation.observe("contract", worker.contract.brief())
+
+    async def lose():
+        with pytest.raises(InfraFailure):
+            await conversation.step()
+
+    asyncio.run(lose())
+    # Written straight into memory and its audit, with the call still unsettled.
+    event = {"kind": "responses_lost", "id": waiting_request(worker)}
+    events = [turn for turn in worker.branch.view.pending_turns() if turn["kind"].startswith("responses_")]
+    recorded = worker.session.record_conversation_event(events, event)
+    worker.branch.turn(**event)
+    worker.session.publish_conversation_event(recorded)
+    with pytest.raises(ResponsesConflict, match="not lost in its journal"):
+        make(worker)
 
 
 def test_rollback_discards_context_but_keeps_spending_and_new_request_identity(worker, sdk_transport):

@@ -34,12 +34,14 @@ from taste.brains.responses_feedback import (
 from taste.brains.responses_session import ResponsesFenced, ResponsesSession
 from taste.brains.terminal_tools import TerminalTools
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
+from taste.brains.worker_commands import COMMAND_TOOL, bounded, ran, unfinished
 from taste.brains.worker_protocol import (
     ASSIGNMENT_PATH,
     GOAL_TASK_PATH,
     WORKER_REPORT_PATH,
     ContractMismatch,
 )
+from taste.llm import InfraFailure
 from taste.memstore import Branch, State
 
 SYSTEM = """You are a worker executing one immutable Taste assignment.
@@ -70,6 +72,11 @@ CLAIM_REFUSED = (
     "Nothing you did was lost. Reply again with exactly one JSON object, without markdown, "
     "with the fields status, summary, evidence, accepted_inbox_ids and accepted_verdicts."
 )
+# How many replies a worker may lose, give up and ask for again before its run
+# ends. Each one is a new call inside its caps, beside the lost one's charge.
+LOST_REPLIES = 2
+# How many times one monitor judgement is asked again after its reply is lost.
+MONITOR_LOST_REPLIES = 1
 # A long file written in one command is the usual cause.
 REPLY_TRUNCATED = (
     "Your last reply reached the output limit before it ended, so no tool call in it ran "
@@ -187,24 +194,16 @@ class AzureWorkerRuntime:
         except Exception:
             return []
 
-        def clip(text, size):
-            text = " ".join(str(text).split())
-            return text if len(text) <= size else text[:size] + " [cut]"
-
         started, lines = {}, []
         for message in messages:
             content = message.get("content")
             for block in content if isinstance(content, list) else ():
-                if block.get("type") == "tool_use" and block.get("name") == "terminal_exec":
+                if block.get("type") == "tool_use" and block.get("name") == COMMAND_TOOL:
                     started[block.get("id")] = (block.get("input") or {}).get("command", "")
                 elif block.get("type") == "tool_result" and block.get("tool_use_id") in started:
-                    rows = [row for row in str(block.get("content", "")).splitlines() if row.strip()]
-                    line = f"ran: {clip(started.pop(block['tool_use_id']), 300)} -> {clip(rows[0] if rows else 'no result text', 120)}"
-                    lines.append(line + (f"; last line printed: {clip(rows[-1], 200)}" if len(rows) > 1 else ""))
-        lines.extend(f"started, result not recorded: {clip(command, 300)}" for command in started.values())
-        lines = lines[-last:]
-        while lines and sum(map(len, lines)) > limit:
-            lines.pop(0)
+                    lines.append(ran(started.pop(block["tool_use_id"]), block.get("content", "")))
+        lines.extend(unfinished(command) for command in started.values())
+        lines = bounded(lines, last=last, limit=limit)
         if not lines:
             return []
         return ["No claim was stated. Mechanical record of this worker's terminal commands, "
@@ -214,14 +213,44 @@ class AzureWorkerRuntime:
         if time.time() >= self.session.binding.deadline_unix:
             raise ResponsesFenced("the admitted worker deadline elapsed")
 
+    async def _monitored(self, operation):
+        """Run one monitor operation; if its reply is lost, give that up and ask once more.
+
+        One unanswered request to the monitor ended the worker's whole run,
+        for a call the worker had no part in. The decision to ask again is
+        made here and not in the monitor's own thread: a worker that is being
+        stopped is cancelled at this await, and makes no further call.
+        """
+        for again in range(MONITOR_LOST_REPLIES + 1):
+            try:
+                return await operation()
+            except InfraFailure as failure:
+                if (not failure.transient or again == MONITOR_LOST_REPLIES
+                        or not self.monitor.forfeit_lost_reply()):
+                    raise
+
     async def _drive(self) -> WorkerClaim:
-        refused = 0
+        refused = lost = 0
         while True:
             self._check_deadline()
             self.feedback.observe_pending()
-            reply = await self.conversation.step()
+            try:
+                reply = await self.conversation.step()
+            except InfraFailure as failure:
+                # The request was sent and no reply came back: a timeout, a
+                # dropped connection, the service's own passing trouble. That
+                # ended the run, and with it everything this worker had read
+                # and done; the next worker began the assignment again. The
+                # lost call is charged its worst case and the same question is
+                # asked as a new call. A request refused as wrong would be
+                # refused again, and is not asked again.
+                lost += 1
+                if not failure.transient or lost > LOST_REPLIES:
+                    raise
+                self.conversation.forfeit()
+                continue
             if reply.tool_calls:
-                await self.monitor.drain(None)
+                await self._monitored(lambda: self.monitor.drain(None))
                 continue
             try:
                 claim = self.feedback.accept_latest()
@@ -236,7 +265,7 @@ class AzureWorkerRuntime:
                     "claim_refused." + request,
                     REPLY_TRUNCATED if isinstance(reason, TruncatedWorkerReply)
                     else CLAIM_REFUSED.format(reason=reason))
-                await self.monitor.drain(None)
+                await self._monitored(lambda: self.monitor.drain(None))
                 continue
             refused = 0
             if claim.status == "blocked":
@@ -248,7 +277,7 @@ class AzureWorkerRuntime:
             request = self.conversation.completed_turn().request_id
             self.conversation.observe("continue." + request,
                                       "Continue the assignment and handle remaining feedback.")
-            await self.monitor.drain(None)
+            await self._monitored(lambda: self.monitor.drain(None))
 
     def _control_failures(self):
         failures = []
@@ -295,13 +324,14 @@ class AzureWorkerRuntime:
         None when the monitor's journal could not say: half an account is not
         one the coordinator can charge by.
         """
-        known, exposure = (monitor_report.get(name) for name in ("known_cost_usd", "unknown_exposure_usd"))
-        for value in (known, exposure):
+        amounts = [monitor_report.get(name) for name in (
+            "known_cost_usd", "unknown_exposure_usd", "lost_exposure_usd")]
+        for value in amounts:
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or value < 0):
                 return None
-        return {"known_usd": math.fsum((worker_cost.known_cost_usd, known)),
-                "unknown_exposure_usd": math.fsum((worker_cost.unknown_exposure_usd, exposure))}
+        return {"known_usd": math.fsum((worker_cost.known_cost_usd, amounts[0])),
+                "unknown_exposure_usd": math.fsum((worker_cost.exposure_usd, *amounts[1:]))}
 
     async def run(self) -> AzureWorkerResult:
         claim, failures, interrupted = None, [], False
@@ -336,7 +366,8 @@ class AzureWorkerRuntime:
         # go to the coordinator, not back into an endless acknowledgement loop.
         verdict_boundary = self.branch.verdict_watermark()
         if not interrupted and not failures:
-            _, interrupted = await _settled_monitor(self.monitor.drain(None, final=True), failures)
+            _, interrupted = await _settled_monitor(
+                self._monitored(lambda: self.monitor.drain(None, final=True)), failures)
 
         for spec in self.assignment.outputs:
             try:
@@ -357,15 +388,16 @@ class AzureWorkerRuntime:
 
         assessment = None
         if not interrupted and not failures:
-            assessment, interrupted = await _settled_monitor(
-                self.monitor.certify_terminal(work, context={
-                    "schema": "taste.brains/AzureWorkerTerminalContext/1",
-                    "run_id": self.session.binding.run_id,
-                    "assignment_digest": "sha256:" + hashlib.sha256(self.assignment.to_json().encode()).hexdigest(),
-                    "worker_claim": _claim_payload(claim),
-                    "outputs": [item.to_dict() for item in outputs],
-                    "feedback_boundary": {"pending_inbox_ids": pending, "verdicts": verdict_boundary},
-                }), failures)
+            terminal_context = {
+                "schema": "taste.brains/AzureWorkerTerminalContext/1",
+                "run_id": self.session.binding.run_id,
+                "assignment_digest": "sha256:" + hashlib.sha256(self.assignment.to_json().encode()).hexdigest(),
+                "worker_claim": _claim_payload(claim),
+                "outputs": [item.to_dict() for item in outputs],
+                "feedback_boundary": {"pending_inbox_ids": pending, "verdicts": verdict_boundary},
+            }
+            assessment, interrupted = await _settled_monitor(self._monitored(
+                lambda: self.monitor.certify_terminal(work, context=terminal_context)), failures)
             if assessment is not None and (assessment.state_id != work.id
                     or assessment.contract_digest != self.assignment.contract_digest
                     or not assessment.acceptable):
@@ -383,11 +415,14 @@ class AzureWorkerRuntime:
         cost = None
         if worker_cost.cost_usd is not None and monitor_report.get("cost_known"):
             cost = math.fsum((worker_cost.cost_usd, monitor_report["cost_usd"]))
-        if cost is None:
-            failures.append("model_cost_unknown")
         # What is known and what is only bounded, kept apart: a run that lost
         # one reply is then charged for that call, not its whole ceiling.
         account = self._cost_account(worker_cost, monitor_report)
+        # A reply given up as lost is charged and on record, and its run goes
+        # on. Only a call whose outcome is still open leaves the cost unsettled.
+        if cost is None and not (account is not None and worker_cost.settled
+                                 and monitor_report.get("unknown_model_calls") == 0):
+            failures.append("model_cost_unknown")
         if claim is None:
             failures.append("missing_worker_claim")
         failures = list(dict.fromkeys(failures))

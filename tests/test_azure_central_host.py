@@ -271,26 +271,14 @@ install(network, hook=lose_one)
 """)
 
 
-def test_a_worker_whose_request_is_never_answered_ends_at_its_ceiling_and_the_goal_goes_on(
+def test_a_worker_whose_request_is_never_answered_asks_again_and_finishes_the_goal(
         tmp_path, goal, policy, sdk_transport):
     # Planner to worker process to coordinator, with only the network scripted.
-    # The first worker's second request is never answered. It ends at the
-    # request ceiling, not at the goal's deadline; it reports what it paid and
-    # what that one request can have cost; and the next worker finishes the goal.
-    payloads = []
-
-    def handler(wire):
-        payload = json.loads(json.loads(wire.content)["input"][0]["content"])
-        payloads.append(payload)
-        result = proposal(payload, complete=len(payloads) > 2)
-        if not result["complete"]:
-            assignment = result["assignments"][0]
-            assignment["assignment_id"] = f"write-output-{len(payloads)}"
-            assignment["contract"]["identity"] = f"azure-worker-{len(payloads)}"
-        return httpx.Response(200, json=response(
-            model=AZURE_PLANNER_MODEL, output=[message(json.dumps(result))]))
-
-    sdk_transport(handler)
+    # The worker's second request is never answered. It ends at the request
+    # ceiling, not at the goal's deadline. The worker gives it up, asks again
+    # and finishes: the same worker, with everything it had done, where one
+    # lost reply used to end its run and send another worker to start over.
+    _, payloads = install_planner(sdk_transport)
     root, marker = tmp_path / "repo", tmp_path / "lost-reply"
     script = LOSES_ONE_REPLY.replace("MARKER", repr(str(marker)))
 
@@ -302,26 +290,26 @@ def test_a_worker_whose_request_is_never_answered_ends_at_its_ceiling_and_the_go
 
     bounded = replace(policy, request_seconds=45)
     with host(tmp_path, goal, bounded, launcher=SubprocessLauncher(command, env=environment())) as runtime:
-        result = runtime.run(max_generations=4, wall_clock_seconds=90)
+        result = runtime.run(max_generations=3, wall_clock_seconds=90)
         assert result.complete and result.stop_reason == "complete", result.to_dict()
         assert runtime.integration.head.read("output.txt") == "correct"
         # The unanswered request had 45 seconds, not the two minutes the goal had.
         assert marker.read_text() == "45.0"
-
-        lost, finished = sorted(runtime.supervisor.runs(), key=lambda run: run.assignment.generation)
-        assert finished.phase == "delivered"
-        first, second = (WorkerReport.from_json(runtime.store.view(run.assignment.worker).head.read(
-            WORKER_REPORT_PATH)) for run in (lost, finished))
-        assert first.cost_usd is None and not first.completed
-        account = first.metadata["model_cost"]
-        assert account["known_usd"] > 0
+        # One plan, one worker, one completion: nothing was begun again.
+        assert len(payloads) == 2
+        (run,) = runtime.supervisor.runs()
+        assert run.phase == "delivered"
+        report = WorkerReport.from_json(runtime.store.view(run.assignment.worker).head.read(WORKER_REPORT_PATH))
+        assert report.completed and report.cost_usd is None
+        account = report.metadata["model_cost"]
+        assert report.metadata["worker_accounting"]["lost_calls"] == 1
         # One request of a few kilobytes: cents. Its worker and monitor caps,
-        # which the run was charged before, come to $40.
-        assert 0 < account["unknown_exposure_usd"] < 1
+        # which a run that lost a reply was charged before, come to $40.
+        assert account["known_usd"] > 0 and 0 < account["unknown_exposure_usd"] < 1
         budget = result.budget
         assert budget.enforceable
+        assert budget.worker_spent_usd == pytest.approx(account["known_usd"])
         assert budget.reserved_usd == pytest.approx(account["unknown_exposure_usd"])
-        assert budget.worker_spent_usd == pytest.approx(account["known_usd"] + second.cost_usd)
 
 
 def test_expired_policy_does_not_refresh_planner_deadline_or_dispatch(tmp_path, goal, policy, sdk_transport):

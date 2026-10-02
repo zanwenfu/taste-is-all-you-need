@@ -527,6 +527,7 @@ class CentralRuntime:
         communication: CommunicationHook | None = None,
         clock: Callable[[], datetime] = _now,
         fault_injector: Callable[[str, Mapping[str, Any]], None] | None = None,
+        work_record: Callable[[SupervisorRun], Sequence[str]] | None = None,
     ) -> None:
         if not isinstance(goal, Goal):
             raise ValueError("goal must be a Goal")
@@ -566,6 +567,9 @@ class CentralRuntime:
         self.control_lock = control_lock
         self.default_wall_timeout_seconds = float(default_wall_timeout_seconds)
         self.communication = communication
+        # What a run that left no report is recorded as having done, where
+        # this host's workers keep such a record. See _work_record.
+        self.work_record = work_record
         # While its workers work and nothing changes, run() watches them this
         # often and makes a durable cycle only this often. See _await_change.
         self.idle_poll_seconds = IDLE_POLL_SECONDS
@@ -1231,6 +1235,25 @@ class CentralRuntime:
         reached = self._spend_cap_reached()
         if reached is not None:
             raise _SpendCapReached(reached)
+
+    def _work_record(self, run: SupervisorRun) -> dict[str, list[str]]:
+        """Trigger evidence for a run that ended without a report: what it is recorded as having run.
+
+        A worker killed after its grace period writes nothing, and the
+        coordinator knew only that the run had ended, although its commands
+        had run and may have changed files. Where the host can read the
+        worker's own recorded turns, their mechanical record goes to the
+        planner with the trigger. It is help for the next plan and for the
+        closing reply, never a condition: a record that cannot be read is
+        left out and the cycle goes on as it always did.
+        """
+        if self.work_record is None:
+            return {}
+        try:
+            lines = [line for line in self.work_record(run) if isinstance(line, str) and line]
+        except Exception:
+            return {}
+        return {"work_record": lines} if lines else {}
 
     def _charge_lost_cost(self, run: SupervisorRun, reservations: list[float], unknown: list[str]) -> None:
         """Account for an ended run whose exact spending cannot be read.
@@ -2323,10 +2346,19 @@ class CentralRuntime:
                 if callable(bind_deadline):
                     bind_deadline(remaining_seconds=remaining)
                 cycle = self._begin_cycle(plan)
+                # A worker killed at its grace period left no report to collect.
+                # What its recorded turns show goes with the closing trigger.
+                unreported = [
+                    {"run_id": run.run_id, "assignment_id": run.assignment.assignment_id, **record}
+                    for run in self.supervisor.runs()
+                    if run.assignment.generation == plan.generation and run.phase == "terminal"
+                    for record in (self._work_record(run),) if record
+                ]
                 trigger = RuntimeTrigger(
                     kind="closing", subject_id=self.goal.goal_id,
                     detail=f"the run ended ({stop_reason}); no further work can be assigned",
-                    evidence={"stop_reason": stop_reason, "detail": detail[:1024]},
+                    evidence={"stop_reason": stop_reason, "detail": detail[:1024],
+                              **({"unreported_work": unreported} if unreported else {})},
                 )
                 revised = self._replan(cycle, plan, (trigger,), closing=True)
                 runs = self.supervisor.runs()
@@ -2576,6 +2608,7 @@ class CentralRuntime:
                             "run_id": run.run_id,
                             "run_sequence": run.sequence,
                             "terminal_reason": run.terminal_reason,
+                            **self._work_record(run),
                         },
                     )
                     triggers.append(trigger)
@@ -2697,7 +2730,8 @@ class CentralRuntime:
                             kind="worker_terminal",
                             subject_id=assignment.assignment_id,
                             detail=run.terminal_reason or "terminal worker has no accepted report",
-                            evidence={"run_id": run.run_id, "run_sequence": run.sequence},
+                            evidence={"run_id": run.run_id, "run_sequence": run.sequence,
+                                      **self._work_record(run)},
                         )
                     )
                     failed.add(assignment.assignment_id)

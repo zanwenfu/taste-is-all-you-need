@@ -31,6 +31,19 @@ behaviour and interfaces.
 
 ### Fixed
 
+- **A lost reply no longer ends the run.** A worker whose request got no
+  reply (a timeout, a dropped connection, the provider's own passing trouble)
+  ended its run, and another worker began the assignment again. The journal
+  now gives the lost call up, charges it the most the request it sent can have
+  cost (measured by the service where the request continued an answered one),
+  and the worker asks the same question as a new call, at most twice. Its
+  monitor does the same, once. A lost final certification is no longer
+  recorded as a refusal.
+- **A killed worker leaves a record.** A worker killed after its grace period
+  wrote nothing, and the coordinator closed knowing nothing of it. What it ran
+  is now read from its own recorded turns and given to the planner with the
+  trigger that reports the run, and with the closing trigger: each command,
+  its exit and the last line it printed.
 - **The certifier can read a worker's report.** An output artifact over 8 KB
   was shown to the certifier as omitted, so a run whose criteria spoke of its
   report was refused and a second worker sent to write a shorter one (four of

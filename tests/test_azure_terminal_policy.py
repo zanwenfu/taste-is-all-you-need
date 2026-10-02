@@ -7,25 +7,30 @@ import json
 import os
 import secrets
 import tempfile
+import threading
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from taste.brains import azure_worker_launch
+from taste.brains import azure_worker_launch, benchmark_reply
 from taste.brains.azure_central_host import compose_azure_central_runtime
 from taste.brains.azure_execution_policy import AzureExecutionPolicy
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
+from taste.brains.central_planner import Goal
 from taste.brains.records import contract_digest
-from taste.brains.terminal_broker import TerminalBinding, TerminalBroker
+from taste.brains.terminal_broker import TerminalBinding, TerminalBroker, TerminalResult
 from taste.brains.terminal_service import TerminalCredential, TerminalGrant, TerminalService
 from taste.brains.terminal_worker_policy import TERMINAL_POLICY_KEY, TerminalWorkerPolicy
-from tests.test_azure_central_host import environment, install_planner
+from taste.providers.azure_openai import AZURE_PLANNER_MODEL
+from tests.test_azure_central_host import environment, install_planner, proposal
 from tests.test_azure_central_host import goal as _goal
 from tests.test_azure_central_host import policy as _policy
+from tests.test_azure_openai import httpx
 from tests.test_azure_openai import sdk_transport as _sdk_transport
 from tests.test_azure_worker_policy import assignment
 from tests.test_azure_worker_process import BOOTSTRAP
+from tests.test_openai_responses import message, response
 from tests.test_terminal_broker import Environment
 
 goal = _goal
@@ -160,6 +165,121 @@ def test_default_azure_coordinator_assigns_grant_to_real_worker_and_replays_with
                     assert recovered.stop_and_drain("verify completed terminal goal settlement") == result
                 assert len(env.calls) == 1 and len(sent) == 2
             finally:
+                await service.close()
+                owner.close()
+    asyncio.run(scenario())
+
+
+KILLED_MID_COMMAND = BOOTSTRAP.replace("install(network)", """
+import json
+from tests.test_openai_responses import function_call
+def two_commands(number, payload):
+    command = "make test" if number == 1 else "make install"
+    return [function_call(json.dumps({"command": command, "cwd": "/tmp", "timeout_seconds": 60}),
+                          name="terminal_exec", call_id="terminal_call_%d" % number)]
+install(network, worker_reply=two_commands)
+""")
+
+
+def test_a_worker_killed_mid_command_leaves_what_it_ran_for_the_closing_reply(
+        tmp_path, policy, sdk_transport, monkeypatch):
+    # Planner, a real worker process and the terminal service, with only the
+    # network and the task container scripted. The worker's second command
+    # never returns. When working time ends the worker cannot settle inside
+    # its grace period and is killed, so it writes no report. The coordinator
+    # used to close knowing nothing of it; now the closing reply is asked for
+    # with the commands that worker's own recorded turns show.
+    class Stuck(Environment):
+        def __init__(self):
+            super().__init__()
+            self.result = TerminalResult(0, b"12 passed\n", b"")
+            self.hold = threading.Event()
+
+        def execute(self, request):
+            self.calls.append(request)
+            if len(self.calls) > 1:
+                self.hold.wait(60)
+            return self.result
+
+    goal = Goal(goal_id="azure-goal", task="Run the tests, then install.",
+                success_criteria=("the tests pass and the install is done",), budget_usd=100,
+                metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA, benchmark_reply.RESERVE_KEY: 10})
+    payloads = []
+
+    def planner(wire):
+        payload = json.loads(json.loads(wire.content)["input"][0]["content"])
+        payloads.append(payload)
+        closing = "closing_proposal" in payload["rules"]
+        if closing:
+            result = payload["required_output_shape"]
+            result.update(complete=False, completion_reason="", rationale="the run ended before the plan did")
+            result["assessment"] = [
+                {"criterion_id": item["criterion_id"], "verdict": "not_met",
+                 "evidence": "the install was started and no result was recorded"}
+                for item in payload["standing_criteria"]]
+        else:
+            result = proposal(payload)
+        result["metadata"] = {"final_reply": "The tests passed. The install did not finish." if closing else ""}
+        return httpx.Response(200, json=response(
+            model=AZURE_PLANNER_MODEL, output=[message(json.dumps(result))]))
+
+    sdk_transport(planner)
+    # A command here may run for a minute, far past the end of working time.
+    admitted = replace(policy, terminal=TerminalWorkerPolicy(
+        TerminalBinding("trial", Environment.environment_id, policy.deadline_unix, 20), 60))
+    original_command = azure_worker_launch.worker_command
+    bootstrap = KILLED_MID_COMMAND + "\nsys.modules.pop('taste.brains.azure_worker_entrypoint', None)\n"
+
+    def command(*args, **kwargs):
+        argv = list(original_command(*args, **kwargs))
+        argv[3] = argv[3].replace("import runpy;", bootstrap + "\nimport runpy;", 1)
+        return tuple(argv)
+
+    monkeypatch.setattr(azure_worker_launch, "worker_command", command)
+
+    async def scenario():
+        env = Stuck()
+        owner = TerminalBroker.create(tmp_path / "terminal-ledger", admitted.terminal.binding, env)
+        with tempfile.TemporaryDirectory(prefix="taste-central-rpc-", dir="/tmp") as directory:
+            socket_path = str(Path(directory) / "service" / "terminal.sock")
+            seed = TerminalCredential(socket_path, os.geteuid(), os.geteuid(),
+                                      TerminalGrant(owner.binding, "controller_bootstrap", 5), "a" * 64)
+            service = TerminalService(owner, [seed])
+            await service.start()
+            loop = asyncio.get_running_loop()
+
+            def issue(spec):
+                credential = TerminalCredential(socket_path, os.geteuid(), os.geteuid(),
+                    admitted.terminal.grant(spec.assignment), secrets.token_hex(32))
+
+                async def register():
+                    service.authorize(credential)
+
+                asyncio.run_coroutine_threadsafe(register(), loop).result(timeout=5)
+                return credential
+
+            root = tmp_path / "repo"
+            root.mkdir()
+            try:
+                with compose_azure_central_runtime(root, "terminal-central", goal, policy=admitted,
+                        environment=environment(), terminal_credential_provider=issue,
+                        supervisor_termination_grace=1.0) as runtime:
+                    result = await runtime.run_async(max_generations=3, wall_clock_seconds=20)
+                    assert result.stop_reason == "wall_clock" and not result.complete, result.to_dict()
+                    assert runtime.runtime.closing_failure is None, runtime.runtime.closing_failure
+                    (run,) = runtime.supervisor.runs()
+                    assert run.terminal and run.report_id is None, "the worker was killed and left no report"
+                    assert [call.command for call in env.calls] == ["make test", "make install"]
+                    asked = json.dumps(payloads[-1])
+                    assert "closing_proposal" in payloads[-1]["rules"] and "unreported_work" in asked
+                    assert "ran: make test -> exit 0; last line printed: 12 passed" in asked
+                    assert "started, result not recorded: make install" in asked
+                    # The planner was told from the start what such a record is.
+                    assert "may or may not have finished" in payloads[0]["rules"]["unreported_work"]
+                    plan = runtime.planner.current_plan(goal.goal_id)
+                    assert plan.metadata["proposal"]["final_reply"] == "The tests passed. The install did not finish."
+            finally:
+                env.hold.set()
                 await service.close()
                 owner.close()
     asyncio.run(scenario())

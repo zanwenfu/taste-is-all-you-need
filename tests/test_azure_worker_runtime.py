@@ -14,7 +14,7 @@ import pytest
 
 from taste.brains.azure_worker_entrypoint import execute_worker, run_directory
 from taste.brains.azure_worker_launch import worker_command
-from taste.brains.azure_worker_runtime import CLAIM_CORRECTIONS
+from taste.brains.azure_worker_runtime import CLAIM_CORRECTIONS, LOST_REPLIES
 from taste.brains.communication import Communicator, Message
 from taste.brains.monitor import MonitorBrain
 from taste.brains.monitor_judge import TERMINAL_JUDGEMENT_SCHEMA
@@ -240,54 +240,100 @@ def test_paid_invalid_monitor_reply_remains_known_cost_and_blocks_completion(wor
     assert result.metadata["monitor"]["cost_known"]
 
 
-def test_lost_provider_reply_is_unknown_cost_and_never_retried(worker, sdk_transport):
+def test_a_worker_that_loses_a_reply_asks_again_and_finishes_its_run(worker, sdk_transport):
+    # The service takes the worker's second request and never answers it. That
+    # used to end the run: the artifact it had written was thrown away with
+    # its context, and another worker began the assignment again.
+    def lose_the_second(role, number, payload):
+        if role == "worker" and number == 2:
+            raise httpx.ReadTimeout("no answer")
+
+    _, calls, _ = install(sdk_transport, hook=lose_the_second)
+    assert run(worker) == WorkerExitCode.COMPLETED
+    result = report(worker)
+    assert result.completed and not result.uncertain, result.uncertainty_reasons
+    assert calls["worker"] == 3, "the lost request was asked once more, as a new call"
+    work = worker.store.state(result.final_state_id)
+    assert work.read("output.txt") == "correct"
+    # What the lost call cost is not known, so the run has no exact cost. It
+    # has an account instead: every answered call on receipt at $0.000366,
+    # and the unanswered one bounded by the few kilobytes it sent.
+    assert result.cost_usd is None
+    account = result.metadata["model_cost"]
+    answered = calls["worker"] - 1 + calls["monitor"] + calls["terminal"]
+    assert account["known_usd"] == pytest.approx(answered * 0.000366)
+    assert 0 < account["unknown_exposure_usd"] < 0.5
+    accounting = result.metadata["worker_accounting"]
+    assert (accounting["lost_calls"], accounting["unknown_calls"]) == (1, 0)
+    assert accounting["lost_exposure_usd"] == account["unknown_exposure_usd"]
+
+
+def test_a_reply_lost_again_and_again_ends_the_run_after_two_more_tries(worker, sdk_transport):
     def fail(wire):
         raise httpx.ReadError("private Azure token must not appear in report", request=wire)
     sent, _ = sdk_transport(fail)
     assert run(worker) == WorkerExitCode.INCOMPLETE
     result = report(worker)
     assert result.cost_usd is None and not result.completed
-    assert result.metadata["worker_accounting"]["unknown_calls"] == 1
-    assert len(sent) == 1
+    assert result.terminal_reason == "runtime_infrafailure"
+    # Asked three times in all, each a call of its own on the journal: two
+    # given up and charged, and the last left open, which ends the run.
+    assert len(sent) == 1 + LOST_REPLIES == 3
+    accounting = result.metadata["worker_accounting"]
+    assert (accounting["lost_calls"], accounting["unknown_calls"]) == (LOST_REPLIES, 1)
+    assert "model_cost_unknown" in result.uncertainty_reasons
     assert "private Azure token" not in result.to_json()
 
 
-def test_a_lost_worker_reply_leaves_an_account_of_what_the_run_can_have_cost(worker, sdk_transport):
-    # The service takes the worker's second request and never answers it.
-    def lose_the_second(role, number, payload):
-        if role == "worker" and number == 2:
+def test_a_request_the_service_refuses_as_wrong_is_not_asked_again(worker, sdk_transport):
+    sent, _ = sdk_transport(lambda wire: httpx.Response(400, json={"error": {"message": "invalid request"}}))
+    assert run(worker) == WorkerExitCode.INCOMPLETE
+    result = report(worker)
+    assert len(sent) == 1 and not result.completed
+    accounting = result.metadata["worker_accounting"]
+    assert (accounting["lost_calls"], accounting["unknown_calls"]) == (0, 1)
+
+
+@pytest.mark.parametrize("judgement", ["monitor", "terminal"])
+def test_a_worker_whose_monitor_loses_a_reply_still_finishes(worker, sdk_transport, judgement):
+    # Either kind: a judgement of the work so far, or the final certification.
+    def lose_the_first_judgement(role, number, payload):
+        if role == judgement and number == 1:
             raise httpx.ReadTimeout("no answer")
 
-    _, calls, _ = install(sdk_transport, hook=lose_the_second)
+    _, calls, _ = install(sdk_transport, hook=lose_the_first_judgement)
+    exit_code = run(worker)
+    result = report(worker)
+    assert exit_code == WorkerExitCode.COMPLETED, (result.uncertainty_reasons, calls)
+    assert result.completed and not result.uncertain, result.uncertainty_reasons
+    assert result.cost_usd is None
+    account = result.metadata["model_cost"]
+    answered = calls["worker"] + calls["monitor"] + calls["terminal"] - 1
+    assert calls[judgement] == 2, "the lost judgement was asked once more"
+    assert account["known_usd"] == pytest.approx(answered * 0.000366)
+    exposure = account["unknown_exposure_usd"]
+    assert 0 < exposure < 0.5
+    monitor = result.metadata["monitor"]
+    assert exposure == monitor["lost_exposure_usd"]
+    assert (monitor["lost_model_calls"], monitor["unknown_model_calls"]) == (1, 0)
+    assert result.metadata["worker_accounting"]["lost_exposure_usd"] == 0
+
+
+def test_a_monitor_that_keeps_losing_replies_ends_the_run_with_an_account(worker, sdk_transport):
+    def lose_every_judgement(role, number, payload):
+        if role == "monitor":
+            raise httpx.ReadTimeout("no answer")
+
+    _, calls, _ = install(sdk_transport, hook=lose_every_judgement)
     assert run(worker) == WorkerExitCode.INCOMPLETE
     result = report(worker)
     assert result.cost_usd is None and "model_cost_unknown" in result.uncertainty_reasons
     account = result.metadata["model_cost"]
-    # Every call that was answered is on receipt, at $0.000366 each.
-    answered = calls["worker"] - 1 + calls["monitor"] + calls["terminal"]
-    assert answered >= 1 and account["known_usd"] == pytest.approx(answered * 0.000366)
-    # The unanswered one is bounded by the request it sent, a few kilobytes:
-    # cents, where the model's whole window would be $5.25.
-    exposure = account["unknown_exposure_usd"]
-    assert 0 < exposure < 0.5
-    assert exposure == result.metadata["worker_accounting"]["unknown_exposure_usd"]
-    assert result.metadata["monitor"]["unknown_exposure_usd"] == 0
-
-
-def test_a_lost_monitor_reply_is_in_the_account_too(worker, sdk_transport):
-    def lose_the_monitor(role, number, payload):
-        if role == "monitor":
-            raise httpx.ReadTimeout("no answer")
-
-    _, calls, _ = install(sdk_transport, hook=lose_the_monitor)
-    assert run(worker) == WorkerExitCode.INCOMPLETE
-    result = report(worker)
-    assert result.cost_usd is None
-    account = result.metadata["model_cost"]
     assert account["known_usd"] == pytest.approx(calls["worker"] * 0.000366)
-    exposure = account["unknown_exposure_usd"]
-    assert 0 < exposure < 0.5
-    assert exposure == result.metadata["monitor"]["unknown_exposure_usd"]
+    monitor = result.metadata["monitor"]
+    assert (monitor["lost_model_calls"], monitor["unknown_model_calls"]) == (1, 1)
+    assert account["unknown_exposure_usd"] == pytest.approx(
+        monitor["lost_exposure_usd"] + monitor["unknown_exposure_usd"])
     assert result.metadata["worker_accounting"]["unknown_exposure_usd"] == 0
 
 

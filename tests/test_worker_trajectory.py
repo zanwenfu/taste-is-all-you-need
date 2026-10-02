@@ -7,8 +7,9 @@ import pytest
 
 from taste.benchmarks.worker_trajectory import worker_trajectory
 from taste.brains.responses_conversation import ToolOutcome
+from taste.llm import InfraFailure
 from tests.test_openai_responses import message
-from tests.test_responses_conversation import install, make, tool
+from tests.test_responses_conversation import install, install_with_loss, make, tool
 from tests.test_responses_conversation import sdk_transport as _sdk_transport
 from tests.test_responses_conversation import worker as _worker
 
@@ -93,3 +94,28 @@ def test_interrupted_work_has_no_invented_observation_or_final_reply(worker, sdk
         assert not observations
     save_case(tmp_path, trace, [] if fail == "provider" else [{"args": {"text": "correct"},
         "result": "saved but unpublished" if fail == "publication" else ""}])
+
+
+def test_a_request_given_up_as_lost_is_named_and_nothing_is_invented_for_it(worker, sdk_transport):
+    install_with_loss(sdk_transport, [tool()], None, [message("done")])
+    conversation = make(worker)
+    conversation.observe("task", "continue the developer conversation")
+
+    async def run():
+        await conversation.step()
+        with pytest.raises(InfraFailure):
+            await conversation.step()
+        lost = conversation.forfeit()
+        await conversation.step()
+        return lost
+
+    lost = asyncio.run(run())
+    trace = export(worker)
+    assert trace["extra"]["lost_model_requests"] == [lost]
+    # It is accounted for, so the trace is whole: no request still waits, and
+    # no reply or tool call stands in for the one that never came.
+    assert trace["extra"]["pending_model_requests"] == []
+    assert trace["extra"]["incomplete_worker_trace"] is False
+    replies = [step for step in trace["steps"] if step["source"] == "agent"]
+    assert len(replies) == 2 and lost not in {step["extra"]["request_id"] for step in replies}
+

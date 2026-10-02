@@ -25,7 +25,7 @@ def worker_trajectory(rows, *, run_id):
     if not rows or not isinstance(run_id, str) or not run_id:
         raise ResponsesAuditError("a worker trajectory requires its run and durable evidence")
     steps, history, request_at, completions, calls = [], {}, {}, {}, {}
-    pending, unseen_results = set(), set()
+    pending, unseen_results, lost = set(), set(), []
     incomplete = False
     binding = None
 
@@ -79,6 +79,13 @@ def worker_trajectory(rows, *, run_id):
                 calls[key] = (scoped, call, "requested")
                 unseen_results.add(key)
                 value["extra"]["tool_execution"][scoped] = "requested"
+        elif kind == "responses_lost":
+            # The reply never came and the call was given up. It is named, and
+            # no reply, tool call or result is shown for it.
+            if request != event["id"] or request not in pending:
+                raise ResponsesAuditError("worker lost reply has no original model request")
+            pending.remove(request)
+            lost.append(request)
         elif kind in {"responses_tool_intent", "responses_tool_result"}:
             call = event["call"]
             key = (request, call["id"])
@@ -113,5 +120,5 @@ def worker_trajectory(rows, *, run_id):
             "agent": {"name": "taste-azure-worker", "version": "1", "model_name": binding["model"]},
             "steps": steps, "extra": {"trace_scope": "internal_worker", "complete_attempt": False,
                 "incomplete_worker_trace": incomplete or bool(pending) or bool(unseen_results),
-                "pending_model_requests": sorted(pending),
+                "pending_model_requests": sorted(pending), "lost_model_requests": lost,
                 "unobserved_tool_calls": len(unseen_results), "includes_discarded_context": True}}

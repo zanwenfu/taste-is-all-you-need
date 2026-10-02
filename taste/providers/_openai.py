@@ -223,6 +223,17 @@ class OpenAIProvider:
             # A lost reply may already have been billed. The new Azure path
             # requires explicit settlement, never automatic paid replays.
             return False
+        return self.is_transient(exc)
+
+    def is_transient(self, exc: Exception) -> bool:
+        """Whether the same request, asked again, could be answered.
+
+        True for a connection that failed or timed out and for the statuses a
+        service uses for its own passing trouble. False for a request it
+        refused as wrong: that one would be refused again. On the Azure route
+        this is only a description; whether to ask again, and how the lost
+        attempt is charged, is its caller's decision.
+        """
         try:
             import openai
         except ImportError:  # pragma: no cover

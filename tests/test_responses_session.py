@@ -26,6 +26,7 @@ from taste.pricing import max_call_cost_usd
 from taste.providers.azure_openai import AZURE_WORKER_MODEL
 from tests.test_azure_openai import config, httpx, success
 from tests.test_azure_openai import sdk_transport as _sdk_transport
+from tests.test_openai_responses import response
 
 sdk_transport = _sdk_transport
 
@@ -222,6 +223,135 @@ def test_a_time_ceiling_is_bound_to_the_journal_like_its_other_limits(tmp_path, 
 def test_a_time_ceiling_must_bound_a_request(ceiling):
     with pytest.raises(ValueError, match="request_seconds"):
         binding(request_seconds=ceiling)
+
+
+LOST = [{"role": "user", "content": "lost"}]
+
+
+def never_answers_lost(reply=success):
+    """A service that accepts any request containing the word and never answers it."""
+    def handle(wire):
+        if b"lost" in wire.content:
+            raise httpx.ReadTimeout("no answer", request=wire)
+        return reply(wire)
+    return handle
+
+
+def test_a_lost_reply_can_be_given_up_and_the_journal_goes_on(tmp_path, sdk_transport):
+    # One unanswered request closed the journal for good: every later call was
+    # refused, so the worker that owned it ended and another started over.
+    sent, _ = sdk_transport(never_answers_lost())
+    directory, limits = tmp_path / "session", binding()
+
+    async def lose_one_and_go_on(session):
+        with pytest.raises(InfraFailure):
+            await call(session, "turn-1", messages=LOST)
+        assert session.fenced and session.unsettled
+        # The request was 102 bytes: at most 102 tokens and the framing
+        # allowance of 4,096, at 2.50 a million, and 128 output tokens at 10.00.
+        charged = session.forfeit("turn-1")
+        assert charged == pytest.approx(0.011775)
+        assert not session.fenced and not session.unsettled
+        assert (await call(session, "turn-2")).text_blocks == ("done",)
+        accounting = session.call_accounting()
+        assert (accounting.completed_calls, accounting.unknown_calls, accounting.lost_calls) == (1, 0, 1)
+        assert accounting.settled and accounting.lost_exposure_usd == pytest.approx(0.011775)
+        assert accounting.cost_usd is None, "what the lost call cost is still not known"
+        assert accounting.cost_ceiling_usd == pytest.approx(0.000366 + 0.011775)
+        assert session.forfeit("turn-1") == charged, "giving it up again changes nothing"
+        with pytest.raises(ResponsesFenced, match="lost"):
+            await call(session, "turn-1", messages=LOST)
+
+    session = ResponsesSession.create(directory, limits, config())
+    try:
+        asyncio.run(lose_one_and_go_on(session))
+    finally:
+        session.close()
+    # The charge is durable, and so is the journal's being open for calls.
+    reopened = ResponsesSession.open(directory, limits, config())
+    try:
+        assert not reopened.fenced
+        assert reopened.outcome("turn-1") == "lost" and reopened.outcome("turn-2") == "completed"
+        assert reopened.outcome("never-asked") is None
+        assert reopened.call_accounting().lost_exposure_usd == pytest.approx(0.011775)
+        asyncio.run(call(reopened, "turn-3"))
+        assert len(sent) == 3
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("room,admitted", [(0.01, False), (0.02, True)])
+def test_a_lost_reply_is_charged_against_the_cap(tmp_path, sdk_transport, room, admitted):
+    # The cap leaves this much beyond one whole call. The lost reply is
+    # charged $0.011775 of it, which fits in two cents and not in one.
+    sdk_transport(never_answers_lost())
+    whole = max_call_cost_usd(AZURE_WORKER_MODEL, max_output_tokens=128)
+
+    async def lose_one_then_ask(session):
+        with pytest.raises(InfraFailure):
+            await call(session, "turn-1", messages=LOST)
+        session.forfeit("turn-1")
+        if admitted:
+            await call(session, "turn-2")
+        else:
+            with pytest.raises(BudgetExceeded):
+                await call(session, "turn-2")
+
+    session = ResponsesSession.create(tmp_path / "session", binding(budget_usd=whole + room), config())
+    try:
+        asyncio.run(lose_one_then_ask(session))
+    finally:
+        session.close()
+
+
+def test_only_a_call_with_an_unknown_outcome_can_be_given_up(tmp_path, sdk_transport):
+    sdk_transport(success)
+    session = ResponsesSession.create(tmp_path / "session", binding(), config())
+    try:
+        asyncio.run(call(session, "answered"))
+        for request_id in ("answered", "never-asked"):
+            with pytest.raises(ResponsesConflict, match="unknown outcome"):
+                session.forfeit(request_id)
+        assert session.call_accounting().lost_calls == 0
+    finally:
+        session.close()
+
+
+def test_a_lost_request_is_bounded_by_what_the_service_measured_before_it(tmp_path, sdk_transport):
+    # A worker's request is its whole conversation again and a little more.
+    # The service has already counted the earlier part's tokens, so only what
+    # was added needs the byte bound.
+    history = [{"role": "user", "content": "x" * 40_000}]
+
+    def measured(wire):
+        return httpx.Response(200, json=response(model="gpt-6-sol", usage={
+            "input_tokens": 9_000, "output_tokens": 20, "total_tokens": 9_020,
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        }), headers={"x-ms-served-model": AZURE_WORKER_MODEL})
+
+    sdk_transport(never_answers_lost(measured))
+
+    async def lose_a_continuation_then_a_fresh_request(session):
+        await call(session, "turn-1", messages=history)
+        with pytest.raises(InfraFailure):
+            await call(session, "turn-2", messages=[*history, *LOST])
+        # By its 40,131 bytes alone the request could hold 44,227 tokens. The
+        # part sent before was measured at 9,000, and the 34 bytes added hold
+        # at most 34 more: 13,130 tokens with the allowance, at 2.50 a
+        # million, and 128 output tokens at 10.00.
+        assert session.call_accounting().unknown_exposure_usd == pytest.approx(0.034105)
+        assert session.forfeit("turn-2") == pytest.approx(0.034105)
+        # A request that does not continue the measured one has only its bytes.
+        with pytest.raises(InfraFailure):
+            await call(session, "turn-3", messages=LOST)
+        assert session.forfeit("turn-3") == pytest.approx(0.011775)
+
+    session = ResponsesSession.create(tmp_path / "session", binding(), config())
+    try:
+        asyncio.run(lose_a_continuation_then_a_fresh_request(session))
+    finally:
+        session.close()
 
 
 @pytest.mark.parametrize("fail", [None, "read_error", "system_exit"])

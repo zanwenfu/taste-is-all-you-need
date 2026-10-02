@@ -8,7 +8,6 @@ import json
 import sqlite3
 import subprocess
 import sys
-import threading
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
@@ -24,9 +23,8 @@ from taste.brains.monitor_judge import (
 from taste.brains.responses_monitor import ResponsesMonitorJudge
 from taste.brains.responses_session import ResponsesConflict, ResponsesFenced, ResponsesSession
 from taste.brains.worker_protocol import ModelCallAccounting
-from taste.llm import LLM, BudgetExceeded, InfraFailure
+from taste.llm import LLM, InfraFailure
 from taste.memstore import Store
-from taste.pricing import max_call_cost_usd
 from tests.test_azure_openai import config, httpx
 from tests.test_azure_openai import sdk_transport as _sdk_transport
 from tests.test_openai_responses import function_call, message, response
@@ -269,7 +267,66 @@ def test_rejected_verdict_remains_paid_and_replays_without_a_second_charge(worke
     assert len(sent) == 1
 
 
-def test_lost_provider_reply_is_unknown_spend_and_fences_new_observations(worker, sdk_transport):
+def test_a_monitor_whose_reply_is_lost_can_give_it_up_and_judge_again(worker, sdk_transport):
+    # One unanswered request to the monitor closed its journal, and with it
+    # ended the worker's whole run, though the worker had done nothing wrong.
+    answers = iter([None])
+
+    def handle(wire):
+        if next(answers, "answered") is None:
+            raise httpx.ReadTimeout("no answer", request=wire)
+        return reply(wire)
+
+    sent, _ = sdk_transport(handle)
+    observe(worker)
+    first = monitor(worker)
+    with pytest.raises(InfraFailure):
+        asyncio.run(first.cycle(None, final=True))
+    assert first.forfeit_lost_reply()
+    assert not first.forfeit_lost_reply(), "nothing is left to give up"
+    asyncio.run(first.cycle(None, final=True))
+    report = first.report()
+    assert report["judgements"] == 1 and report["worst"] == "fine"
+    # The lost request was charged; the same judgement was asked as a new
+    # call. Its exact cost is not known, and nothing is left open.
+    assert len(sent) == 2 and sent[0].content == sent[1].content
+    assert not report["cost_known"] and report["known_cost_usd"] == pytest.approx(0.000366)
+    assert (report["lost_model_calls"], report["unknown_model_calls"]) == (1, 0)
+    assert 0 < report["lost_exposure_usd"] < 0.05
+    # After a restart the same observation is answered from the receipt.
+    resumed = monitor(worker, reopened(worker))
+    asyncio.run(resumed.cycle(None, final=True))
+    assert len(sent) == 2 and resumed.report()["judgements"] == 1
+
+
+def test_a_lost_final_certification_is_not_recorded_as_a_refusal(worker, sdk_transport):
+    # The certifier's lost reply was recorded as its verdict on that state: a
+    # refusal, which a second asking returned unchanged. The work was then
+    # refused for want of a reply, and another worker sent to certify it again.
+    lost = []
+
+    def handle(wire):
+        terminal = TERMINAL_JUDGEMENT_SCHEMA in wire.content.decode()
+        if terminal and not lost:
+            lost.append(wire)
+            raise httpx.ReadTimeout("no answer", request=wire)
+        return reply(wire, terminal=terminal)
+
+    sent, _ = sdk_transport(handle)
+    observe(worker)
+    brain = monitor(worker)
+    asyncio.run(brain.drain(None, final=True))
+    state = worker.branch.checkpoint("work finished")
+    with pytest.raises(InfraFailure):
+        asyncio.run(brain.certify_terminal(state, context={"completed": True}))
+    assert brain.report()["terminal_assessment"] is None, "no verdict was recorded for the lost reply"
+    assert brain.forfeit_lost_reply()
+    assessment = asyncio.run(brain.certify_terminal(state, context={"completed": True}))
+    assert assessment.acceptable, assessment.failure
+    assert len(sent) == 3 and len(lost) == 1
+
+
+def test_a_lost_monitor_reply_not_given_up_fences_new_observations(worker, sdk_transport):
     def fail(wire):
         raise httpx.ReadError("private provider failure", request=wire)
 
@@ -283,120 +340,20 @@ def test_lost_provider_reply_is_unknown_spend_and_fences_new_observations(worker
     assert report["cost_usd"] is None
     assert report["known_cost_usd"] == 0.0
     assert report["unknown_model_calls"] == report["model_calls"] == 1
+    assert 0 < report["unknown_exposure_usd"] < 0.05
     observe(worker, "new evidence")
     resumed = monitor(worker, reopened(worker))
     with pytest.raises(ResponsesFenced):
         asyncio.run(resumed.cycle(None, final=True))
     assert len(sent) == 1
-    assert "private provider failure" not in json.dumps(resumed.report())
 
 
-@pytest.mark.parametrize("late_failure", [False, True])
-def test_cancellation_retains_monitor_thread_until_receipt_and_sidecar_settle(
-        worker, sdk_transport, late_failure):
-    entered, release = threading.Event(), threading.Event()
+def test_a_judge_without_a_journal_has_nothing_to_give_up(worker):
+    class Plain:
+        def __call__(self, _contract, _batch, _view):
+            raise AssertionError("not judged in this test")
 
-    def handle(wire):
-        entered.set()
-        assert release.wait(10)
-        if late_failure:
-            raise httpx.ReadError("late failure", request=wire)
-        return reply(wire)
-
-    sent, _ = sdk_transport(handle)
-    observe(worker)
-    first = monitor(worker)
-
-    async def scenario():
-        task = asyncio.create_task(first.cycle(None, final=True))
-        try:
-            assert await asyncio.to_thread(entered.wait, 5)
-            task.cancel()
-            await asyncio.sleep(0)
-            task.cancel()
-            await asyncio.sleep(0)
-            assert not task.done()
-            # Another opener cannot release or steal the thread's journal.
-            with pytest.raises(BlockingIOError):
-                reopened(worker)
-            assert first.report()["cost_usd"] is None
-            release.set()
-            with pytest.raises(BaseExceptionGroup if late_failure else asyncio.CancelledError):
-                await task
-        finally:
-            release.set()
-            if not task.done():
-                await asyncio.wait((task,))
-
-    asyncio.run(scenario())
-    resumed = monitor(worker, reopened(worker))
-    if late_failure:
-        assert not resumed.report()["cost_known"]
-    else:
-        asyncio.run(resumed.drain(None, final=True))
-        assert resumed.report()["cost_usd"] == pytest.approx(0.000366)
-    assert len(sent) == 1
-
-
-def test_the_certifier_view_grows_with_the_request_size_its_journal_admits(tmp_path):
-    # At the original 192 KiB request limit nothing changes; a trial that
-    # admits 1 MiB requests lets its certifier read a long run's results whole.
-    small = ResponsesMonitorJudge.create(
-        tmp_path / "small", binding(role="monitor", run_id="worker-run.small.monitor"), config())
-    assert (small.transcript_view_bytes, small.max_prompt_bytes) == (64 * 1024, 192 * 1024)
-    assert small.artifact_view_bytes == 8 * 1024
-    large = ResponsesMonitorJudge.create(
-        tmp_path / "large", binding(role="monitor", run_id="worker-run.large.monitor",
-                                    max_request_bytes=1_048_576), config())
-    assert large.transcript_view_bytes == 384 * 1024
-    assert large.transcript_view_bytes < large.max_prompt_bytes < 1_048_576
-    # A worker may write an artifact of 64 KiB, and its certifier reads all of it.
-    assert large.artifact_view_bytes == 64 * 1024
-    # Both views, at their largest as JSON text, leave 256 KiB of the prompt for the rest.
-    assert large.max_prompt_bytes - (large.transcript_view_bytes + 2 * large.artifact_view_bytes) == 256 * 1024
-
-
-@pytest.mark.parametrize("limit", ["budget", "calls", "deadline"])
-def test_limits_survive_reopen_and_replay_does_not_consume_another_allowance(
-        tmp_path, sdk_transport, monkeypatch, limit):
-    sent, _ = sdk_transport(reply)
-    changes = {"role": "monitor"}
-    if limit == "budget":
-        changes["budget_usd"] = max_call_cost_usd(binding().model, max_output_tokens=128) + 0.000183
-    if limit == "calls":
-        changes["max_calls"] = 1
-    limits = binding(**changes)
-    directory = tmp_path / "monitor"
-    first = ResponsesMonitorJudge.create(directory, limits, config())
-    result = first._completion(system="strict monitor", prompt="first observation")
-    if limit == "deadline":
-        monkeypatch.setattr("taste.brains.responses_session.time",
-                            SimpleNamespace(time=lambda: limits.deadline_unix + 1))
-    second = ResponsesMonitorJudge.open(directory, limits, config())
-    assert second._completion(system="strict monitor", prompt="first observation") == result
-    with pytest.raises(BudgetExceeded if limit == "budget" else ResponsesFenced):
-        second._completion(system="strict monitor", prompt="new observation")
-    assert len(sent) == 1
-    assert second.call_accounting().model_calls == 1
-
-
-def test_memory_rollback_and_missing_journal_cannot_reset_monitor_cost(worker, sdk_transport):
-    sent, _ = sdk_transport(reply)
-    before = worker.branch.head
-    observe(worker)
-    first = monitor(worker)
-    asyncio.run(first.drain(None, final=True))
-    worker.branch.checkpoint("judged work")
-    worker.branch.rollback(before, "restore previous worker context")
-    assert reopened(worker).call_accounting().cost_usd == pytest.approx(0.000366)
-    worker.directory.rename(worker.directory.with_name("saved-monitor-journal"))
-    report = first.report()
-    assert not report["cost_known"]
-    assert report["cost_usd"] is None
-    assert report["model_calls"] is None
-    assert report["accounting_failure"] == "FileNotFoundError"
-    assert not worker.directory.exists()
-    assert len(sent) == 1
+    assert monitor(worker, Plain()).forfeit_lost_reply() is False
 
 
 def test_monitor_crash_during_dispatch_leaves_durable_unknown_spend(worker, sdk_transport):

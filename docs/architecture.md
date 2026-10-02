@@ -44,14 +44,18 @@ the budget, a limit on plan generations or on planner failures.
 for each assignment, starts the worker in its own process group, notices
 readiness, enforces the deadline, and reaps the whole process tree at the end.
 A worker is asked to stop before it is killed, so that it can settle a model
-call it has paid for and write its report.
+call it has paid for and write its report. A worker that is killed anyway
+writes nothing, but it recorded every command in its memory before running
+it: what it ran is read from there and given to the planner, for the next
+plan and for the closing reply.
 
 ### Workers
 
 A worker is an operating-system process with one contract, one branch of
 memory and a set of tools. It loops: model call, tool call, result. It ends by
 stating a structured claim: completed, blocked, or needing another turn, with
-its evidence. Its report records exactly what it spent.
+its evidence. Its report records what it spent: exactly, or, if a reply was
+lost on the way, what it paid and the most the lost calls can have cost.
 
 There are two worker harnesses behind the same supervisor:
 
@@ -119,7 +123,10 @@ Every model call goes through one facade (`taste/llm.py`, `taste/providers/`,
 - a request that could not be connected carried nothing and is sent again. One
   that may have arrived is never sent again: its reply is lost and its cost
   unknown. It is charged the most the request it sent could have cost, and
-  that stays visible in the accounts, apart from what is known to be spent.
+  that stays visible in the accounts, apart from what is known to be spent;
+- after a lost reply the worker, or its monitor, asks the same question again
+  as a new call, inside its caps, and goes on. A request the provider refused
+  as wrong is not asked again, and a worker that is being stopped asks nothing.
 
 ## The life of a goal
 
