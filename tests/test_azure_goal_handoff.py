@@ -237,11 +237,12 @@ def test_result_rejects_identity_and_accounting_contradictions(goal, field, repl
         settled_outcome(value, SimpleNamespace(goal=goal))
 
 
-@pytest.mark.parametrize("reason", ["complete", "generation_bound", "wall_clock", "budget_blocked",
+@pytest.mark.parametrize("reason", ["complete", "generation_bound", "wall_clock", "budget_blocked", "spend_cap",
                                     "cancelled", "interrupted", "runtime_error", "planner_failed", "foreign"])
 def test_only_known_settled_bounded_stops_can_proceed_to_grading(goal, reason):
     result = settled_outcome(valid_outcome(goal, reason), SimpleNamespace(goal=goal))
-    assert grading_ready(result) == (reason in {"complete", "generation_bound", "wall_clock", "budget_blocked"})
+    assert grading_ready(result) == (reason in {
+        "complete", "generation_bound", "wall_clock", "budget_blocked", "spend_cap"})
 
 
 @pytest.mark.parametrize("change", ["reserved", "unknown_worker", "live_worker", "unknown_planner", "over_budget"])

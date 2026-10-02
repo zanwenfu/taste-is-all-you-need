@@ -16,7 +16,9 @@ from taste.brains.azure_worker_launch import worker_command
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.central_host import compose_central_runtime
 from taste.brains.central_planner import Goal, InvalidPlannerOutput, PlannerIdentityConflict
+from taste.brains.records import WorkerReport
 from taste.brains.supervisor import SubprocessLauncher
+from taste.brains.worker_protocol import WORKER_REPORT_PATH
 from taste.pricing import call_cost, table_sha
 from taste.providers.azure_openai import AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
 from taste.providers.base import ProtocolFailure
@@ -223,6 +225,105 @@ def test_a_lost_planner_reply_is_charged_at_its_ceiling_and_the_goal_goes_on(tmp
         assert budget.known_spent_usd > 0
 
 
+def test_a_plan_the_service_never_answers_ends_at_its_ceiling_and_the_goal_goes_on(tmp_path, goal, policy, sdk_transport):
+    # A request was given all the time its goal had left. One the service
+    # accepted and never answered held the coordinator until the trial ended.
+    payloads = []
+
+    def handler(wire):
+        payload = json.loads(json.loads(wire.content)["input"][0]["content"])
+        payloads.append(payload)
+        if len(payloads) == 1:
+            raise httpx.ReadTimeout("no answer")
+        return httpx.Response(200, json=response(
+            model=AZURE_PLANNER_MODEL, output=[message(json.dumps(proposal(payload, complete=True)))]))
+
+    sent, _ = sdk_transport(handler)
+    with host(tmp_path, goal, replace(policy, request_seconds=45), launcher=NoLaunchLauncher()) as runtime:
+        result = runtime.run(max_generations=3, wall_clock_seconds=60)
+        assert result.complete and result.stop_reason == "complete", result.to_dict()
+        # Each request had 45 seconds, not the minute the run had left. The
+        # unanswered one was not sent again; the next plan was a new call.
+        assert [wire.extensions["timeout"]["read"] for wire in sent] == [45, 45]
+        assert result.budget.enforceable and result.budget.reserved_usd > 0
+
+
+# A worker process whose second request is accepted and never answered, once:
+# the worker that follows it finds the marker and is answered as usual.
+LOSES_ONE_REPLY = BOOTSTRAP.replace("install(network)", """
+import pathlib
+marker = pathlib.Path(MARKER)
+allowed = []
+def network(handler):
+    def observed(wire):
+        allowed.append(wire.extensions["timeout"]["read"])
+        return handler(wire)
+    class Client(OriginalClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, transport=httpx.MockTransport(observed))
+    httpx.Client = Client
+    return [], []
+def lose_one(role, number, payload):
+    if role == "worker" and number == 2 and not marker.exists():
+        marker.write_text(repr(allowed[-1]))
+        raise httpx.ReadTimeout("no answer")
+install(network, hook=lose_one)
+""")
+
+
+def test_a_worker_whose_request_is_never_answered_ends_at_its_ceiling_and_the_goal_goes_on(
+        tmp_path, goal, policy, sdk_transport):
+    # Planner to worker process to coordinator, with only the network scripted.
+    # The first worker's second request is never answered. It ends at the
+    # request ceiling, not at the goal's deadline; it reports what it paid and
+    # what that one request can have cost; and the next worker finishes the goal.
+    payloads = []
+
+    def handler(wire):
+        payload = json.loads(json.loads(wire.content)["input"][0]["content"])
+        payloads.append(payload)
+        result = proposal(payload, complete=len(payloads) > 2)
+        if not result["complete"]:
+            assignment = result["assignments"][0]
+            assignment["assignment_id"] = f"write-output-{len(payloads)}"
+            assignment["contract"]["identity"] = f"azure-worker-{len(payloads)}"
+        return httpx.Response(200, json=response(
+            model=AZURE_PLANNER_MODEL, output=[message(json.dumps(result))]))
+
+    sdk_transport(handler)
+    root, marker = tmp_path / "repo", tmp_path / "lost-reply"
+    script = LOSES_ONE_REPLY.replace("MARKER", repr(str(marker)))
+
+    def command(spec):
+        argv = list(worker_command(spec, repo_root=root, session="azure-central"))
+        bootstrap = script + "\nsys.modules.pop('taste.brains.azure_worker_entrypoint', None)\n"
+        argv[3] = argv[3].replace("import runpy;", bootstrap + "\nimport runpy;", 1)
+        return argv
+
+    bounded = replace(policy, request_seconds=45)
+    with host(tmp_path, goal, bounded, launcher=SubprocessLauncher(command, env=environment())) as runtime:
+        result = runtime.run(max_generations=4, wall_clock_seconds=90)
+        assert result.complete and result.stop_reason == "complete", result.to_dict()
+        assert runtime.integration.head.read("output.txt") == "correct"
+        # The unanswered request had 45 seconds, not the two minutes the goal had.
+        assert marker.read_text() == "45.0"
+
+        lost, finished = sorted(runtime.supervisor.runs(), key=lambda run: run.assignment.generation)
+        assert finished.phase == "delivered"
+        first, second = (WorkerReport.from_json(runtime.store.view(run.assignment.worker).head.read(
+            WORKER_REPORT_PATH)) for run in (lost, finished))
+        assert first.cost_usd is None and not first.completed
+        account = first.metadata["model_cost"]
+        assert account["known_usd"] > 0
+        # One request of a few kilobytes: cents. Its worker and monitor caps,
+        # which the run was charged before, come to $40.
+        assert 0 < account["unknown_exposure_usd"] < 1
+        budget = result.budget
+        assert budget.enforceable
+        assert budget.reserved_usd == pytest.approx(account["unknown_exposure_usd"])
+        assert budget.worker_spent_usd == pytest.approx(account["known_usd"] + second.cost_usd)
+
+
 def test_expired_policy_does_not_refresh_planner_deadline_or_dispatch(tmp_path, goal, policy, sdk_transport):
     sent, _ = install_planner(sdk_transport)
     expired = replace(policy, deadline_unix=1)
@@ -237,6 +338,7 @@ def test_expired_policy_does_not_refresh_planner_deadline_or_dispatch(tmp_path, 
     ("worker_max_calls", True), ("monitor_max_calls", 0), ("max_request_bytes", 0),
     ("worker_budget_usd", 0.001), ("monitor_budget_usd", 0.001),
     ("monitor_batch_size", 0), ("deadline_unix", float("nan")), ("pricing_sha", "changed"),
+    ("request_seconds", 0), ("request_seconds", True), ("request_seconds", 3601),
 ])
 def test_unusable_policy_is_rejected_before_composition(policy, field, value):
     with pytest.raises(ValueError):

@@ -28,6 +28,8 @@ _FIELDS = frozenset({
 
 
 _EFFORTS = ("medium", "high")  # "low" is the original choice and is not written.
+# Written only when chosen, so assignments made before them keep their form.
+_OPTIONAL = frozenset({"worker_effort", "request_seconds"})
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,7 @@ class AzureWorkerPolicy:
     @classmethod
     def from_assignment(cls, assignment: Assignment) -> AzureWorkerPolicy:
         raw = assignment.resources.get("azure_openai")
-        if not isinstance(raw, Mapping) or set(raw) - {"worker_effort"} != _FIELDS:
+        if not isinstance(raw, Mapping) or set(raw) - _OPTIONAL != _FIELDS:
             raise EntrypointInputError("assignment requires one exact Azure worker policy")
         if raw["schema"] != AZURE_WORKER_POLICY_SCHEMA or raw["pricing_sha"] != table_sha():
             raise EntrypointInputError("Azure policy schema or admitted pricing table changed")
@@ -48,6 +50,9 @@ class AzureWorkerPolicy:
             raise EntrypointInputError("this Azure worker policy requires a verified dated worker model")
         if "worker_effort" in raw and raw["worker_effort"] not in _EFFORTS:
             raise EntrypointInputError("Azure worker reasoning effort is not admitted")
+        if "request_seconds" in raw and type(raw["request_seconds"]) not in (int, float):
+            raise EntrypointInputError("Azure request ceiling is not admitted")
+        ceiling = raw.get("request_seconds")
         try:
             monitor_budget = _assignment_monitor_budget_usd(assignment)
             # Worker and monitor currently share one served model. They must
@@ -69,12 +74,14 @@ class AzureWorkerPolicy:
                 budget_usd=assignment.contract.budget_usd,
                 max_calls=raw["worker_max_calls"], max_output_tokens=raw["worker_max_output_tokens"],
                 max_request_bytes=raw["max_request_bytes"], deadline_unix=raw["deadline_unix"],
+                request_seconds=ceiling,
             )
             monitor = ResponsesBinding(
                 run_id=worker.run_id + ".monitor", model=assignment.model, role="monitor",
                 endpoint=route.base_url, deployment=raw["monitor_deployment"], budget_usd=monitor_budget,
                 max_calls=raw["monitor_max_calls"], max_output_tokens=raw["monitor_max_output_tokens"],
                 max_request_bytes=raw["max_request_bytes"], deadline_unix=raw["deadline_unix"],
+                request_seconds=ceiling,
             )
             if assignment.contract.max_turns is not None and worker.max_calls > assignment.contract.max_turns:
                 raise ValueError("worker call allowance exceeds the contract turn limit")

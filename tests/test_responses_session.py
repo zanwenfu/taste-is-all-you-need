@@ -160,6 +160,70 @@ def test_failures_keep_the_correct_receipt_and_fence_restart(tmp_path, sdk_trans
         reopened.close()
 
 
+def test_a_request_ends_at_its_own_ceiling_and_is_charged_by_what_it_sent(tmp_path, sdk_transport):
+    # The service accepts the request and never answers. Bounded only by the
+    # run's deadline, this call would have waited the ten minutes out.
+    def never_answers(wire):
+        raise httpx.ReadTimeout("no answer", request=wire)
+
+    sent, _ = sdk_transport(never_answers)
+    limits = binding(request_seconds=20, deadline_unix=time.time() + 600)
+    session = ResponsesSession.create(tmp_path / "session", limits, config())
+    try:
+        with pytest.raises(InfraFailure):
+            asyncio.run(call(session))
+        assert len(sent) == 1 and sent[0].extensions["timeout"]["read"] == 20
+        accounting = session.call_accounting()
+        assert accounting.unknown_calls == 1 and accounting.cost_usd is None
+        # The request was 100 bytes, so it held at most 100 tokens and the
+        # framing allowance of 4,096, at the dearest rates such a request can
+        # meet on this model: 2.50 a million in, 10.00 a million out for the
+        # 128 output tokens allowed. Bounded by the model's whole window
+        # instead, the figure is $5.25.
+        assert accounting.unknown_exposure_usd == pytest.approx(0.01177)
+        assert accounting.cost_ceiling_usd == pytest.approx(0.01177)
+    finally:
+        session.close()
+
+
+def test_a_settled_journal_has_nothing_unknown_to_charge(tmp_path, sdk_transport):
+    sdk_transport(success)
+    session = ResponsesSession.create(tmp_path / "session", binding(), config())
+    try:
+        asyncio.run(call(session))
+        accounting = session.call_accounting()
+        assert accounting.unknown_calls == 0 and accounting.unknown_exposure_usd == 0
+        assert accounting.cost_usd == accounting.cost_ceiling_usd == pytest.approx(0.000366)
+    finally:
+        session.close()
+
+
+def test_a_time_ceiling_is_bound_to_the_journal_like_its_other_limits(tmp_path, sdk_transport):
+    sdk_transport(success)
+    deadline = time.time() + 60
+    plain, bounded = tmp_path / "plain", tmp_path / "bounded"
+    ResponsesSession.create(plain, binding(deadline_unix=deadline), config()).close()
+    # A journal that names no ceiling keeps the identity it had before
+    # ceilings existed, so one made by earlier code still reopens.
+    identity = json.loads(sqlite3.connect(plain / "calls.sqlite3").execute(
+        "SELECT value FROM meta WHERE key='identity'").fetchone()[0])
+    assert "request_seconds" not in identity["binding"]
+    ResponsesSession.open(plain, binding(deadline_unix=deadline), config()).close()
+    with pytest.raises(ResponsesConflict, match="binding changed"):
+        ResponsesSession.open(plain, binding(deadline_unix=deadline, request_seconds=20), config())
+
+    ResponsesSession.create(bounded, binding(deadline_unix=deadline, request_seconds=20), config()).close()
+    ResponsesSession.open(bounded, binding(deadline_unix=deadline, request_seconds=20), config()).close()
+    with pytest.raises(ResponsesConflict, match="binding changed"):
+        ResponsesSession.open(bounded, binding(deadline_unix=deadline, request_seconds=30), config())
+
+
+@pytest.mark.parametrize("ceiling", [0, -5, float("inf"), True, "20", 3601])
+def test_a_time_ceiling_must_bound_a_request(ceiling):
+    with pytest.raises(ValueError, match="request_seconds"):
+        binding(request_seconds=ceiling)
+
+
 @pytest.mark.parametrize("fail", [None, "read_error", "system_exit"])
 def test_repeated_cancellation_owns_the_call_and_its_late_outcome(tmp_path, sdk_transport, fail):
     entered, release = threading.Event(), threading.Event()

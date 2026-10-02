@@ -21,7 +21,7 @@ from pathlib import Path
 
 from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import WORKER_EFFORTS, AzureExecutionPolicy
-from taste.brains.central_planner import Goal
+from taste.brains.central_planner import SPEND_CAP_KEY, Goal
 from taste.brains.terminal_broker import TerminalBinding
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
 from taste.pricing import max_call_cost_usd, table_sha
@@ -72,6 +72,10 @@ class TrialSettings:
     max_assignments: int = 1
     max_commands: int = 600
     command_seconds: float = 600.0
+    # The longest any one model request may take. In 257 recorded calls the
+    # slowest worker reply took 36 seconds and the slowest plan 40; a reply of
+    # the full output allowance takes about 290 at the slowest speed seen.
+    request_seconds: float = 300.0
     worker_grace_seconds: float = 45.0
     # Held back for the closing reply: a stopped worker's grace, then one
     # reasoning planner call (measured at 40 to 60 seconds without reasoning).
@@ -103,8 +107,8 @@ class TrialSettings:
         if served_model(self.model)[1] != AZURE_PLANNER_MODEL:
             raise ValueError("the coordinator runs on gpt-6-astra; name it as the trial's model")
         for name in ("spend_cap_usd", "worker_spend_cap_usd", "monitor_spend_cap_usd",
-                     "command_seconds", "worker_grace_seconds", "reply_reserve_seconds",
-                     "plan_seconds", "handoff_seconds"):
+                     "command_seconds", "request_seconds", "worker_grace_seconds",
+                     "reply_reserve_seconds", "plan_seconds", "handoff_seconds"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
@@ -165,7 +169,7 @@ class TrialSettings:
             pricing_sha=table_sha(),
             terminal=TerminalWorkerPolicy(binding, self.command_seconds, workdir),
             worker_model=worker, worker_effort=self.worker_effort,
-            planner_effort=self.planner_effort,
+            planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
             worker_wall_seconds=604800.0, max_assignments=self.max_assignments,
@@ -176,7 +180,8 @@ class TrialSettings:
                     budget_usd=self.budgets()[2],
                     metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA,
                               benchmark_reply.RESERVE_KEY: self.reply_reserve_seconds,
-                              benchmark_reply.PLAN_KEY: self.plan_seconds})
+                              benchmark_reply.PLAN_KEY: self.plan_seconds,
+                              SPEND_CAP_KEY: self.spend_cap_usd})
 
     def disclosure(self):
         """The configuration a result should be reported with."""
@@ -192,6 +197,7 @@ class TrialSettings:
                 "reply_reserve_seconds": self.reply_reserve_seconds,
                 "plan_seconds": self.plan_seconds,
                 "handoff_seconds": self.handoff_seconds, "command_seconds": self.command_seconds,
+                "request_seconds": self.request_seconds,
                 "max_request_bytes": self.max_request_bytes}
 
 

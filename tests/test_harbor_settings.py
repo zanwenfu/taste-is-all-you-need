@@ -14,6 +14,7 @@ from taste.benchmarks.harbor_settings import (
     served_model,
 )
 from taste.brains import benchmark_reply
+from taste.brains.central_planner import SPEND_CAP_KEY
 from taste.pricing import max_call_cost_usd
 from taste.providers.azure_openai import AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
 
@@ -41,6 +42,18 @@ def test_one_named_model_runs_every_role_through_one_deployment():
     assert TrialSettings(planner_effort="").disclosure()["coordinator_effort"] == "provider default"
 
 
+def test_every_request_has_a_time_ceiling_which_the_run_discloses():
+    # In 257 recorded calls the slowest worker reply took 36 seconds and the
+    # slowest plan 40. Five minutes cuts off no reply that is still coming.
+    settings = TrialSettings()
+    assert settings.request_seconds == 300.0
+    policy = policy_for(settings)
+    assert policy.request_seconds == 300.0 and policy.worker_resources()["request_seconds"] == 300.0
+    assert settings.disclosure()["request_seconds"] == 300.0
+    chosen = TrialSettings.from_options({"request_seconds": "120"})
+    assert policy_for(chosen).request_seconds == 120.0
+
+
 def test_a_cheaper_worker_model_keeps_its_own_route():
     settings = TrialSettings.from_options({"model": "gpt-6-astra", "worker_model": "gpt-6-sol",
                                            "worker_effort": "medium"})
@@ -63,6 +76,9 @@ def test_caps_are_what_a_role_may_spend_plus_one_worst_case_call():
     policy = policy_for(settings)
     assert (policy.worker_budget_usd, policy.monitor_budget_usd) == (worker, monitor)
     assert settings.goal("trial-1", "task").budget_usd == goal
+    # The admission budget bounds the worst case. The cap is what the goal is
+    # held to: it takes on no more work once its known spending reaches it.
+    assert settings.goal("trial-1", "task").metadata[SPEND_CAP_KEY] == 10
 
 
 def test_goal_reserves_its_closing_reply_and_names_the_generic_criterion():
@@ -101,6 +117,8 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
     ({"handoff_seconds": "nan"}, "must be positive"),
     ({"max_generations": "many"}, "wrong type"),
     ({"planner_effort": "extreme"}, "planner reasoning effort"),
+    ({"request_seconds": "0"}, "must be positive"),
+    ({"request_seconds": "inf"}, "must be positive"),
     ({"workers": 3}, "unknown trial setting"),
 ])
 def test_settings_are_admitted_not_guessed(options, match):

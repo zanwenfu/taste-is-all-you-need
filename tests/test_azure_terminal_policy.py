@@ -15,6 +15,7 @@ import pytest
 from taste.brains import azure_worker_launch
 from taste.brains.azure_central_host import compose_azure_central_runtime
 from taste.brains.azure_execution_policy import AzureExecutionPolicy
+from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.records import contract_digest
 from taste.brains.terminal_broker import TerminalBinding, TerminalBroker
 from taste.brains.terminal_service import TerminalCredential, TerminalGrant, TerminalService
@@ -59,6 +60,26 @@ def test_optional_terminal_policy_preserves_old_wire_format_and_pins_new_scope(p
         policy.validate_assignment(configured(new))
     with pytest.raises(ValueError):
         new.validate_assignment(configured(policy))
+
+
+def test_a_request_ceiling_is_part_of_the_policy_only_when_named(policy):
+    # A policy made before ceilings existed names none and keeps its wire form.
+    assert "request_seconds" not in policy.to_dict()
+    assert "request_seconds" not in policy.worker_resources()
+    assert AzureWorkerPolicy.from_assignment(configured(policy)).worker.request_seconds is None
+
+    bounded = replace(policy, request_seconds=45)
+    raw = bounded.to_dict()
+    assert raw["request_seconds"] == 45 and AzureExecutionPolicy.from_dict(raw) == bounded
+    # The worker and its monitor are bound to it through the assignment.
+    admitted = AzureWorkerPolicy.from_assignment(configured(bounded))
+    assert admitted.worker.request_seconds == admitted.monitor.request_seconds == 45
+    bounded.validate_assignment(configured(bounded))
+    for other in (policy, replace(policy, request_seconds=60)):
+        with pytest.raises(ValueError):
+            bounded.validate_assignment(configured(other))
+    with pytest.raises(ValueError):
+        AzureExecutionPolicy.from_dict({**policy.to_dict(), "request_seconds": None})
 
 
 @pytest.mark.parametrize("field,value", [("environment_id", "different_container"), ("max_commands", 21),

@@ -67,6 +67,7 @@ from taste.memstore.backend import BLOB_MODES
 from taste.pricing import ensure_priced, max_call_cost_usd
 
 __all__ = [
+    "SPEND_CAP_KEY",
     "BranchObservation",
     "CentralPlanner",
     "Goal",
@@ -85,6 +86,10 @@ __all__ = [
 
 PLANNER_ROOT = ".taste/planner"
 GOAL_SCHEMA = "taste.brains/Goal/1"
+# Goal metadata: the known spending at which the goal takes on no more work.
+# The goal's budget bounds the worst case of every call it admits and is far
+# larger; this is the amount the goal is meant to spend.
+SPEND_CAP_KEY = "spend_cap_usd"
 WORLD_SCHEMA = "taste.brains/WorldSnapshot/1"
 BRANCH_OBSERVATION_SCHEMA = "taste.brains/BranchObservation/1"
 OBSERVED_RUN_SCHEMA = "taste.brains/ObservedRun/1"
@@ -377,6 +382,14 @@ class Goal:
             self, "metadata", _freeze(_mapping(self.metadata, "metadata"), "metadata")
         )
         benchmark_reply.required(self.metadata)
+        if SPEND_CAP_KEY in self.metadata:
+            _positive_number(self.metadata[SPEND_CAP_KEY], f"metadata.{SPEND_CAP_KEY}")
+
+    @property
+    def spend_cap_usd(self) -> float | None:
+        """The known spending at which this goal takes on no more work, if it names one."""
+        cap = self.metadata.get(SPEND_CAP_KEY)
+        return None if cap is None else float(cap)
 
     def to_dict(self) -> dict[str, Any]:
         return {

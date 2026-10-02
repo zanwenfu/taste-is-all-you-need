@@ -67,6 +67,7 @@ def test_assignment_roundtrip_preserves_exact_worker_and_monitor_bindings():
     {"endpoint": "https://resource.openai.azure.com/openai/v1/?api-key=secret"},
     {"endpoint": config().base_url.rstrip("/")}, {"pricing_sha": "wrong"},
     {"schema": "future"}, {"api_key": "must-not-be-in-assignment"},
+    {"request_seconds": 0}, {"request_seconds": True}, {"request_seconds": "45"}, {"request_seconds": 3601},
 ])
 def test_invalid_or_unbound_policy_is_rejected_before_dispatch(changes):
     with pytest.raises(EntrypointInputError):

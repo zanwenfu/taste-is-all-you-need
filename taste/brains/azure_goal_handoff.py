@@ -220,7 +220,8 @@ def grading_ready(outcome):
     """Model completion is separate from benchmark reward; this is only admission."""
     return (outcome.budget.enforceable and outcome.budget.reserved_usd == 0
             and outcome.budget.known_spent_usd <= outcome.budget.limit_usd
-            and outcome.stop_reason in {"complete", "budget_blocked", "generation_bound", "wall_clock"})
+            and outcome.stop_reason in {"complete", "budget_blocked", "generation_bound", "wall_clock",
+                                        "spend_cap"})
 
 
 def _arguments(digest, operation):

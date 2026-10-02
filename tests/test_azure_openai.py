@@ -242,6 +242,119 @@ def test_a_refusal_is_not_waited_out_past_the_calls_own_deadline(sdk_transport, 
     assert len(sent) == 1 and waits == []
 
 
+def ask(llm, **limits):
+    return llm.call(model=AZURE_WORKER_MODEL, system="Be precise.", messages=[], max_tokens=128,
+                    effort="low", **limits)
+
+
+def test_each_sending_has_its_own_time_ceiling_inside_the_calls_deadline(sdk_transport):
+    # A request was given all the time left to its goal, up to 24 minutes, so
+    # one the service never answered held its worker until the trial ended.
+    sent, _ = sdk_transport(success)
+    llm = LLM(azure_openai=config())
+    ask(llm, timeout_seconds=600, request_seconds=45)
+    ask(llm, timeout_seconds=600)
+    ask(llm, timeout_seconds=2, request_seconds=45)
+    allowed = [wire.extensions["timeout"]["read"] for wire in sent]
+    assert allowed[0] == 45
+    assert 590 < allowed[1] <= 600, "with no ceiling named, the deadline alone, as before"
+    assert 0 < allowed[2] <= 2, "a nearer deadline still bounds the request"
+
+
+def test_opening_a_connection_is_not_given_the_whole_ceiling(sdk_transport):
+    # A connection opens in a second or two. One that will not open carried
+    # nothing and is tried again for free, so there is no reason to wait five
+    # minutes to learn it.
+    sent, _ = sdk_transport(success)
+    llm = LLM(azure_openai=config())
+    ask(llm, timeout_seconds=600, request_seconds=300)
+    ask(llm, timeout_seconds=600)
+    ask(llm, timeout_seconds=2, request_seconds=300)
+    limits = [wire.extensions["timeout"] for wire in sent]
+    assert (limits[0]["connect"], limits[0]["read"]) == (30, 300)
+    assert limits[1]["connect"] == 30 and 590 < limits[1]["read"] <= 600
+    assert 0 < limits[2]["connect"] <= 2 and 0 < limits[2]["read"] <= 2
+
+
+def test_waiting_out_a_refusal_does_not_use_up_the_next_sendings_ceiling(sdk_transport, monkeypatch):
+    waits = []
+    monkeypatch.setattr("taste.providers._openai.time.sleep", waits.append)
+    refusals = iter([refused("50")])
+    sent, _ = sdk_transport(lambda wire: next(refusals, None) or success(wire))
+    ask(LLM(azure_openai=config()), timeout_seconds=600, request_seconds=45)
+    # The service asked for longer than one sending may take. The wait belongs
+    # to the call's deadline, and the request sent again has its whole ceiling.
+    assert waits == [50.0]
+    assert [wire.extensions["timeout"]["read"] for wire in sent] == [45, 45]
+
+
+@pytest.mark.parametrize("ceiling", [0, -1, float("inf"), True, "45"])
+def test_a_ceiling_that_bounds_nothing_is_refused_before_any_request(sdk_transport, ceiling):
+    sent, _ = sdk_transport(success)
+    with pytest.raises(ValueError, match="request_seconds"):
+        ask(LLM(azure_openai=config()), timeout_seconds=600, request_seconds=ceiling)
+    assert sent == []
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout])
+def test_a_request_that_never_left_this_machine_is_sent_again(sdk_transport, monkeypatch, failure):
+    # No connection was made, so the service received nothing and billed
+    # nothing. Counted as a lost paid reply, one refused connection ended a
+    # worker's whole run at its cost ceiling.
+    waits = []
+    monkeypatch.setattr("taste.providers._openai.time.sleep", waits.append)
+    failures = iter([failure("no connection"), failure("no connection")])
+
+    def handler(wire):
+        not_connected = next(failures, None)
+        if not_connected is not None:
+            raise not_connected
+        return success(wire)
+
+    sent, _ = sdk_transport(handler)
+    cap = max_call_cost_usd(AZURE_WORKER_MODEL, max_output_tokens=128)
+    llm = LLM(azure_openai=config(), budget_usd=10 * cap, cap_on="billed")
+    assert ask(llm, timeout_seconds=600).provenance["served_model"] == AZURE_WORKER_MODEL
+    assert len(sent) == 3 and waits == [2.0, 4.0]
+    assert len({wire.content for wire in sent}) == 1, "the request sent again is the same request"
+    assert llm.stats.totals.calls == 1 and llm._reserved_usd == 0
+
+
+def test_a_connection_that_cannot_be_made_fails_after_bounded_tries(sdk_transport, monkeypatch):
+    monkeypatch.setattr("taste.providers._openai.time.sleep", lambda _seconds: None)
+
+    def handler(wire):
+        raise httpx.ConnectError("no connection")
+
+    sent, _ = sdk_transport(handler)
+    llm = LLM(azure_openai=config())
+    with pytest.raises(InfraFailure):
+        ask(llm, timeout_seconds=600)
+    assert len(sent) == 6 and llm.stats.totals.calls == 0
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout, httpx.ReadError, httpx.WriteError,
+                                     httpx.WriteTimeout, httpx.RemoteProtocolError])
+def test_a_request_that_may_have_arrived_is_never_sent_again(sdk_transport, monkeypatch, failure):
+    # Once any of the request was written, a reply may have been produced and
+    # charged, whatever this side saw. A request the service never answers
+    # ends here too, at its ceiling.
+    monkeypatch.setattr("taste.providers._openai.time.sleep", lambda _seconds: None)
+
+    def handler(wire):
+        raise failure("the connection failed after the request was written")
+
+    sent, _ = sdk_transport(handler)
+    cap = max_call_cost_usd(AZURE_WORKER_MODEL, max_output_tokens=128)
+    llm = LLM(azure_openai=config(), budget_usd=cap, cap_on="billed")
+    with pytest.raises(InfraFailure):
+        ask(llm, timeout_seconds=600, request_seconds=45)
+    assert len(sent) == 1 and sent[0].extensions["timeout"]["read"] == 45
+    assert llm._reserved_usd == cap and llm.stats.totals.calls == 0
+    with pytest.raises(ProtocolFailure, match="unsettled"):
+        invoke(llm)
+
+
 def test_separate_llms_do_not_reuse_other_azure_credentials(sdk_transport):
     sent, _ = sdk_transport(success)
     first, second = LLM(azure_openai=config()), LLM(azure_openai=config(api_key="second-azure"))

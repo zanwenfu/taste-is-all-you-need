@@ -44,14 +44,17 @@ from taste.providers.base import (
     ToolCall,
     Usage,
     UsageSchemaError,
+    sending_timeout,
 )
 
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 
-# On the Azure route: how many times one call is sent again after the service
-# refused it for its rate limit, and the longest single wait.
-_THROTTLE_RESENDS = 5
-_THROTTLE_WAIT_SECONDS = 60.0
+# On the Azure route: how many times one call is sent again after a sending
+# that provably cost nothing, and the longest single wait before the next.
+_UNBILLED_RESENDS = 5
+_RESEND_WAIT_SECONDS = 60.0
+# On the Azure route: the longest a sending waits for its connection to open.
+_CONNECT_SECONDS = 30.0
 
 # Blocks carrying provider-native items through the canonical transcript.
 _NATIVE = "_openai_item"
@@ -73,8 +76,10 @@ class OpenAIProvider:
         self._azure = azure
         self._api_key = azure.api_key if azure is not None else api_key or os.environ.get("OPENAI_API_KEY")
         self._client: Any = None
-        # Rate-limit refusals this provider waited out (see _create).
+        # Rate-limit refusals this provider waited out, and requests it sent
+        # again because no connection had been made (see _create).
         self.throttled = 0
+        self.unconnected = 0
 
     def ensure_ready(self) -> None:
         if not self._api_key:
@@ -131,8 +136,9 @@ class OpenAIProvider:
         }
         if request.tools:
             kwargs["tools"] = [_to_tool(t) for t in request.tools]
-        if request.timeout_seconds is not None:
-            kwargs["timeout"] = request.timeout_seconds
+        timeout = sending_timeout(request)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         if request.sampling.effort:
             kwargs["reasoning"] = {"effort": request.sampling.effort}
 
@@ -141,7 +147,7 @@ class OpenAIProvider:
         # that never applied, so the drop is recorded instead.
         dropped = ["temperature"] if request.sampling.temperature is not None else []
 
-        raw = self._create(client, kwargs, request.timeout_seconds)
+        raw = self._create(client, kwargs, request.timeout_seconds, request.request_seconds)
         # Validate counters before the SDK's permissive model construction:
         # it can coerce strings/bools into integer counters, concealing an
         # incompatible wire schema from the accounting boundary.
@@ -163,36 +169,53 @@ class OpenAIProvider:
             })
         return completion
 
-    def _create(self, client: Any, kwargs: dict[str, Any], timeout_seconds: float | None) -> Any:
-        """Send one request; on the Azure route, wait out a rate-limit refusal.
+    def _create(self, client: Any, kwargs: dict[str, Any], timeout_seconds: float | None,
+                request_seconds: float | None = None) -> Any:
+        """Send one request; on the Azure route, send it again when that is provably free.
 
-        A 429 is the service declining to process the request. Nothing ran, so
-        nothing was billed, and sending the same request again cannot pay
-        twice. Every other failure may hide a reply that was produced and
+        A 429 is the service declining to process the request. A connection
+        that was never made carried no request at all. In both cases nothing
+        ran, so nothing was billed, and sending the same request again cannot
+        pay twice. Every other failure may hide a reply that was produced and
         charged; those stay with the caller's explicit settlement and are
         never sent again here.
 
-        Without this, one refusal ended a worker's whole run at unknown cost.
-        The waits are bounded in number and length and by the call's own
-        deadline; a refusal that outlasts them is raised as before.
+        Without this, one refusal or one refused connection ended a worker's
+        whole run at unknown cost. The waits are bounded in number and length
+        and by the call's own deadline; a failure that outlasts them is raised
+        as before.
+
+        ``timeout_seconds`` is the call's deadline, waits included.
+        ``request_seconds`` bounds each sending inside it: a request the
+        service accepts and never answers ends there, as a lost reply, instead
+        of holding its caller for all the time the call had left.
         """
         if self._azure is None:
             return client.responses.with_raw_response.create(**kwargs)
         import openai
 
         deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
-        for resend in range(_THROTTLE_RESENDS + 1):
+        for resend in range(_UNBILLED_RESENDS + 1):
+            seconds = request_seconds
             if deadline is not None:
-                kwargs["timeout"] = max(0.001, deadline - time.monotonic())
+                left = max(0.001, deadline - time.monotonic())
+                seconds = left if seconds is None else min(left, seconds)
+            if seconds is not None:
+                kwargs["timeout"] = _sending_limits(seconds)
             try:
                 return client.responses.with_raw_response.create(**kwargs)
             except openai.RateLimitError as refusal:
-                pause = _throttle_wait(refusal, resend)
-                if resend == _THROTTLE_RESENDS or (
-                        deadline is not None and time.monotonic() + pause >= deadline):
+                unbilled, counter = refusal, "throttled"
+            except openai.APIConnectionError as failure:
+                if not _never_sent(failure):
                     raise
-                self.throttled += 1
-                time.sleep(pause)
+                unbilled, counter = failure, "unconnected"
+            pause = _resend_wait(unbilled, resend)
+            if resend == _UNBILLED_RESENDS or (
+                    deadline is not None and time.monotonic() + pause >= deadline):
+                raise unbilled
+            setattr(self, counter, getattr(self, counter) + 1)
+            time.sleep(pause)
         raise AssertionError("unreachable")  # pragma: no cover
 
     def is_retryable(self, exc: Exception) -> bool:
@@ -387,9 +410,36 @@ class OpenAIProvider:
         )
 
 
-def _throttle_wait(refusal: Any, resend: int) -> float:
-    """Seconds to wait after a rate-limit refusal: what the service asked, within bounds."""
-    headers = getattr(getattr(refusal, "response", None), "headers", None) or {}
+def _sending_limits(seconds: float) -> Any:
+    """One sending's time limits: ``seconds`` to be answered, less to connect.
+
+    A connection that does not open in half a minute will not, and the
+    request it would have carried is sent again for free. Given the whole
+    limit, a blocked connection used all of it first.
+    """
+    import httpx
+
+    return httpx.Timeout(seconds, connect=min(seconds, _CONNECT_SECONDS))
+
+
+def _never_sent(failure: Any) -> bool:
+    """Whether a connection failure happened before any of the request was written.
+
+    The SDK raises its connection error from the transport's own. Only a
+    connection that could not be opened, or could not be had from the pool,
+    is certain to have carried nothing. A failure while writing or reading
+    may follow a request the service received.
+    """
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(failure.__cause__, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+
+
+def _resend_wait(unbilled: Any, resend: int) -> float:
+    """Seconds to wait before sending again: what the service asked, within bounds."""
+    headers = getattr(getattr(unbilled, "response", None), "headers", None) or {}
     asked = None
     for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
         try:
@@ -401,7 +451,7 @@ def _throttle_wait(refusal: Any, resend: int) -> float:
         asked = None
     if asked is None:
         asked = 2.0 ** (resend + 1)
-    return min(max(asked, 0.25), _THROTTLE_WAIT_SECONDS)
+    return min(max(asked, 0.25), _RESEND_WAIT_SECONDS)
 
 
 def _instructions(system: list[dict[str, Any]]) -> str:

@@ -85,7 +85,8 @@ The operating system stays.
   a crash they are looked up, not repeated, and a paid reply is never paid for
   twice.
 - **Spending is bounded.** Each model call is admitted against what is left
-  of the budget at its worst-case price.
+  of the budget at its worst-case price, and a goal that reaches its spend cap
+  takes on no more work and gives its reply.
 - **A stuck command does not take the task with it.** A command that outlives
   its timeout is killed with the processes it started. The environment stays
   usable and the output it had printed is kept.

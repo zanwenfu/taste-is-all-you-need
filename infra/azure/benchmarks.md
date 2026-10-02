@@ -37,9 +37,11 @@ start a job on a host that fails it.
 
     sudo infra/azure/run-harbor.sh <job> <tasks dir> [harbor run options]
 
-    # errata-bench: Harbor must also find its agents and task digests
+    # errata-bench: Harbor must also find its agents and task digests. The
+    # four tasks excluded are the ones its judge does not grade (see below).
     sudo EXTRA_PATH=/root/errata/errata-bench/src infra/azure/run-harbor.sh \
-        errata-astra /root/errata/v1.0.2-dataset/harbor -k 3 -n 2 --max-retries 2
+        errata-astra /root/errata/v1.0.2-dataset/harbor -k 3 -n 2 --max-retries 2 \
+        -x Pavel401-BugViper-85 -x Whiteknight07-AiTutor-34 -x entireio-cli-253 -x entireio-cli-38
 
 The script starts `harbor run -a taste.benchmarks.harbor_agent:TasteAgent
 -m azure/gpt-6-astra` in one systemd unit (`taste-harbor-<job>`). Follow it
@@ -60,8 +62,9 @@ result metadata (`agent_result.metadata.taste.configuration`).
 | `worker_model` | the trial's model | Served model for workers and monitors (`gpt-6-astra` or `gpt-6-sol`). The coordinator is always `gpt-6-astra`. |
 | `worker_effort` | `low` | Worker reasoning effort: `low`, `medium`, `high`. Monitors use `low`. |
 | `planner_effort` | `medium` | The coordinator's reasoning effort. Empty leaves the provider's default. Measured on gpt-6-astra, the level changes little: the model reasons briefly at every level. |
-| `spend_cap_usd` | 15 | What one trial may really spend before it stops and replies. |
-| `worker_spend_cap_usd`, `monitor_spend_cap_usd` | 6, 2 | The same, for one worker and its monitor. |
+| `spend_cap_usd` | 15 | Known spending at which a trial takes on no more work and replies. A worker already running finishes first, so a trial can pass the cap by that worker's and its monitor's allowances and by the closing reply. |
+| `worker_spend_cap_usd`, `monitor_spend_cap_usd` | 6, 2 | What one worker and its monitor may spend: neither is admitted another call once its spending has passed this. |
+| `request_seconds` | 300 | Longest any one model request may wait for its reply. A request the service never answers ends there and is accounted as a lost reply. In 257 recorded calls the slowest took 40 seconds. |
 | `max_assignments` | 1 | Assignments one plan may hold. One container and a serial terminal make one worker at a time the honest default. |
 | `reply_reserve_seconds` | 210 | Held back from working time for the coordinator's closing reply. |
 | `plan_seconds` | 90 | No new plan is started with less working time than this; the run closes instead. |
@@ -69,10 +72,18 @@ result metadata (`agent_result.metadata.taste.configuration`).
 | `command_seconds` | 600 | Longest timeout one command may ask for (default per command: 120). |
 | `agent_timeout_sec` | from `task.toml` | Only if the task's published agent time must be overridden for a drill. |
 
-Admission budgets are larger than the spend caps: a call is admitted only if
-the role's spending plus that call's worst case fits its budget, so each
-budget is the cap plus one worst-case call. The caps are what limit real
-spending.
+The caps are what hold real spending. The admission budgets a trial also
+records are much larger and are not what it is meant to spend. Before a call
+is sent, its worst case is set aside, priced as if the request filled the
+model's whole context (about $27 on gpt-6-astra). A role's budget is its cap
+plus one such call, and a trial's is about $226 for a $15 cap. They show that
+a trial cannot spend more than that whatever happens.
+
+A call whose reply was lost has no known cost. It is charged the most the
+request it sent can have cost: a request holds no more tokens than bytes, so
+a 200 KB request is charged at most $3.40 for its input, not $27. That amount
+stays set aside for the rest of the trial and is reported apart from what is
+known to be spent.
 
 ## What a trial leaves
 
@@ -86,9 +97,9 @@ spending.
   Harbor result names the token.
 
 A trial is handed to the benchmark's verifier whatever the audit found. A run
-that stops on time, budget, generation bound or planner failures still ends
-with the coordinator's closing reply; one cancelled by the benchmark's own
-time limit is sealed first and graded as a timeout.
+that stops on time, its spend cap, its budget, the generation bound or planner
+failures still ends with the coordinator's closing reply; one cancelled by the
+benchmark's own time limit is sealed first and graded as a timeout.
 
 ## errata-bench
 
@@ -96,6 +107,14 @@ time limit is sealed first and graded as a timeout.
     cd /root/errata/errata-bench && /root/errata/grade-venv/bin/python scripts/grade_harbor.py \
         /root/errata/v1.0.2-dataset /root/errata/jobs/<job> --out /root/errata/runs/<job> \
         --admission /root/errata/v1.0.2-dataset/admission/gpt-6-astra --rows-only
+
+The current release is errata-bench's code at tag `v1.0.4` with its tasks at
+dataset version `v1.0.2` (checked 2026-10-02). Its `main` branch is ahead, for
+a next version of the tasks that is not released, and does not run these.
+The official judge is admitted on 51 of the 55 tasks and only answers on
+those are graded, so a full run is 153 trials. The other four are
+`Pavel401-BugViper-85`, `Whiteknight07-AiTutor-34`, `entireio-cli-253` and
+`entireio-cli-38`.
 
 Grading itself is paid and runs in errata-bench's own environment with the
 judge's key (see errata-bench's running guide). Taste's reply is written by
@@ -127,9 +146,12 @@ a certifier that could not read a long run's evidence: the same 117 KB task
 cost $18.58 and took 17 minutes before that fix.
 
 Most errata-bench instructions are large: the median is 75 KB and 32 of the
-55 tasks exceed 64 KB. A full run of 165 trials at the costs above is in the
-region of $500 to $900 for the agent, and its spend caps bound it near
-$3,000. Paid grading is separate.
+55 tasks exceed 64 KB. A full run of 153 trials at the costs above is in the
+region of $450 to $850 for the agent. Its spend caps hold a trial to $23
+and three calls: $15, then a worker and its monitor that were already
+running ($6 and $2), and the one call each of them and the closing reply may
+have in flight. The dearest call recorded cost under $1, so the run is
+bounded near $4,000. Paid grading is separate.
 
 Not validated: a full three-attempt run, paid grading, more than five trials
 at once on a larger machine, Terminal-Bench's separate verifier, and any

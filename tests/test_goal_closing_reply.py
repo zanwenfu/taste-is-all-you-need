@@ -9,7 +9,7 @@ import pytest
 
 from taste.brains import benchmark_reply
 from taste.brains.central_host import compose_central_runtime
-from taste.brains.central_planner import PlanningRequest
+from taste.brains.central_planner import SPEND_CAP_KEY, PlanningRequest
 from tests.test_brains_central_runtime import (
     FakeHandle,
     FakeLauncher,
@@ -207,6 +207,60 @@ def test_failed_closing_reply_never_changes_or_delays_the_recorded_stop(make_hos
     assert final_reply(host) == ""  # Still the last promoted, working plan.
     assert host.runtime.closing_failure
     assert host.outcome() == outcome
+
+
+def spending_host(make_host, cap, *, each=0.60, seen=None):
+    """A goal whose workers each end short of it, having spent ``each`` dollars."""
+    goal = replying_goal(reserve=10, budget=20.0)
+    goal = replace(goal, metadata={**goal.metadata, SPEND_CAP_KEY: cap})
+    launcher = FakeLauncher()
+    host = make_host(goal, responder(seen=seen, budget=1.5), launcher=launcher)
+
+    def launch(spec):
+        launcher.launch_calls.append(spec.run_id)
+        return launcher.handles.setdefault(spec.run_id, WorkingHandle(
+            7000 + len(launcher.handles), 0.2,
+            lambda: install_report(host.runtime, spec.assignment.assignment_id,
+                                   completed=False, cost_usd=each)))
+
+    launcher.launch = launch
+    return host, launcher
+
+
+def test_a_goal_at_its_spend_cap_takes_on_no_more_work_and_gives_its_reply(make_host):
+    # The cap was written down and never enforced: only the admission budget
+    # stopped a goal, and that is a bound on the worst case ($20 here, about
+    # $226 in a benchmark trial with a $15 cap). After the second worker,
+    # $1.20 is known spent against a cap of $1.00.
+    seen: list[PlanningRequest] = []
+    host, launcher = spending_host(make_host, 1.0, seen=seen)
+    outcome = host.run(max_generations=8, wall_clock_seconds=60)
+
+    assert outcome.stop_reason == "spend_cap" and not outcome.complete
+    assert "$1.20" in outcome.detail and "$1.00" in outcome.detail
+    assert outcome.budget.known_spent_usd == pytest.approx(1.20)
+    # No third worker, and no plan asked for one.
+    assert len(launcher.launch_calls) == 2
+    closing = [item for item in seen if benchmark_reply.is_closing(item.operation_id)]
+    assert len(closing) == 1 and seen[-1] is closing[0]
+    assert len(seen) == 3, "two plans and the closing reply"
+    assert host.runtime.closing_failure is None, host.runtime.closing_failure
+    assert final_reply(host) == REPLY
+    assert host.run(max_generations=8, wall_clock_seconds=60) == outcome
+
+
+def test_a_goal_under_its_spend_cap_is_not_stopped_by_it(make_host):
+    host, launcher = spending_host(make_host, 5.0)
+    outcome = host.run(max_generations=3, wall_clock_seconds=60)
+    assert outcome.stop_reason == "generation_bound"
+    assert len(launcher.launch_calls) == 3
+    assert outcome.budget.known_spent_usd == pytest.approx(1.80)
+
+
+@pytest.mark.parametrize("cap", [0, -1, True, "15", None])
+def test_a_spend_cap_is_a_positive_amount(cap):
+    with pytest.raises(ValueError, match="spend_cap_usd"):
+        replace(simple_goal(), metadata={SPEND_CAP_KEY: cap})
 
 
 def test_lost_cost_of_a_capped_worker_is_charged_at_its_ceiling(make_host):

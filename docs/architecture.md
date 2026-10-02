@@ -109,10 +109,17 @@ Every model call goes through one facade (`taste/llm.py`, `taste/providers/`,
 - a model with no verified price cannot be called;
 - before a call is sent, its worst-case cost is reserved against what is left
   of the budget, so a goal cannot overspend by accident;
+- a goal can also name a spend cap, far below that worst-case budget. Once
+  its known spending reaches the cap it asks for no new plan, and closes with
+  its reply;
+- each request has a time ceiling of its own, inside its goal's deadline, so
+  one the provider never answers does not hold a worker to the end;
 - the reply is journaled before anything acts on it. After a crash the stored
   reply is replayed; the provider is not asked, and not paid, a second time;
-- a reply that was lost in transit has an unknown cost. It is charged at the
-  most it could have cost, and that stays visible in the accounts.
+- a request that could not be connected carried nothing and is sent again. One
+  that may have arrived is never sent again: its reply is lost and its cost
+  unknown. It is charged the most the request it sent could have cost, and
+  that stays visible in the accounts, apart from what is known to be spent.
 
 ## The life of a goal
 

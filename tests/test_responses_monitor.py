@@ -411,7 +411,10 @@ judge._completion(system="strict monitor", prompt="pinned observation")
                              json.dumps(asdict(worker.limits))], capture_output=True, text=True, timeout=20)
     assert result.returncode == 37, result.stderr
     second = reopened(worker)
-    assert second.call_accounting() == ModelCallAccounting(0, 0, 1)
+    accounting = second.call_accounting()
+    assert (accounting.known_cost_usd, accounting.completed_calls, accounting.unknown_calls) == (0, 0, 1)
+    # Charged by the small request it sent; the model's whole window is $5.25.
+    assert 0 < accounting.unknown_exposure_usd < 0.05
     with pytest.raises(ResponsesFenced):
         second._completion(system="strict monitor", prompt="new observation")
     assert sent == []

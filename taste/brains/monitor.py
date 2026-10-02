@@ -1552,6 +1552,7 @@ class MonitorBrain:
                 accounting_fields = {
                     "known_cost_usd": accounting.known_cost_usd,
                     "unknown_model_calls": accounting.unknown_calls,
+                    "unknown_exposure_usd": accounting.unknown_exposure_usd,
                 }
             except Exception as exc:
                 cost_known, cost_usd, model_calls = False, None, None

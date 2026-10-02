@@ -422,6 +422,7 @@ class LLM:
         effort: str | None = None,
         role: str = "unspecified",
         timeout_seconds: float | None = None,
+        request_seconds: float | None = None,
     ) -> Completion:
         """One model turn, retried on transient failure.
 
@@ -429,12 +430,17 @@ class LLM:
         at the cap, and :class:`InfraFailure` when the provider cannot serve
         the request. All three are typed so the kernel classifies the run
         rather than crashing.
+
+        ``timeout_seconds`` bounds the whole call, waits included.
+        ``request_seconds`` bounds each sending of the request inside it, so a
+        request the provider never answers ends without using up the call.
         """
-        if timeout_seconds is not None and (
-            isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
-            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0
-        ):
-            raise ValueError("timeout_seconds must be finite and positive")
+        for name, value in (("timeout_seconds", timeout_seconds), ("request_seconds", request_seconds)):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
         deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
         ensure_priced(model)
         exposure = self._reserve_call_budget(model, max_tokens)
@@ -463,7 +469,8 @@ class LLM:
                         if remaining is not None and remaining <= 0:
                             raise TimeoutError("model deadline elapsed before dispatch")
                         dispatched = True
-                        completion = provider.complete(replace(request, timeout_seconds=remaining))
+                        completion = provider.complete(replace(
+                            request, timeout_seconds=remaining, request_seconds=request_seconds))
                     finally:
                         self._semaphore.release()
                 except ProtocolFailure:

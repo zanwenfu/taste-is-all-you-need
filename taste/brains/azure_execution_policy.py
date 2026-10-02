@@ -27,7 +27,7 @@ WORKER_EFFORTS = ("low", "medium", "high")
 POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
-                     "planner_effort": ""}
+                     "planner_effort": "", "request_seconds": None}
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,10 @@ class AzureExecutionPolicy:
     # The coordinator's reasoning effort. Empty names none and leaves the
     # provider's default.
     planner_effort: str = ""
+    # The longest any one model request may take, for every role. None leaves
+    # each request all the time its goal has left: one the service never
+    # answers then holds its worker, or the coordinator, until the goal ends.
+    request_seconds: float | None = None
 
     def __post_init__(self):
         if self.terminal is not None and (
@@ -85,6 +89,10 @@ class AzureExecutionPolicy:
         if self.max_assignments is not None and (
                 type(self.max_assignments) is not int or not 1 <= self.max_assignments <= 64):
             raise ValueError("max_assignments must be between 1 and 64")
+        if self.request_seconds is not None:
+            if type(self.request_seconds) not in (int, float) or not 0 < self.request_seconds <= 3600:
+                raise ValueError("request_seconds must be positive and at most 3600 seconds")
+            object.__setattr__(self, "request_seconds", float(self.request_seconds))
         route = self.azure_config({"AZURE_OPENAI_BASE_URL": self.endpoint,
                                    "AZURE_OPENAI_API_KEY": "policy-validation-only"})
         if route.base_url != self.endpoint:
@@ -102,7 +110,7 @@ class AzureExecutionPolicy:
                 deployment=self.planner_deployment if role == "planner" else self.worker_deployment,
                 budget_usd=budget, max_calls=1 if role == "planner" else getattr(self, f"{role}_max_calls"),
                 max_output_tokens=tokens, max_request_bytes=self.max_request_bytes,
-                deadline_unix=self.deadline_unix, role=role,
+                deadline_unix=self.deadline_unix, role=role, request_seconds=self.request_seconds,
             )
             if role != "planner" and budget < max_call_cost_usd(model, max_output_tokens=tokens, cap_on="billed"):
                 raise ValueError(f"{role} budget cannot admit even one bounded call")
@@ -166,6 +174,7 @@ class AzureExecutionPolicy:
             "max_request_bytes": self.max_request_bytes, "monitor_batch_size": self.monitor_batch_size,
             "pricing_sha": self.pricing_sha,
             **({} if self.worker_effort == "low" else {"worker_effort": self.worker_effort}),
+            **({} if self.request_seconds is None else {"request_seconds": self.request_seconds}),
         }
 
     def configure_prompt(self, payload):

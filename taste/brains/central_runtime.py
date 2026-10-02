@@ -83,7 +83,8 @@ _TERMINAL_CURRENT_PHASES = frozenset({"terminal", "report_accepted", "delivered"
 
 # Stops after which a benchmark goal still owes the developer a reply. A
 # cancelled or crashed run does not: its owner has withdrawn the time for one.
-_CLOSING_STOPS = frozenset({"wall_clock", "generation_bound", "budget_blocked", "planner_failed"})
+_CLOSING_STOPS = frozenset({"wall_clock", "generation_bound", "budget_blocked", "planner_failed",
+                            "spend_cap"})
 _CLOSING_MINIMUM_SECONDS = 5.0
 # Between cycles that changed nothing: how often the live workers are looked
 # at, and the longest the coordinator goes without a full durable cycle.
@@ -109,6 +110,10 @@ class BudgetBlocked(CoordinatorError):
 
 class _WallDeadlineReached(CoordinatorError):
     """The goal deadline has elapsed before another external effect."""
+
+
+class _SpendCapReached(CoordinatorError):
+    """The goal's known spending has reached its cap; it takes on no more work."""
 
 
 class _StopRequested(CoordinatorError):
@@ -1127,10 +1132,14 @@ class CentralRuntime:
                 continue
             report = self._load_report_for_accounting(run)
             if report is not None:
-                if report.cost_usd is None:
+                bounds = None if report.cost_usd is not None else self._reported_cost_bounds(run, report)
+                if report.cost_usd is not None:
+                    worker_costs.append(report.cost_usd)
+                elif bounds is None:
                     self._charge_lost_cost(run, reservations, unknown)
                 else:
-                    worker_costs.append(report.cost_usd)
+                    worker_costs.append(bounds[0])
+                    reservations.append(bounds[1])
                 continue
             if run.phase in _TERMINAL_CURRENT_PHASES:
                 # A process may have spent money even if its exact report is
@@ -1198,6 +1207,31 @@ class CentralRuntime:
         if self._plan_minimum and remaining is not None and remaining() < self._plan_minimum:
             raise _WallDeadlineReached("too little working time remains to start another plan")
 
+    def _spend_cap_reached(self) -> str | None:
+        """Why the goal may take on no more work, once its known spending is at its cap.
+
+        The goal's budget is a bound on the worst case of every call it
+        admits, and a trial's was about fifteen times what the trial was meant
+        to spend. Nothing held a goal to that smaller amount: a goal whose
+        workers kept failing could go on until the bound itself ran out. The
+        cap counts what is known to be spent, and it is checked before each
+        new plan, which every new worker needs. A worker already running is
+        not interrupted, so the goal can pass its cap by that worker's
+        allowance, and by the one call that writes its closing reply.
+        """
+        cap = self.goal.spend_cap_usd
+        if cap is None:
+            return None
+        spent = self._budget(self.supervisor.runs()).known_spent_usd
+        if spent < cap:
+            return None
+        return f"known spending of ${spent:.2f} reached the goal's spend cap of ${cap:.2f}"
+
+    def _require_spend_room(self) -> None:
+        reached = self._spend_cap_reached()
+        if reached is not None:
+            raise _SpendCapReached(reached)
+
     def _charge_lost_cost(self, run: SupervisorRun, reservations: list[float], unknown: list[str]) -> None:
         """Account for an ended run whose exact spending cannot be read.
 
@@ -1217,6 +1251,33 @@ class CentralRuntime:
             unknown.append(run.run_id)
         else:
             reservations.append(ceiling)
+
+    def _reported_cost_bounds(self, run: SupervisorRun, report: WorkerReport) -> tuple[float, float] | None:
+        """What an ended run spent for certain, and the most its unknown calls can add.
+
+        A run that lost one reply still wrote its report, from journals that
+        hold every receipt and the exact request of each call whose outcome is
+        unknown. Charged its whole ceiling, as a killed run is, one unanswered
+        request cost a trial about $60 of budget for a run that had spent
+        under a dollar. With the report's own account, what it paid is counted
+        as spent and only the unknown calls' worst case stays reserved. An
+        account that is missing, malformed or beyond the run's own caps is not
+        relied on, and the run stays at its ceiling.
+        """
+        ceiling = self._assignment_cost_ceiling(run.assignment)
+        account = report.metadata.get("model_cost")
+        if (ceiling is None or "azure_openai" not in run.assignment.resources
+                or not isinstance(account, Mapping)
+                or set(account) != {"known_usd", "unknown_exposure_usd"}):
+            return None
+        known, exposure = account["known_usd"], account["unknown_exposure_usd"]
+        for value in (known, exposure):
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0):
+                return None
+        if known + exposure > ceiling:
+            return None
+        return float(known), float(exposure)
 
     @staticmethod
     def _assignment_cost_ceiling(assignment: Assignment) -> float | None:
@@ -1843,6 +1904,7 @@ class CentralRuntime:
     ) -> PlanRevision:
         if not closing:
             self._require_planning_time()
+            self._require_spend_room()
         for trigger in triggers:
             self._record_trigger(cycle, trigger)
         base_id = self._operation_id(plan, triggers, closing=closing)
@@ -2142,6 +2204,10 @@ class CentralRuntime:
                 if planner_failures >= max_planner_failures:
                     stop_reason, detail = "planner_failed", "durable planner failure limit reached"
                     break
+                reached = self._spend_cap_reached()
+                if reached is not None:
+                    stop_reason, detail = "spend_cap", reached
+                    break
                 try:
                     bind_deadline = getattr(self.planner.transport, "bind_deadline", None)
                     if callable(bind_deadline):
@@ -2203,6 +2269,8 @@ class CentralRuntime:
             stop_reason, detail = "cancelled", str(exc)
         except _WallDeadlineReached as exc:
             stop_reason, detail = "wall_clock", str(exc)
+        except _SpendCapReached as exc:
+            stop_reason, detail = "spend_cap", str(exc)
         except BudgetBlocked as exc:
             stop_reason, detail = "budget_blocked", str(exc)
         except BaseException as exc:

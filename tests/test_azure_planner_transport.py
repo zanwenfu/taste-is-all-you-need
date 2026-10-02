@@ -72,6 +72,27 @@ def test_a_chosen_reasoning_effort_is_sent_and_bound_into_the_receipt(tmp_path, 
         assert len(sent) == 2
 
 
+def test_a_plan_request_has_its_own_time_ceiling_inside_the_planners_deadline(tmp_path, sdk_transport):
+    sent, _ = sdk_transport(success)
+    with closing(Store.open(tmp_path / "repo", "azure-planner")) as store:
+        bounded = planner(store, request_seconds=45)
+        bounded.bind_deadline(remaining_seconds=600)
+        call(bounded, "bounded")
+        assert sent[0].extensions["timeout"]["read"] == 45
+        # A nearer deadline still bounds the request.
+        bounded.bind_deadline(remaining_seconds=20)
+        call(bounded, "near-the-end")
+        assert 0 < sent[1].extensions["timeout"]["read"] <= 20
+        # With no ceiling named, the deadline alone, as before.
+        plain = planner(store)
+        plain.bind_deadline(remaining_seconds=600)
+        call(plain, "plain")
+        assert 590 < sent[2].extensions["timeout"]["read"] <= 600
+        for unusable in (0, True, "45", float("inf")):
+            with pytest.raises(ValueError, match="request ceiling"):
+                planner(store, request_seconds=unusable)
+
+
 def test_rotated_azure_key_replays_old_receipt_and_only_new_request_uses_new_key(tmp_path, sdk_transport):
     sent, _ = sdk_transport(success)
     root = tmp_path / "repo"

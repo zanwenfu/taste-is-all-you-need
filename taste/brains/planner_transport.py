@@ -697,9 +697,15 @@ class LLMPlannerTransport:
         max_prompt_bytes: int = 192 * 1024,
         deadline_unix: float | None = None,
         effort: str | None = None,
+        request_seconds: float | None = None,
     ) -> None:
         if not isinstance(store, Store):
             raise TypeError("planner transport store must be a Store")
+        if request_seconds is not None and (
+            isinstance(request_seconds, bool) or not isinstance(request_seconds, (int, float))
+            or not math.isfinite(request_seconds) or request_seconds <= 0
+        ):
+            raise ValueError("planner request ceiling must be finite and positive, or None")
         if effort is not None and (not isinstance(effort, str) or not effort):
             raise ValueError("planner reasoning effort must be a nonempty string or None")
         if not isinstance(control, Branch) or control.store is not store:
@@ -733,6 +739,10 @@ class LLMPlannerTransport:
         self.deadline_unix = deadline_unix
         # None names no effort and leaves the provider's default.
         self.effort = effort
+        # The longest one request may take, inside the deadlines. It is not
+        # part of a receipt's identity: it changes neither what was asked nor
+        # what was answered.
+        self.request_seconds = request_seconds
         self.journal_branch = journal.name
         self._ensure_ready = ensure_ready
         self._bound_remaining_usd: float | None = None
@@ -1316,6 +1326,8 @@ class LLMPlannerTransport:
                     if remaining <= 0:
                         raise TimeoutError("planner absolute deadline elapsed before provider dispatch")
                     call_options["timeout_seconds"] = min(call_options.get("timeout_seconds", remaining), remaining)
+                if self.request_seconds is not None:
+                    call_options["request_seconds"] = self.request_seconds
                 dispatched = True
                 completion = self.llm.call(
                     model=self.model,

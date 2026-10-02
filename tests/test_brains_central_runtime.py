@@ -5,13 +5,16 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from taste.brains.azure_worker_policy import AZURE_WORKER_POLICY_SCHEMA
 from taste.brains.central_planner import (
+    SPEND_CAP_KEY,
     CentralPlanner,
     Goal,
     InvalidPlannerOutput,
@@ -23,6 +26,8 @@ from taste.brains.central_runtime import (
     BudgetBlocked,
     CentralRuntime,
     CoordinatorCorruption,
+    CoordinatorError,
+    CycleOutcome,
     ExternalSignal,
     GoalOutcome,
     RuntimeTrigger,
@@ -46,6 +51,8 @@ from taste.brains.records import (
 from taste.brains.supervisor import CentralSupervisor, ProcessExit
 from taste.brains.worker_runtime import WORKER_REPORT_PATH
 from taste.memstore import Store
+from taste.pricing import table_sha
+from taste.providers.azure_openai import AZURE_WORKER_MODEL
 
 
 class FakeHandle:
@@ -223,6 +230,7 @@ def install_report(
     content: str = "certified product\n",
     completed: bool = True,
     cost_usd: float | None = 0.25,
+    metadata: dict[str, Any] | None = None,
 ) -> WorkerReport:
     run = next(
         item
@@ -279,6 +287,7 @@ def install_report(
                     "pending_actions": [],
                     "terminal_assessment": assessment.to_dict(),
                 },
+                **(metadata or {}),
             },
         )
         worker.write(WORKER_REPORT_PATH, report.to_json())
@@ -659,6 +668,118 @@ def test_unknown_cost_is_not_zero_and_prevents_new_budgeted_spawn(store: Store) 
     assert len(launcher.launch_calls) == 1
     assert len(transport.calls) == 1
     assert any(item.kind == "budget_unknown" for item in blocked_again.triggers)
+
+
+def capped(assignment: Assignment) -> Assignment:
+    """The same assignment under the Azure worker's caps, which admit each call before it is sent."""
+    return replace(assignment, model=AZURE_WORKER_MODEL, resources={**assignment.resources, "azure_openai": {
+        "schema": AZURE_WORKER_POLICY_SCHEMA, "endpoint": "https://test-resource.openai.azure.com/openai/v1/",
+        "worker_deployment": "gpt-6-sol", "monitor_deployment": "gpt-6-sol",
+        "deadline_unix": 4_102_444_800.0, "worker_max_calls": 4, "worker_max_output_tokens": 128,
+        "monitor_max_calls": 3, "monitor_max_output_tokens": 256, "max_request_bytes": 196_608,
+        "monitor_batch_size": 10, "pricing_sha": table_sha()}})
+
+
+def lost_reply_stack(store: Store):
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            return (capped(assignment_for(request, "first", "worker-first", "first.txt", budget_usd=1.5)),)
+        if request.generation == 2:
+            return (capped(assignment_for(request, "second", "worker-second", "second.txt", budget_usd=1.5)),)
+        return complete_response(request, prompt)
+
+    launcher = FakeLauncher()
+    runtime, _ = stack(store, simple_goal(budget_usd=5.0), ScriptedTransport(respond), launcher)
+    runtime.cycle()
+    runtime.cycle()
+    return runtime, launcher
+
+
+def end_first_run(runtime: CentralRuntime, launcher: FakeLauncher, metadata: dict[str, Any]) -> CycleOutcome:
+    install_report(runtime, "first", cost_usd=None, completed=False, metadata=metadata)
+    run = runtime.supervisor.runs()[0]
+    launcher.handles[run.run_id].exit = ProcessExit(exit_code=0, reaped=True)
+    outcome = runtime.cycle()
+    for _ in range(3):
+        if len(launcher.launch_calls) > 1 or outcome.status == "budget_blocked":
+            break
+        outcome = runtime.cycle()
+    return outcome
+
+
+def test_a_run_that_lost_a_reply_is_charged_what_it_can_have_cost(store: Store) -> None:
+    # The run's receipts came to $0.40 and the one request it never heard back
+    # from can have cost at most $0.25. It used to be charged its whole
+    # ceiling, $3.00 of a $5.00 goal, which left no room for the next worker.
+    runtime, launcher = lost_reply_stack(store)
+    outcome = end_first_run(runtime, launcher, {
+        "model_cost": {"known_usd": 0.40, "unknown_exposure_usd": 0.25}})
+    assert outcome.budget.enforceable
+    assert outcome.budget.known_spent_usd == pytest.approx(0.40)
+    assert outcome.budget.worker_spent_usd == pytest.approx(0.40)
+    # What stays reserved for good is the lost call; the rest is the next
+    # worker's own ceiling while it runs.
+    assert len(launcher.launch_calls) == 2
+    assert outcome.budget.reserved_usd == pytest.approx(0.25 + 3.0)
+
+
+@pytest.mark.parametrize("model_cost", [
+    None,                                                    # an older report says nothing
+    {"known_usd": 0.40},                                     # half an account
+    {"known_usd": "0.40", "unknown_exposure_usd": 0.25},     # not numbers
+    {"known_usd": -0.40, "unknown_exposure_usd": 0.25},
+    {"known_usd": True, "unknown_exposure_usd": 0.25},
+    {"known_usd": 2.90, "unknown_exposure_usd": 0.25},       # more than its caps admit
+    {"known_usd": 0.40, "unknown_exposure_usd": 0.25, "note": "extra"},
+])
+def test_an_account_that_cannot_be_relied_on_leaves_the_run_at_its_ceiling(store: Store, model_cost) -> None:
+    runtime, launcher = lost_reply_stack(store)
+    outcome = end_first_run(runtime, launcher, {} if model_cost is None else {"model_cost": model_cost})
+    assert outcome.budget.enforceable
+    assert outcome.budget.known_spent_usd == 0.0
+    assert outcome.budget.reserved_usd == pytest.approx(3.0)
+    # $2.00 remains: not enough for a second worker's $3.00 ceiling.
+    assert len(launcher.launch_calls) == 1
+
+
+def two_step_goal_at_its_cap(store: Store):
+    """One plan, two steps. The first is delivered having spent the cap, and
+    the second waits on it."""
+    def respond(request: PlanningRequest, prompt: str):
+        if request.generation == 1:
+            first = assignment_for(request, "first", "worker-first", "first.txt", budget_usd=1.0)
+            return (first, assignment_for(request, "second", "worker-second", "second.txt",
+                                          depends_on=("first",), budget_usd=1.0))
+        return complete_response(request, prompt)
+
+    transport = ScriptedTransport(respond)
+    launcher = FakeLauncher()
+    goal = replace(simple_goal(budget_usd=20.0), metadata={SPEND_CAP_KEY: 0.50})
+    runtime, _ = stack(store, goal, transport, launcher)
+    runtime.cycle()
+    runtime.cycle()
+    assert len(launcher.launch_calls) == 1
+    install_report(runtime, "first", cost_usd=0.60)
+    launcher.handles[launcher.launch_calls[0]].exit = ProcessExit(exit_code=0, reaped=True)
+    return runtime, launcher, transport
+
+
+def test_a_waiting_step_is_not_started_once_the_spend_cap_is_reached(store: Store) -> None:
+    runtime, launcher, transport = two_step_goal_at_its_cap(store)
+    outcome = runtime.run(max_generations=5, wall_clock_seconds=30)
+    assert outcome.stop_reason == "spend_cap"
+    assert "$0.60" in outcome.detail and "$0.50" in outcome.detail
+    assert len(launcher.launch_calls) == 1 and len(transport.calls) == 1
+    assert outcome.delivered_assignment_ids == ("first",)
+
+
+def test_cycles_driven_one_at_a_time_hold_to_the_spend_cap_too(store: Store) -> None:
+    # A host that advances the goal itself has no run loop to stop it.
+    runtime, launcher, transport = two_step_goal_at_its_cap(store)
+    with pytest.raises(CoordinatorError, match="spend cap"):
+        for _ in range(4):
+            runtime.cycle()
+    assert len(launcher.launch_calls) == 1 and len(transport.calls) == 1
 
 
 def test_global_budget_counts_planner_cost_and_both_worker_reservations(

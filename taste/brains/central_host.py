@@ -470,7 +470,8 @@ def compose_central_runtime(
                 max_tokens=planner_max_tokens,
                 **({"max_prompt_bytes": azure_policy.max_request_bytes,
                     "deadline_unix": azure_policy.deadline_unix,
-                    "effort": azure_policy.planner_effort or None} if azure_policy is not None else {}),
+                    "effort": azure_policy.planner_effort or None,
+                    "request_seconds": azure_policy.request_seconds} if azure_policy is not None else {}),
             )
         elif isinstance(concrete_transport, LLMPlannerTransport):
             if opened_planner_journal is None:

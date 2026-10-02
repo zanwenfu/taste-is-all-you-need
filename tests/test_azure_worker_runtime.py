@@ -252,6 +252,53 @@ def test_lost_provider_reply_is_unknown_cost_and_never_retried(worker, sdk_trans
     assert "private Azure token" not in result.to_json()
 
 
+def test_a_lost_worker_reply_leaves_an_account_of_what_the_run_can_have_cost(worker, sdk_transport):
+    # The service takes the worker's second request and never answers it.
+    def lose_the_second(role, number, payload):
+        if role == "worker" and number == 2:
+            raise httpx.ReadTimeout("no answer")
+
+    _, calls, _ = install(sdk_transport, hook=lose_the_second)
+    assert run(worker) == WorkerExitCode.INCOMPLETE
+    result = report(worker)
+    assert result.cost_usd is None and "model_cost_unknown" in result.uncertainty_reasons
+    account = result.metadata["model_cost"]
+    # Every call that was answered is on receipt, at $0.000366 each.
+    answered = calls["worker"] - 1 + calls["monitor"] + calls["terminal"]
+    assert answered >= 1 and account["known_usd"] == pytest.approx(answered * 0.000366)
+    # The unanswered one is bounded by the request it sent, a few kilobytes:
+    # cents, where the model's whole window would be $5.25.
+    exposure = account["unknown_exposure_usd"]
+    assert 0 < exposure < 0.5
+    assert exposure == result.metadata["worker_accounting"]["unknown_exposure_usd"]
+    assert result.metadata["monitor"]["unknown_exposure_usd"] == 0
+
+
+def test_a_lost_monitor_reply_is_in_the_account_too(worker, sdk_transport):
+    def lose_the_monitor(role, number, payload):
+        if role == "monitor":
+            raise httpx.ReadTimeout("no answer")
+
+    _, calls, _ = install(sdk_transport, hook=lose_the_monitor)
+    assert run(worker) == WorkerExitCode.INCOMPLETE
+    result = report(worker)
+    assert result.cost_usd is None
+    account = result.metadata["model_cost"]
+    assert account["known_usd"] == pytest.approx(calls["worker"] * 0.000366)
+    exposure = account["unknown_exposure_usd"]
+    assert 0 < exposure < 0.5
+    assert exposure == result.metadata["monitor"]["unknown_exposure_usd"]
+    assert result.metadata["worker_accounting"]["unknown_exposure_usd"] == 0
+
+
+def test_a_settled_run_accounts_for_exactly_what_it_paid(worker, sdk_transport):
+    install(sdk_transport)
+    assert run(worker) == WorkerExitCode.COMPLETED
+    result = report(worker)
+    assert result.metadata["model_cost"] == {
+        "known_usd": pytest.approx(result.cost_usd), "unknown_exposure_usd": 0}
+
+
 @pytest.mark.parametrize("phase", ["worker", "monitor", "terminal"])
 @pytest.mark.parametrize("late_failure", [False, True])
 def test_repeated_cancellation_waits_for_paid_thread_then_reports_without_more_calls(

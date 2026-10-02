@@ -288,6 +288,21 @@ class AzureWorkerRuntime:
                                            spec.path, entry.sha, spec.kind, spec.metadata))
         return tuple(outputs), failures
 
+    @staticmethod
+    def _cost_account(worker_cost, monitor_report):
+        """Receipts, and the worst case of calls with no receipt, from both journals.
+
+        None when the monitor's journal could not say: half an account is not
+        one the coordinator can charge by.
+        """
+        known, exposure = (monitor_report.get(name) for name in ("known_cost_usd", "unknown_exposure_usd"))
+        for value in (known, exposure):
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0):
+                return None
+        return {"known_usd": math.fsum((worker_cost.known_cost_usd, known)),
+                "unknown_exposure_usd": math.fsum((worker_cost.unknown_exposure_usd, exposure))}
+
     async def run(self) -> AzureWorkerResult:
         claim, failures, interrupted = None, [], False
         try:
@@ -370,6 +385,9 @@ class AzureWorkerRuntime:
             cost = math.fsum((worker_cost.cost_usd, monitor_report["cost_usd"]))
         if cost is None:
             failures.append("model_cost_unknown")
+        # What is known and what is only bounded, kept apart: a run that lost
+        # one reply is then charged for that call, not its whole ceiling.
+        account = self._cost_account(worker_cost, monitor_report)
         if claim is None:
             failures.append("missing_worker_claim")
         failures = list(dict.fromkeys(failures))
@@ -395,7 +413,8 @@ class AzureWorkerRuntime:
                       "worker_evidence": list(claim.evidence) if claim is not None else self._activity(),
                       "structured_status": claim.status if claim is not None else None,
                       "feedback_boundary": {"verdicts": verdict_boundary, "pending_inbox_ids": pending},
-                      "assignment_digest": "sha256:" + hashlib.sha256(self.assignment.to_json().encode()).hexdigest()},
+                      "assignment_digest": "sha256:" + hashlib.sha256(self.assignment.to_json().encode()).hexdigest(),
+                      **({} if account is None else {"model_cost": account})},
         )
         _atomic_report(self.branch.path(WORKER_REPORT_PATH), report.to_json())
         report_state = self.branch.checkpoint("Azure worker terminal report: " + reason)

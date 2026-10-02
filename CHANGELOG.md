@@ -3,6 +3,32 @@
 Notable changes, newest first. Before 1.0 a minor version may change
 behaviour and interfaces.
 
+## Unreleased
+
+### Added
+
+- **A time ceiling for each model request** (`request_seconds`, 300 in
+  benchmark trials), inside the goal's deadline. A request the provider never
+  answers ends there instead of holding its worker, or the coordinator, until
+  the goal ends.
+- **A spend cap the goal is held to** (goal metadata `spend_cap_usd`). Once a
+  goal's known spending reaches it, no new plan is asked for and the goal
+  closes with its reply (stop reason `spend_cap`). Benchmark trials already
+  disclosed a cap of $15; nothing enforced it.
+- On the Azure route, a request that could not be connected is sent again,
+  as a rate-limit refusal already was: nothing was sent, so nothing was
+  billed. A connection has 30 seconds to open.
+
+### Changed
+
+- **A lost reply is charged by the request it sent.** A request holds no more
+  tokens than bytes, so its size bounds its cost. A run that lost one reply
+  was charged its whole ceiling (about $60 in a benchmark trial); it is now
+  charged what it is known to have spent, plus that one call's worst case
+  (about $4 for a 270 KB request).
+- A worker's report carries that account (`metadata.model_cost`), and the
+  coordinator counts the known part as spent.
+
 ## 0.2.0 (2026-10-02)
 
 The first tagged release. Research software, alpha: see "Status" in the

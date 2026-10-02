@@ -209,12 +209,32 @@ def call_cost(
     return billed, work
 
 
+# Tokens a service may add around the request it is sent: message and tool
+# framing, and any preamble of its own.
+REQUEST_FRAMING_TOKENS = 4_096
+
+
+def request_token_bound(request_bytes: int) -> int:
+    """The most prompt tokens a serialized request of this many bytes can hold.
+
+    A tokenizer reads at least one byte for every token it emits, so text
+    holds no more tokens than bytes. The harness measures the request as the
+    JSON it journals, which is never shorter than the text sent. This is a
+    bound, not an estimate: the most seen in 354 recorded calls was 0.30
+    tokens a byte.
+    """
+    if type(request_bytes) is not int or request_bytes < 0:
+        raise ValueError("request_bytes must be a non-negative integer")
+    return request_bytes + REQUEST_FRAMING_TOKENS
+
+
 def max_call_cost_usd(
     model: str,
     *,
     max_output_tokens: int,
     max_attempts: int = 1,
     cap_on: str = "billed",
+    max_prompt_tokens: int | None = None,
 ) -> float:
     """Conservative exposure of one facade call before it is dispatched.
 
@@ -224,6 +244,10 @@ def max_call_cost_usd(
     output allowance at the most expensive output rate, and every permitted
     retry.  It intentionally leaves headroom unused near a cap; refusing work
     is safer than representing a soft post-hoc threshold as a hard budget.
+
+    ``max_prompt_tokens`` narrows the bound to a request already known not to
+    exceed it (see :func:`request_token_bound`): the prompt is priced at that
+    size, and only at the tiers a prompt of that size can reach.
     """
     if (
         isinstance(max_output_tokens, bool)
@@ -240,18 +264,32 @@ def max_call_cost_usd(
     if cap_on not in {"billed", "work"}:
         raise ValueError("cap_on must be 'billed' or 'work'")
 
+    if max_prompt_tokens is not None and (
+        type(max_prompt_tokens) is not int or max_prompt_tokens < 1
+    ):
+        raise ValueError("max_prompt_tokens must be a positive integer or None")
+
     price = ensure_priced(model)
+    prompt_tokens = price.context_window
+    if max_prompt_tokens is not None:
+        prompt_tokens = min(prompt_tokens, max_prompt_tokens)
+    # A request is priced by the first tier its prompt fits, so a prompt of at
+    # most this size reaches that tier and the cheaper ones before it.
+    reachable: list[Rates] = []
+    for limit, rates in price.tiers:
+        reachable.append(rates)
+        if limit is None or prompt_tokens <= limit:
+            break
     if cap_on == "billed":
         prompt_rate = max(
-            max(rates.input, rates.cache_read, rates.cache_write)
-            for _limit, rates in price.tiers
+            max(rates.input, rates.cache_read, rates.cache_write) for rates in reachable
         )
     else:
-        prompt_rate = max(rates.input for _limit, rates in price.tiers)
-    output_rate = max(rates.output for _limit, rates in price.tiers)
+        prompt_rate = max(rates.input for rates in reachable)
+    output_rate = max(rates.output for rates in reachable)
     exposure = (
         max_attempts
-        * (price.context_window * prompt_rate + max_output_tokens * output_rate)
+        * (prompt_tokens * prompt_rate + max_output_tokens * output_rate)
         / 1_000_000
     )
     if not math.isfinite(exposure) or exposure <= 0:

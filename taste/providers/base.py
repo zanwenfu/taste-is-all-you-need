@@ -101,6 +101,16 @@ class CompletionRequest:
     role: str
     run_id: str = ""
     timeout_seconds: float | None = None
+    # The longest one sending of this request may take, inside the call's
+    # timeout. None leaves the timeout as the only bound.
+    request_seconds: float | None = None
+
+
+def sending_timeout(request: CompletionRequest) -> float | None:
+    """How long one sending may take: its own ceiling, inside what the call has left."""
+    bounds = [value for value in (request.timeout_seconds, request.request_seconds)
+              if value is not None]
+    return min(bounds) if bounds else None
 
 
 @dataclass(frozen=True)

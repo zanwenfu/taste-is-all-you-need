@@ -32,7 +32,13 @@ from taste.brains import responses_audit
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.worker_protocol import ModelCallAccounting
 from taste.llm import LLM, BudgetExceeded
-from taste.pricing import call_cost, ensure_priced, max_call_cost_usd, table_sha
+from taste.pricing import (
+    call_cost,
+    ensure_priced,
+    max_call_cost_usd,
+    request_token_bound,
+    table_sha,
+)
 from taste.providers.azure_openai import AzureOpenAIConfig
 from taste.providers.base import Completion, ProtocolFailure, ToolCall, Usage
 
@@ -77,10 +83,19 @@ class ResponsesBinding:
     deadline_unix: float
     max_request_bytes: int = 196_608
     role: str = "worker"
+    # The longest one request may take, inside the run's deadline. None leaves
+    # the deadline as the only bound, as it was before ceilings existed.
+    request_seconds: float | None = None
 
     def __post_init__(self):
         if self.role not in {"worker", "monitor", "planner"}:
             raise ValueError("Responses role must be worker, monitor or planner")
+        if self.request_seconds is not None:
+            value = self.request_seconds
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not 0 < value <= 3600):
+                raise ValueError("request_seconds must be positive and at most 3600")
+            object.__setattr__(self, "request_seconds", float(value))
         if not isinstance(self.run_id, str) or _ID.fullmatch(self.run_id) is None:
             raise ValueError("run_id must be a stable identifier")
         for name in ("budget_usd", "deadline_unix"):
@@ -152,6 +167,10 @@ class ResponsesSession:
         # Preserve their exact identity; every other role is explicitly bound.
         if binding.role == "worker":
             identity_binding.pop("role")
+        # Likewise a journal that names no request ceiling keeps the identity
+        # it had before ceilings existed.
+        if binding.request_seconds is None:
+            identity_binding.pop("request_seconds")
         identity = _json({"schema": _VERSION, "binding": identity_binding, "pricing_sha": table_sha()})
         try:
             if fresh:
@@ -282,11 +301,27 @@ class ResponsesSession:
     def call_accounting(self) -> ModelCallAccounting:
         self._check()
         counts = dict(self._db.execute("SELECT status,count(*) FROM calls GROUP BY status"))
+        unknown = [request for (request,) in self._db.execute(
+            "SELECT request FROM calls WHERE status IN ('pending','unknown') ORDER BY rowid")]
         return ModelCallAccounting(
             known_cost_usd=self.known_cost_usd,
             completed_calls=counts.get("completed", 0),
-            unknown_calls=counts.get("pending", 0) + counts.get("unknown", 0),
+            unknown_calls=len(unknown),
+            unknown_exposure_usd=math.fsum(self._request_exposure(request) for request in unknown),
         )
+
+    def _request_exposure(self, request: str) -> float:
+        """The most one dispatch of this journaled request can have cost.
+
+        A call whose reply was lost was charged as if it had filled the
+        model's whole context: about $27 on the model used in benchmark
+        trials, for requests that cost under a dollar. The request is on
+        record, and it cannot have held more tokens than its bytes.
+        """
+        return max_call_cost_usd(
+            self.binding.model, max_output_tokens=self.binding.max_output_tokens,
+            max_attempts=1, cap_on="billed",
+            max_prompt_tokens=request_token_bound(len(request.encode())))
 
     def ensure_ready(self) -> None:
         """Validate SDK/credential configuration without dispatch or spending."""
@@ -450,9 +485,12 @@ class ResponsesSession:
             remaining = self.binding.deadline_unix - time.time()
             if remaining <= 0:
                 raise _NotDispatched("deadline elapsed before provider invocation")
+            ceiling = self.binding.request_seconds
             return self._llm.call(model=self.binding.model, max_tokens=self.binding.max_output_tokens,
                                   role=self.binding.role, temperature=None,
-                                  timeout_seconds=remaining, **request)
+                                  timeout_seconds=remaining,
+                                  **({} if ceiling is None else {"request_seconds": ceiling}),
+                                  **request)
         except (KeyboardInterrupt, SystemExit) as exc:
             raise BaseExceptionGroup("Responses provider was interrupted", [exc]) from None
 

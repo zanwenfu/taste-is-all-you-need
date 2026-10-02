@@ -18,6 +18,7 @@ from taste.providers.base import (
     ToolCall,
     Usage,
     require,
+    sending_timeout,
 )
 
 # Statuses worth another attempt: rate limits, transient server faults, overload.
@@ -108,8 +109,9 @@ class AnthropicProvider:
         }
         if request.tools:
             kwargs["tools"] = request.tools
-        if request.timeout_seconds is not None:
-            kwargs["timeout"] = request.timeout_seconds
+        timeout = sending_timeout(request)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
 
         # A model that refuses ``temperature`` refuses the whole request, so
         # the choice is between dropping the parameter and never calling the

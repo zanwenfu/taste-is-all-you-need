@@ -18,6 +18,7 @@ from taste.pricing import (
     max_call_cost_usd,
     provider_for,
     rates_for,
+    request_token_bound,
     table_sha,
 )
 
@@ -197,12 +198,49 @@ def test_max_call_cost_uses_the_selected_cap_currency() -> None:
     assert billed > work, "cache-write rates are the worst billed prompt bucket"
 
 
+def test_a_call_is_bounded_by_the_request_it_sends_when_that_is_known() -> None:
+    # gpt-6-astra: a prompt token costs at most 12.50 a million (a cache write)
+    # in a request of up to 272,000, and 25.00 in a longer one, where output
+    # also rises from 50 to 75. Bounded by the whole 1,050,000-token window a
+    # call's worst case was $27.48, whatever it sent.
+    model = "gpt-6-astra-2026-09-03"
+    assert max_call_cost_usd(model, max_output_tokens=16_384) == pytest.approx(27.4788)
+    assert max_call_cost_usd(
+        model, max_output_tokens=16_384, max_prompt_tokens=200_000
+    ) == pytest.approx(3.3192)
+    # The boundary is inclusive, and one token more reprices the whole request.
+    assert max_call_cost_usd(
+        model, max_output_tokens=16_384, max_prompt_tokens=272_000
+    ) == pytest.approx(4.2192)
+    assert max_call_cost_usd(
+        model, max_output_tokens=16_384, max_prompt_tokens=272_001
+    ) == pytest.approx(8.028825)
+    # A bound beyond the model's window is the window.
+    assert max_call_cost_usd(
+        model, max_output_tokens=16_384, max_prompt_tokens=9_000_000
+    ) == pytest.approx(27.4788)
+    # The work currency prices the same bound at the uncached input rate.
+    assert max_call_cost_usd(
+        model, max_output_tokens=16_384, max_prompt_tokens=200_000, cap_on="work"
+    ) == pytest.approx(2.8192)
+
+
+def test_a_request_holds_no_more_tokens_than_its_bytes_and_an_allowance() -> None:
+    assert request_token_bound(0) == 4_096
+    assert request_token_bound(100_000) == 104_096
+    for invalid in (-1, True, 1.5, None):
+        with pytest.raises(ValueError, match="request_bytes"):
+            request_token_bound(invalid)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"max_output_tokens": 0}, "max_output_tokens"),
         ({"max_output_tokens": 1, "max_attempts": False}, "max_attempts"),
         ({"max_output_tokens": 1, "cap_on": "tokens"}, "cap_on"),
+        ({"max_output_tokens": 1, "max_prompt_tokens": 0}, "max_prompt_tokens"),
+        ({"max_output_tokens": 1, "max_prompt_tokens": True}, "max_prompt_tokens"),
     ],
 )
 def test_max_call_cost_rejects_an_unbounded_configuration(kwargs, message) -> None:
