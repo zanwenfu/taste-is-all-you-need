@@ -30,6 +30,14 @@ behaviour and interfaces.
   matches the SHA-256 recorded when it was sent; with `--calls N` the same
   model is asked again. Every prompt change made after the first go/no-go run
   was checked this way before being kept.
+- **The study's analysis** (`scripts/study_report.py`): registered
+  comparisons between arms, paired by task: per-task differences in the share
+  of runs solved, a bootstrap interval over tasks, a sign-flip permutation
+  test (exact up to 20 differing tasks) with Holm's adjustment over the
+  comparisons, the exact sign test, and cost per trial and per solved task.
+  Seeded, so the same records give the same report; checked on synthetic
+  records with known answers
+  ([#35](https://github.com/zanwenfu/taste-is-all-you-need/issues/35)).
 - **The continue control** (`--ak services=none --ak alone=continue`): the
   agent alone, run again in the environment its last run left, given the
   task as given each time, until the supervised arm's generation bound or the
