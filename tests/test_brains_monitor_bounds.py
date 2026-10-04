@@ -70,7 +70,8 @@ def test_too_many_exact_finding_ids_fail_before_a_model_call(store):
     brain, _ = scaffold(store)
     try:
         state = brain.checkpoint("exact finding identity set")
-        findings = [{"id": f"finding-{i}-" + "a" * 64} for i in range(4000)]
+        # Findings are shown by label, not id; each carries its reason.
+        findings = [{"id": f"finding-{i}-" + "a" * 64, "reason": "r" * 120} for i in range(4000)]
         with pytest.raises(MonitorObservationError, match="input budget"):
             LLMMonitorJudge(NeverCall()).judge_terminal(brain.contract, state, {}, findings)
     finally:

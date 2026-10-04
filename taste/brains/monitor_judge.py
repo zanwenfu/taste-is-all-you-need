@@ -297,10 +297,10 @@ verdict for missing text only when a criterion cannot be supported without the
 part that is cut, and then name that criterion. Do not ask for text to be
 displayed again merely so that you can read all of it.
 
-Every historical finding id in the observation must appear exactly once in
-either resolved_finding_ids or unresolved_finding_ids. Mark a finding resolved
-only when evidence in this exact State or terminal context demonstrates the
-problem was corrected. A `fine` decision is valid only if every success
+Every historical finding in the observation must appear exactly once, by its
+label (F1, F2, ...), in either resolved_finding_ids or unresolved_finding_ids.
+Mark a finding resolved only when evidence in this exact State or terminal
+context demonstrates the problem was corrected. A `fine` decision is valid only if every success
 criterion is supported and unresolved_finding_ids is empty.
 
 Return exactly one JSON object and no markdown or surrounding prose. It must
@@ -619,9 +619,14 @@ def build_terminal_observation(
     contract_json, durable_contract = _validated_contract(head, contract)
     assignment_json, assignment = _validated_assignment(head, durable_contract)
     try:
-        findings = [({"id": item["id"], "detail": _bounded_evidence(item, 2048)}
-                     if len(json.dumps(item, ensure_ascii=True)) > 2048 else item)
-                    for item in historical_findings]
+        # Shown by label, not id: a certifier asked to copy every 64-character
+        # finding id back exactly mis-copied one and failed closed (measured).
+        findings = []
+        for index, item in enumerate(historical_findings, start=1):
+            shown = {key: value for key, value in item.items() if key != "id"}
+            findings.append({"label": _finding_label(index),
+                             **({"detail": _bounded_evidence(shown, 2048)}
+                                if len(json.dumps(shown, ensure_ascii=True)) > 2048 else shown)})
         files = sorted(head.files())
         payload = json.dumps(
             {
@@ -738,6 +743,10 @@ def parse_monitor_response(
     )
 
 
+def _finding_label(index: int) -> str:
+    return f"F{index}"
+
+
 def parse_terminal_response(
     text: str,
     *,
@@ -817,6 +826,11 @@ def parse_terminal_response(
         isinstance(item, str) and item for item in unresolved
     ):
         raise MonitorResponseError("unresolved_finding_ids must be an array of ids")
+    # Findings are named by the labels they were shown under; an exact id is
+    # still accepted.
+    labels = {_finding_label(index): finding for index, finding in enumerate(finding_ids, start=1)}
+    resolved = [labels.get(item, item) for item in resolved]
+    unresolved = [labels.get(item, item) for item in unresolved]
     if len(set(resolved)) != len(resolved) or len(set(unresolved)) != len(unresolved):
         raise MonitorResponseError("terminal finding partitions contain duplicate ids")
     overlap = set(resolved) & set(unresolved)

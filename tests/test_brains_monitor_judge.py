@@ -147,6 +147,22 @@ def test_llm_judge_receives_exact_pinned_contract_assignment_and_events(store: S
     brain.close()
 
 
+
+def test_a_certifier_names_findings_by_label_and_their_ids_are_written() -> None:
+    """Measured: certifications failed closed when a 64-character finding id was mis-copied."""
+    first, second = "a" * 64, "b" * 64
+    decision = parse_terminal_response(
+        terminal_response(severity="wrong", resolved_finding_ids=["F2"], unresolved_finding_ids=["F1"]),
+        finding_ids=(first, second),
+    )
+    assert decision.resolved_finding_ids == (second,) and decision.unresolved_finding_ids == (first,)
+    # A label that names no finding is still not a decision.
+    with pytest.raises(MonitorResponseError, match="partition exactly"):
+        parse_terminal_response(
+            terminal_response(severity="wrong", resolved_finding_ids=["F3"], unresolved_finding_ids=["F1"]),
+            finding_ids=(first, second),
+        )
+
 def test_monitor_rejects_provider_model_substitution_before_pricing() -> None:
     backing = FakeLLM([FakeTurn(text=response())], model=MODEL_MONITOR)
 
@@ -353,8 +369,11 @@ def test_terminal_judge_receives_the_exact_state_context_outputs_and_findings(
     assert "def parse(text)" in prompt
     assert '"tool_use_id": "terminal-test"' in prompt
     assert '"passed": 12' in prompt
-    assert '"id": "finding-1"' in prompt
+    # A finding is shown by a short label, not by its id: copying 64-character
+    # hashes back exactly is bookkeeping a model gets wrong.
+    assert '"label": "F1"' in prompt and "finding-1" not in prompt
     assert TERMINAL_JUDGEMENT_SCHEMA in fake.calls[0]["system"]
+    assert "label (F1, F2, ...)" in fake.calls[0]["system"]
     assert "never appear in the State's manifest" in fake.calls[0]["system"]
     brain.close()
 

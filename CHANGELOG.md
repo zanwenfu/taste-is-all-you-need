@@ -98,6 +98,12 @@ behaviour and interfaces.
   before the batch (`earlier_in_this_run`) and whether the worker is still
   running
   ([#43](https://github.com/zanwenfu/taste-is-all-you-need/issues/43)).
+- **The certifier names earlier findings by label.** It had to copy every
+  earlier monitor finding's 64-character id into one of two lists, and a
+  mis-copied id made certification fail closed: two of ten refusals in a
+  pilot. Findings are now shown as F1, F2, ... and the labels mapped back to
+  their ids before the partition is checked
+  ([#46](https://github.com/zanwenfu/taste-is-all-you-need/issues/46)).
 - **A defect still being fixed is not a reason to stop an agent.** About half
   of the agents stopped mid-run in the first go/no-go run were developing,
   on a failing check they could still fix ("fails a basic sampling call", in
