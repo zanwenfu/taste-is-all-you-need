@@ -26,7 +26,7 @@ here can be acted on.
 
 | Arm | Settings | What runs |
 | --- | --- | --- |
-| alone | `--ak agent=mini-swe-agent --ak services=none` | One run of the task as given. A fixed rule plans (the task verbatim, one assignment); no monitor; nothing certifies. |
+| alone | `--ak agent=mini-swe-agent --ak services=none --ak reply_reserve_seconds=10` | One run of the task as given. A fixed rule plans (the task verbatim, one assignment); no monitor; nothing certifies. (Reserve: see the amendment below.) |
 | taste | `--ak agent=mini-swe-agent` | Taste's coordinator plans, a monitor judges each step, the certifier checks each report. A monitor judgement of wrong or lost stops the agent; the coordinator may run it again with a new assignment. |
 
 Both arms run through the same worker process, model journal, terminal broker
@@ -92,5 +92,14 @@ trials from running at all stops the run; it restarts from the beginning once
 fixed, with the fix recorded below.
 
 ## Record
+
+**Amendment before the run (2026-10-04).** Both arms held back 210 seconds of
+each task's time for the coordinator's closing reply. The supervised arm needs
+them: its closing reply is a model call. The fixed plan's closing takes no
+time, so in the alone arm those seconds were only taken from the agent (on a
+15-minute task, from about 12.5 minutes of work to 9). That reserve is part of
+what supervision costs, so the alone arm runs with the least the goal admits:
+`--ak reply_reserve_seconds=10`. Found while reviewing a six-trial pilot that
+used the registered settings; no go/no-go trial had run.
 
 (Filled in after the run: the commands, the report and the decision.)
