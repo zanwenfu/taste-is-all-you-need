@@ -30,6 +30,13 @@ behaviour and interfaces.
   matches the SHA-256 recorded when it was sent; with `--calls N` the same
   model is asked again. Every prompt change made after the first go/no-go run
   was checked this way before being kept.
+- **An export of a study's trial records** (`scripts/export_records.py`):
+  each trial's Harbor result and verifier output and Taste's settled record,
+  nothing else, with a manifest of SHA-256 checksums that `--verify` checks;
+  refused if a copied file holds the value of a named secret. The report
+  scripts run on the export as on the originals: the first go/no-go run's
+  export (602 files, 176 MB, no Azure key in any file) recomputes its report
+  ([#39](https://github.com/zanwenfu/taste-is-all-you-need/issues/39)).
 - **A check of what passing trials fetched online** (`scripts/online_check.py`):
   every command a passing trial's agent ran, read from its settled record;
   each fetch from the internet (a URL, or curl, wget, git clone and the like
