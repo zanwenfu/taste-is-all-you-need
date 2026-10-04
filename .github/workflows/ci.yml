@@ -46,7 +46,7 @@ jobs:
           python -m pip install --no-deps --require-hashes -r requirements-agents.txt
 
       - name: Lint
-        run: ruff check taste/ tests/ examples/
+        run: ruff check taste/ tests/ examples/ scripts/
 
       - name: Test
         run: pytest -v
