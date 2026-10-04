@@ -51,9 +51,17 @@ def recorded_commands(turns: Any, *, run_id: str, last: int = 40, limit: int = 1
     ours = False
     for turn in turns:
         kind = turn.get("kind")
-        if kind == "responses_binding":
+        if kind in ("responses_binding", "hosted_binding"):
             binding = turn.get("binding")
             ours = isinstance(binding, dict) and binding.get("run_id") == run_id
+            continue
+        if ours and kind == "hosted_command":
+            started[turn.get("effect_id")] = turn.get("command", "")
+            continue
+        if ours and kind == "hosted_output":
+            if turn.get("effect_id") in started:
+                lines.append(ran(started.pop(turn.get("effect_id")),
+                                 f"exit {turn.get('returncode')}\n{turn.get('output', '')}"))
             continue
         call = turn.get("call")
         if not ours or not isinstance(call, dict) or call.get("name") != COMMAND_TOOL:

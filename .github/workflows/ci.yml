@@ -24,6 +24,7 @@ jobs:
             pyproject.toml
             requirements-brains-lock.txt
             requirements-openai-lock.txt
+            requirements-agents.txt
 
       - name: Configure git (for Memory tests)
         run: |
@@ -35,11 +36,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ '${{ matrix.python-version }}' = '3.14' ]; then
-            python -m pip install -r requirements-openai-lock.txt -e '.[dev,brains,openai]'
+            python -m pip install -r requirements-openai-lock.txt -e '.[dev,brains,openai,agents]'
           else
-            python -m pip install -e '.[dev,brains,openai]'
+            python -m pip install -e '.[dev,brains,openai,agents]'
           fi
           python -m pip check
+          # Hosted agents are installed without their own dependencies, after
+          # the check, which would list those as missing (requirements-agents.txt).
+          python -m pip install --no-deps --require-hashes -r requirements-agents.txt
 
       - name: Lint
         run: ruff check taste/ tests/ examples/

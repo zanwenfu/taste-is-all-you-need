@@ -14,7 +14,7 @@ import math
 import os
 from dataclasses import asdict
 
-from taste.benchmarks.worker_trajectory import worker_trajectory
+from taste.benchmarks.worker_trajectory import hosted_trajectory, worker_trajectory
 from taste.brains import benchmark_reply
 from taste.brains.azure_worker_entrypoint import run_directory
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
@@ -161,6 +161,41 @@ def _worker_calls(trace, rows, calls, gaps, run_id):
                 "function_name": tool["name"], "arguments": tool["arguments"]})
 
 
+def _hosted_calls(trace, rows, calls, gaps, run_id):
+    """A hosted agent's replies against their provider receipts.
+
+    Memory keeps each reply compactly (its text, calls, stop and model); the
+    journal keeps the receipt. They must agree, and every journaled call must
+    have been recorded as requested.
+    """
+    completions = {r["event"]["id"]: r["event"] for r in rows if r["event"]["kind"] == "hosted_completion"}
+    requested = {r["event"]["id"] for r in rows if r["event"]["kind"] == "hosted_request"}
+    by_id = {row["request_id"]: row for row in calls}
+    if requested != set(by_id):
+        gaps.append("worker_request_audit_mismatch:" + run_id)
+    for step in trace["steps"]:
+        identifier = step.get("extra", {}).get("request_id")
+        if identifier is None:
+            continue
+        call = by_id.get(identifier)
+        reply = None if call is None else call["completion"]
+        recorded = completions[identifier]
+        if (reply is None or recorded["text"] != reply["text_blocks"]
+                or recorded["stop_reason"] != reply["stop_reason"] or recorded["model"] != reply["model"]
+                or [(c["id"], c["name"], c["arguments"]) for c in recorded["calls"]]
+                != [(c["id"], c["name"], c["arguments"]) for c in reply["tool_calls"]]):
+            raise GoalInputError("hosted agent's recorded reply differs from its provider receipt")
+        step["metrics"] = _metrics(reply["usage"], call["cost_usd"])
+    for call in calls:
+        reply = call["completion"]
+        if reply is None or call["request_id"] in completions:
+            continue
+        gaps.append("worker_reply_unpublished:" + run_id + ":" + call["request_id"])
+        _step(trace["steps"], "agent", "\n".join(reply["text_blocks"]), model_name=reply["model"],
+              llm_call_count=1, metrics=_metrics(reply["usage"], call["cost_usd"]),
+              extra={"request_id": call["request_id"], "memory_published": False})
+
+
 def _workers(host, runs, gaps):
     traces, costs, retained_bytes = [], [], 0
     for run in runs:
@@ -201,12 +236,14 @@ def _workers(host, runs, gaps):
                 elif call["status"] != "not_dispatched":
                     gaps.append(role + "_cost_unknown:" + run.run_id + ":" + call["request_id"])
             if role == "worker":
-                trace = (worker_trajectory(rows, run_id=run.run_id) if rows else
+                hosted = bool(rows) and rows[0]["event"]["kind"].startswith("hosted_")
+                project = hosted_trajectory if hosted else worker_trajectory
+                trace = (project(rows, run_id=run.run_id) if rows else
                          _trajectory(run.run_id, "taste-azure-worker", [
                              {"step_id": 1, "source": "system", "message": "No conversation audit was published."}]))
                 if not rows or trace["extra"]["incomplete_worker_trace"]:
                     gaps.append("worker_conversation_incomplete:" + run.run_id)
-                _worker_calls(trace, rows, calls, gaps, run.run_id)
+                (_hosted_calls if hosted else _worker_calls)(trace, rows, calls, gaps, run.run_id)
             else:
                 steps = []
                 _step(steps, "system", "Internal monitor evidence; call timestamps were not recorded.")

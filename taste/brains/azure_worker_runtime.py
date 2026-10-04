@@ -151,6 +151,11 @@ class AzureWorkerResult:
 
 
 class AzureWorkerRuntime:
+    HARNESS = "azure-responses/1"
+    # A worker that takes inbox messages and verdicts must acknowledge them all
+    # before it may complete. An agent that cannot take them is not held to it.
+    ACKNOWLEDGES_FEEDBACK = True
+
     def __init__(self, branch: Branch, assignment: Assignment, session: ResponsesSession,
                  monitor: MonitorBrain, *, terminal_client=None):
         self.branch, self.assignment = branch, assignment
@@ -208,6 +213,9 @@ class AzureWorkerRuntime:
             return []
         return ["No claim was stated. Mechanical record of this worker's terminal commands, "
                 "oldest first:", *lines]
+
+    def _extra_metadata(self):
+        return {}
 
     def _check_deadline(self):
         if time.time() >= self.session.binding.deadline_unix:
@@ -356,10 +364,11 @@ class AzureWorkerRuntime:
             failures.append("runtime_" + type(exc).__name__)
 
         pending = self._pending_inbox()
-        if pending:
-            failures.append("unaccepted_inbox")
-        if self.branch.unacked_verdicts():
-            failures.append("unaccepted_verdicts")
+        if self.ACKNOWLEDGES_FEEDBACK:
+            if pending:
+                failures.append("unaccepted_inbox")
+            if self.branch.unacked_verdicts():
+                failures.append("unaccepted_verdicts")
         failures.extend(self._control_failures())
 
         # Freeze worker input before the final monitor drain. Its new verdicts
@@ -402,7 +411,7 @@ class AzureWorkerRuntime:
                     or assessment.contract_digest != self.assignment.contract_digest
                     or not assessment.acceptable):
                 failures.append("monitor_rejected")
-        if self._pending_inbox():
+        if self.ACKNOWLEDGES_FEEDBACK and self._pending_inbox():
             failures.append("feedback_arrived_during_finalization")
         if time.time() >= self.session.binding.deadline_unix:
             failures.append("deadline_elapsed")
@@ -443,13 +452,14 @@ class AzureWorkerRuntime:
             monitor_severity=monitor_report.get("current") or "unknown",
             uncertain=bool(failures), uncertainty_reasons=tuple(failures),
             summary=claim.summary if claim is not None else reason,
-            metadata={"harness": "azure-responses/1", "durability_ok": not interrupted and not failures,
+            metadata={"harness": self.HARNESS, "durability_ok": not interrupted and not failures,
                       "monitor": monitor_report, "worker_accounting": asdict(worker_cost),
                       "worker_evidence": list(claim.evidence) if claim is not None else self._activity(),
                       "structured_status": claim.status if claim is not None else None,
                       "feedback_boundary": {"verdicts": verdict_boundary, "pending_inbox_ids": pending},
                       "assignment_digest": "sha256:" + hashlib.sha256(self.assignment.to_json().encode()).hexdigest(),
-                      **({} if account is None else {"model_cost": account})},
+                      **({} if account is None else {"model_cost": account}),
+                      **self._extra_metadata()},
         )
         _atomic_report(self.branch.path(WORKER_REPORT_PATH), report.to_json())
         report_state = self.branch.checkpoint("Azure worker terminal report: " + reason)

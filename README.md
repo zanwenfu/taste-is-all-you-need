@@ -182,11 +182,12 @@ This is research software at an early stage. What has been shown, and how:
 | Memory layer | Its own test suite, including one test for every defect an independent audit found, and a crash-consistency demo. |
 | Single-process kernel | Recorded real runs with Claude ([feature added in 43 s for $0.10](examples/todo_api/runs/polished.md), [three workers in parallel](examples/parallel_demo/runs/parallel.md)) and the rollback demo above, which CI runs on every push. |
 | Multi-process runtime | About 3,000 tests that need no API key, on Python 3.11, 3.12 and 3.14. With real models: 29 trials of 16 [errata-bench](https://errata-bench.vercel.app/docs) tasks, all accepted by that benchmark's own admission check. |
+| Agents written by others | [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) runs unchanged as a worker: a test finds its requests, messages and commands the same as under its own model class. Two drill trials of one Terminal-Bench 2.1 tuning task, every role on GPT-5.6 Luna, both passed by the task's verifier. |
 
 What it has **not** shown yet: a full benchmark run or any score, more than
-one worker at a time on a shared task container, and anything on
-Terminal-Bench. The runtime is a library; the `taste` command drives only the
-single-process kernel.
+one worker at a time on a shared task container, rollback of the task
+environment, and whether supervising an agent helps it. The runtime is a
+library; the `taste` command drives only the single-process kernel.
 
 Open problems and next steps are tracked as
 [issues](https://github.com/zanwenfu/taste-is-all-you-need/issues).

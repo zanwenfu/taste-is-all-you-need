@@ -18,7 +18,7 @@ from taste.brains.azure_central_host import compose_azure_central_runtime
 from taste.brains.azure_execution_policy import AzureExecutionPolicy
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.central_planner import Goal
-from taste.brains.records import contract_digest
+from taste.brains.records import ArtifactSpec, contract_digest
 from taste.brains.terminal_broker import TerminalBinding, TerminalBroker, TerminalResult
 from taste.brains.terminal_service import TerminalCredential, TerminalGrant, TerminalService
 from taste.brains.terminal_worker_policy import TERMINAL_POLICY_KEY, TerminalWorkerPolicy
@@ -85,6 +85,90 @@ def test_a_request_ceiling_is_part_of_the_policy_only_when_named(policy):
             bounded.validate_assignment(configured(other))
     with pytest.raises(ValueError):
         AzureExecutionPolicy.from_dict({**policy.to_dict(), "request_seconds": None})
+
+
+LUNA = "gpt-5.6-luna-2026-07-09"
+
+
+def on_luna(policy, **changes):
+    return replace(policy, **{"planner_model": LUNA, "worker_model": LUNA,
+                              "planner_deployment": "gpt-5.6-luna",
+                              "worker_deployment": "gpt-5.6-luna", **changes})
+
+
+def test_the_coordinator_model_is_part_of_the_policy_only_when_not_the_original(policy):
+    # A policy made before the coordinator could change keeps its wire form.
+    assert policy.planner_model == AZURE_PLANNER_MODEL and "planner_model" not in policy.to_dict()
+    luna = on_luna(policy)
+    raw = luna.to_dict()
+    assert raw["planner_model"] == LUNA and AzureExecutionPolicy.from_dict(raw) == luna
+    route = luna.azure_config({"AZURE_OPENAI_BASE_URL": policy.endpoint, "AZURE_OPENAI_API_KEY": "k"})
+    assert [(item.model, item.deployment) for item in route.deployments] == [(LUNA, "gpt-5.6-luna")]
+    with pytest.raises(ValueError):
+        AzureExecutionPolicy.from_dict({**policy.to_dict(), "planner_model": AZURE_PLANNER_MODEL})
+
+
+def test_a_coordinator_and_its_workers_on_two_models_keep_two_routes(policy):
+    mixed = replace(policy, planner_model=LUNA, planner_deployment="gpt-5.6-luna")
+    route = mixed.azure_config({"AZURE_OPENAI_BASE_URL": policy.endpoint, "AZURE_OPENAI_API_KEY": "k"})
+    assert {(item.model, item.deployment) for item in route.deployments} == {
+        (LUNA, "gpt-5.6-luna"), (mixed.worker_model, mixed.worker_deployment)}
+
+
+@pytest.mark.parametrize("changes,match", [
+    ({"planner_model": "gpt-5.6-luna"}, "verified Azure deployment"),
+    ({"planner_model": "gpt-6.1-sol-2026-09-29"}, "verified Azure deployment"),
+    ({"worker_deployment": "another-route"}, "exactly one deployment"),
+])
+def test_an_unpriced_or_doubly_routed_coordinator_is_refused(policy, changes, match):
+    with pytest.raises(ValueError, match=match):
+        on_luna(policy, **changes) if "planner_model" not in changes else replace(policy, **changes)
+
+
+def test_a_hosted_agent_is_part_of_the_policy_only_when_named(policy):
+    assert "worker_agent" not in policy.to_dict() and "worker_agent" not in policy.worker_resources()
+    with pytest.raises(ValueError, match="terminal"):
+        replace(policy, worker_agent="mini-swe-agent")
+    with pytest.raises(ValueError, match="no hosted agent"):
+        replace(bound(policy), worker_agent="claude-code")
+    hosted = replace(bound(policy), worker_agent="mini-swe-agent")
+    raw = hosted.to_dict()
+    assert raw["worker_agent"] == "mini-swe-agent" and AzureExecutionPolicy.from_dict(raw) == hosted
+    assert hosted.worker_resources()["worker_agent"] == "mini-swe-agent"
+
+
+def with_outputs(assignment, *outputs, inputs=()):
+    contract = replace(assignment.contract, inputs=tuple(item.path for item in inputs),
+                       outputs=tuple(item.path for item in outputs))
+    return replace(assignment, contract=contract, contract_digest=contract_digest(contract),
+                   inputs=tuple(inputs), outputs=tuple(outputs))
+
+
+def test_a_hosted_agents_assignment_declares_one_report_and_no_inputs(policy):
+    hosted = replace(bound(policy), worker_agent="mini-swe-agent")
+    report = ArtifactSpec("report", "report.md", kind="report")
+    hosted.validate_assignment(with_outputs(configured(hosted), report))
+    for bad in (with_outputs(configured(hosted)),
+                with_outputs(configured(hosted), report, ArtifactSpec("extra", "extra.md")),
+                with_outputs(configured(hosted), replace(report, required=False))):
+        with pytest.raises(ValueError, match="exactly one"):
+            hosted.validate_assignment(bad)
+
+
+def test_the_planner_is_told_what_a_hosted_agent_can_be_asked(policy):
+    hosted = replace(bound(policy), worker_agent="mini-swe-agent")
+    exemplar = {"model": "", "contract": {"inputs": ["in.txt"], "outputs": ["out.txt"]},
+                "resources": {"wall_timeout_seconds": 600}, "inputs": [{"path": "in.txt"}],
+                "outputs": [{"artifact_id": "out", "path": "out.txt", "kind": "file", "required": True,
+                             "disposition": "present"}]}
+    payload = {"required_output_shape": {"assignments": [exemplar]}, "rules": {}}
+    hosted.configure_prompt(payload)
+    rules = payload["rules"]
+    assert "mini-swe-agent" in rules["hosted_workers"] and "exactly one output" in rules["hosted_workers"]
+    assert "run shell commands in the shared task container, one at a time" in rules["worker_capabilities"]["can"]
+    assert rules["worker_capabilities"]["terminal_effects"]
+    assert exemplar["inputs"] == [] and exemplar["contract"]["outputs"] == ["report.md"]
+    assert [(item["path"], item["kind"]) for item in exemplar["outputs"]] == [("report.md", "report")]
 
 
 @pytest.mark.parametrize("field,value", [("environment_id", "different_container"), ("max_commands", 21),

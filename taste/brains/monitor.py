@@ -133,6 +133,12 @@ UNJUDGED_KINDS = frozenset(
         "responses_binding",
         "responses_request",
         "responses_lost",
+        # A hosted agent's binding and task (the contract is judged from the
+        # contract itself), and its request intents and given-up calls.
+        "hosted_binding",
+        "hosted_task",
+        "hosted_request",
+        "hosted_lost",
         "runtime_budget_receipt",
         "runtime_budget_connection_intent",
         "runtime_session_bound",

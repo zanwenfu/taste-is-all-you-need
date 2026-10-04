@@ -133,6 +133,12 @@ _OPENAI = {
         Rates(0.20, 1.20, 0.02, 0.25), Rates(0.40, 1.80, 0.04, 0.50),
         window=1_050_000, as_of="2026-08-15",
     ),
+    # The Azure deployment's version, Global Standard, checked 2026-10-04
+    # against Azure's retail price list (meters "5.6 luna ... Std Gl").
+    "gpt-5.6-luna-2026-07-09": _tiered(
+        Rates(0.20, 1.20, 0.02, 0.25), Rates(0.40, 1.80, 0.04, 0.50),
+        window=1_050_000, as_of="2026-10-04",
+    ),
 }
 
 PRICES: dict[str, ModelPrice] = {**_ANTHROPIC, **_OPENAI}

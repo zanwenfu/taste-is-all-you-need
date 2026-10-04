@@ -7,6 +7,16 @@ behaviour and interfaces.
 
 ### Added
 
+- **Agents written by others, run unchanged as workers** (`taste.agents`,
+  `--ak agent=mini-swe-agent`). mini-swe-agent keeps its own loop,
+  configuration, tool and parsing; Taste supplies its model transport and its
+  shell, records both for its monitor, stops it when the monitor judges it
+  wrong or lost, and certifies its report like any worker's. A test runs its
+  loop with its own model class and with Taste's and finds the same requests,
+  messages and commands.
+- **Any admitted model in every role, the coordinator included**, and GPT-5.6
+  Luna (`gpt-5.6-luna`, version 2026-07-09) among them, at its Azure Global
+  Standard price.
 - **A fixed split of Terminal-Bench 2.1 into tuning and test tasks**
   (`data/splits/terminal-bench-2-1.json`, rule in
   `taste/benchmarks/task_split.py`), and `infra/azure/run-terminal-bench.sh`,

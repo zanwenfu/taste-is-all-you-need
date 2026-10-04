@@ -54,6 +54,28 @@ def test_every_request_has_a_time_ceiling_which_the_run_discloses():
     assert policy_for(chosen).request_seconds == 120.0
 
 
+@pytest.mark.parametrize("name,served", [("gpt-5.6-luna", "gpt-5.6-luna-2026-07-09"),
+                                         ("gpt-6-sol", AZURE_WORKER_MODEL)])
+def test_any_admitted_model_can_run_every_role_including_the_coordinator(name, served):
+    settings = TrialSettings.from_options({"model": "azure/" + name})
+    policy = policy_for(settings)
+    assert policy.planner_model == policy.worker_model == served
+    assert policy.planner_deployment == policy.worker_deployment == name
+    disclosed = settings.disclosure()
+    assert disclosed["coordinator_model"] == disclosed["worker_model"] == disclosed["monitor_model"] == served
+    worker_cap, _, _ = settings.budgets()
+    assert worker_cap == pytest.approx(settings.worker_spend_cap_usd + max_call_cost_usd(
+        served, max_output_tokens=settings.worker_max_output_tokens, cap_on="billed"))
+
+
+def test_a_trial_can_host_an_agent_in_every_worker():
+    settings = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent"})
+    assert policy_for(settings).worker_agent == "mini-swe-agent"
+    assert settings.disclosure()["worker_agent"] == "mini-swe-agent"
+    assert TrialSettings().disclosure()["worker_agent"] == "taste"
+    assert policy_for(TrialSettings()).worker_agent == ""
+
+
 def test_a_cheaper_worker_model_keeps_its_own_route():
     settings = TrialSettings.from_options({"model": "gpt-6-astra", "worker_model": "gpt-6-sol",
                                            "worker_effort": "medium"})
@@ -111,7 +133,8 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
 
 @pytest.mark.parametrize("options,match", [
     ({"model": "gpt-6-luna"}, "model must be one of"),
-    ({"model": "gpt-6-sol"}, "coordinator runs on gpt-6-astra"),
+    ({"model": "gpt-6.1-sol"}, "model must be one of"),
+    ({"agent": "claude-code"}, "agent must be one of"),
     ({"worker_model": "claude"}, "model must be one of"),
     ({"spend_cap_usd": "0"}, "must be positive"),
     ({"handoff_seconds": "nan"}, "must be positive"),

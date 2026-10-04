@@ -59,7 +59,9 @@ result metadata (`agent_result.metadata.taste.configuration`).
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `worker_model` | the trial's model | Served model for workers and monitors (`gpt-6-astra` or `gpt-6-sol`). The coordinator is always `gpt-6-astra`. |
+| `-m azure/<model>` | `gpt-6-astra` | The trial's model, which the coordinator runs on and every other role too unless `worker_model` names another: `gpt-6-astra`, `gpt-6-sol` or `gpt-5.6-luna`. |
+| `worker_model` | the trial's model | Served model for workers and monitors, one of the same three. |
+| `agent` | empty | An agent written by others that every worker runs unchanged: `mini-swe-agent`. Empty runs Taste's own worker. See below. |
 | `worker_effort` | `low` | Worker reasoning effort: `low`, `medium`, `high`. Monitors use `low`. |
 | `planner_effort` | `medium` | The coordinator's reasoning effort. Empty leaves the provider's default. Measured on gpt-6-astra, the level changes little: the model reasons briefly at every level. |
 | `spend_cap_usd` | 15 | Known spending at which a trial takes on no more work and replies. A worker already running finishes first, so a trial can pass the cap by that worker's and its monitor's allowances and by the closing reply. |
@@ -84,6 +86,28 @@ request it sent can have cost: a request holds no more tokens than bytes, so
 a 200 KB request is charged at most $3.40 for its input, not $27. That amount
 stays set aside for the rest of the trial and is reported apart from what is
 known to be spent.
+
+## Agents written by others
+
+With `--ak agent=mini-swe-agent` every worker is mini-swe-agent 2.4.6 with its
+own `mini` configuration (the one Harbor runs it with), its own loop, prompts,
+bash tool and parsing (`taste/agents/mini_swe_agent.py`). Taste supplies only
+its model transport and its shell: each request goes through the worker's
+journaled model session, each command to the task container through the
+terminal broker, and both are recorded for the worker's monitor. A monitor
+that judges the agent wrong or lost stops it at its next call. Its exit, final
+message, submission and command record become the assignment's report.
+
+mini-swe-agent is installed in the worker environment without its own
+dependencies, which would replace the `openai` package this project needs:
+
+    pip install -e '.[agents]'
+    pip install --no-deps --require-hashes -r requirements-agents.txt
+
+Differences from running it alone, disclosed with results: each reply's
+output tokens are capped (a budget needs a ceiling per call), its template
+values leave out the host's environment variables, and output beyond the
+terminal broker's retention limit is cut.
 
 ## What a trial leaves
 

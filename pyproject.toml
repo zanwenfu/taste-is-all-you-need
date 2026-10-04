@@ -42,9 +42,14 @@ openai = ["openai>=3.0,<4"]
 # The brain layer only. Kept optional so the memory layer stays importable
 # without it -- tests/test_package_isolation.py holds that boundary.
 brains = ["claude-agent-sdk==0.2.152"]
+# What hosted agents' own modules import (taste.agents). The agents themselves
+# are installed without dependencies from requirements-agents.txt.
+agents = ["jinja2>=3.1,<4", "platformdirs>=4,<5", "pyyaml>=6,<7"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
+    # mini-swe-agent's own model class, run beside Taste's in a comparison test.
+    "tenacity>=8,<10",
 ]
 # Everything the multi-process runtime can use: both worker harnesses.
 all = ["openai>=3.0,<4", "claude-agent-sdk==0.2.152"]

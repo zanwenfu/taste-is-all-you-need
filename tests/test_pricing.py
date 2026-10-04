@@ -53,6 +53,17 @@ def test_openai_long_context_doubles_input_and_halves_again_on_output() -> None:
         assert long.output == pytest.approx(short.output * 1.5), model
 
 
+def test_gpt_5_6_luna_on_azure_carries_its_dated_global_standard_price() -> None:
+    # Azure retail prices for the deployment's version 2026-07-09, Global
+    # Standard, checked 2026-10-04: per million tokens, input, output, cached
+    # input and cache write, short context and then long.
+    price = PRICES["gpt-5.6-luna-2026-07-09"]
+    short, long = price.tiers[0][1], price.tiers[1][1]
+    assert (short.input, short.output, short.cache_read, short.cache_write) == (0.20, 1.20, 0.02, 0.25)
+    assert (long.input, long.output, long.cache_read, long.cache_write) == (0.40, 1.80, 0.04, 0.50)
+    assert price.tiers[0][0] == _LONG_CONTEXT_THRESHOLD and price.as_of == "2026-10-04"
+
+
 def test_default_role_models_are_priced() -> None:
     from taste.llm import MODEL_MONITOR, MODEL_PLANNER, MODEL_WORKER
 

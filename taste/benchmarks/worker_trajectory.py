@@ -122,3 +122,86 @@ def worker_trajectory(rows, *, run_id):
                 "incomplete_worker_trace": incomplete or bool(pending) or bool(unseen_results),
                 "pending_model_requests": sorted(pending), "lost_model_requests": lost,
                 "unobserved_tool_calls": len(unseen_results), "includes_discarded_context": True}}
+
+
+def hosted_trajectory(rows, *, run_id):
+    """ATIF evidence for a hosted agent's run: its model replies, commands and outputs.
+
+    The agent's own messages stay its own; this is Taste's record of what
+    crossed the host: each reply's text and commands, each command's output as
+    recorded in memory, a call given up as lost, and how the run ended.
+    """
+    if not rows or not isinstance(run_id, str) or not run_id:
+        raise ResponsesAuditError("a hosted trajectory requires its run and durable evidence")
+    steps, history, pending, lost, results = [], set(), set(), [], {}
+    binding, current, incomplete, exit_event = None, None, False, None
+
+    def step(row, source, message, **fields):
+        value = {"step_id": len(steps) + 1, "timestamp": row["at"], "source": source, "message": message,
+                 "extra": {"audit_event_id": row["id"], "memory_published": row["published"],
+                           **({"is_sidechain": True} if source == "agent" else {})}, **fields}
+        steps.append(value)
+        return value
+
+    for row in rows:
+        identifier, parent, event = row["id"], row["parent"], row["event"]
+        if (identifier in history or event_id(parent, event) != identifier
+                or (parent != ROOT and parent not in history) or type(row["published"]) is not bool):
+            raise ResponsesAuditError("hosted trajectory audit chain is malformed")
+        history.add(identifier)
+        incomplete |= not row["published"]
+        kind = event["kind"]
+        if kind == "hosted_binding":
+            if binding is not None or parent != ROOT or event["binding"]["run_id"] != run_id:
+                raise ResponsesAuditError("hosted trajectory binding changed")
+            binding = event["binding"]
+        elif binding is None:
+            raise ResponsesAuditError("hosted trajectory has no original binding")
+        elif kind == "hosted_task":
+            step(row, "user", event["content"])
+        elif kind == "hosted_request":
+            pending.add(event["id"])
+        elif kind == "hosted_lost":
+            pending.discard(event["id"])
+            lost.append(event["id"])
+        elif kind == "hosted_completion":
+            if event["id"] not in pending:
+                raise ResponsesAuditError("hosted reply has no original model request")
+            pending.discard(event["id"])
+            current = step(row, "agent", "\n".join(event["text"]), model_name=event["model"], llm_call_count=1)
+            current["extra"].update(request_id=event["id"], stop_reason=event["stop_reason"],
+                                    cost_usd=event["cost_usd"])
+            calls = [{"tool_call_id": "call_" + hashlib.sha256((event["id"] + "\0" + call["id"]).encode()).hexdigest(),
+                      "function_name": call["name"], "arguments": deepcopy(call["arguments"])}
+                     for call in event["calls"]]
+            if calls:
+                current["tool_calls"] = calls
+        elif kind == "hosted_command":
+            results[event["effect_id"]] = (current, event)
+        elif kind == "hosted_output":
+            owner, command = results.pop(event["effect_id"], (None, None))
+            if command is None:
+                raise ResponsesAuditError("hosted output has no recorded command")
+            observed = {"content": event["output"], "extra": {
+                "command": command["command"], "returncode": event["returncode"],
+                "terminated": event["terminated"], "output_chars": event["output_chars"],
+                "effect_id": event["effect_id"], "timestamp": row["at"]}}
+            if owner is None:
+                step(row, "system", "command run before any model reply", observation={"results": [observed]})
+            else:
+                owner.setdefault("observation", {"results": []})["results"].append(observed)
+        elif kind == "hosted_exit":
+            exit_event = event
+        else:
+            raise ResponsesAuditError("hosted trajectory contains an unsupported audit event")
+
+    agent = binding["agent"]
+    return {"schema_version": "ATIF-v1.7", "session_id": run_id, "trajectory_id": run_id,
+            "agent": {"name": agent["name"], "version": agent["version"], "model_name": binding["model"]},
+            "steps": steps, "extra": {
+                "trace_scope": "internal_worker", "hosted_agent": agent, "complete_attempt": False,
+                "incomplete_worker_trace": incomplete or bool(pending) or bool(results),
+                "pending_model_requests": sorted(pending), "lost_model_requests": lost,
+                "unfinished_commands": len(results),
+                "exit": None if exit_event is None else {
+                    "exit_status": exit_event["exit_status"], "stopped_by": exit_event["stopped_by"]}}}

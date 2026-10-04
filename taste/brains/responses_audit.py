@@ -49,8 +49,8 @@ def record(db, parent, event):
     raw = encoded(event)
     if len(raw.encode()) > MAX_EVENT_BYTES:
         raise ResponsesAuditError("conversation audit event exceeds its byte limit")
-    if not isinstance(event, dict) or not str(event.get("kind", "")).startswith("responses_"):
-        raise ResponsesAuditError("conversation audit requires a Responses event")
+    if not isinstance(event, dict) or not str(event.get("kind", "")).startswith(("responses_", "hosted_")):
+        raise ResponsesAuditError("conversation audit requires a Responses or hosted-agent event")
     identifier = event_id(parent, event)
     previous = db.execute("SELECT parent,event FROM conversation_events WHERE id=?", (identifier,)).fetchone()
     if previous is not None:

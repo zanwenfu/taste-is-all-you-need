@@ -124,7 +124,6 @@ class OpenAIProvider:
 
         kwargs: dict[str, Any] = {
             "model": binding.deployment if binding is not None else request.model,
-            "instructions": _instructions(request.system),
             "input": self._to_input(request.messages),
             "max_output_tokens": request.max_tokens,
             # No server-side state: a run must be reproducible from its own
@@ -134,6 +133,11 @@ class OpenAIProvider:
             # by OpenAI versions that now include encrypted content by default.
             "include": ["reasoning.encrypted_content"],
         }
+        # A request with no system text sends none: an agent that writes its
+        # own system message as an input item is then sent exactly that.
+        instructions = _instructions(request.system)
+        if instructions:
+            kwargs["instructions"] = instructions
         if request.tools:
             kwargs["tools"] = [_to_tool(t) for t in request.tools]
         timeout = sending_timeout(request)
@@ -480,8 +484,12 @@ def _to_tool(tool: dict[str, Any]) -> dict[str, Any]:
 
     Explicit non-strict mode preserves the existing schemas' optional fields.
     Responses may otherwise normalize an omitted ``strict`` into strict mode.
-    Tool handlers still validate arguments before any effect.
+    Tool handlers still validate arguments before any effect. A tool already
+    written as a Responses function tool, as a hosted agent writes its own, is
+    sent exactly as it is.
     """
+    if tool.get("type") == "function" and "parameters" in tool:
+        return dict(tool)
     return {
         "type": "function",
         "name": tool["name"],

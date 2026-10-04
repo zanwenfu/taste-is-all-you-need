@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from taste.agents import HOSTED_AGENTS
 from taste.brains.records import Assignment
 from taste.brains.responses_session import ResponsesBinding
 from taste.brains.worker_admission import EntrypointConfig, EntrypointInputError
@@ -29,7 +30,7 @@ _FIELDS = frozenset({
 
 _EFFORTS = ("medium", "high")  # "low" is the original choice and is not written.
 # Written only when chosen, so assignments made before them keep their form.
-_OPTIONAL = frozenset({"worker_effort", "request_seconds"})
+_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent"})
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,8 @@ class AzureWorkerPolicy:
     monitor: ResponsesBinding
     monitor_batch_size: int
     effort: str = "low"
+    # A hosted agent's name; empty for Taste's own worker.
+    agent: str = ""
 
     @classmethod
     def from_assignment(cls, assignment: Assignment) -> AzureWorkerPolicy:
@@ -52,6 +55,8 @@ class AzureWorkerPolicy:
             raise EntrypointInputError("Azure worker reasoning effort is not admitted")
         if "request_seconds" in raw and type(raw["request_seconds"]) not in (int, float):
             raise EntrypointInputError("Azure request ceiling is not admitted")
+        if "worker_agent" in raw and raw["worker_agent"] not in HOSTED_AGENTS:
+            raise EntrypointInputError("the assignment names no hosted agent this worker can run")
         ceiling = raw.get("request_seconds")
         try:
             monitor_budget = _assignment_monitor_budget_usd(assignment)
@@ -88,7 +93,7 @@ class AzureWorkerPolicy:
         except (ValueError, TypeError, ProtocolFailure) as exc:
             # Do not echo arbitrary policy values into launch diagnostics.
             raise EntrypointInputError("Azure routing or spending limits are invalid") from exc
-        return cls(worker, monitor, batch, raw.get("worker_effort", "low"))
+        return cls(worker, monitor, batch, raw.get("worker_effort", "low"), raw.get("worker_agent", ""))
 
     def validate_launch(self, config: EntrypointConfig) -> None:
         if (config.expected_model != self.worker.model or config.monitor_model != self.monitor.model

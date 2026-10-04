@@ -19,16 +19,19 @@ import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+from taste.agents import HOSTED_AGENTS
 from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import WORKER_EFFORTS, AzureExecutionPolicy
 from taste.brains.central_planner import SPEND_CAP_KEY, Goal
 from taste.brains.terminal_broker import TerminalBinding
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
 from taste.pricing import max_call_cost_usd, table_sha
-from taste.providers.azure_openai import AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
+from taste.providers.azure_openai import AZURE_LUNA_MODEL, AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
 
 # Names a benchmark command line uses, and the dated served model behind each.
-SERVED_MODELS = {"gpt-6-astra": AZURE_PLANNER_MODEL, "gpt-6-sol": AZURE_WORKER_MODEL}
+# Any of them may run every role; the trial's model is the coordinator's.
+SERVED_MODELS = {"gpt-6-astra": AZURE_PLANNER_MODEL, "gpt-6-sol": AZURE_WORKER_MODEL,
+                 "gpt-5.6-luna": AZURE_LUNA_MODEL}
 CRITERION = ("The developer's most recent request in the task is addressed in the task "
              "environment, and the final reply says accurately what was done, what was "
              "verified and what was not.")
@@ -49,6 +52,9 @@ class TrialSettings:
     deployment: str = ""            # empty: the deployment is named after its model
     worker_deployment: str = ""
     worker_effort: str = "low"
+    # An agent written by others that every worker runs unchanged (taste.agents);
+    # empty for Taste's own worker.
+    agent: str = ""
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
     # little: 47 to 70 reasoning tokens on one small puzzle from low to high,
@@ -104,8 +110,6 @@ class TrialSettings:
     def __post_init__(self):
         served_model(self.model)
         served_model(self.worker_model or self.model)
-        if served_model(self.model)[1] != AZURE_PLANNER_MODEL:
-            raise ValueError("the coordinator runs on gpt-6-astra; name it as the trial's model")
         for name in ("spend_cap_usd", "worker_spend_cap_usd", "monitor_spend_cap_usd",
                      "command_seconds", "request_seconds", "worker_grace_seconds",
                      "reply_reserve_seconds", "plan_seconds", "handoff_seconds"):
@@ -117,6 +121,8 @@ class TrialSettings:
         # Refused when the agent is built, not when the first plan is made.
         if self.worker_effort not in WORKER_EFFORTS:
             raise ValueError("worker reasoning effort must be low, medium or high")
+        if self.agent and self.agent not in HOSTED_AGENTS:
+            raise ValueError("agent must be one of: " + ", ".join(sorted(HOSTED_AGENTS)))
         if self.planner_effort not in ("", *WORKER_EFFORTS):
             raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
 
@@ -149,7 +155,7 @@ class TrialSettings:
         return started_unix + goal_seconds, started_unix + agent_timeout_seconds + 3600
 
     def policy(self, endpoint, deadline_unix, *, owner_token, container_id, workdir):
-        coordinator, _, worker_name, worker = self.models
+        coordinator, planner, worker_name, worker = self.models
         worker_cap, monitor_cap, _ = self.budgets()
         binding = TerminalBinding(owner_token, container_id, deadline_unix, self.max_commands)
         planner_deployment = self.deployment or coordinator
@@ -168,7 +174,8 @@ class TrialSettings:
             max_request_bytes=self.max_request_bytes, monitor_batch_size=self.monitor_batch_size,
             pricing_sha=table_sha(),
             terminal=TerminalWorkerPolicy(binding, self.command_seconds, workdir),
-            worker_model=worker, worker_effort=self.worker_effort,
+            planner_model=planner, worker_model=worker, worker_effort=self.worker_effort,
+            worker_agent=self.agent,
             planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
@@ -189,6 +196,7 @@ class TrialSettings:
         worker_cap, monitor_cap, goal = self.budgets()
         return {"coordinator_model": served, "worker_model": worker_served,
                 "monitor_model": worker_served, "worker_effort": self.worker_effort,
+                "worker_agent": self.agent or "taste",
                 "coordinator_effort": self.planner_effort or "provider default",
                 "monitor_effort": "low",
                 "spend_cap_usd": self.spend_cap_usd, "admission_budgets_usd": {

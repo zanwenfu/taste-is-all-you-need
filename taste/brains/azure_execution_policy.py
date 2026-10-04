@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 
+from taste.agents import HOSTED_AGENTS
 from taste.brains.azure_worker_policy import AZURE_WORKER_POLICY_SCHEMA, AzureWorkerPolicy
 from taste.brains.responses_session import ResponsesBinding
 from taste.brains.terminal_worker_policy import TERMINAL_POLICY_KEY, TerminalWorkerPolicy
@@ -27,7 +28,8 @@ WORKER_EFFORTS = ("low", "medium", "high")
 POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
-                     "planner_effort": "", "request_seconds": None}
+                     "planner_effort": "", "request_seconds": None, "planner_model": AZURE_PLANNER_MODEL,
+                     "worker_agent": ""}
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,11 @@ class AzureExecutionPolicy:
     # each request all the time its goal has left: one the service never
     # answers then holds its worker, or the coordinator, until the goal ends.
     request_seconds: float | None = None
+    # The served model the coordinator plans and replies on.
+    planner_model: str = AZURE_PLANNER_MODEL
+    # An agent written by others that every worker runs, unchanged (see
+    # taste.agents); empty for Taste's own worker.
+    worker_agent: str = ""
 
     def __post_init__(self):
         if self.terminal is not None and (
@@ -75,10 +82,16 @@ class AzureExecutionPolicy:
             raise ValueError("terminal policy must share the original Azure goal deadline")
         if self.worker_model not in AZURE_MODELS:
             raise ValueError("worker model has no verified Azure deployment and price")
-        if (self.worker_model == AZURE_PLANNER_MODEL) != (self.worker_deployment == self.planner_deployment):
+        if self.planner_model not in AZURE_MODELS:
+            raise ValueError("planner model has no verified Azure deployment and price")
+        if (self.worker_model == self.planner_model) != (self.worker_deployment == self.planner_deployment):
             raise ValueError("one served model must use exactly one deployment")
         if self.worker_effort not in WORKER_EFFORTS:
             raise ValueError("worker reasoning effort must be low, medium or high")
+        if self.worker_agent and self.worker_agent not in HOSTED_AGENTS:
+            raise ValueError(f"no hosted agent named {self.worker_agent!r}")
+        if self.worker_agent and self.terminal is None:
+            raise ValueError("a hosted agent works in the task's terminal, and this goal has none")
         if self.planner_effort not in ("", *WORKER_EFFORTS):
             raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
         for name, ceiling in (("worker_grace_seconds", 600), ("worker_wall_seconds", 604800)):
@@ -102,7 +115,7 @@ class AzureExecutionPolicy:
         if type(self.monitor_batch_size) is not int or not 1 <= self.monitor_batch_size <= 1000:
             raise ValueError("monitor batch size must be between 1 and 1000")
         for role in ("worker", "monitor", "planner"):
-            model = AZURE_PLANNER_MODEL if role == "planner" else self.worker_model
+            model = self.planner_model if role == "planner" else self.worker_model
             budget = self.worker_budget_usd if role == "planner" else getattr(self, f"{role}_budget_usd")
             tokens = getattr(self, f"{role}_max_output_tokens")
             ResponsesBinding(
@@ -156,8 +169,8 @@ class AzureExecutionPolicy:
 
     def azure_config(self, environment):
         result = AzureOpenAIConfig.from_environment(environment, deployments=(
-            AzureDeployment(AZURE_PLANNER_MODEL, self.planner_deployment),
-            *(() if self.worker_model == AZURE_PLANNER_MODEL
+            AzureDeployment(self.planner_model, self.planner_deployment),
+            *(() if self.worker_model == self.planner_model
               else (AzureDeployment(self.worker_model, self.worker_deployment),)),
         ))
         if result.base_url != self.endpoint:
@@ -175,6 +188,7 @@ class AzureExecutionPolicy:
             "pricing_sha": self.pricing_sha,
             **({} if self.worker_effort == "low" else {"worker_effort": self.worker_effort}),
             **({} if self.request_seconds is None else {"request_seconds": self.request_seconds}),
+            **({"worker_agent": self.worker_agent} if self.worker_agent else {}),
         }
 
     def configure_prompt(self, payload):
@@ -222,6 +236,37 @@ class AzureExecutionPolicy:
                 "rolling memory back does not undo it. A command that runs past its timeout is killed with "
                 "its child processes; the container and everything else in it stay as they are. The "
                 "benchmark's own grading happens after this goal ends and is not a worker's job.")
+        if self.worker_agent:
+            self._configure_hosted(payload, exemplar)
+
+    def _configure_hosted(self, payload, exemplar):
+        """Every worker is an agent written by others: say what it can and cannot be asked."""
+        rules = payload["rules"]
+        rules["worker_capabilities"] = {
+            "can": ["run shell commands in the shared task container, one at a time"],
+            "cannot": ["read or write memory artifacts", "take inbox messages or verdicts while it runs",
+                       "produce any output but its report"],
+            "harness_does_for_it": (
+                "writes its exit, final message, submission and a record of its commands into the "
+                "assignment's one output, then certifies and delivers that report"),
+            "terminal_effects": rules["worker_capabilities"].get("terminal_effects", ""),
+        }
+        rules["hosted_workers"] = (
+            f"Every worker is {self.worker_agent}, an agent written by others and run unchanged. It is "
+            "given contract.task, the contract's success criteria and the goal's original task as one "
+            "text, and works in the task container through shell commands until it decides it is done. "
+            "It reads no memory artifacts and takes no feedback while it runs: when its monitor judges "
+            "it wrong or lost it is stopped, and the next plan sees why. Each assignment declares no "
+            "inputs and exactly one output, its report (contract.outputs equal to that one path); the "
+            "harness writes it. What the agent changed in the container stays there for the next worker.")
+        rules["worker_context"] = (
+            "Every worker is shown the goal's original task after its own task and criteria. "
+            "contract.task should say what that worker must do and check.")
+        exemplar["contract"].update(inputs=[], outputs=["report.md"])
+        exemplar["inputs"] = []
+        exemplar["outputs"] = [{**exemplar["outputs"][0], "artifact_id": "<unique id for this report>",
+                                "path": "report.md", "kind": "report",
+                                "description": "the agent's report, written by the harness"}]
 
     def validate_plan(self, assignments):
         if self.max_assignments is not None and len(assignments) > self.max_assignments:
@@ -235,6 +280,11 @@ class AzureExecutionPolicy:
             allowed.add(TERMINAL_POLICY_KEY)
             if assignment.resources.get(TERMINAL_POLICY_KEY) != self.terminal.to_dict():
                 raise ValueError("assignment differs from the goal's terminal policy")
+        if self.worker_agent and (assignment.inputs or len(assignment.outputs) != 1
+                                  or assignment.outputs[0].disposition != "present"
+                                  or not assignment.outputs[0].required):
+            raise ValueError("a hosted agent's assignment declares no inputs and exactly one "
+                             "required output, its report")
         if (assignment.resources.get("azure_openai") != self.worker_resources()
                 or assignment.model != self.worker_model
                 or assignment.resources.get("monitor_budget_usd") != self.monitor_budget_usd

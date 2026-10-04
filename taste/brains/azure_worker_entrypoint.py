@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from taste.benchmarks.worker_trajectory import worker_trajectory
+from taste.benchmarks.worker_trajectory import hosted_trajectory, worker_trajectory
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.azure_worker_runtime import AzureWorkerRuntime, _atomic_report, _json
 from taste.brains.monitor import MonitorBrain
@@ -43,6 +43,22 @@ _QUARANTINED_RESOURCES: list[tuple] = []
 def run_directory(store: Store, run_id: str) -> Path:
     return store.backend.common_dir / (
         f"taste.azure.{store.session}." + hashlib.sha256(run_id.encode()).hexdigest())
+
+
+def _hosted_runtime(policy, branch, assignment, session, monitor, terminal, directory):
+    """The assignment's hosted agent, with a private, empty global configuration."""
+    # mini-swe-agent reads a global configuration directory when imported and
+    # prints a banner; this run gives it its own, and no banner.
+    config = directory / "agent-config"
+    config.mkdir(mode=0o700, exist_ok=True)
+    os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(config)
+    os.environ["MSWEA_SILENT_STARTUP"] = "1"
+    from taste.agents import hosted_agent
+    from taste.brains.hosted_worker import HostedWorkerRuntime
+
+    return HostedWorkerRuntime(branch, assignment, session, monitor, terminal_client=terminal,
+                               agent=hosted_agent(policy.agent, effort=policy.effort),
+                               model_name=assignment.model)
 
 
 async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str] | None = None,
@@ -93,7 +109,10 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
         judge.ensure_ready()
         monitor = MonitorBrain(store, durable.contract, judge, batch_size=policy.monitor_batch_size,
                                run_id=durable.run_id)
-        runtime = AzureWorkerRuntime(branch, durable.assignment, session, monitor, terminal_client=terminal)
+        if policy.agent:
+            runtime = _hosted_runtime(policy, branch, durable.assignment, session, monitor, terminal, directory)
+        else:
+            runtime = AzureWorkerRuntime(branch, durable.assignment, session, monitor, terminal_client=terminal)
         if ready_callback is None:
             mark_worker_ready(environ=environment)
         else:
@@ -116,8 +135,10 @@ async def execute_worker(config: EntrypointConfig, *, environ: Mapping[str, str]
             try:
                 rows = session.conversation_audit()
                 if rows:
+                    project = (hosted_trajectory if rows[0]["event"]["kind"].startswith("hosted_")
+                               else worker_trajectory)
                     _atomic_report(session.directory / "trajectory.worker.json",
-                        _json(worker_trajectory(rows, run_id=session.binding.run_id)))
+                        _json(project(rows, run_id=session.binding.run_id)))
             except Exception as exc:
                 print(f"Azure worker trace failed: {type(exc).__name__}", file=sys.stderr, flush=True)
                 outcome = WorkerExitCode.RUNTIME_FAILURE
