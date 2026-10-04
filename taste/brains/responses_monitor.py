@@ -94,6 +94,24 @@ class _MonitorCalls:
             session.close()
 
 
+
+def size_views(judge: LLMMonitorJudge, max_request_bytes: int) -> LLMMonitorJudge:
+    """Size a judge's views to what its journal admits per request."""
+    # A certifier held to a 64 KiB view of a long run saw every result
+    # shortened and refused correct work three times over for "an evidence
+    # gap" (measured: a four-minute fix became four workers and $18). The
+    # view grows with what this journal admits; rendering and the request's
+    # own JSON escaping can each enlarge it, so it takes under half.
+    room = max_request_bytes - MAX_MONITOR_PROMPT_BYTES
+    judge.transcript_view_bytes = max(TRANSCRIPT_VIEW_BYTES, min(MAX_TRANSCRIPT_VIEW_BYTES, room // 2))
+    # A report over 8 KiB was shown as omitted, and every run whose
+    # criteria spoke of its report was then refused (three of three
+    # measured). A worker may write 64 KiB; with room, that is shown whole.
+    judge.artifact_view_bytes = max(MAX_INLINE_ARTIFACT_BYTES, min(MAX_ARTIFACT_VIEW_BYTES, room // 8))
+    judge.max_prompt_bytes = max(MAX_MONITOR_PROMPT_BYTES, max_request_bytes * 3 // 4)
+    return judge
+
+
 class ResponsesMonitorJudge(LLMMonitorJudge):
     """Strict incremental and terminal judges using Azure Responses only.
 
@@ -120,18 +138,7 @@ class ResponsesMonitorJudge(LLMMonitorJudge):
             _MonitorCalls(directory, binding, azure), model=binding.model,
             max_tokens=binding.max_output_tokens, json_prefill=False,
         )
-        # A certifier held to a 64 KiB view of a long run saw every result
-        # shortened and refused correct work three times over for "an evidence
-        # gap" (measured: a four-minute fix became four workers and $18). The
-        # view grows with what this journal admits; rendering and the request's
-        # own JSON escaping can each enlarge it, so it takes under half.
-        room = binding.max_request_bytes - MAX_MONITOR_PROMPT_BYTES
-        self.transcript_view_bytes = max(TRANSCRIPT_VIEW_BYTES, min(MAX_TRANSCRIPT_VIEW_BYTES, room // 2))
-        # A report over 8 KiB was shown as omitted, and every run whose
-        # criteria spoke of its report was then refused (three of three
-        # measured). A worker may write 64 KiB; with room, that is shown whole.
-        self.artifact_view_bytes = max(MAX_INLINE_ARTIFACT_BYTES, min(MAX_ARTIFACT_VIEW_BYTES, room // 8))
-        self.max_prompt_bytes = max(MAX_MONITOR_PROMPT_BYTES, binding.max_request_bytes * 3 // 4)
+        size_views(self, binding.max_request_bytes)
 
     def call_accounting(self) -> ModelCallAccounting:
         return self.llm.call_accounting()

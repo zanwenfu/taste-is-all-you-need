@@ -25,8 +25,8 @@ behaviour and interfaces.
   Standard price.
 - **Replaying a recorded decision** (`scripts/replay_decision.py`): rebuilds
   from a copy of a run's memory the coordinator's prompt for one planning
-  request, or the step judgement that stopped a worker, with whichever code
-  is on the path. Run with the code that decided, the coordinator's prompt
+  request, the step judgement that stopped a worker, or a worker run's
+  certification, with whichever code is on the path. Run with the code that decided, the coordinator's prompt
   matches the SHA-256 recorded when it was sent; with `--calls N` the same
   model is asked again. Every prompt change made after the first go/no-go run
   was checked this way before being kept.

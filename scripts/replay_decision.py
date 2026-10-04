@@ -2,6 +2,7 @@
 
     python scripts/replay_decision.py coordinator WORKSPACE [--generation N|last] [--calls 3]
     python scripts/replay_decision.py monitor WORKSPACE --branch SUFFIX [--calls 3]
+    python scripts/replay_decision.py certifier WORKSPACE --branch SUFFIX [--calls 3]
 
 WORKSPACE is the git repository a run's memory lives in (for a benchmark
 trial, its agent-state/workspace). It is copied to a temporary directory and
@@ -17,6 +18,9 @@ sent in the same situation.
 monitor: rebuilds the step judgement that stopped a worker's run (the first
 judged wrong or lost) from that run's monitor state: the batch as judged, the
 memory state it saw, and the events before it.
+
+certifier: rebuilds a worker run's last certification from its monitor state:
+the State it judged, the context it was given and the earlier findings.
 
 With --calls N, the same model is asked N times with the call settings the run
 used (Azure credentials from AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY),
@@ -150,10 +154,22 @@ def monitor_judgement(store: Store, workspace: Path, session: str, suffix: str):
     return name, assignment, contract, batch, view, action
 
 
-def ask_monitor(assignment: Assignment, contract: Contract, batch, view, calls: int, environ) -> list:
-    """What the monitor's model judges of this batch, ``calls`` times, with the run's settings."""
+def _monitor_judge(assignment: Assignment, environ):
+    """The run's monitor judge: its model, output limit, effort and view sizes."""
     from taste.brains.azure_worker_policy import AzureWorkerPolicy
     from taste.brains.monitor_judge import LLMMonitorJudge
+
+    try:
+        from taste.brains.responses_monitor import size_views
+    except ImportError:  # code from before the rule had a name: the same rule
+        from taste.brains import monitor_judge as m
+
+        def size_views(judge, max_request_bytes):
+            room = max_request_bytes - m.MAX_MONITOR_PROMPT_BYTES
+            judge.transcript_view_bytes = max(m.TRANSCRIPT_VIEW_BYTES, min(m.MAX_TRANSCRIPT_VIEW_BYTES, room // 2))
+            judge.artifact_view_bytes = max(m.MAX_INLINE_ARTIFACT_BYTES, min(m.MAX_ARTIFACT_VIEW_BYTES, room // 8))
+            judge.max_prompt_bytes = max(m.MAX_MONITOR_PROMPT_BYTES, max_request_bytes * 3 // 4)
+            return judge
 
     policy = AzureWorkerPolicy.from_assignment(assignment)
     llm = _llm(policy.azure_config(environ), "replay-monitor")
@@ -165,12 +181,43 @@ def ask_monitor(assignment: Assignment, contract: Contract, batch, view, calls: 
 
     judge = LLMMonitorJudge(Calls(), model=policy.monitor.model, max_tokens=policy.monitor.max_output_tokens,
                             json_prefill=False)
+    return size_views(judge, policy.monitor.max_request_bytes)
+
+
+def ask_monitor(assignment: Assignment, contract: Contract, batch, view, calls: int, environ) -> list:
+    """What the monitor's model judges of this batch, ``calls`` times, with the run's settings."""
+    judge = _monitor_judge(assignment, environ)
     return [judge(contract, list(batch), view) for _ in range(calls)]
+
+
+def certifier_judgement(store: Store, workspace: Path, suffix: str):
+    """The last certification of one worker's run, rebuilt: the State, context and findings it judged."""
+    name = next(branch for branch in _branches(workspace) if branch.endswith(suffix))
+    head = store.view(name).head
+    raw_assignment = head.read("assignment.json")
+    assignment = None if raw_assignment is None else Assignment.from_dict(json.loads(raw_assignment))
+    contract = assignment.contract if assignment is not None else Contract.from_dict(
+        json.loads(head.read(CONTRACT_PATH)))
+    raw_report = head.read("worker-report.json")
+    run_id = None if raw_report is None else json.loads(raw_report).get("run_id")
+    monitor = MonitorBrain(store, contract, None, run_id=run_id)
+    assessment = monitor.state.terminal_assessments[-1]
+    findings = list(monitor._terminal_findings())
+    if tuple(item["id"] for item in findings) != assessment.finding_ids:
+        raise RuntimeError("the monitor's findings differ from those the certification judged")
+    return (name, assignment, contract, store.state(assessment.state_id),
+            json.loads(assessment.context_json), findings, assessment)
+
+
+def ask_certifier(assignment: Assignment, contract: Contract, state, context, findings, calls: int, environ):
+    """What the certifier's model decides of this State, ``calls`` times, with the run's settings."""
+    judge = _monitor_judge(assignment, environ)
+    return [judge.judge_terminal(contract, state, context, list(findings)) for _ in range(calls)]
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("role", choices=("coordinator", "monitor"))
+    parser.add_argument("role", choices=("coordinator", "monitor", "certifier"))
     parser.add_argument("workspace", type=Path)
     parser.add_argument("--session", default="terminal-trial", help="the memory session (default: a trial's)")
     parser.add_argument("--generation", default="last", help="coordinator: the plan's generation, or last")
@@ -192,6 +239,18 @@ def main(argv=None) -> int:
                     print(f"--- {index}: complete={plan.get('complete')} verdicts={verdicts} "
                           f"assignments={len(plan.get('assignments') or [])}")
                     print("    rationale:", str(plan.get("rationale"))[:400])
+        elif arguments.role == "certifier":
+            if not arguments.branch:
+                parser.error("certifier needs --branch")
+            name, assignment, contract, state, context, findings, assessment = certifier_judgement(
+                store, workspace, arguments.branch)
+            print(f"branch {name}: State {state.id}, {len(findings)} earlier findings")
+            print("recorded:", assessment.judgement.severity.value, "acceptable" if assessment.acceptable
+                  else "refused", "|", assessment.judgement.reason[:300])
+            if arguments.calls:
+                for index, decision in enumerate(ask_certifier(assignment, contract, state, context, findings,
+                                                               arguments.calls, os.environ)):
+                    print(f"--- {index}: {decision.judgement.severity.value} | {decision.judgement.reason[:300]}")
         else:
             if not arguments.branch:
                 parser.error("monitor needs --branch")
