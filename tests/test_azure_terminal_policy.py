@@ -191,6 +191,35 @@ def test_a_hosted_agents_assignment_is_given_no_inputs_whatever_the_planner_writ
     assert bound(policy).fill_assignment(own, "a", [])["inputs"] == [reference]
 
 
+def test_a_hosted_agents_assignment_is_given_its_report_as_its_one_output(policy):
+    """Measured on GPT-5.6 Luna: plans declared the task's own file as a second output beside the
+    report, three times in one goal, each refused. The file belongs in the container, where the
+    task already asks for it; a hosted agent's one output is the report the harness writes."""
+    from taste.brains.central_planner import CentralPlanner
+    from taste.brains.records import Assignment
+
+    hosted = replace(bound(policy), worker_agent="mini-swe-agent")
+    masks, report = ArtifactSpec("masks", "convert_masks.py", kind="source"), ArtifactSpec("agent-report", "report.md", kind="report")
+    item = json.loads(with_outputs(configured(hosted), masks, report).to_json())
+    filled = []
+    fixed = hosted.fill_assignment(item, "assignments[0]", filled)
+    assert [(o["artifact_id"], o["path"], o["kind"], o["required"]) for o in fixed["outputs"]] == [
+        ("agent-report", "report.md", "report", True)]
+    assert fixed["contract"]["outputs"] == ["report.md"] and "contract_digest" not in fixed
+    assert {"assignments[0].outputs", "assignments[0].contract.outputs"} <= set(filled)
+    hosted.validate_assignment(Assignment.from_dict(CentralPlanner._with_derived_digest(fixed)))
+    # With no report declared, one is written.
+    bare = json.loads(with_outputs(configured(hosted), masks).to_json())
+    assert [(o["path"], o["kind"]) for o in hosted.fill_assignment(bare, "a", [])["outputs"]] == [("report.md", "report")]
+    # An assignment that already declares just its report is left as it is.
+    again = []
+    hosted.fill_assignment(json.loads(with_outputs(configured(hosted), report).to_json()), "a", again)
+    assert not [name for name in again if "outputs" in name]
+    # Taste's own worker keeps the outputs its planner declares.
+    own = json.loads(with_outputs(configured(bound(policy)), masks).to_json())
+    assert [o["path"] for o in bound(policy).fill_assignment(own, "a", [])["outputs"]] == ["convert_masks.py"]
+
+
 def with_outputs(assignment, *outputs, inputs=()):
     contract = replace(assignment.contract, inputs=tuple(item.path for item in inputs),
                        outputs=tuple(item.path for item in outputs))

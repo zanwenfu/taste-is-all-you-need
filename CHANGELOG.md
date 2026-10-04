@@ -71,6 +71,13 @@ behaviour and interfaces.
   monitor prompts say a file's absence from the state's manifest is not
   evidence that it is missing
   ([#40](https://github.com/zanwenfu/taste-is-all-you-need/issues/40)).
+- **A documented failure no longer meets a goal.** A goal was closed as
+  complete on evidence of "17 passes and one documented failure", and the
+  benchmark's verifier failed it: the rule that lets a worker's honest finding
+  satisfy its contract was applied to the goal's own criteria. The coordinator
+  is now told that a failing test or check, an error, unfinished work or a
+  documented limitation means not met (`assessment_standard`,
+  [#44](https://github.com/zanwenfu/taste-is-all-you-need/issues/44)).
 - **A hosted agent is not asked to write a report.** The harness writes its
   report; contracts that asked the agent for one turned the agent's own
   reports into stops and refusals of otherwise right work
@@ -87,7 +94,10 @@ behaviour and interfaces.
 - **Only refused plans in a row end a goal.** The limit counted refusals over
   the whole goal, so a long goal ended although its planner recovered every
   time. A key at a proposal's top level that is not part of a proposal (an
-  echoed prompt section or plan id) is dropped and recorded with the plan
+  echoed prompt section or plan id) is dropped and recorded with the plan, a
+  hosted agent's assignment is given its report as its one output (plans had
+  declared the task's own file beside it), and a criterion id copied with a
+  slip is written, when the slip is unambiguous
   ([#42](https://github.com/zanwenfu/taste-is-all-you-need/issues/42)).
 - **A lost reply no longer ends the run.** A worker whose request got no
   reply (a timeout, a dropped connection, the provider's own passing trouble)

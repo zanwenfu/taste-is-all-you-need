@@ -993,6 +993,32 @@ revision against the new integration state and an exact ArtifactRef.
 """
 
 
+
+def _repair_criterion_id(value: dict[str, Any], request: PlanningRequest, filled: list[str]) -> None:
+    """Write a standing criterion's id where the model copied it with a slip.
+
+    Measured on GPT-5.6 Luna: an assessment named its goal's one criterion by
+    a hash with an extra digit, a refused plan. Only a copying slip is
+    repaired: exactly one entry names no standing criterion, exactly one
+    standing criterion is unassessed, and the two ids agree on their first 24
+    characters. Any other unknown id is still refused.
+    """
+    assessment = value.get("assessment")
+    if request.criteria is None or not isinstance(assessment, list):
+        return
+    standing = [item.criterion_id for item in request.criteria.criteria]
+    named = [entry.get("criterion_id") if isinstance(entry, Mapping) else None for entry in assessment]
+    unknown = [index for index, criterion in enumerate(named)
+               if isinstance(criterion, str) and criterion not in standing]
+    unassessed = [criterion for criterion in standing if criterion not in named]
+    if len(unknown) != 1 or len(unassessed) != 1 or named[unknown[0]][:24] != unassessed[0][:24]:
+        return
+    index = unknown[0]
+    value["assessment"] = [*assessment[:index], {**assessment[index], "criterion_id": unassessed[0]},
+                           *assessment[index + 1:]]
+    filled.append(f"assessment[{index}].criterion_id")
+
+
 class CentralPlanner:
     """Create and recover exact, immutable plan revisions on a control branch."""
 
@@ -2244,6 +2270,18 @@ class CentralPlanner:
                     "first, and word the success criteria so that an accurate, evidenced finding "
                     "that it is false, with the work that is still possible done, satisfies them."
                 ),
+                # Measured on GPT-5.6 Luna: a goal closed as complete on
+                # evidence of "17 passes and one documented failure"; the
+                # benchmark's verifier failed it. contract_premises lets a
+                # worker's honest finding satisfy its contract; it never
+                # satisfies the goal's own criteria.
+                "assessment_standard": (
+                    "A standing criterion is met only when the evidence shows the task's request "
+                    "done as asked. A failing test or check, an error, work left undone, or a "
+                    "limitation a worker documented means not met, however accurately it is "
+                    "reported. A worker's contract being satisfied does not by itself meet the "
+                    "goal's criteria."
+                ),
                 "same_plan_dependencies_do_not_transfer_future_artifacts": True,
                 "unique_output_artifact_ids_and_paths": True,
                 "contract_io_must_equal_structured_artifact_paths": True,
@@ -2538,6 +2576,7 @@ class CentralPlanner:
             value["metadata"] = ({"final_reply": ""} if replying and value.get("complete") is False
                                  and not closing else {})
             filled.append("metadata")
+        _repair_criterion_id(value, request, filled)
         items = value.get("assignments")
         if isinstance(items, list):
             value["assignments"] = [self._fill_assignment(item, request, f"assignments[{index}]", filled)

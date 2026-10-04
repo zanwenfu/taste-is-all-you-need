@@ -1043,6 +1043,30 @@ def test_echoed_prompt_sections_are_dropped_and_a_copied_digest_is_derived_again
         "ignored:plan_id", "ignored:request", "assignments[0].contract_digest"]
 
 
+def test_a_criterion_id_copied_with_a_slip_is_written_and_recorded(store: Store, goal: Goal) -> None:
+    """Measured on GPT-5.6 Luna: an assessment named its one criterion by a hash with an extra digit."""
+    def slipped(_id: str, _system: str, prompt: str) -> str:
+        value = json.loads(proposal(prompt, assignment_for(request_from_prompt(prompt))))
+        value["assessment"][0]["criterion_id"] += "9"
+        return json.dumps(value)
+
+    central, _ = planner(store, slipped)
+    plan = central.plan(goal)
+    assert "assessment[0].criterion_id" in plan.metadata["filled_by_harness"]
+
+
+def test_an_unrelated_id_in_place_of_the_one_criterion_is_still_refused(store: Store, goal: Goal) -> None:
+    """Only a copying slip is repaired: an id sharing nothing with the criterion is not one."""
+    def unknown(_id: str, _system: str, prompt: str) -> str:
+        value = json.loads(proposal(prompt, assignment_for(request_from_prompt(prompt))))
+        value["assessment"][0]["criterion_id"] = "sha256:" + "e" * 64
+        return json.dumps(value)
+
+    central, _ = planner(store, unknown)
+    with pytest.raises(InvalidPlannerOutput, match="not standing"):
+        central.plan(goal)
+
+
 def test_a_key_written_twice_with_one_value_is_not_ambiguous(store: Store, goal: Goal) -> None:
     def twice(_id: str, _system: str, prompt: str) -> str:
         valid = proposal(prompt, assignment_for(request_from_prompt(prompt)))
@@ -1056,7 +1080,10 @@ def test_a_key_written_twice_with_one_value_is_not_ambiguous(store: Store, goal:
 def test_the_planner_input_names_its_reply_format(store: Store, goal: Goal) -> None:
     central, transport = planner(store)
     central.plan(goal)
-    assert "JSON object" in json.loads(transport.calls[0][2])["rules"]["reply_format"]
+    rules = json.loads(transport.calls[0][2])["rules"]
+    assert "JSON object" in rules["reply_format"]
+    # Measured: a goal closed on "17 passes and one documented failure".
+    assert "documented means not met" in rules["assessment_standard"]
 
 
 def test_a_proposal_with_nothing_to_fill_records_nothing(store: Store, goal: Goal) -> None:

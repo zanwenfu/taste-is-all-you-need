@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, fields, replace
 
 from taste.agents import HOSTED_AGENTS
 from taste.brains.azure_worker_policy import AZURE_WORKER_POLICY_SCHEMA, AzureWorkerPolicy
+from taste.brains.records import ArtifactSpec
 from taste.brains.responses_session import ResponsesBinding
 from taste.brains.single_run import FIXED_PLAN_MODEL
 from taste.brains.terminal_worker_policy import TERMINAL_POLICY_KEY, TerminalWorkerPolicy
@@ -339,6 +340,8 @@ class AzureExecutionPolicy:
                 contract = {**contract, "inputs": []}
                 item["contract"] = contract
                 item.pop("contract_digest", None)
+        if self.worker_agent:
+            contract = self._fill_hosted_outputs(item, contract, where, filled)
         if isinstance(contract, Mapping):
             changed = {name: wanted for name, wanted in (("budget_usd", self.worker_budget_usd),
                                                          ("max_turns", self.worker_max_calls))
@@ -348,6 +351,30 @@ class AzureExecutionPolicy:
                 item.pop("contract_digest", None)
                 filled.extend(f"{where}.contract.{name}" for name in sorted(changed))
         return item
+
+    @staticmethod
+    def _fill_hosted_outputs(item, contract, where, filled):
+        """A hosted agent's one output is its report, which the harness writes.
+
+        Measured on GPT-5.6 Luna: plans declared the task's own file as a
+        second output beside the report, three times in one goal, each a
+        refused plan. That file belongs in the container, where the task asks
+        for it; the report the model declared, if any, is kept.
+        """
+        outputs = item.get("outputs") if isinstance(item.get("outputs"), list) else []
+        declared = [spec for spec in outputs if isinstance(spec, Mapping) and spec.get("kind") == "report"]
+        report = {"schema": ArtifactSpec.SCHEMA, "artifact_id": f"{item.get('assignment_id') or 'agent'}-report",
+                  "path": "report.md", "kind": "report", "description": "the agent's report, written by the harness",
+                  "metadata": {}, **(declared[0] if declared else {}), "required": True, "disposition": "present"}
+        if outputs != [report]:
+            item["outputs"] = [report]
+            filled.append(f"{where}.outputs")
+        if isinstance(contract, Mapping) and contract.get("outputs") != [report["path"]]:
+            contract = {**contract, "outputs": [report["path"]]}
+            item["contract"] = contract
+            item.pop("contract_digest", None)
+            filled.append(f"{where}.contract.outputs")
+        return contract
 
     def validate_plan(self, assignments):
         if self.max_assignments is not None and len(assignments) > self.max_assignments:
