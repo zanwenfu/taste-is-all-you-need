@@ -23,6 +23,13 @@ behaviour and interfaces.
 - **Any admitted model in every role, the coordinator included**, and GPT-5.6
   Luna (`gpt-5.6-luna`, version 2026-07-09) among them, at its Azure Global
   Standard price.
+- **Replaying a recorded decision** (`scripts/replay_decision.py`): rebuilds
+  from a copy of a run's memory the coordinator's prompt for one planning
+  request, or the step judgement that stopped a worker, with whichever code
+  is on the path. Run with the code that decided, the coordinator's prompt
+  matches the SHA-256 recorded when it was sent; with `--calls N` the same
+  model is asked again. Every prompt change made after the first go/no-go run
+  was checked this way before being kept.
 - **A fixed split of Terminal-Bench 2.1 into tuning and test tasks**
   (`data/splits/terminal-bench-2-1.json`, rule in
   `taste/benchmarks/task_split.py`), and `infra/azure/run-terminal-bench.sh`,
