@@ -170,7 +170,9 @@ def hosted_trajectory(rows, *, run_id):
             pending.discard(event["id"])
             current = step(row, "agent", "\n".join(event["text"]), model_name=event["model"], llm_call_count=1)
             current["extra"].update(request_id=event["id"], stop_reason=event["stop_reason"],
-                                    cost_usd=event["cost_usd"])
+                                    cost_usd=event["cost_usd"],
+                                    # Paid for, but the run ended before the agent received it.
+                                    **({"cut_off": True} if event.get("cut_off") else {}))
             calls = [{"tool_call_id": "call_" + hashlib.sha256((event["id"] + "\0" + call["id"]).encode()).hexdigest(),
                       "function_name": call["name"], "arguments": deepcopy(call["arguments"])}
                      for call in event["calls"]]

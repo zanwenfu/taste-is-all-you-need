@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import threading
@@ -175,6 +176,7 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         # An agent run alone is neither judged nor certified: it is the baseline.
         self.CERTIFIES = AzureWorkerPolicy.from_assignment(assignment).supervised
         self.host = None
+        self._inflight = None
         self._commands = 0
         self.task = hosted_task(assignment, self.prepared.read(GOAL_TASK_PATH))
         if not self._events():
@@ -206,6 +208,13 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
             raise HostedStop("deadline")
 
     async def _ask(self, messages, tools, effort):
+        self._inflight = asyncio.current_task()
+        try:
+            return await self._ask_model(messages, tools, effort)
+        finally:
+            self._inflight = None
+
+    async def _ask_model(self, messages, tools, effort):
         lost = 0
         while True:
             self._admitted()
@@ -215,6 +224,12 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
             try:
                 completion = await self.session.complete(request_id, system="", messages=messages,
                                                          tools=tools, effort=effort)
+            except (asyncio.CancelledError, BaseExceptionGroup):
+                # The run ended while this call was in flight; the journal has
+                # settled it. Measured: a reply paid for and journaled was left
+                # out of the record, and the trial's evidence was incomplete.
+                self._settle_cut_off(request_id)
+                raise
             except InfraFailure as failure:
                 # Asked again as a new call, as Taste's own worker does; the
                 # journal charges the lost one its worst case.
@@ -230,14 +245,46 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
                 raise HostedStop("model_session_closed") from None
             except ValueError:
                 raise HostedStop("request_too_large") from None
-            cost = self.session._receipt_cost(completion)
-            self._append("completion", id=request_id, text=list(completion.text_blocks),
-                         calls=[{"id": call.id, "name": call.name, "arguments": call.arguments}
-                                for call in completion.tool_calls],
-                         stop_reason=completion.stop_reason, model=completion.model, cost_usd=cost)
+            cost = self._record_completion(request_id, completion)
             return _reply(completion, cost)
 
+    def _record_completion(self, request_id, completion, **marks):
+        cost = self.session._receipt_cost(completion)
+        self._append("completion", id=request_id, text=list(completion.text_blocks),
+                     calls=[{"id": call.id, "name": call.name, "arguments": call.arguments}
+                            for call in completion.tool_calls],
+                     stop_reason=completion.stop_reason, model=completion.model, cost_usd=cost, **marks)
+        return cost
+
+    def _settle_cut_off(self, request_id):
+        """Put a call the run's end cut off on record: its reply if it came, else its loss.
+
+        The agent never received the reply, so it is marked cut off. A call
+        whose outcome is unknown is given up, charged its worst case, as a lost
+        reply is mid-run. Recording never hides the run's own ending.
+        """
+        with contextlib.suppress(Exception):
+            if self.session.outcome(request_id) == "completed":
+                self._record_completion(request_id, self.session.lookup(request_id), cut_off=True)
+                return
+            if self.session.outcome(request_id) == "unknown":
+                self.session.forfeit(request_id)
+            self._append("lost", id=request_id)
+
     async def _run(self, command, cwd, timeout_seconds, shown=None):
+        self._inflight = asyncio.current_task()
+        try:
+            return await self._run_command(command, cwd, timeout_seconds, shown)
+        finally:
+            self._inflight = None
+
+    def _end_command(self, effect_id, why):
+        """A command with no result: how it ended, its effects unknown, so the record is whole."""
+        with contextlib.suppress(Exception):
+            self._append("output", effect_id=effect_id, returncode=-1, terminated=why, output="",
+                         output_chars=0, dropped_bytes=0)
+
+    async def _run_command(self, command, cwd, timeout_seconds, shown=None):
         self._admitted()
         grant = self.terminal_client.credential.grant
         timeout = min(float(timeout_seconds), float(grant.max_timeout_seconds))
@@ -250,10 +297,16 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         try:
             result = await self.terminal_client.execute(
                 TerminalRequest(effect_id, grant.actor_id, command, cwd, timeout))
-        except (asyncio.CancelledError, HostedStop):
+        except HostedStop:
             raise
         except Exception:
+            # Measured: commands that lost their terminal at a trial's end were
+            # left without a result, and the trials' evidence was incomplete.
+            self._end_command(effect_id, "terminal_unavailable")
             raise HostedStop("terminal_unavailable") from None
+        except BaseException:
+            self._end_command(effect_id, "cancelled")
+            raise
         output = _text(result.stdout) + _text(result.stderr)
         self._append("output", effect_id=effect_id, returncode=result.return_code,
                      terminated=result.terminated or "", output=_excerpt(output, OUTPUT_CHARS),
@@ -345,6 +398,11 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
                 self.host.stop("interrupted")
         result, error = done.result()
         if cancelled is not None:
+            # The agent's thread returns as soon as its call is cancelled; the
+            # call itself settles its record first.
+            inflight = self._inflight
+            if inflight is not None and not inflight.done():
+                await asyncio.wait((inflight,))
             raise cancelled
         if error is not None and not isinstance(error, HostedStop):
             raise error

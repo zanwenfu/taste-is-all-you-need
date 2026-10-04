@@ -98,6 +98,17 @@ behaviour and interfaces.
   before the batch (`earlier_in_this_run`) and whether the worker is still
   running
   ([#43](https://github.com/zanwenfu/taste-is-all-you-need/issues/43)).
+- **A hosted agent's run cut off at its end leaves a whole record.** A run
+  stopped while a model call was in flight left the reply, paid and
+  journaled, out of the record; a command that lost its terminal at a trial's
+  end was left without a result. In the first go/no-go run four of 60
+  supervised trials were flagged `evidence_incomplete` for this. A cut-off
+  reply is now recorded (marked `cut_off`, since the agent never received
+  it), a call whose outcome is unknown is given up and charged its worst
+  case, a command is recorded as ended (`cancelled` or
+  `terminal_unavailable`, effects unknown), and a cancelled run waits for its
+  call in flight to settle
+  ([#48](https://github.com/zanwenfu/taste-is-all-you-need/issues/48)).
 - **The certifier names earlier findings by label.** It had to copy every
   earlier monitor finding's 64-character id into one of two lists, and a
   mis-copied id made certification fail closed: two of ten refusals in a

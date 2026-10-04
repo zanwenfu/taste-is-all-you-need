@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import time
 from dataclasses import replace
 
 import pytest
@@ -181,6 +183,71 @@ def test_the_monitor_sees_the_work_before_the_batch_it_judges(worker, sdk_transp
     assert '"earlier_in_this_run": []' in first and '"worker_running": true' in first
     assert "ran: make test -> exit 1" in last and "ran: sed -i" in last
     assert '"worker_running": false' in last
+
+
+def _hosted_events(worker):
+    view = worker.store.view(worker.assignment.worker)
+    return [event for event in (*view.head.transcript.turns, *view.pending_turns())
+            if str(event.get("kind", "")).startswith("hosted_")]
+
+
+def _unsettled(events):
+    """Model requests with no reply or loss recorded, and commands with no output: what
+    settlement calls an incomplete conversation."""
+    answered = {e["id"] for e in events if e["kind"] in ("hosted_completion", "hosted_lost")}
+    ended = {e["effect_id"] for e in events if e["kind"] == "hosted_output"}
+    return ([e["id"] for e in events if e["kind"] == "hosted_request" and e["id"] not in answered],
+            [e["effect_id"] for e in events if e["kind"] == "hosted_command" and e["effect_id"] not in ended])
+
+
+def test_a_command_its_terminal_cannot_finish_is_recorded_as_ended(worker, sdk_transport, tmp_path):
+    """Measured: runs whose last command lost its terminal at a trial's end left that command
+    without a result, and the trials' evidence was flagged incomplete (#48)."""
+    install(sdk_transport, worker_reply=lambda number, _: [bash("make test", f"c{number}")])
+
+    async def scenario():
+        hosted(worker)
+        async with terminal(worker, tmp_path) as t:
+            def execute(request):
+                raise RuntimeError("the task container went away")
+            t.env.execute = execute
+            await execute_worker(worker.config, store=worker.store, environ=worker.environ)
+            body = worker.store.state(report(worker).final_state_id).read("report.md")
+            assert "(stopped: terminal_unavailable)" in body
+    asyncio.run(scenario())
+    events = _hosted_events(worker)
+    assert _unsettled(events) == ([], [])
+    [ended] = [e for e in events if e["kind"] == "hosted_output"]
+    assert ended["terminated"] == "terminal_unavailable" and ended["returncode"] == -1
+
+
+def test_a_model_reply_cut_off_by_the_runs_end_is_still_recorded(worker, sdk_transport, tmp_path):
+    """Measured: a run stopped while a model call was in flight left the reply paid and journaled
+    but not recorded, and the trial's evidence was flagged incomplete (#48)."""
+    running = {}
+
+    def cut_off(role, number, _payload):
+        if role == "worker" and number == 2:
+            running["loop"].call_soon_threadsafe(running["task"].cancel)
+            time.sleep(0.3)  # the reply is still in flight when the run is cancelled
+
+    install(sdk_transport, worker_reply=lambda number, _: [bash("make test", f"c{number}")], hook=cut_off)
+
+    async def scenario():
+        hosted(worker)
+        async with terminal(worker, tmp_path) as t:
+            scripted(t.env, {"make test": TerminalResult(1, b"FAILED test_parse\n", b"")})
+            running["loop"] = asyncio.get_running_loop()
+            running["task"] = asyncio.ensure_future(
+                execute_worker(worker.config, store=worker.store, environ=worker.environ))
+            with contextlib.suppress(asyncio.CancelledError):
+                await running["task"]
+    asyncio.run(scenario())
+    events = _hosted_events(worker)
+    assert _unsettled(events) == ([], [])
+    # The paid reply the agent never received is on record, marked as cut off.
+    replies = [e for e in events if e["kind"] == "hosted_completion"]
+    assert len(replies) == 2 and replies[-1].get("cut_off") is True and not replies[0].get("cut_off")
 
 
 def test_a_hosted_agent_needs_the_task_terminal_and_one_report(worker, sdk_transport):
