@@ -91,6 +91,13 @@ behaviour and interfaces.
   before the batch (`earlier_in_this_run`) and whether the worker is still
   running
   ([#43](https://github.com/zanwenfu/taste-is-all-you-need/issues/43)).
+- **A defect still being fixed is not a reason to stop an agent.** About half
+  of the agents stopped mid-run in the first go/no-go run were developing,
+  on a failing check they could still fix ("fails a basic sampling call", in
+  a trial later solved). The step prompt now says that while the worker is
+  running such a defect is drifting at most, and what wrong is for: working
+  against the contract
+  ([#45](https://github.com/zanwenfu/taste-is-all-you-need/issues/45)).
 - **Only refused plans in a row end a goal.** The limit counted refusals over
   the whole goal, so a long goal ended although its planner recovered every
   time. A key at a proposal's top level that is not part of a proposal (an

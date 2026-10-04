@@ -135,6 +135,9 @@ def test_llm_judge_receives_exact_pinned_contract_assignment_and_events(store: S
     # manifest" did not list a file the run had written in the task container.
     assert "never appear in the State's manifest" in call["system"]
     assert "earlier_in_this_run" in call["system"] and "worker_running" in call["system"]
+    # Measured: about half the agents stopped mid-run were developing, on a
+    # defect they could still find and fix by their own testing.
+    assert "a defect in work the worker is still developing" in call["system"]
     prompt = call["messages"][0]["content"]
     assert brain.contract.to_json() in prompt
     assert item.to_json() in prompt

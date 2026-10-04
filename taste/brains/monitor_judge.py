@@ -258,6 +258,13 @@ Severity is your confidence that something is wrong:
 - wrong: positive evidence the work is off-contract, not merely incomplete
 - lost: the evidence says continuing this plan will not reach the criteria
 
+While `worker_running` is true, a defect in work the worker is still developing
+-- a failing test or check, a bug, an error it has not yet had the chance to
+fix -- is unfinished work: drifting at most. Developing is finding and fixing
+such defects. Wrong is for working against the contract: on a different task,
+changing what must not change, fabricating a result, or claiming a success the
+evidence contradicts.
+
 Return exactly one JSON object and no markdown or surrounding prose. It must
 validate against this schema:
 {json.dumps(MONITOR_JUDGEMENT_JSON_SCHEMA, sort_keys=True, separators=(",", ":"))}
