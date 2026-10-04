@@ -134,6 +134,28 @@ must be reported as self-graded.
 The dataset on the VM was copied from the local v1.0.2 release folder and
 every file except `README.md` verified against the published `SHA256SUMS`.
 
+## Terminal-Bench 2.1
+
+    # once: the 89 tasks, from Harbor's registry
+    sudo /root/taste-harbor-20260927/venv/bin/harbor download \
+        terminal-bench/terminal-bench-2-1 -o /root/tb
+
+    # tuning tasks: any time
+    sudo infra/azure/run-terminal-bench.sh <job> tuning -k 1 -n 2
+    # test tasks: only for a registered study
+    sudo infra/azure/run-terminal-bench.sh <job> test <study> -k 3 -n 2
+
+Settings may be tuned only on tasks whose results are not reported, so the
+tasks are split once, before any run, by the rule in
+`taste/benchmarks/task_split.py`: 20 tuning tasks stratified by difficulty,
+taken in the order of a salted hash, no category beyond its share. The split
+is `data/splits/terminal-bench-2-1.json` (salt `taste-tb21-split-2026-10-04`);
+it pins the dataset by a digest of every file and is never rewritten.
+`run-terminal-bench.sh` copies one part's tasks into a new directory and runs
+them. It refuses a dataset that differs from the pinned one, and test tasks
+unless the study is registered in `data/studies/<study>.json` with the SHA-256
+of the split record.
+
 ## Validated so far (2026-10-01, test VM, gpt-6-astra in every role)
 
 Fifteen trials of four errata-bench v1.0.2 tasks, one to five at a time.

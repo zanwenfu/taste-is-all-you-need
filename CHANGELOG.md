@@ -7,6 +7,11 @@ behaviour and interfaces.
 
 ### Added
 
+- **A fixed split of Terminal-Bench 2.1 into tuning and test tasks**
+  (`data/splits/terminal-bench-2-1.json`, rule in
+  `taste/benchmarks/task_split.py`), and `infra/azure/run-terminal-bench.sh`,
+  which runs one part and refuses test tasks unless a registered study names
+  the split.
 - **A time ceiling for each model request** (`request_seconds`, 300 in
   benchmark trials), inside the goal's deadline. A request the provider never
   answers ends there instead of holding its worker, or the coordinator, until
