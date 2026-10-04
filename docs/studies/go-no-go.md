@@ -2,8 +2,9 @@
 
 Registered on 2026-10-04, before any go/no-go trial ran
 ([issue 26](https://github.com/zanwenfu/taste-is-all-you-need/issues/26)).
-The code and settings are fixed at the commit tagged `go-no-go-2` (see the
-amendments below; `go-no-go-1` was the first registration).
+The code and settings are fixed at the commit tagged `go-no-go-3` (see the
+amendments below; `go-no-go-1` was the first registration, and the first run
+used `go-no-go-2`).
 
 ## Question
 
@@ -117,4 +118,77 @@ service enforces), and a hosted agent's assignment is given no inputs. The
 planner's decisions are validated as before. Also measured now: goals Taste
 closed as complete that the verifier failed. No go/no-go trial had run.
 
-(Filled in after the run: the commands, the report and the decision.)
+**First run, at `go-no-go-2` (2026-10-04, 10:39 to 21:32 UTC).** One Azure VM
+with 4 vCPUs, two trials at a time (one once the alone arm had finished, at
+12:40). From the tagged code:
+
+    MODEL=azure/gpt-5.6-luna infra/azure/run-terminal-bench.sh gng1-alone tuning -k 3 -n 1 \
+        --ak agent=mini-swe-agent --ak spend_cap_usd=2 --ak worker_spend_cap_usd=2 \
+        --ak monitor_spend_cap_usd=1 --ak worker_max_calls=1000 --ak monitor_max_calls=400 \
+        --ak max_commands=2000 --ak services=none --ak reply_reserve_seconds=10
+    MODEL=azure/gpt-5.6-luna infra/azure/run-terminal-bench.sh gng1-taste tuning -k 3 -n 1 \
+        --ak agent=mini-swe-agent --ak spend_cap_usd=2 --ak worker_spend_cap_usd=2 \
+        --ak monitor_spend_cap_usd=1 --ak worker_max_calls=1000 --ak monitor_max_calls=400 \
+        --ak max_commands=2000
+    python scripts/go_no_go_report.py --arm alone=/root/tb/jobs/gng1-alone \
+        --arm taste=/root/tb/jobs/gng1-taste
+
+| Arm | Solved | Trials | $/trial | $/solved | Coordinator $ | Agent $ | Monitor $ | Monitor stops | Refused, verifier passed | Flagged |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| alone | 17 | 60 | 0.005906 | 0.020844 | 0.0 | 0.354354 | 0.0 | 0 | 0 | 0 |
+| taste | 24 | 60 | 0.239512 | 0.598781 | 6.798815 | 2.647677 | 4.924252 | 46 | 81 | 8 |
+
+Paired by task (20 tasks): taste better on 7, alone better on 1
+(kv-store-grpc), same on 12; exact sign test p = 0.07.
+
+Measure 4, supervised arm: 46 agent runs stopped by their monitor;
+81 submissions refused in trials the verifier passed (an upper bound on
+wrong refusals: a later run may have changed the container); 6 of
+the 20 goals closed as complete failed the verifier. Measure 5: 8
+trials flagged, four `stopped:planner_failed` and the rest
+`evidence_incomplete` from work cut off at a trial's end
+([#48](https://github.com/zanwenfu/taste-is-all-you-need/issues/48)); no
+exceptions. Model spend: $14.72 ($0.35 alone, $14.37 supervised) in all.
+
+**Decision on the first run: Go** by the rule. The supervised arm solved 24 task-runs and the
+alone arm 17 (the rule asks at least 16). It did better on 7 of the 20
+tasks and worse on one (kv-store-grpc, 2 of 3 against 3 of 3). It cost about
+40 times as much per trial ($0.24 against $0.006) and 29 times as much per
+solved task ($0.60 against $0.021): the coordinator $6.80 of its $14.37, the
+monitors $4.92, the agent's own calls $2.65. Whether the gain comes from
+supervision or from running the agent more than once is what the study's
+budget-matched controls
+([#34](https://github.com/zanwenfu/taste-is-all-you-need/issues/34)) are for.
+
+**Third amendment, after the first run (2026-10-04): code at `go-no-go-3`.**
+The first run's records showed defects in the supervised arm, each tracked
+as an issue and fixed with tests while the run went on (the run itself used
+`go-no-go-2` throughout):
+[#40](https://github.com/zanwenfu/taste-is-all-you-need/issues/40) the
+coordinator, monitors and certifier looked for a container task's files in
+memory, where they never are, so certified work was assessed "not met" and
+finished goals kept running;
+[#41](https://github.com/zanwenfu/taste-is-all-you-need/issues/41) contracts
+asked the hosted agent to write its own report, and its monitor judged it;
+[#42](https://github.com/zanwenfu/taste-is-all-you-need/issues/42) refused
+plans were counted over the whole goal, and several bookkeeping slips were
+still refusals;
+[#43](https://github.com/zanwenfu/taste-is-all-you-need/issues/43) the step
+monitor judged a run's last batch without its earlier work;
+[#44](https://github.com/zanwenfu/taste-is-all-you-need/issues/44) a goal was
+closed on a documented test failure;
+[#45](https://github.com/zanwenfu/taste-is-all-you-need/issues/45) agents were
+stopped for defects they were still fixing;
+[#46](https://github.com/zanwenfu/taste-is-all-you-need/issues/46)
+certification failed closed when a finding's hash was mis-copied.
+Each change to a prompt was first checked by replaying recorded decisions
+with the same model and settings (`scripts/replay_decision.py`; the code that
+decided rebuilds the prompt it sent, byte for byte), and the changes together
+by two pilots on tuning tasks (nine trials).
+The go/no-go is run again at `go-no-go-3`: both arms, the same tasks, runs
+and settings. So that it takes hours rather than a day, the VM is resized to
+32 vCPUs (Standard_D32as_v7) and each arm runs eight trials at a time; the
+first run had two at a time in all. The decision below is taken on this
+second run; the first run's result stands as recorded.
+
+(Filled in after the second run: its commands, report and the decision.)
