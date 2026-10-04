@@ -191,4 +191,49 @@ and settings. So that it takes hours rather than a day, the VM is resized to
 first run had two at a time in all. The decision below is taken on this
 second run; the first run's result stands as recorded.
 
-(Filled in after the second run: its commands, report and the decision.)
+**Second run, at `go-no-go-3` (2026-10-04, 22:25 to 23:50 UTC).** One Azure
+VM with 32 vCPUs, eight trials at a time per arm. From the tagged code:
+
+    MODEL=azure/gpt-5.6-luna infra/azure/run-terminal-bench.sh gng3-alone tuning -k 3 -n 8 \
+        --ak agent=mini-swe-agent --ak spend_cap_usd=2 --ak worker_spend_cap_usd=2 \
+        --ak monitor_spend_cap_usd=1 --ak worker_max_calls=1000 --ak monitor_max_calls=400 \
+        --ak max_commands=2000 --ak services=none --ak reply_reserve_seconds=10
+    MODEL=azure/gpt-5.6-luna infra/azure/run-terminal-bench.sh gng3-taste tuning -k 3 -n 8 \
+        --ak agent=mini-swe-agent --ak spend_cap_usd=2 --ak worker_spend_cap_usd=2 \
+        --ak monitor_spend_cap_usd=1 --ak worker_max_calls=1000 --ak monitor_max_calls=400 \
+        --ak max_commands=2000
+    python scripts/go_no_go_report.py --arm alone=/root/tb/jobs/gng3-alone \
+        --arm taste=/root/tb/jobs/gng3-taste
+
+| Arm | Solved | Trials | $/trial | $/solved | Coordinator $ | Agent $ | Monitor $ | Monitor stops | Refused, verifier passed | Flagged |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| alone | 20 | 60 | 0.006437 | 0.019312 | 0.0 | 0.386241 | 0.0 | 0 | 0 | 0 |
+| taste | 25 | 60 | 0.194744 | 0.467385 | 5.517135 | 2.06173 | 4.105756 | 23 | 7 | 4 |
+
+Paired by task (20 tasks): taste better on 5, alone better on 3
+(polyglot-c-py, sam-cell-seg, sqlite-with-gcov), same on 12; exact sign test
+p = 0.73. With `scripts/study_report.py`: mean difference in the share of
+runs solved +0.083 per task, bootstrap 95% interval [-0.033, 0.217],
+sign-flip permutation p = 0.34.
+
+Measure 4, supervised arm: 23 agent runs stopped by their monitor (first run
+46); 7 submissions refused in trials the verifier passed (first run 81); 6 of
+the 27 goals closed as complete failed the verifier (first run 6 of 20); no
+goal ended because its planner failed (first run 4). Measure 5: 4 trials
+flagged `evidence_incomplete` (work cut off at a trial's end, #48, fixed after
+this tag); 2 trials raised an exception and were not graded: at the end the
+terminal still held a command, and the environment could not be handed to
+grading ([#49](https://github.com/zanwenfu/taste-is-all-you-need/issues/49));
+both count as unsolved. Model spend: $12.07 ($0.39 alone, $11.68 supervised).
+Both runs together $26.79; with the pilots and decision replays, about $32 of
+the $100 allowed.
+
+**Decision: Go** by the rule: the supervised arm solved 25 task-runs and the
+alone arm 20 (the rule asks at least 19). The fixes made supervision much
+cleaner (wrong refusals 81 to 7, monitor stops 46 to 23, planner failures 4 to
+0, cost per trial $0.24 to $0.19), but its gain over the agent alone is small
+and, on 20 tasks, not distinguishable from none; the alone arm itself moved
+from 17 to 20 between the runs with the same code. Supervision as built does
+not make the agent worse at about 30 times the cost; whether it, or rollback
+built on it, makes it better is for the study, with the continue control
+(#34) to separate supervision from extra attempts.
