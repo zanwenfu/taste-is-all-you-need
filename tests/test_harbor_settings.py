@@ -105,6 +105,14 @@ def test_both_arms_are_held_to_the_same_cap_per_trial():
     assert alone.spend_cap_usd == supervised.spend_cap_usd == 2
 
 
+def test_the_continue_control_has_the_supervised_arms_generations():
+    """#34: the agent alone, run again until the supervised arm's bound or the task's time."""
+    once = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent", "services": "none"})
+    again = replace(once, alone="continue")
+    assert once.generations == 1 and again.generations == again.max_generations == 12
+    assert again.disclosure()["alone"] == "continue" and "alone" not in replace(once, services="all").disclosure()
+
+
 def test_a_cheaper_worker_model_keeps_its_own_route():
     settings = TrialSettings.from_options({"model": "gpt-6-astra", "worker_model": "gpt-6-sol",
                                            "worker_effort": "medium"})
@@ -165,6 +173,8 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
     ({"model": "gpt-6.1-sol"}, "model must be one of"),
     ({"agent": "claude-code"}, "agent must be one of"),
     ({"agent": "mini-swe-agent", "services": "some"}, "services must be all or none"),
+    ({"agent": "mini-swe-agent", "alone": "twice"}, "alone must be once or continue"),
+    ({"agent": "mini-swe-agent", "alone": "continue"}, "needs services none"),
     ({"worker_model": "claude"}, "model must be one of"),
     ({"spend_cap_usd": "0"}, "must be positive"),
     ({"handoff_seconds": "nan"}, "must be positive"),

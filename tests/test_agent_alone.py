@@ -11,8 +11,6 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-import pytest
-
 from taste.brains import azure_worker_launch, benchmark_reply
 from taste.brains.azure_central_host import compose_azure_central_runtime
 from taste.brains.azure_worker_entrypoint import run_directory
@@ -121,12 +119,78 @@ def test_the_agent_alone_runs_once_unjudged_and_its_own_words_are_the_reply(tmp_
     asyncio.run(scenario())
 
 
-def test_the_fixed_plan_refuses_a_second_generation():
+def test_the_agent_alone_continues_in_the_same_environment_until_the_generations_run_out(
+        tmp_path, policy, sdk_transport, monkeypatch):
+    sent, _ = install_planner(sdk_transport)
+    admitted = alone(policy)
+    goal = Goal(goal_id="azure-goal", task="Make the tests pass.", success_criteria=("make test passes",),
+                budget_usd=100, metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA,
+                                          benchmark_reply.RESERVE_KEY: 10})
+    original = azure_worker_launch.worker_command
+
+    def command(*args, **kwargs):
+        argv = list(original(*args, **kwargs))
+        argv[3] = argv[3].replace("import runpy;", ALONE + "\nsys.modules.pop('taste.brains.azure_worker_entrypoint', None)\nimport runpy;", 1)
+        return tuple(argv)
+
+    monkeypatch.setattr(azure_worker_launch, "worker_command", command)
+
+    async def scenario():
+        env = Scripted()
+        owner = TerminalBroker.create(tmp_path / "terminal-ledger", admitted.terminal.binding, env)
+        with tempfile.TemporaryDirectory(prefix="taste-alone-rpc-", dir="/tmp") as directory:
+            socket_path = str(Path(directory) / "service" / "terminal.sock")
+            seed = TerminalCredential(socket_path, os.geteuid(), os.geteuid(),
+                                      TerminalGrant(owner.binding, "controller_bootstrap", 5), "a" * 64)
+            service = TerminalService(owner, [seed])
+            await service.start()
+            loop = asyncio.get_running_loop()
+
+            def issue(spec):
+                credential = TerminalCredential(socket_path, os.geteuid(), os.geteuid(),
+                    admitted.terminal.grant(spec.assignment), secrets.token_hex(32))
+
+                async def register():
+                    service.authorize(credential)
+
+                asyncio.run_coroutine_threadsafe(register(), loop).result(timeout=5)
+                return credential
+
+            root = tmp_path / "repo"
+            root.mkdir()
+            try:
+                with compose_azure_central_runtime(root, "alone", goal, policy=admitted,
+                        environment=environment(), terminal_credential_provider=issue) as runtime:
+                    result = await runtime.run_async(max_generations=3, wall_clock_seconds=120)
+                    assert result.stop_reason == "generation_bound", result.detail
+                    runs = sorted(runtime.supervisor.runs(), key=lambda run: run.assignment.generation)
+                    # Three runs, each given the task as given, in the one environment.
+                    assert [run.assignment.assignment_id for run in runs] == ["agent-run", "agent-run-2",
+                                                                              "agent-run-3"]
+                    assert {run.assignment.contract.task for run in runs} == {"Make the tests pass."}
+                    assert len(env.calls) == 6
+                    plan = runtime.planner.current_plan(goal.goal_id)
+                    assert plan.metadata["proposal"]["final_reply"] == "I ran the tests and they pass."
+                assert sent == []
+            finally:
+                await service.close()
+                owner.close()
+    asyncio.run(scenario())
+
+
+def test_a_later_generation_runs_the_agent_again_on_the_task_as_given():
+    """The continue control (#34): the agent alone, run again in the same environment each
+    generation the runtime allows, given the task verbatim; nothing plans, judges or certifies."""
+    exemplar = {"model": "m", "resources": {}, "contract": {"budget_usd": 2.0, "max_turns": 1000}}
     payload = {"request": {"operation_id": "op", "generation": 2, "parent_plan": {"plan_id": "p"},
-                           "goal": {"task": "t"}, "world": {"integration_state_id": "a" * 40}},
-               "required_output_shape": {"assignments": [{}]}}
-    with pytest.raises(ValueError, match="one generation"):
-        single_run_proposal(json.dumps(payload))
+                           "goal": {"task": "Make the tests pass.", "success_criteria": ["make test passes"]},
+                           "world": {"integration_state_id": "a" * 40}},
+               "required_output_shape": {"assignments": [exemplar]}}
+    proposal = json.loads(single_run_proposal(json.dumps(payload)))
+    [run] = proposal["assignments"]
+    assert run["assignment_id"] == "agent-run-2" and run["generation"] == 2
+    assert run["contract"]["identity"] == "agent-2" and run["contract"]["task"] == "Make the tests pass."
+    assert proposal["complete"] is False
 
 
 def test_the_closing_reply_without_a_report_says_so():

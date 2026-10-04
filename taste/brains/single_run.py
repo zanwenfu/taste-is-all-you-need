@@ -1,13 +1,16 @@
-"""The planner of an agent run alone: one assignment, the task as given; then its report.
+"""The planner of an agent run alone: the task as given, for each run; then its report.
 
 With every service off (``services="none"``), a goal is the agent and nothing
 else, run through the same goal machinery as a supervised one: the same
 worker process, journals, terminal broker, settlement and record. Only the
 planner, the monitors and the certifier are absent. The planner is this fixed
-rule, not a model: its first plan is one assignment whose task is the goal's
-task verbatim, for the hosted agent; its closing reply is that agent's own
-final words. Its calls go through the ordinary planner transport, so they are
-recorded like any plan, at no cost, under the model name ``taste-fixed-plan``.
+rule, not a model: each plan is one assignment whose task is the goal's task
+verbatim, for the hosted agent; its closing reply is that agent's own final
+words. The goal's generation bound says how many runs there are: one for the
+agent alone, or as many as the supervised arm may have for the continue
+control (#34), each run in the environment the last one left. Its calls go
+through the ordinary planner transport, so they are recorded like any plan,
+at no cost, under the model name ``taste-fixed-plan``.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from taste.brains.records import ArtifactSpec, Assignment, contract_digest
 
 FIXED_PLAN_MODEL = "taste-fixed-plan"
 REPORT_PATH = "report.md"
-_RATIONALE = "One run of the agent on the task as given, with planning, monitoring and certification off."
+_RATIONALE = "A run of the agent on the task as given, with planning, monitoring and certification off."
 
 
 def _assessment(payload, evidence):
@@ -47,23 +50,27 @@ def single_run_proposal(prompt: str) -> str:
                      assessment=_assessment(payload, "No one judged the agent's work in this run."),
                      metadata={"final_reply": _closing_reply(request)})
         return json.dumps(shape, sort_keys=True)
-    if request["generation"] != 1 or request.get("parent_plan") is not None:
-        raise ValueError("an agent run alone has one generation")
+    generation = request["generation"]
+    if (generation == 1) != (request.get("parent_plan") is None):
+        raise ValueError("only the first plan of an agent run alone has no parent")
+    # A fresh branch for each run; the first keeps the name it always had.
+    suffix = "" if generation == 1 else f"-{generation}"
     exemplar = payload["required_output_shape"]["assignments"][0]
     goal = request["goal"]
     contract = Contract(
-        identity="agent", task=goal["task"], inputs=(), outputs=(REPORT_PATH,),
+        identity="agent" + suffix, task=goal["task"], inputs=(), outputs=(REPORT_PATH,),
         success_criteria=tuple(goal.get("success_criteria") or ("the task is done",)),
         budget_usd=exemplar["contract"]["budget_usd"], max_turns=exemplar["contract"]["max_turns"],
     )
     assignment = Assignment(
-        assignment_id="agent-run", generation=1, attempt=0, contract=contract,
+        assignment_id="agent-run" + suffix, generation=generation, attempt=0, contract=contract,
         contract_digest=contract_digest(contract), base_state_id=request["world"]["integration_state_id"],
         outputs=(ArtifactSpec("report", REPORT_PATH, kind="report",
                               description="the agent's report, written by the harness"),),
         model=exemplar["model"], resources=exemplar["resources"],
     )
     shape.update(assignments=[assignment.to_dict()],
-                 assessment=_assessment(payload, "The agent has not run yet."),
+                 assessment=_assessment(payload, "The agent has not run yet." if generation == 1
+                                        else "No one judged the agent's work in this run."),
                  metadata={"final_reply": ""})
     return json.dumps(shape, sort_keys=True)

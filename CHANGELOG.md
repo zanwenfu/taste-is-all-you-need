@@ -30,6 +30,12 @@ behaviour and interfaces.
   matches the SHA-256 recorded when it was sent; with `--calls N` the same
   model is asked again. Every prompt change made after the first go/no-go run
   was checked this way before being kept.
+- **The continue control** (`--ak services=none --ak alone=continue`): the
+  agent alone, run again in the environment its last run left, given the
+  task as given each time, until the supervised arm's generation bound or the
+  task's time runs out. A gain from supervision might come from running the
+  agent more than once; this arm has the attempts without the supervision
+  ([#34](https://github.com/zanwenfu/taste-is-all-you-need/issues/34)).
 - **A fixed split of Terminal-Bench 2.1 into tuning and test tasks**
   (`data/splits/terminal-bench-2-1.json`, rule in
   `taste/benchmarks/task_split.py`), and `infra/azure/run-terminal-bench.sh`,

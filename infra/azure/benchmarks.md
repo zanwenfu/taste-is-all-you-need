@@ -63,6 +63,7 @@ result metadata (`agent_result.metadata.taste.configuration`).
 | `worker_model` | the trial's model | Served model for workers and monitors, one of the same three. |
 | `agent` | empty | An agent written by others that every worker runs unchanged: `mini-swe-agent`. Empty runs Taste's own worker. See below. |
 | `services` | `all` | `none` runs that agent alone: a fixed rule plans (the task verbatim, one assignment), no monitor judges it and nothing certifies it, one generation. The baseline arm, through the same machinery; the agent may spend the trial's whole cap. |
+| `alone` | `once` | With `services=none`: `continue` runs the agent again, given the task as given each time, in the environment the last run left, until `max_generations` or the task's time runs out. The control for a gain that comes from more attempts rather than from supervision. |
 | `worker_effort` | `low` | Worker reasoning effort: `low`, `medium`, `high`. Monitors use `low`. |
 | `planner_effort` | `medium` | The coordinator's reasoning effort. Empty leaves the provider's default. Measured on gpt-6-astra, the level changes little: the model reasons briefly at every level. |
 | `spend_cap_usd` | 15 | Known spending at which a trial takes on no more work and replies. A worker already running finishes first, so a trial can pass the cap by that worker's and its monitor's allowances and by the closing reply. |

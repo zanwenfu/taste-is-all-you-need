@@ -56,9 +56,14 @@ class TrialSettings:
     # An agent written by others that every worker runs unchanged (taste.agents);
     # empty for Taste's own worker.
     agent: str = ""
-    # "none" runs that agent alone: one run of the task as given, with no
-    # planner (a fixed rule plans), no monitor and no certification.
+    # "none" runs that agent alone: the task as given, with no planner (a
+    # fixed rule plans), no monitor and no certification.
     services: str = "all"
+    # With services off: "once" runs the agent one time; "continue" (#34)
+    # runs it again in the environment the last run left, given the task as
+    # given each time, until the generation bound or the task's time runs
+    # out: the supervised arm's attempts without its supervision.
+    alone: str = "once"
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
     # little: 47 to 70 reasoning tokens on one small puzzle from low to high,
@@ -131,6 +136,10 @@ class TrialSettings:
             raise ValueError("services must be all or none")
         if self.services == "none" and not self.agent:
             raise ValueError("services can be off only for a hosted agent")
+        if self.alone not in ("once", "continue"):
+            raise ValueError("alone must be once or continue")
+        if self.alone == "continue" and self.services != "none":
+            raise ValueError("alone=continue runs the agent alone: it needs services none")
         if self.planner_effort not in ("", *WORKER_EFFORTS):
             raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
 
@@ -147,8 +156,8 @@ class TrialSettings:
 
     @property
     def generations(self):
-        """The goal's generation bound: one run when the agent runs alone."""
-        return 1 if self.services == "none" else self.max_generations
+        """The goal's generation bound: one run when the agent runs alone once."""
+        return 1 if self.services == "none" and self.alone == "once" else self.max_generations
 
     def budgets(self):
         """(worker cap, monitor cap, goal budget) in USD, each including its worst-case call."""
@@ -220,6 +229,7 @@ class TrialSettings:
         return {"coordinator_model": served, "worker_model": worker_served,
                 "monitor_model": worker_served, "worker_effort": self.worker_effort,
                 "worker_agent": self.agent or "taste", "services": self.services,
+                **({"alone": self.alone} if self.services == "none" else {}),
                 "coordinator_effort": self.planner_effort or "provider default",
                 "monitor_effort": "low",
                 "spend_cap_usd": self.spend_cap_usd, "admission_budgets_usd": {
