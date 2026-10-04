@@ -76,7 +76,12 @@ def coordinator_prompt(store: Store, generation: str = "last"):
                 if path.startswith(".taste/planner/operations/") and path.endswith("/request.json")]
     candidates = [item for item in requests if "closing" not in item.operation_id]
     wanted = max(item.generation for item in candidates) if generation == "last" else int(generation)
-    request = next(item for item in candidates if item.generation == wanted)
+    # A generation can have several requests (a refused plan is asked for
+    # again); the one to replay is the one whose plan was accepted.
+    accepted = {json.loads(head.read(path)).get("metadata", {}).get("request_id")
+                for path in head.files() if path.startswith(".taste/planner/plans/")}
+    matching = [item for item in candidates if item.generation == wanted]
+    request = next((item for item in matching if item.request_id in accepted), matching[0])
     sent = [json.loads(head.read(path)) for path in head.files()
             if path.startswith(".taste/planner/transport/") and path.endswith("/intent.json")]
     recorded = [item["binding"]["prompt_sha256"] for item in sent
