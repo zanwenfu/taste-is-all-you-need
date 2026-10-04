@@ -141,7 +141,11 @@ _OPENAI = {
     ),
 }
 
-PRICES: dict[str, ModelPrice] = {**_ANTHROPIC, **_OPENAI}
+# The planner of an agent run alone is a fixed rule (taste.brains.single_run),
+# not a model: it sends nothing anywhere and costs nothing.
+_FIXED = {"taste-fixed-plan": ModelPrice("fixed", ((None, Rates(0.0, 0.0, 0.0, 0.0)),), 1_000_000, "2026-10-04")}
+
+PRICES: dict[str, ModelPrice] = {**_ANTHROPIC, **_OPENAI, **_FIXED}
 
 # Names that resolve to a different snapshot over time. A run manifest
 # recording an alias cannot say which model actually answered, so an alias is
@@ -298,7 +302,9 @@ def max_call_cost_usd(
         * (prompt_tokens * prompt_rate + max_output_tokens * output_rate)
         / 1_000_000
     )
-    if not math.isfinite(exposure) or exposure <= 0:
+    # Only the fixed plan, which is not a model and sends nothing, costs nothing;
+    # a model priced at zero is a mistake in the table.
+    if not math.isfinite(exposure) or exposure < 0 or (exposure == 0 and price.provider != "fixed"):
         raise PricingError(f"maximum call exposure for {model!r} is invalid")
     return exposure
 

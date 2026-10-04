@@ -155,6 +155,8 @@ class AzureWorkerRuntime:
     # A worker that takes inbox messages and verdicts must acknowledge them all
     # before it may complete. An agent that cannot take them is not held to it.
     ACKNOWLEDGES_FEEDBACK = True
+    # Whether a monitor judges the work and certifies the report.
+    CERTIFIES = True
 
     def __init__(self, branch: Branch, assignment: Assignment, session: ResponsesSession,
                  monitor: MonitorBrain, *, terminal_client=None):
@@ -374,7 +376,7 @@ class AzureWorkerRuntime:
         # Freeze worker input before the final monitor drain. Its new verdicts
         # go to the coordinator, not back into an endless acknowledgement loop.
         verdict_boundary = self.branch.verdict_watermark()
-        if not interrupted and not failures:
+        if not interrupted and not failures and self.CERTIFIES:
             _, interrupted = await _settled_monitor(
                 self._monitored(lambda: self.monitor.drain(None, final=True)), failures)
 
@@ -396,7 +398,7 @@ class AzureWorkerRuntime:
             failures.append("work_conflicts")
 
         assessment = None
-        if not interrupted and not failures:
+        if not interrupted and not failures and self.CERTIFIES:
             terminal_context = {
                 "schema": "taste.brains/AzureWorkerTerminalContext/1",
                 "run_id": self.session.binding.run_id,
@@ -436,7 +438,7 @@ class AzureWorkerRuntime:
             failures.append("missing_worker_claim")
         failures = list(dict.fromkeys(failures))
         completed = bool(not failures and claim is not None and claim.status == "completed"
-                         and assessment is not None and assessment.acceptable)
+                         and (not self.CERTIFIES or (assessment is not None and assessment.acceptable)))
         # Record detail separately; WorkerReport terminal_reason is a strict
         # lowercase category, not an exception name or an artifact path.
         reason = "completed" if completed else (failures[0].split(":", 1)[0].lower() if failures else "blocked")

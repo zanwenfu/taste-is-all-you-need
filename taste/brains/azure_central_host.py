@@ -6,6 +6,7 @@ import os
 from taste.brains.azure_execution_policy import AzureExecutionPolicy
 from taste.brains.azure_worker_launch import worker_command_factory
 from taste.brains.central_host import compose_central_runtime
+from taste.brains.single_run import FIXED_PLAN_MODEL
 from taste.brains.supervisor import SubprocessLauncher
 from taste.llm import LLM
 from taste.providers.base import ProtocolFailure
@@ -53,7 +54,9 @@ def compose_azure_central_runtime(
         {"AZURE_OPENAI_BASE_URL": policy.endpoint, "AZURE_OPENAI_API_KEY": "settlement-no-dispatch"}
         if settlement_only else environment)
     llm_type = _SettlementLLM if settlement_only else LLM
-    llm = llm_type(azure_openai=azure, budget_usd=bound_goal.budget_usd, cap_on="billed",
+    # The fixed plan of an agent run alone is not a model and has no route.
+    route = {} if policy.planner_model == FIXED_PLAN_MODEL else {"azure_openai": azure}
+    llm = llm_type(**route, budget_usd=bound_goal.budget_usd, cap_on="billed",
                   max_attempts=1, load_env_file=False, run_id=f"central-planner.{bound_goal.goal_id}")
     if launcher is None:
         launcher_type = _SettlementLauncher if settlement_only else SubprocessLauncher

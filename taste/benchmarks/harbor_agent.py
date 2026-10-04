@@ -157,7 +157,7 @@ class TasteAgent(BaseAgent):
         root = safe_parent(self.trials_root) / token
         self.owner = AzureTerminalTrial.create(
             root, backend, goal, policy, service_uid=self._service_uid,
-            python_executable=self.worker_python, max_generations=settings.max_generations,
+            python_executable=self.worker_python, max_generations=settings.generations,
             wall_clock_seconds=deadline - started, max_planner_failures=settings.max_planner_failures)
         context.metadata = {"taste": {"trial": token, "configuration": settings.disclosure()}}
         outcome = None

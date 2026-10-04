@@ -137,6 +137,22 @@ def test_a_hosted_agent_is_part_of_the_policy_only_when_named(policy):
     assert hosted.worker_resources()["worker_agent"] == "mini-swe-agent"
 
 
+def test_services_are_off_only_for_a_hosted_agent_with_the_fixed_plan(policy):
+    hosted = replace(bound(policy), worker_agent="mini-swe-agent")
+    alone = replace(hosted, services="none", planner_model="taste-fixed-plan", planner_deployment="fixed-plan")
+    assert alone.worker_resources()["services"] == "none" and "services" not in hosted.worker_resources()
+    assert AzureExecutionPolicy.from_dict(alone.to_dict()) == alone
+    route = alone.azure_config({"AZURE_OPENAI_BASE_URL": policy.endpoint, "AZURE_OPENAI_API_KEY": "k"})
+    assert [item.model for item in route.deployments] == [alone.worker_model]  # the fixed plan has no route
+    for source, changes, match in (
+            (hosted, {"services": "none"}, "fixed plan"),
+            (hosted, {"planner_model": "taste-fixed-plan", "planner_deployment": "fixed-plan"}, "fixed plan"),
+            (alone, {"worker_agent": ""}, "hosted agent"),
+            (hosted, {"services": "some"}, "all or none")):
+        with pytest.raises(ValueError, match=match):
+            replace(source, **changes)
+
+
 def with_outputs(assignment, *outputs, inputs=()):
     contract = replace(assignment.contract, inputs=tuple(item.path for item in inputs),
                        outputs=tuple(item.path for item in outputs))

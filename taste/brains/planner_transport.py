@@ -426,7 +426,9 @@ def _validate_admission(admission: Any) -> dict[str, Any]:
         remaining = None if remaining_raw is None else _cost(remaining_raw, "remaining_usd")
     except ValueError as exc:
         raise PlannerReceiptError("planner receipt admission is invalid") from exc
-    if ceiling <= 0 or (remaining is not None and remaining < ceiling):
+    # Zero only for the fixed plan of an agent run alone; the price table
+    # refuses a zero worst case for any model.
+    if ceiling < 0 or (remaining is not None and remaining < ceiling):
         raise PlannerReceiptError("planner receipt admission did not cover call exposure")
     return {
         "remaining_usd": remaining,

@@ -363,7 +363,9 @@ def compose_central_runtime(
     if type(owns_planner_sdk) is not bool or (owns_planner_sdk and azure_policy is None):
         raise ValueError("SDK client ownership requires the explicit Azure composition")
     if azure_policy is not None:
-        expected_route = {
+        from taste.brains.single_run import FIXED_PLAN_MODEL
+
+        expected_route = None if azure_policy.planner_model == FIXED_PLAN_MODEL else {
             "route": "azure_openai", "endpoint": azure_policy.endpoint,
             "deployment": azure_policy.planner_deployment, "deployment_type": "GlobalStandard",
             "served_model": azure_policy.planner_model,

@@ -14,6 +14,12 @@ behaviour and interfaces.
   wrong or lost, and certifies its report like any worker's. A test runs its
   loop with its own model class and with Taste's and finds the same requests,
   messages and commands.
+- **An agent run alone through the same machinery** (`--ak services=none`),
+  the baseline arm of a comparison: a fixed rule plans (the task verbatim, one
+  assignment, then the agent's own words as the reply), no monitor, no
+  certification, one generation. Both arms are held to the same cap per trial.
+  `scripts/go_no_go_report.py` compares two arms task by task, with spending
+  by role. The first study's protocol is `docs/studies/go-no-go.md`.
 - **Any admitted model in every role, the coordinator included**, and GPT-5.6
   Luna (`gpt-5.6-luna`, version 2026-07-09) among them, at its Azure Global
   Standard price.

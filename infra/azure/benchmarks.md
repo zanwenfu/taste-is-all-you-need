@@ -62,6 +62,7 @@ result metadata (`agent_result.metadata.taste.configuration`).
 | `-m azure/<model>` | `gpt-6-astra` | The trial's model, which the coordinator runs on and every other role too unless `worker_model` names another: `gpt-6-astra`, `gpt-6-sol` or `gpt-5.6-luna`. |
 | `worker_model` | the trial's model | Served model for workers and monitors, one of the same three. |
 | `agent` | empty | An agent written by others that every worker runs unchanged: `mini-swe-agent`. Empty runs Taste's own worker. See below. |
+| `services` | `all` | `none` runs that agent alone: a fixed rule plans (the task verbatim, one assignment), no monitor judges it and nothing certifies it, one generation. The baseline arm, through the same machinery; the agent may spend the trial's whole cap. |
 | `worker_effort` | `low` | Worker reasoning effort: `low`, `medium`, `high`. Monitors use `low`. |
 | `planner_effort` | `medium` | The coordinator's reasoning effort. Empty leaves the provider's default. Measured on gpt-6-astra, the level changes little: the model reasons briefly at every level. |
 | `spend_cap_usd` | 15 | Known spending at which a trial takes on no more work and replies. A worker already running finishes first, so a trial can pass the cap by that worker's and its monitor's allowances and by the closing reply. |
@@ -104,7 +105,13 @@ dependencies, which would replace the `openai` package this project needs:
     pip install -e '.[agents]'
     pip install --no-deps --require-hashes -r requirements-agents.txt
 
-Differences from running it alone, disclosed with results: each reply's
+With `--ak services=none` the same agent runs alone, as the baseline of a
+comparison: everything is the same (worker process, journal, broker, record)
+except that a fixed rule plans and no monitor or certifier runs. The fixed
+plan's calls are recorded like any plan, at no cost, as `taste-fixed-plan`.
+`scripts/go_no_go_report.py` compares two such job directories task by task.
+
+Differences from running it outside Taste, disclosed with results: each reply's
 output tokens are capped (a budget needs a ceiling per call), its template
 values leave out the host's environment variables, and output beyond the
 terminal broker's retention limit is cut.

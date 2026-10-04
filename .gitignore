@@ -26,6 +26,7 @@ docs/*
 !docs/img/
 !docs/architecture.md
 !docs/azure-harness.md
+!docs/studies/
 
 # Dataset snapshots: 8MB of JSONL, pinned by digest in data/*.sha256
 data/*.jsonl

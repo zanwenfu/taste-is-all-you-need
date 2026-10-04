@@ -28,7 +28,9 @@ from taste.pricing import (
 def test_every_priced_model_declares_a_verification_date() -> None:
     for model, price in PRICES.items():
         assert price.as_of, f"{model} has no as_of date"
-        assert price.provider in {"anthropic", "openai"}
+        assert price.provider in {"anthropic", "openai", "fixed"}
+        # The only fixed price is the fixed plan, which sends nothing anywhere.
+        assert price.provider != "fixed" or model == "taste-fixed-plan"
 
 
 def test_anthropic_cache_multipliers_match_the_published_structure() -> None:
@@ -62,6 +64,19 @@ def test_gpt_5_6_luna_on_azure_carries_its_dated_global_standard_price() -> None
     assert (short.input, short.output, short.cache_read, short.cache_write) == (0.20, 1.20, 0.02, 0.25)
     assert (long.input, long.output, long.cache_read, long.cache_write) == (0.40, 1.80, 0.04, 0.50)
     assert price.tiers[0][0] == _LONG_CONTEXT_THRESHOLD and price.as_of == "2026-10-04"
+
+
+def test_only_the_fixed_plan_may_cost_nothing() -> None:
+    from taste.pricing import ModelPrice, Rates
+
+    assert max_call_cost_usd("taste-fixed-plan", max_output_tokens=16384, cap_on="billed") == 0.0
+    zero = ModelPrice("openai", ((None, Rates(0.0, 0.0, 0.0, 0.0)),), 1000, "2026-10-04")
+    PRICES["a-model-priced-at-zero"] = zero
+    try:
+        with pytest.raises(PricingError, match="invalid"):
+            max_call_cost_usd("a-model-priced-at-zero", max_output_tokens=10, cap_on="billed")
+    finally:
+        del PRICES["a-model-priced-at-zero"]
 
 
 def test_default_role_models_are_priced() -> None:

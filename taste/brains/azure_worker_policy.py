@@ -30,7 +30,7 @@ _FIELDS = frozenset({
 
 _EFFORTS = ("medium", "high")  # "low" is the original choice and is not written.
 # Written only when chosen, so assignments made before them keep their form.
-_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent"})
+_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent", "services"})
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,8 @@ class AzureWorkerPolicy:
     effort: str = "low"
     # A hosted agent's name; empty for Taste's own worker.
     agent: str = ""
+    # False for an agent run alone: no monitor judges it and nothing certifies it.
+    supervised: bool = True
 
     @classmethod
     def from_assignment(cls, assignment: Assignment) -> AzureWorkerPolicy:
@@ -57,6 +59,8 @@ class AzureWorkerPolicy:
             raise EntrypointInputError("Azure request ceiling is not admitted")
         if "worker_agent" in raw and raw["worker_agent"] not in HOSTED_AGENTS:
             raise EntrypointInputError("the assignment names no hosted agent this worker can run")
+        if "services" in raw and (raw["services"] != "none" or "worker_agent" not in raw):
+            raise EntrypointInputError("only a hosted agent can run without services")
         ceiling = raw.get("request_seconds")
         try:
             monitor_budget = _assignment_monitor_budget_usd(assignment)
@@ -93,7 +97,8 @@ class AzureWorkerPolicy:
         except (ValueError, TypeError, ProtocolFailure) as exc:
             # Do not echo arbitrary policy values into launch diagnostics.
             raise EntrypointInputError("Azure routing or spending limits are invalid") from exc
-        return cls(worker, monitor, batch, raw.get("worker_effort", "low"), raw.get("worker_agent", ""))
+        return cls(worker, monitor, batch, raw.get("worker_effort", "low"), raw.get("worker_agent", ""),
+                   raw.get("services") != "none")
 
     def validate_launch(self, config: EntrypointConfig) -> None:
         if (config.expected_model != self.worker.model or config.monitor_model != self.monitor.model

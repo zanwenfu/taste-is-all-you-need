@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, fields, replace
 from taste.agents import HOSTED_AGENTS
 from taste.brains.azure_worker_policy import AZURE_WORKER_POLICY_SCHEMA, AzureWorkerPolicy
 from taste.brains.responses_session import ResponsesBinding
+from taste.brains.single_run import FIXED_PLAN_MODEL
 from taste.brains.terminal_worker_policy import TERMINAL_POLICY_KEY, TerminalWorkerPolicy
 from taste.brains.worker_admission import EntrypointInputError
 from taste.pricing import max_call_cost_usd, table_sha
@@ -29,7 +30,8 @@ POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
                      "planner_effort": "", "request_seconds": None, "planner_model": AZURE_PLANNER_MODEL,
-                     "worker_agent": ""}
+                     "worker_agent": "", "services": "all"}
+SERVICES = ("all", "none")
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,9 @@ class AzureExecutionPolicy:
     # An agent written by others that every worker runs, unchanged (see
     # taste.agents); empty for Taste's own worker.
     worker_agent: str = ""
+    # "none" runs that agent alone through the same machinery: the fixed plan
+    # as its planner (taste.brains.single_run), no monitor, no certification.
+    services: str = "all"
 
     def __post_init__(self):
         if self.terminal is not None and (
@@ -82,8 +87,14 @@ class AzureExecutionPolicy:
             raise ValueError("terminal policy must share the original Azure goal deadline")
         if self.worker_model not in AZURE_MODELS:
             raise ValueError("worker model has no verified Azure deployment and price")
-        if self.planner_model not in AZURE_MODELS:
+        if self.services not in SERVICES:
+            raise ValueError("services must be all or none")
+        if self.planner_model not in AZURE_MODELS and self.planner_model != FIXED_PLAN_MODEL:
             raise ValueError("planner model has no verified Azure deployment and price")
+        if (self.planner_model == FIXED_PLAN_MODEL) != (self.services == "none"):
+            raise ValueError("the fixed plan is the planner of an agent run alone, and only that")
+        if self.services == "none" and not self.worker_agent:
+            raise ValueError("services can be off only for a hosted agent")
         if (self.worker_model == self.planner_model) != (self.worker_deployment == self.planner_deployment):
             raise ValueError("one served model must use exactly one deployment")
         if self.worker_effort not in WORKER_EFFORTS:
@@ -168,8 +179,10 @@ class AzureExecutionPolicy:
         return replace(goal, metadata={**goal.metadata, POLICY_KEY: self.to_dict()})
 
     def azure_config(self, environment):
+        planner = (() if self.planner_model == FIXED_PLAN_MODEL
+                   else (AzureDeployment(self.planner_model, self.planner_deployment),))
         result = AzureOpenAIConfig.from_environment(environment, deployments=(
-            AzureDeployment(self.planner_model, self.planner_deployment),
+            *planner,
             *(() if self.worker_model == self.planner_model
               else (AzureDeployment(self.worker_model, self.worker_deployment),)),
         ))
@@ -189,6 +202,7 @@ class AzureExecutionPolicy:
             **({} if self.worker_effort == "low" else {"worker_effort": self.worker_effort}),
             **({} if self.request_seconds is None else {"request_seconds": self.request_seconds}),
             **({"worker_agent": self.worker_agent} if self.worker_agent else {}),
+            **({"services": self.services} if self.services != "all" else {}),
         }
 
     def configure_prompt(self, payload):

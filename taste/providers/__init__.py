@@ -26,9 +26,11 @@ _CACHE: dict[str, Provider] = {}
 
 def _register() -> None:
     from taste.providers._anthropic import AnthropicProvider
+    from taste.providers._fixed import FixedPlanProvider
     from taste.providers._openai import OpenAIProvider
 
     _BUILDERS["anthropic"] = AnthropicProvider
+    _BUILDERS["fixed"] = FixedPlanProvider
     _BUILDERS["openai"] = OpenAIProvider
 
 

@@ -23,6 +23,7 @@ from taste.agents import HOSTED_AGENTS
 from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import WORKER_EFFORTS, AzureExecutionPolicy
 from taste.brains.central_planner import SPEND_CAP_KEY, Goal
+from taste.brains.single_run import FIXED_PLAN_MODEL
 from taste.brains.terminal_broker import TerminalBinding
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
 from taste.pricing import max_call_cost_usd, table_sha
@@ -55,6 +56,9 @@ class TrialSettings:
     # An agent written by others that every worker runs unchanged (taste.agents);
     # empty for Taste's own worker.
     agent: str = ""
+    # "none" runs that agent alone: one run of the task as given, with no
+    # planner (a fixed rule plans), no monitor and no certification.
+    services: str = "all"
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
     # little: 47 to 70 reasoning tokens on one small puzzle from low to high,
@@ -123,19 +127,37 @@ class TrialSettings:
             raise ValueError("worker reasoning effort must be low, medium or high")
         if self.agent and self.agent not in HOSTED_AGENTS:
             raise ValueError("agent must be one of: " + ", ".join(sorted(HOSTED_AGENTS)))
+        if self.services not in ("all", "none"):
+            raise ValueError("services must be all or none")
+        if self.services == "none" and not self.agent:
+            raise ValueError("services can be off only for a hosted agent")
         if self.planner_effort not in ("", *WORKER_EFFORTS):
             raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
 
     @property
     def models(self):
-        """(coordinator short name, its served model, worker short name, its served model)."""
-        coordinator = served_model(self.model)
+        """(coordinator short name, its served model, worker short name, its served model).
+
+        An agent run alone has the fixed plan as its coordinator, and the
+        trial's model is the agent's.
+        """
+        coordinator = ((FIXED_PLAN_MODEL, FIXED_PLAN_MODEL) if self.services == "none"
+                       else served_model(self.model))
         return (*coordinator, *served_model(self.worker_model or self.model))
+
+    @property
+    def generations(self):
+        """The goal's generation bound: one run when the agent runs alone."""
+        return 1 if self.services == "none" else self.max_generations
 
     def budgets(self):
         """(worker cap, monitor cap, goal budget) in USD, each including its worst-case call."""
         _, planner, _, worker = self.models
-        worker_cap = self.worker_spend_cap_usd + max_call_cost_usd(
+        # Arms are compared at equal cost: an agent run alone may spend what a
+        # whole supervised trial may, which there the planner, the workers and
+        # their monitors share.
+        allowance = self.spend_cap_usd if self.services == "none" else self.worker_spend_cap_usd
+        worker_cap = allowance + max_call_cost_usd(
             worker, max_output_tokens=self.worker_max_output_tokens, cap_on="billed")
         monitor_cap = self.monitor_spend_cap_usd + max_call_cost_usd(
             worker, max_output_tokens=self.monitor_max_output_tokens, cap_on="billed")
@@ -158,7 +180,8 @@ class TrialSettings:
         coordinator, planner, worker_name, worker = self.models
         worker_cap, monitor_cap, _ = self.budgets()
         binding = TerminalBinding(owner_token, container_id, deadline_unix, self.max_commands)
-        planner_deployment = self.deployment or coordinator
+        planner_deployment = ("fixed-plan" if self.services == "none"
+                              else self.deployment or coordinator)
         # One served model has one route: a worker on the coordinator's model
         # shares its deployment unless another is named for it.
         worker_deployment = self.worker_deployment or (
@@ -175,7 +198,7 @@ class TrialSettings:
             pricing_sha=table_sha(),
             terminal=TerminalWorkerPolicy(binding, self.command_seconds, workdir),
             planner_model=planner, worker_model=worker, worker_effort=self.worker_effort,
-            worker_agent=self.agent,
+            worker_agent=self.agent, services=self.services,
             planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
@@ -196,7 +219,7 @@ class TrialSettings:
         worker_cap, monitor_cap, goal = self.budgets()
         return {"coordinator_model": served, "worker_model": worker_served,
                 "monitor_model": worker_served, "worker_effort": self.worker_effort,
-                "worker_agent": self.agent or "taste",
+                "worker_agent": self.agent or "taste", "services": self.services,
                 "coordinator_effort": self.planner_effort or "provider default",
                 "monitor_effort": "low",
                 "spend_cap_usd": self.spend_cap_usd, "admission_budgets_usd": {

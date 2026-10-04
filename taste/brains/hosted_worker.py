@@ -31,6 +31,7 @@ import uuid
 from dataclasses import asdict
 
 from taste.agents import HostedStop, ModelReply, ShellResult
+from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.azure_worker_runtime import LOST_REPLIES, AzureWorkerRuntime
 from taste.brains.records import Assignment
 from taste.brains.responses_feedback import WorkerClaim
@@ -171,6 +172,8 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         self.report_spec = present[0]
         self.terminal_client, self.workdir = terminal_client, terminal_policy.workdir or "/"
         self.agent, self.model_name = agent, model_name
+        # An agent run alone is neither judged nor certified: it is the baseline.
+        self.CERTIFIES = AzureWorkerPolicy.from_assignment(assignment).supervised
         self.host = None
         self._commands = 0
         self.task = hosted_task(assignment, self.prepared.read(GOAL_TASK_PATH))
@@ -256,7 +259,7 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
                      terminated=result.terminated or "", output=_excerpt(output, OUTPUT_CHARS),
                      output_chars=len(output),
                      dropped_bytes=result.stdout_dropped_bytes + result.stderr_dropped_bytes)
-        judged = await self._monitored(lambda: self.monitor.drain(None))
+        judged = await self._monitored(lambda: self.monitor.drain(None)) if self.CERTIFIES else ()
         stops = [judgement.severity.value for judgement, _ in judged or ()
                  if judgement.severity.value in STOP_SEVERITIES]
         if stops and self.host is not None:
@@ -360,4 +363,4 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         return WorkerClaim(status, summary, tuple(self._activity()), (), {})
 
     def _extra_metadata(self):
-        return {"agent": self.agent.identity()}
+        return {"agent": self.agent.identity(), "supervised": self.CERTIFIES}

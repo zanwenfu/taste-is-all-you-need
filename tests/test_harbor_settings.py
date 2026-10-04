@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -76,6 +77,34 @@ def test_a_trial_can_host_an_agent_in_every_worker():
     assert policy_for(TrialSettings()).worker_agent == ""
 
 
+def test_an_agent_run_alone_has_the_fixed_plan_one_generation_and_says_so():
+    settings = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent",
+                                           "services": "none"})
+    policy = policy_for(settings)
+    assert (policy.planner_model, policy.planner_deployment, policy.services) == (
+        "taste-fixed-plan", "fixed-plan", "none")
+    assert policy.worker_model == "gpt-5.6-luna-2026-07-09" and policy.worker_deployment == "gpt-5.6-luna"
+    assert settings.generations == 1 and TrialSettings().generations == settings.max_generations
+    disclosed = settings.disclosure()
+    assert disclosed["coordinator_model"] == "taste-fixed-plan" and disclosed["services"] == "none"
+    with pytest.raises(ValueError, match="hosted agent"):
+        TrialSettings.from_options({"services": "none"})
+
+
+def test_both_arms_are_held_to_the_same_cap_per_trial():
+    worst = max_call_cost_usd("gpt-5.6-luna-2026-07-09", max_output_tokens=TrialSettings().worker_max_output_tokens,
+                              cap_on="billed")
+    supervised = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent",
+                                             "spend_cap_usd": "2", "worker_spend_cap_usd": "1"})
+    alone = replace(supervised, services="none")
+    # Supervised: the trial's $2 is shared, each worker held to its own $1.
+    assert supervised.budgets()[0] == pytest.approx(1 + worst)
+    assert policy_for(supervised).worker_budget_usd == pytest.approx(1 + worst)
+    # Alone: the agent may spend the whole $2 the supervised trial may.
+    assert alone.budgets()[0] == pytest.approx(2 + worst)
+    assert alone.spend_cap_usd == supervised.spend_cap_usd == 2
+
+
 def test_a_cheaper_worker_model_keeps_its_own_route():
     settings = TrialSettings.from_options({"model": "gpt-6-astra", "worker_model": "gpt-6-sol",
                                            "worker_effort": "medium"})
@@ -135,6 +164,7 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
     ({"model": "gpt-6-luna"}, "model must be one of"),
     ({"model": "gpt-6.1-sol"}, "model must be one of"),
     ({"agent": "claude-code"}, "agent must be one of"),
+    ({"agent": "mini-swe-agent", "services": "some"}, "services must be all or none"),
     ({"worker_model": "claude"}, "model must be one of"),
     ({"spend_cap_usd": "0"}, "must be positive"),
     ({"handoff_seconds": "nan"}, "must be positive"),
