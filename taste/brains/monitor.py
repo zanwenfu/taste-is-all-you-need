@@ -556,10 +556,15 @@ class _Observed:
 class _PinnedView:
     """The ordinary BranchView with the observed head held still for a judge."""
 
-    def __init__(self, observed: _Observed) -> None:
+    def __init__(self, observed: _Observed, *, earlier: tuple[dict[str, Any], ...] | None = None,
+                 running: bool | None = None) -> None:
         self._live = observed.view
         self.head = observed.head
         self.observed_events = observed.events
+        # What the worker did before the batch being judged, and whether it is
+        # still going: a run's last batch often holds only its submission.
+        self.earlier_events = earlier
+        self.worker_running = running
 
     def exists(self) -> bool:
         return True
@@ -995,7 +1000,8 @@ class MonitorBrain:
         batch = tuple(pending[: self.batch_size])
         batch_fingerprints = observed.fingerprints[through : through + len(batch)]
         try:
-            judgement = self._judge(self.contract, list(batch), _PinnedView(observed))
+            judgement = self._judge(self.contract, list(batch), _PinnedView(
+                observed, earlier=tuple(observed.events[:through]), running=alive and not force))
         except BaseException:
             self.state.fingerprints = old_fingerprints
             self.state.judged_through = old_through

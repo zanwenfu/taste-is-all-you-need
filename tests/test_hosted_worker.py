@@ -145,6 +145,44 @@ def test_an_agent_its_monitor_judges_wrong_is_stopped_at_its_next_call(worker, s
     asyncio.run(scenario())
 
 
+def _prompt(payload):
+    parts = []
+    for item in payload.get("input", ()):
+        content = item.get("content")
+        parts.extend([content] if isinstance(content, str) else
+                     [part.get("text", "") for part in content or () if isinstance(part, dict)])
+    return "\n".join(parts)
+
+
+def test_the_monitor_sees_the_work_before_the_batch_it_judges(worker, sdk_transport, tmp_path):
+    """Measured: 36 step findings said a run "submitted after only a completion echo", each for a run
+    that had recorded 3 to 14 commands; the monitor was shown only the batch holding the submission."""
+    replies = {1: [bash("make test", "c1")], 2: [bash("sed -i 's/x/y/' parser.py && make test", "c2")],
+               3: [bash(f"echo {SENTINEL}", "c3")]}
+    shown = []
+
+    def monitor(role, payload):
+        if role != "terminal":
+            shown.append(_prompt(payload))
+        return judged("fine")(role, payload)
+
+    install(sdk_transport, worker_reply=lambda number, _: replies[number], monitor_reply=monitor)
+
+    async def scenario():
+        hosted(worker, monitor_batch_size=1)
+        worker.config = replace(worker.config, monitor_batch_size=1)
+        async with terminal(worker, tmp_path) as t:
+            scripted(t.env, {"sed -i": TerminalResult(0, b"4 passed\n", b""),
+                             "make test": TerminalResult(1, b"FAILED test_parse\n", b""),
+                             SENTINEL: TerminalResult(0, f"{SENTINEL}\n".encode(), b"")})
+            assert await execute_worker(worker.config, store=worker.store, environ=worker.environ) == WorkerExitCode.COMPLETED
+    asyncio.run(scenario())
+    first, last = shown[0], shown[-1]
+    assert '"earlier_in_this_run": []' in first and '"worker_running": true' in first
+    assert "ran: make test -> exit 1" in last and "ran: sed -i" in last
+    assert '"worker_running": false' in last
+
+
 def test_a_hosted_agent_needs_the_task_terminal_and_one_report(worker, sdk_transport):
     install(sdk_transport)
     hosted(worker)

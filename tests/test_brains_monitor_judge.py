@@ -134,6 +134,7 @@ def test_llm_judge_receives_exact_pinned_contract_assignment_and_events(store: S
     # Measured: a monitor called a run wrong because "the immutable state
     # manifest" did not list a file the run had written in the task container.
     assert "never appear in the State's manifest" in call["system"]
+    assert "earlier_in_this_run" in call["system"] and "worker_running" in call["system"]
     prompt = call["messages"][0]["content"]
     assert brain.contract.to_json() in prompt
     assert item.to_json() in prompt

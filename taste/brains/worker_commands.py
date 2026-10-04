@@ -38,22 +38,24 @@ def bounded(lines: list[str], *, last: int = 40, limit: int = 12_000) -> list[st
     return lines
 
 
-def recorded_commands(turns: Any, *, run_id: str, last: int = 40, limit: int = 12_000) -> list[str]:
+def recorded_commands(turns: Any, *, run_id: str | None, last: int = 40, limit: int = 12_000) -> list[str]:
     """The commands one run's recorded turns show, oldest first; [] if there are none.
 
     Read from memory, not from the worker: its branch keeps every turn it
     recorded, so this works for a worker that was killed. A command is listed
     once its intent was recorded, which is before it runs, and as unfinished
-    if no result followed.
+    if no result followed. With ``run_id=None`` every turn is read as the
+    run's: a monitor's events are one run's and leave its binding out.
     """
     started: dict[Any, Any] = {}
     lines: list[str] = []
-    ours = False
+    ours = run_id is None
     for turn in turns:
         kind = turn.get("kind")
         if kind in ("responses_binding", "hosted_binding"):
-            binding = turn.get("binding")
-            ours = isinstance(binding, dict) and binding.get("run_id") == run_id
+            if run_id is not None:
+                binding = turn.get("binding")
+                ours = isinstance(binding, dict) and binding.get("run_id") == run_id
             continue
         if ours and kind == "hosted_command":
             started[turn.get("effect_id")] = turn.get("command", "")

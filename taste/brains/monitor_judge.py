@@ -29,6 +29,7 @@ from taste.brains.monitor import (
     TerminalDecision,
 )
 from taste.brains.records import Assignment, contract_digest
+from taste.brains.worker_commands import recorded_commands
 from taste.llm import MODEL_MONITOR
 from taste.pricing import call_cost
 
@@ -238,7 +239,10 @@ plan, the other workers, and the decision about what to do. So judge how
 confident you are that something is wrong -- not what should be done about it.
 
 **A worker in progress is not a worker in trouble.** You are shown one batch of
-events from a run that is still going. Early batches routinely contain setup,
+events. `earlier_in_this_run` is a mechanical record of the commands the worker
+ran before this batch (the most recent that fit), and `worker_running` says
+whether it is still going: a run's last batch often holds only its submission,
+after the work that record shows. Early batches routinely contain setup,
 exploration, reading files, thinking, and partial tool output, with none of the
 contract's outputs present yet. That is what normal work looks like before it
 finishes; it is not evidence of a problem. The observation's `elapsed` field
@@ -457,6 +461,23 @@ def _elapsed_since(started_at: str | None) -> str | None:
     return f"{seconds / 60:.1f}m since this worker started"
 
 
+def _earlier_work(view: Any) -> dict[str, Any]:
+    """The commands run before this batch, and whether the worker is still going.
+
+    Measured: shown only a run's last batch, which held its submission, a
+    monitor reported 36 times that a worker "submitted after only a completion
+    echo"; every one of those runs had recorded 3 to 14 commands.
+    """
+    earlier = getattr(view, "earlier_events", None)
+    running = getattr(view, "worker_running", None)
+    fields: dict[str, Any] = {}
+    if earlier is not None:
+        fields["earlier_in_this_run"] = recorded_commands(earlier, run_id=None, last=30, limit=8 * 1024)
+    if isinstance(running, bool):
+        fields["worker_running"] = running
+    return fields
+
+
 def build_monitor_observation(
     contract: Contract,
     batch: list[dict[str, Any]],
@@ -494,6 +515,7 @@ def build_monitor_observation(
                 # tell second three from minute ten, and grades an unfinished
                 # worker as a failing one.
                 "elapsed": _elapsed_since(getattr(head.meta, "created_at", None)),
+                **_earlier_work(view),
                 "state": state,
                 "events": _bounded_evidence([judge_event(event) for event in batch], 64 * 1024),
             },

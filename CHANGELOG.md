@@ -76,6 +76,14 @@ behaviour and interfaces.
   reports into stops and refusals of otherwise right work
   (`hosted_contracts`,
   [#41](https://github.com/zanwenfu/taste-is-all-you-need/issues/41)).
+- **The step monitor is shown the work before the batch it judges.** Shown
+  only a run's last batch, which often holds just the submission, it reported
+  36 times in the first go/no-go run that an agent "submitted after only a
+  completion echo"; every one of those runs had recorded 3 to 14 commands.
+  Each step observation now carries a mechanical record of the commands run
+  before the batch (`earlier_in_this_run`) and whether the worker is still
+  running
+  ([#43](https://github.com/zanwenfu/taste-is-all-you-need/issues/43)).
 - **Only refused plans in a row end a goal.** The limit counted refusals over
   the whole goal, so a long goal ended although its planner recovered every
   time. A key at a proposal's top level that is not part of a proposal (an
