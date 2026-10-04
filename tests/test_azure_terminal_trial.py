@@ -168,7 +168,8 @@ def test_a_goal_that_ended_badly_still_leaves_its_container_for_grading(trial, m
     async def scenario():
         outcome = await trial.run(api_key="private-test-key")
         assert outcome.stop_reason == stop_reason and trial.sealed and not trial.test_stops
-        assert trial.audit_flags == ("accounting_unsettled",)
+        # Its spending was settled: the flag says how it stopped, not that it was unsettled.
+        assert trial.audit_flags == ("stopped:" + stop_reason,)
     run_scenario(trial, scenario())
 
 

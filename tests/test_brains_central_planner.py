@@ -21,6 +21,8 @@ from taste.brains.central_planner import (
     PlanningRequest,
     RejectedPlannerOperation,
     StalePlanningWorld,
+    _canonical,
+    _digest,
 )
 from taste.brains.contract import Contract
 from taste.brains.planner_transport import (
@@ -976,14 +978,6 @@ def test_crash_recovery_reuses_attempt_after_reopening_central_lease(
             ),
             "unknown",
         ),
-        (
-            lambda prompt: proposal(
-                prompt,
-                assignment_for(request_from_prompt(prompt)),
-                changes={"request_id": "sha256:" + "f" * 64},
-            ),
-            "does not echo",
-        ),
     ],
 )
 def test_invalid_output_is_preserved_and_operation_is_terminally_rejected(
@@ -1005,6 +999,64 @@ def test_invalid_output_is_preserved_and_operation_is_terminally_rejected(
     with pytest.raises(RejectedPlannerOperation, match="invalid_output"):
         central.plan(goal)
     assert len(transport.calls) == 1
+
+
+def test_bookkeeping_a_model_left_out_or_mis_copied_is_written_and_recorded(store: Store, goal: Goal) -> None:
+    def sloppy(_id: str, _system: str, prompt: str) -> str:
+        value = json.loads(proposal(prompt, assignment_for(request_from_prompt(prompt))))
+        value["request_id"] = "sha256:" + "f" * 64
+        value["generation"] = 9
+        del value["schema"], value["metadata"]
+        item = value["assignments"][0]
+        del item["schema"]
+        item["generation"] = 3
+        item["outputs"][0].pop("schema")
+        return json.dumps(value)
+
+    central, transport = planner(store, sloppy)
+    plan = central.plan(goal)
+    assert plan.generation == 1 and plan.assignments[0].generation == 1
+    assert plan.assignments[0].contract.task == "Produce parser.py"  # the decisions stay the model's
+    assert list(plan.metadata["filled_by_harness"]) == [
+        "schema", "request_id", "generation", "metadata", "assignments[0].schema",
+        "assignments[0].generation", "assignments[0].outputs[0].schema"]
+    # The plan stays bound to exactly what the model wrote.
+    written = json.loads(sloppy("", "", transport.calls[0][2]))
+    assert plan.metadata["proposal_digest"] == _digest(_canonical(written))
+
+
+def test_echoed_prompt_sections_are_dropped_and_a_copied_digest_is_derived_again(store: Store, goal: Goal) -> None:
+    def echoing(_id: str, _system: str, prompt: str) -> str:
+        value = json.loads(proposal(prompt, assignment_for(request_from_prompt(prompt))))
+        value["request"] = json.loads(prompt)["request"]
+        value["assignments"][0]["contract_digest"] = "sha256:" + "0" * 64
+        return json.dumps(value)
+
+    central, _ = planner(store, echoing)
+    plan = central.plan(goal)
+    assert plan.assignments[0].contract_digest != "sha256:" + "0" * 64
+    assert list(plan.metadata["filled_by_harness"]) == ["ignored:request", "assignments[0].contract_digest"]
+
+
+def test_a_key_written_twice_with_one_value_is_not_ambiguous(store: Store, goal: Goal) -> None:
+    def twice(_id: str, _system: str, prompt: str) -> str:
+        valid = proposal(prompt, assignment_for(request_from_prompt(prompt)))
+        rationale = json.loads(valid)["rationale"]
+        return valid[:-1] + ',"rationale":' + json.dumps(rationale) + "}"
+
+    central, _ = planner(store, twice)
+    assert central.plan(goal).generation == 1
+
+
+def test_the_planner_input_names_its_reply_format(store: Store, goal: Goal) -> None:
+    central, transport = planner(store)
+    central.plan(goal)
+    assert "JSON object" in json.loads(transport.calls[0][2])["rules"]["reply_format"]
+
+
+def test_a_proposal_with_nothing_to_fill_records_nothing(store: Store, goal: Goal) -> None:
+    central, _ = planner(store)
+    assert "filled_by_harness" not in central.plan(goal).metadata
 
 
 def test_duplicate_json_keys_are_rejected(store: Store, goal: Goal) -> None:

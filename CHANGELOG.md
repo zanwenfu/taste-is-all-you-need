@@ -42,6 +42,16 @@ behaviour and interfaces.
 
 ### Changed
 
+- **The planner writes only its decisions.** What the request and the policy
+  fix (echoes of the request, schema names, an assignment's generation, base,
+  model, routing and caps, and no inputs for a hosted agent) is filled by the
+  harness and recorded with the plan as `filled_by_harness`; the plan stays
+  bound to exactly what the model wrote. Measured on GPT-5.6 Luna, such slips
+  were refused plans, and four in a row ended a goal. Plans are also asked
+  for as one JSON object, which the Azure Responses API enforces.
+- A run whose spending is settled but which stopped some other way (its
+  planner failing, a runtime error) is flagged `stopped:<reason>`, not
+  `accounting_unsettled`.
 - **A lost reply is charged by the request it sent.** A request holds no more
   tokens than bytes, so its size bounds its cost. A run that lost one reply
   was charged its whole ceiling (about $60 in a benchmark trial); it is now

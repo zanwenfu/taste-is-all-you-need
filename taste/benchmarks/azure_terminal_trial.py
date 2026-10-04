@@ -53,6 +53,21 @@ SETTLE_SECONDS = 90
 PREPARE_SECONDS = 120
 
 
+def grading_flags(outcome):
+    """What keeps a settled outcome from being a clean handoff, said as what it is.
+
+    One flag, "accounting_unsettled", used to cover both an open budget and a
+    goal that stopped some other way than its bounds (its planner failing, a
+    runtime error): a run whose spending was exact read as unsettled.
+    """
+    if grading_ready(outcome):
+        return []
+    budget = outcome.budget
+    if not (budget.enforceable and budget.reserved_usd == 0 and budget.known_spent_usd <= budget.limit_usd):
+        return ["accounting_unsettled"]
+    return ["stopped:" + outcome.stop_reason]
+
+
 def _protected(path):
     """No writable or symlink ancestor may replace controller state."""
     path = Path(path)
@@ -355,8 +370,7 @@ class AzureTerminalTrial:
                     self.trajectory_path = self.root / "controller/trajectory.json"
                     if trace["extra"].get("evidence_complete") is not True:
                         flags.append("evidence_incomplete")
-                if not grading_ready(self.outcome):
-                    flags.append("accounting_unsettled")
+                flags.extend(grading_flags(self.outcome))
             except Exception as exc:
                 # Our record of the run is missing or unusable. The task's
                 # state in the container is unaffected and is still graded.

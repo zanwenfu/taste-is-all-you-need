@@ -452,6 +452,7 @@ class LLM:
         role: str = "unspecified",
         timeout_seconds: float | None = None,
         request_seconds: float | None = None,
+        json_output: bool = False,
     ) -> Completion:
         """One model turn, retried on transient failure.
 
@@ -482,7 +483,7 @@ class LLM:
                 messages=messages,
                 tools=tools,
                 max_tokens=max_tokens,
-                sampling=SamplingConfig(temperature=temperature, effort=effort),
+                sampling=SamplingConfig(temperature=temperature, effort=effort, json_output=json_output),
                 role=role,
                 run_id=self.run_id,
             )

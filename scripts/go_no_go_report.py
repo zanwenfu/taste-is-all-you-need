@@ -104,6 +104,11 @@ def summarize(rows):
         "refused_submissions_in_solved": sum(
             run["exit"] == "Submitted" and run["phase"] != "delivered"
             for row in rows if row["solved"] and row["services"] != "none" for run in row["agent_runs"]),
+        # Taste closed the goal as complete and the task's verifier failed it:
+        # a completion claimed wrongly, the opposite error to a wrong refusal.
+        "claimed_complete": sum(row["stop_reason"] == "complete" for row in rows),
+        "claimed_complete_unsolved": sum(row["stop_reason"] == "complete" and not row["solved"]
+                                         for row in rows),
         "audit_flagged": sum(bool(row["audit_flags"]) for row in rows),
         "exceptions": sum(bool(row["exception"]) for row in rows),
     }

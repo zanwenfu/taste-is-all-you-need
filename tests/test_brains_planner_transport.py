@@ -163,6 +163,13 @@ def test_charged_invalid_completion_is_receipted_and_replayed_without_call(
     assert replacement_llm.ready_models == []
 
 
+
+def test_a_prompt_that_names_json_asks_for_a_json_reply(store: Store) -> None:
+    llm = ReadyFakeLLM([FakeTurn(text='{"schema":"proposal"}', input_tokens=10, output_tokens=5)])
+    transport = make_transport(llm, store, max_tokens=2048)
+    transport.complete(request_id="attempt-1", system="planner system", prompt="Reply with one JSON object.")
+    assert llm.calls[0]["json_output"] is True
+
 def test_unauditable_usage_is_terminal_and_cost_unknown(store: Store) -> None:
     class BadUsageLLM:
         def __init__(self) -> None:

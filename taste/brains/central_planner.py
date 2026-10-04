@@ -52,6 +52,8 @@ from taste.brains.planner_transport import (
     planner_transport_outcome_path,
 )
 from taste.brains.records import (
+    ArtifactRef,
+    ArtifactSpec,
     Assignment,
     CriteriaRevision,
     Criterion,
@@ -95,6 +97,9 @@ BRANCH_OBSERVATION_SCHEMA = "taste.brains/BranchObservation/1"
 OBSERVED_RUN_SCHEMA = "taste.brains/ObservedRun/1"
 REQUEST_SCHEMA = "taste.brains/PlanningRequest/1"
 PROPOSAL_SCHEMA = "taste.brains/PlannerProposal/1"
+# Top-level sections of the planner's prompt, which a model may echo back.
+_PROMPT_SECTIONS = frozenset({"request", "standing_criteria", "required_output_shape",
+                              "assignment_schema", "rules", "earlier_rejections"})
 ATTEMPT_SCHEMA = "taste.brains/PlanningAttempt/1"
 OUTCOME_SCHEMA = "taste.brains/PlanningOutcome/2"
 _OUTCOME_SCHEMA_V1 = "taste.brains/PlanningOutcome/1"
@@ -249,7 +254,9 @@ def _load_json(text: str, where: str) -> dict[str, Any]:
     def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
-            if key in result:
+            # The same value written twice leaves nothing ambiguous; measured
+            # on GPT-5.6 Luna, it was a refused plan. Two values still are.
+            if key in result and result[key] != value:
                 raise ValueError(f"{where} contains duplicate key {key!r}")
             result[key] = value
         return result
@@ -2247,6 +2254,10 @@ class CentralPlanner:
                 "monitor_budget_usd_if_present_must_be_positive_finite": True,
             },
         }
+        # The service enforces a JSON reply only for a request whose input names
+        # JSON; the system text does not count.
+        payload["rules"]["reply_format"] = (
+            "Reply with exactly one JSON object in the required_output_shape, and nothing else.")
         rejections = self._earlier_rejections(request)
         if rejections:
             payload["earlier_rejections"] = rejections
@@ -2484,11 +2495,101 @@ class CentralPlanner:
             ) from exc
         return {**item, "contract_digest": derived}
 
+    def _fill_bookkeeping(self, raw: Any, request: PlanningRequest) -> tuple[Any, list[str]]:
+        """What the request and the policy already fix, written here and not by the model.
+
+        A proposal carries the model's decisions (the work to assign, how each
+        criterion stands, whether the goal is complete, the reply) beside
+        bookkeeping that the request and the policy fix exactly: echoes of the
+        request, schema names, and an assignment's generation, base, model,
+        routing and caps. Asking a model to copy the bookkeeping exactly made
+        every slip a refused plan. Measured live on GPT-5.6 Luna: four refusals
+        in a row (a request id mis-copied twice, an assignment's caps changed, a
+        metadata field left out) ended a goal whose decisions were sound. The
+        bookkeeping is filled here, what was filled is recorded with the plan,
+        and the decisions are validated exactly as before. A contract digest
+        the model supplied is still checked: that is the tamper signal.
+        """
+        if not isinstance(raw, dict):
+            return raw, []
+        value, filled = dict(raw), []
+        # Sections of the prompt a model sent back; they are not part of a plan.
+        for name in sorted(_PROMPT_SECTIONS & value.keys()):
+            del value[name]
+            filled.append("ignored:" + name)
+        expected = self._proposal_template(request)
+        if value.get("schema") != PROPOSAL_SCHEMA:
+            value["schema"] = PROPOSAL_SCHEMA
+            filled.append("schema")
+        for name in ("request_id", "goal_id", "generation", "parent_plan_id",
+                     "based_on_state_id", "observed_heads"):
+            if name not in value or value[name] != expected[name]:
+                value[name] = expected[name]
+                filled.append(name)
+        if "metadata" not in value:
+            # Only an active proposal may lack it: its reply, if one is
+            # required, must be empty. A final one is refused below for want
+            # of the reply the model alone can write.
+            closing = (benchmark_reply.required(request.goal.metadata)
+                       and benchmark_reply.is_closing(request.operation_id))
+            replying = benchmark_reply.required(request.goal.metadata)
+            value["metadata"] = ({"final_reply": ""} if replying and value.get("complete") is False
+                                 and not closing else {})
+            filled.append("metadata")
+        items = value.get("assignments")
+        if isinstance(items, list):
+            value["assignments"] = [self._fill_assignment(item, request, f"assignments[{index}]", filled)
+                                    for index, item in enumerate(items)]
+        return value, filled
+
+    def _fill_assignment(self, item: Any, request: PlanningRequest, where: str, filled: list[str]) -> Any:
+        if not isinstance(item, Mapping):
+            return item
+        item = dict(item)
+        for name, wanted in (("schema", Assignment.SCHEMA), ("generation", request.generation),
+                             ("base_state_id", request.world.integration_state_id)):
+            if item.get(name) != wanted:
+                item[name] = wanted
+                filled.append(f"{where}.{name}")
+        if type(item.get("attempt")) is not int:
+            item["attempt"] = 0
+            filled.append(f"{where}.attempt")
+        contract = item.get("contract")
+        if "contract_digest" in item and isinstance(contract, Mapping):
+            # A model does not compute a hash; a digest that differs from the
+            # contract it wrote was copied from elsewhere (measured on GPT-5.6
+            # Luna: an earlier plan's). It is derived from the contract below,
+            # and the replacement recorded.
+            try:
+                derived = contract_digest(Contract.from_dict(dict(contract)))
+            except Exception:
+                derived = None
+            if derived is not None and item["contract_digest"] != derived:
+                del item["contract_digest"]
+                filled.append(f"{where}.contract_digest")
+        for key, schema in (("outputs", ArtifactSpec.SCHEMA), ("inputs", ArtifactRef.SCHEMA)):
+            entries = item.get(key)
+            if isinstance(entries, list):
+                fixed = []
+                for index, entry in enumerate(entries):
+                    if isinstance(entry, Mapping) and entry.get("schema") != schema:
+                        entry = {**entry, "schema": schema}
+                        filled.append(f"{where}.{key}[{index}].schema")
+                    fixed.append(entry)
+                item[key] = fixed
+        fill = getattr(self.azure_policy, "fill_assignment", None)
+        if callable(fill):
+            item = fill(item, where, filled)
+        return item
+
     def _parse_proposal(self, response: str, request: PlanningRequest) -> PlanRevision:
         if not isinstance(response, str):
             raise InvalidPlannerOutput("planner transport must return JSON text")
         try:
             raw = _load_json(response, "PlannerProposal")
+            # The proposal is bound to exactly what the model wrote.
+            proposal_digest = _digest(_canonical(raw))
+            raw, filled = self._fill_bookkeeping(raw, request)
             required = {
                 "request_id",
                 "goal_id",
@@ -2540,7 +2641,6 @@ class CentralPlanner:
             metadata = _mapping(raw["metadata"], "PlannerProposal.metadata")
             if benchmark_reply.required(request.goal.metadata):
                 benchmark_reply.validate(metadata, complete=raw["complete"], closing=closing)
-            proposal_digest = _digest(_canonical(raw))
             plan = PlanRevision(
                 plan_id=f"plan.{proposal_digest.removeprefix('sha256:')}",
                 generation=request.generation,
@@ -2562,6 +2662,7 @@ class CentralPlanner:
                     "snapshot_id": request.world.snapshot_id,
                     "proposal_digest": proposal_digest,
                     "proposal": _thaw(metadata),
+                    **({"filled_by_harness": filled} if filled else {}),
                 },
             )
         except InvalidPlannerOutput:

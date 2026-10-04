@@ -63,6 +63,7 @@ def test_each_arm_is_summarized_from_its_own_records(scene):
     assert taste["spend_usd"]["coordinator"] == pytest.approx(0.11)
     assert taste["stopped_by_monitor"] == 1 and taste["refused_submissions_in_solved"] == 1
     assert taste["stops"] == {"monitor_wrong": 1} and taste["exits"] == {"Stopped": 1, "Submitted": 4}
+    assert taste["claimed_complete"] == 4 and taste["claimed_complete_unsolved"] == 1
     assert alone["exits"] == {"LimitsExceeded": 2, "Submitted": 2} and alone["stops"] == {}
 
 

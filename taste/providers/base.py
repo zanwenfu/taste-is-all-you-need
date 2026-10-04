@@ -88,6 +88,8 @@ class SamplingConfig:
     temperature: float | None = None
     effort: str | None = None
     verbosity: str | None = None
+    # The reply must be one JSON object, where the provider can enforce it.
+    json_output: bool = False
 
 
 @dataclass(frozen=True)

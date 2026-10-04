@@ -2,7 +2,8 @@
 
 Registered on 2026-10-04, before any go/no-go trial ran
 ([issue 26](https://github.com/zanwenfu/taste-is-all-you-need/issues/26)).
-The code and settings are fixed at the commit tagged `go-no-go-1`.
+The code and settings are fixed at the commit tagged `go-no-go-2` (see the
+amendments below; `go-no-go-1` was the first registration).
 
 ## Question
 
@@ -70,8 +71,9 @@ Produced by `scripts/go_no_go_report.py` from the two job directories:
    did better; an exact two-sided sign test over the tasks that differ.
 3. Dollars per trial and per solved task, by role (coordinator, agent,
    monitor).
-4. Under Taste: agent runs stopped by their monitor, and submissions the
-   certifier refused in trials the verifier passed.
+4. Under Taste: agent runs stopped by their monitor, submissions the
+   certifier refused in trials the verifier passed, and goals Taste closed as
+   complete that the verifier failed.
 5. Trials with audit flags or exceptions, and their causes.
 
 ## Decision
@@ -101,5 +103,18 @@ time, so in the alone arm those seconds were only taken from the agent (on a
 what supervision costs, so the alone arm runs with the least the goal admits:
 `--ak reply_reserve_seconds=10`. Found while reviewing a six-trial pilot that
 used the registered settings; no go/no-go trial had run.
+
+**Second amendment before the run (2026-10-04): code at `go-no-go-2`.** Two
+pilots of six trials (three tuning tasks, both arms, the registered settings)
+found the supervised arm's planner refused for bookkeeping, not for its
+decisions. On GPT-5.6 Luna: a request id mis-copied, a schema name left out,
+an assignment's caps or routing changed, a metadata field missing, an input
+handed to an agent that reads none, and replies that were not valid JSON. Four
+refusals in a row end a goal, and two of the six supervised trials ended so. In
+`go-no-go-2` the harness writes what the request and the policy fix and records
+what it wrote with the plan, plans are asked for as one JSON object (which the
+service enforces), and a hosted agent's assignment is given no inputs. The
+planner's decisions are validated as before. Also measured now: goals Taste
+closed as complete that the verifier failed. No go/no-go trial had run.
 
 (Filled in after the run: the commands, the report and the decision.)

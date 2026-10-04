@@ -104,6 +104,25 @@ def test_output_limit_matches_the_facade_budget_reservation(transport):
     assert llm.stats.totals.calls == 1
 
 
+def test_a_call_that_must_return_json_asks_the_service_to_hold_it_to_that(transport):
+    provider, sent = transport(response(output=[message('{"ok": true}')]), response())
+    asking = [{"role": "user", "content": "Reply with one JSON object."}]
+    reply = provider.complete(request(messages=asking, sampling=SamplingConfig(effort="low", json_output=True)))
+    assert sent[0]["text"] == {"format": {"type": "json_object"}}
+    assert reply.effective_sampling["json_output"] is True
+    provider.complete(request())
+    assert "text" not in sent[1]
+    # The service refuses JSON mode for an input that does not name JSON: stopped
+    # here, before anything is sent.
+    with pytest.raises(ProtocolFailure, match="name JSON"):
+        provider.complete(request(sampling=SamplingConfig(effort="low", json_output=True)))
+    assert len(sent) == 2
+    # Without system text, no instructions field is sent at all.
+    provider, sent = transport(response())
+    provider.complete(request(system=[]))
+    assert "instructions" not in sent[0]
+
+
 def test_stateless_reasoning_and_tool_results_survive_json_round_trip(transport):
     native = [
         {"type": "reasoning", "id": "rs_test", "summary": [], "encrypted_content": "opaque"},

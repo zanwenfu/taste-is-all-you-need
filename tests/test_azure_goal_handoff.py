@@ -245,6 +245,17 @@ def test_only_known_settled_bounded_stops_can_proceed_to_grading(goal, reason):
         "complete", "generation_bound", "wall_clock", "budget_blocked", "spend_cap"})
 
 
+@pytest.mark.parametrize("reason,flags", [("complete", []), ("spend_cap", []), ("planner_failed", ["stopped:planner_failed"]),
+                                          ("runtime_error", ["stopped:runtime_error"])])
+def test_a_settled_run_that_stopped_otherwise_is_flagged_as_stopped_not_unsettled(goal, reason, flags):
+    from taste.benchmarks.azure_terminal_trial import grading_flags
+
+    assert grading_flags(settled_outcome(valid_outcome(goal, reason), SimpleNamespace(goal=goal))) == flags
+    raw = valid_outcome(goal, reason)
+    raw["budget"]["reserved_usd"] = 0.1
+    assert grading_flags(settled_outcome(raw, SimpleNamespace(goal=goal))) == ["accounting_unsettled"]
+
+
 @pytest.mark.parametrize("change", ["reserved", "unknown_worker", "live_worker", "unknown_planner", "over_budget"])
 def test_complete_does_not_override_unsettled_or_over_budget_accounting(goal, change):
     raw = valid_outcome(goal)

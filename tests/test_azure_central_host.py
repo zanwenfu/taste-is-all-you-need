@@ -1,6 +1,7 @@
 """Azure planning, exact assignment admission, actual worker and goal replay."""
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import sqlite3
@@ -15,7 +16,7 @@ from taste.brains.azure_worker_entrypoint import run_directory
 from taste.brains.azure_worker_launch import worker_command
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.central_host import compose_central_runtime
-from taste.brains.central_planner import Goal, InvalidPlannerOutput, PlannerIdentityConflict
+from taste.brains.central_planner import Goal, PlannerIdentityConflict
 from taste.brains.records import WorkerReport
 from taste.brains.supervisor import SubprocessLauncher
 from taste.brains.worker_protocol import WORKER_REPORT_PATH
@@ -171,8 +172,14 @@ def test_policy_drift_is_rejected_before_new_call_or_worker(tmp_path, goal, poli
         assert not reopened.supervisor.runs() and not sent
 
 
-@pytest.mark.parametrize("change", ["route", "deadline", "worker_budget", "monitor_budget", "model", "calls", "extra"])
-def test_untrusted_planner_cannot_change_execution_policy(tmp_path, goal, policy, sdk_transport, change):
+@pytest.mark.parametrize("change,filled", [
+    ("route", "assignments[0].resources"), ("deadline", "assignments[0].resources"),
+    ("worker_budget", "assignments[0].contract.budget_usd"), ("monitor_budget", "assignments[0].resources"),
+    ("model", "assignments[0].model"), ("calls", "assignments[0].resources"),
+    ("extra", "assignments[0].resources")])
+def test_untrusted_planner_cannot_change_execution_policy(tmp_path, goal, policy, sdk_transport, change, filled):
+    # What the policy fixes is written by the harness, whatever the planner
+    # wrote: the plan carries the policy's exact values and records the change.
     def transform(result):
         assignment = result["assignments"][0]
         if change == "worker_budget":
@@ -190,10 +197,16 @@ def test_untrusted_planner_cannot_change_execution_policy(tmp_path, goal, policy
 
     sent, _ = install_planner(sdk_transport, transform)
     with host(tmp_path, goal, policy, launcher=NoLaunchLauncher()) as runtime:
-        with pytest.raises(InvalidPlannerOutput):
+        with contextlib.suppress(AssertionError):  # this test's launcher starts nothing
             runtime.cycle()
-        assert runtime.planner.planner_cost(goal.goal_id, currency="billed") > 0
-        assert len(sent) == 1 and not runtime.supervisor.runs()
+        plan = runtime.planner.current_plan(goal.goal_id)
+        (assignment,) = plan.assignments
+        assert dict(assignment.resources) == policy.assignment_resources()
+        assert assignment.model == policy.worker_model
+        assert assignment.contract.budget_usd == policy.worker_budget_usd
+        assert assignment.contract.max_turns == policy.worker_max_calls
+        assert filled in plan.metadata["filled_by_harness"]
+        assert len(sent) == 1
 
 
 def test_a_lost_planner_reply_is_charged_at_its_ceiling_and_the_goal_goes_on(tmp_path, goal, policy, sdk_transport):

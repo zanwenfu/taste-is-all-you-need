@@ -145,6 +145,15 @@ class OpenAIProvider:
             kwargs["timeout"] = timeout
         if request.sampling.effort:
             kwargs["reasoning"] = {"effort": request.sampling.effort}
+        if request.sampling.json_output:
+            # Measured on GPT-5.6 Luna: a planner proposal that was not valid
+            # JSON, or held a key twice, was a refused plan. The service can
+            # hold the reply to one JSON object; the parser still checks it.
+            # It refuses that unless the input itself names JSON (the system
+            # text does not count), so a request that does not is stopped here.
+            if "json" not in json.dumps(kwargs["input"]).lower():
+                raise ProtocolFailure("a JSON reply needs the request's input to name JSON")
+            kwargs["text"] = {"format": {"type": "json_object"}}
 
         # temperature is not accepted alongside reasoning on these models.
         # Dropping it silently would leave the manifest claiming a setting
@@ -387,6 +396,8 @@ class OpenAIProvider:
             stop = "tool_use"
 
         sampling: dict[str, Any] = {"temperature": None, "effort": request.sampling.effort}
+        if request.sampling.json_output:
+            sampling["json_output"] = True
         if dropped:
             sampling["dropped"] = dropped
 

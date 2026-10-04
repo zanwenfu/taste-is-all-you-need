@@ -282,6 +282,48 @@ class AzureExecutionPolicy:
                                 "path": "report.md", "kind": "report",
                                 "description": "the agent's report, written by the harness"}]
 
+    def assignment_resources(self):
+        """The resources every assignment of this goal carries, exactly."""
+        return {"azure_openai": self.worker_resources(), "monitor_budget_usd": self.monitor_budget_usd,
+                **({} if self.terminal is None else {TERMINAL_POLICY_KEY: self.terminal.to_dict()})}
+
+    def fill_assignment(self, item, where, filled):
+        """Write the routing, model and caps this policy fixes, recording what changed.
+
+        The model chooses the work; these it can only copy. A changed contract
+        cap changes the contract, so its digest is derived again, never the
+        model's left in place.
+        """
+        resources = item.get("resources") if isinstance(item.get("resources"), Mapping) else {}
+        wanted = {**{key: value for key, value in resources.items() if key == "wall_timeout_seconds"},
+                  **self.assignment_resources()}
+        if resources != wanted:
+            item["resources"] = wanted
+            filled.append(f"{where}.resources")
+        if item.get("model") != self.worker_model:
+            item["model"] = self.worker_model
+            filled.append(f"{where}.model")
+        contract = item.get("contract")
+        if self.worker_agent and (item.get("inputs") or (isinstance(contract, Mapping) and contract.get("inputs"))):
+            # A hosted agent reads no memory artifacts. Measured on GPT-5.6
+            # Luna: a planner handed the next run the last report as an input,
+            # twice, each a refused plan. What it must know goes in its task.
+            item["inputs"] = []
+            filled.append(f"{where}.inputs")
+            if isinstance(contract, Mapping):
+                contract = {**contract, "inputs": []}
+                item["contract"] = contract
+                item.pop("contract_digest", None)
+        if isinstance(contract, Mapping):
+            changed = {name: wanted for name, wanted in (("budget_usd", self.worker_budget_usd),
+                                                         ("max_turns", self.worker_max_calls))
+                       if contract.get(name) != wanted}
+            if changed:
+                item["contract"] = {**contract, **changed}
+                item.pop("contract_digest", None)
+                filled.extend(f"{where}.contract.{name}" for name in sorted(changed))
+        return item
+
     def validate_plan(self, assignments):
         if self.max_assignments is not None and len(assignments) > self.max_assignments:
             raise ValueError(

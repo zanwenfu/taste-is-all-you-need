@@ -1339,6 +1339,10 @@ class LLMPlannerTransport:
                     max_tokens=self.max_tokens,
                     temperature=0.0,
                     role="planner",
+                    # A plan is one JSON object; where the provider can hold
+                    # the reply to that, it does. The service requires the
+                    # input to name JSON, as the planner's own prompts do.
+                    **({"json_output": True} if "json" in prompt.lower() else {}),
                     **({} if self.effort is None else {"effort": self.effort}),
                     **call_options,
                 )

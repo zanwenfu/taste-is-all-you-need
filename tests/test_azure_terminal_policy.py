@@ -153,6 +153,44 @@ def test_services_are_off_only_for_a_hosted_agent_with_the_fixed_plan(policy):
             replace(source, **changes)
 
 
+def test_the_policy_writes_the_routing_model_and_caps_an_assignment_must_carry(policy):
+    from taste.brains.central_planner import CentralPlanner
+    from taste.brains.records import Assignment
+
+    admitted = bound(policy)
+    item = json.loads(configured(admitted).to_json())
+    item["resources"] = {"wall_timeout_seconds": 30, "azure_openai": {"endpoint": "elsewhere"}}
+    item["model"] = "gpt-6-astra-2026-09-03"
+    item["contract"]["budget_usd"] = 999
+    filled = []
+    fixed = admitted.fill_assignment(item, "assignments[0]", filled)
+    assert fixed["resources"] == {"wall_timeout_seconds": 30, **admitted.assignment_resources()}
+    assert fixed["model"] == admitted.worker_model
+    assert fixed["contract"]["budget_usd"] == admitted.worker_budget_usd and "contract_digest" not in fixed
+    assert filled == ["assignments[0].resources", "assignments[0].model", "assignments[0].contract.budget_usd"]
+    admitted.validate_assignment(Assignment.from_dict(CentralPlanner._with_derived_digest(fixed)))
+    # An assignment that already carries them is left as it is.
+    again = []
+    assert admitted.fill_assignment(json.loads(configured(admitted).to_json()), "a", again) and again == []
+
+
+def test_a_hosted_agents_assignment_is_given_no_inputs_whatever_the_planner_writes(policy):
+    hosted = replace(bound(policy), worker_agent="mini-swe-agent")
+    item = json.loads(configured(hosted).to_json())
+    reference = {"schema": "taste.brains/ArtifactRef/1", "artifact_id": "last-report", "branch": "agent-1",
+                 "state_id": "a" * 40, "path": "report.md", "blob_id": "b" * 40}
+    item["inputs"] = [reference]
+    item["contract"]["inputs"] = ["report.md"]
+    filled = []
+    fixed = hosted.fill_assignment(item, "assignments[0]", filled)
+    assert fixed["inputs"] == [] and fixed["contract"]["inputs"] == [] and "contract_digest" not in fixed
+    assert filled[0] == "assignments[0].inputs"
+    # Taste's own worker reads inputs; nothing is taken from its assignments.
+    own = json.loads(configured(bound(policy)).to_json())
+    own["inputs"], own["contract"]["inputs"] = [reference], ["report.md"]
+    assert bound(policy).fill_assignment(own, "a", [])["inputs"] == [reference]
+
+
 def with_outputs(assignment, *outputs, inputs=()):
     contract = replace(assignment.contract, inputs=tuple(item.path for item in inputs),
                        outputs=tuple(item.path for item in outputs))
