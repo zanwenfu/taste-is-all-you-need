@@ -47,8 +47,8 @@ behaviour and interfaces.
   model, routing and caps, and no inputs for a hosted agent) is filled by the
   harness and recorded with the plan as `filled_by_harness`; the plan stays
   bound to exactly what the model wrote. Measured on GPT-5.6 Luna, such slips
-  were refused plans, and four in a row ended a goal. Plans are also asked
-  for as one JSON object, which the Azure Responses API enforces.
+  were refused plans, and four ended a goal. Plans are also asked for as one
+  JSON object, which the Azure Responses API enforces.
 - A run whose spending is settled but which stopped some other way (its
   planner failing, a runtime error) is flagged `stopped:<reason>`, not
   `accounting_unsettled`.
@@ -62,6 +62,25 @@ behaviour and interfaces.
 
 ### Fixed
 
+- **Work done in a task's container is judged where it is.** The coordinator
+  assessed certified work "not met" because memory held only the run's
+  report, and then wrote contracts requiring the task's files in memory, which
+  no worker can satisfy and the certifier enforced. The coordinator is now
+  told that a container's files never appear in memory and that the evidence
+  about them is the commands workers ran there (`task_environment`), and both
+  monitor prompts say a file's absence from the state's manifest is not
+  evidence that it is missing
+  ([#40](https://github.com/zanwenfu/taste-is-all-you-need/issues/40)).
+- **A hosted agent is not asked to write a report.** The harness writes its
+  report; contracts that asked the agent for one turned the agent's own
+  reports into stops and refusals of otherwise right work
+  (`hosted_contracts`,
+  [#41](https://github.com/zanwenfu/taste-is-all-you-need/issues/41)).
+- **Only refused plans in a row end a goal.** The limit counted refusals over
+  the whole goal, so a long goal ended although its planner recovered every
+  time. A key at a proposal's top level that is not part of a proposal (an
+  echoed prompt section or plan id) is dropped and recorded with the plan
+  ([#42](https://github.com/zanwenfu/taste-is-all-you-need/issues/42)).
 - **A lost reply no longer ends the run.** A worker whose request got no
   reply (a timeout, a dropped connection, the provider's own passing trouble)
   ended its run, and another worker began the assignment again. The journal

@@ -97,9 +97,12 @@ BRANCH_OBSERVATION_SCHEMA = "taste.brains/BranchObservation/1"
 OBSERVED_RUN_SCHEMA = "taste.brains/ObservedRun/1"
 REQUEST_SCHEMA = "taste.brains/PlanningRequest/1"
 PROPOSAL_SCHEMA = "taste.brains/PlannerProposal/1"
-# Top-level sections of the planner's prompt, which a model may echo back.
-_PROMPT_SECTIONS = frozenset({"request", "standing_criteria", "required_output_shape",
-                              "assignment_schema", "rules", "earlier_rejections"})
+# A proposal's fields besides its schema. Anything else at its top level means
+# nothing to the harness: a model echoing its prompt's sections, or a plan id
+# copied from the world (both measured on GPT-5.6 Luna).
+_PROPOSAL_FIELDS = frozenset({
+    "request_id", "goal_id", "generation", "parent_plan_id", "based_on_state_id", "observed_heads",
+    "assignments", "rationale", "complete", "completion_reason", "assessment", "metadata"})
 ATTEMPT_SCHEMA = "taste.brains/PlanningAttempt/1"
 OUTCOME_SCHEMA = "taste.brains/PlanningOutcome/2"
 _OUTCOME_SCHEMA_V1 = "taste.brains/PlanningOutcome/1"
@@ -2513,8 +2516,7 @@ class CentralPlanner:
         if not isinstance(raw, dict):
             return raw, []
         value, filled = dict(raw), []
-        # Sections of the prompt a model sent back; they are not part of a plan.
-        for name in sorted(_PROMPT_SECTIONS & value.keys()):
+        for name in sorted(value.keys() - _PROPOSAL_FIELDS - {"schema"}):
             del value[name]
             filled.append("ignored:" + name)
         expected = self._proposal_template(request)
@@ -2590,21 +2592,7 @@ class CentralPlanner:
             # The proposal is bound to exactly what the model wrote.
             proposal_digest = _digest(_canonical(raw))
             raw, filled = self._fill_bookkeeping(raw, request)
-            required = {
-                "request_id",
-                "goal_id",
-                "generation",
-                "parent_plan_id",
-                "based_on_state_id",
-                "observed_heads",
-                "assignments",
-                "rationale",
-                "complete",
-                "completion_reason",
-                "assessment",
-                "metadata",
-            }
-            _fields(raw, PROPOSAL_SCHEMA, required)
+            _fields(raw, PROPOSAL_SCHEMA, set(_PROPOSAL_FIELDS))
             expected = self._proposal_template(request)
             for name in (
                 "request_id",

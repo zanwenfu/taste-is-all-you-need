@@ -250,6 +250,22 @@ class AzureExecutionPolicy:
                 "rolling memory back does not undo it. A command that runs past its timeout is killed with "
                 "its child processes; the container and everything else in it stay as they are. The "
                 "benchmark's own grading happens after this goal ends and is not a worker's job.")
+            # Measured on GPT-5.6 Luna: a run that did the task was certified,
+            # and the coordinator still assessed every criterion not met
+            # because "the integration state contains only report.md", then
+            # wrote contracts requiring the files "in the resulting durable
+            # state", which no worker can satisfy.
+            payload["rules"]["task_environment"] = (
+                "The task is done in its container, not in this system's memory. Files, packages and "
+                "services the task asks for are made in the container and never appear in the "
+                "integration state, a worker's state or any manifest, so their absence there says "
+                "nothing about the container. The evidence about the container is in the world's "
+                "outcomes: the commands each worker ran there, what they printed, and whether its "
+                "report was certified. Assess each criterion about the container from that evidence, "
+                "latest run first, since a later run may have changed what an earlier one showed. "
+                "Never ask for a container file to be committed, delivered, kept in memory or listed in "
+                "a manifest: no worker can do that. Write each success criterion as an effect in the "
+                "container that a worker checks with commands and shows the output of.")
         if self.worker_agent:
             self._configure_hosted(payload, exemplar)
 
@@ -276,6 +292,15 @@ class AzureExecutionPolicy:
         rules["worker_context"] = (
             "Every worker is shown the goal's original task after its own task and criteria. "
             "contract.task should say what that worker must do and check.")
+        # Measured: contracts asked the agent to "write a literal accurate
+        # report"; it wrote reports in the container (one overwritten by a
+        # broken heredoc after the task was done) and its monitor judged those.
+        rules["hosted_contracts"] = (
+            "contract.task and success_criteria ask the agent only for the task's effects in the "
+            "container, each checked with commands it runs. Never ask it to write a report, summary "
+            "or evidence file, or to quote evidence in one: the harness writes its report from the "
+            "record of its commands, and a report the agent writes is not its output. Ask for a "
+            "file only when the task itself asks for that file.")
         exemplar["contract"].update(inputs=[], outputs=["report.md"])
         exemplar["inputs"] = []
         exemplar["outputs"] = [{**exemplar["outputs"][0], "artifact_id": "<unique id for this report>",

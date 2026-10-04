@@ -131,6 +131,9 @@ def test_llm_judge_receives_exact_pinned_contract_assignment_and_events(store: S
     assert call["temperature"] == 0.0
     assert call["tools"] is None
     assert JUDGEMENT_SCHEMA in call["system"]
+    # Measured: a monitor called a run wrong because "the immutable state
+    # manifest" did not list a file the run had written in the task container.
+    assert "never appear in the State's manifest" in call["system"]
     prompt = call["messages"][0]["content"]
     assert brain.contract.to_json() in prompt
     assert item.to_json() in prompt
@@ -348,6 +351,7 @@ def test_terminal_judge_receives_the_exact_state_context_outputs_and_findings(
     assert '"passed": 12' in prompt
     assert '"id": "finding-1"' in prompt
     assert TERMINAL_JUDGEMENT_SCHEMA in fake.calls[0]["system"]
+    assert "never appear in the State's manifest" in fake.calls[0]["system"]
     brain.close()
 
 

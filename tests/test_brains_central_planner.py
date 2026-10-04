@@ -966,18 +966,19 @@ def test_crash_recovery_reuses_attempt_after_reopening_central_lease(
     second_store.close()
 
 
+def _with_assignment_field(prompt: str, **extra) -> str:
+    value = json.loads(proposal(prompt, assignment_for(request_from_prompt(prompt))))
+    value["assignments"][0].update(extra)
+    return json.dumps(value)
+
+
 @pytest.mark.parametrize(
     "response, match",
     [
         (lambda prompt: "```json\n{}\n```", "not valid JSON"),
-        (
-            lambda prompt: proposal(
-                prompt,
-                assignment_for(request_from_prompt(prompt)),
-                changes={"unknown": True},
-            ),
-            "unknown",
-        ),
+        # An unknown key at a proposal's top level means nothing and is
+        # dropped; inside an assignment it is still refused.
+        (lambda prompt: _with_assignment_field(prompt, priority=1), "unknown"),
     ],
 )
 def test_invalid_output_is_preserved_and_operation_is_terminally_rejected(
@@ -1029,13 +1030,17 @@ def test_echoed_prompt_sections_are_dropped_and_a_copied_digest_is_derived_again
     def echoing(_id: str, _system: str, prompt: str) -> str:
         value = json.loads(proposal(prompt, assignment_for(request_from_prompt(prompt))))
         value["request"] = json.loads(prompt)["request"]
+        # Measured on GPT-5.6 Luna: a plan id copied from the world.
+        value["plan_id"] = "plan-copied-from-the-world"
         value["assignments"][0]["contract_digest"] = "sha256:" + "0" * 64
         return json.dumps(value)
 
     central, _ = planner(store, echoing)
     plan = central.plan(goal)
     assert plan.assignments[0].contract_digest != "sha256:" + "0" * 64
-    assert list(plan.metadata["filled_by_harness"]) == ["ignored:request", "assignments[0].contract_digest"]
+    assert plan.plan_id != "plan-copied-from-the-world"
+    assert list(plan.metadata["filled_by_harness"]) == [
+        "ignored:plan_id", "ignored:request", "assignments[0].contract_digest"]
 
 
 def test_a_key_written_twice_with_one_value_is_not_ambiguous(store: Store, goal: Goal) -> None:

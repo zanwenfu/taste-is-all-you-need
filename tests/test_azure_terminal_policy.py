@@ -221,6 +221,9 @@ def test_the_planner_is_told_what_a_hosted_agent_can_be_asked(policy):
     assert "mini-swe-agent" in rules["hosted_workers"] and "exactly one output" in rules["hosted_workers"]
     assert "run shell commands in the shared task container, one at a time" in rules["worker_capabilities"]["can"]
     assert rules["worker_capabilities"]["terminal_effects"]
+    # Measured: contracts asked the agent to "write a literal accurate report";
+    # it wrote reports in the container and its monitor judged those.
+    assert "Never ask it to write a report" in rules["hosted_contracts"]
     assert exemplar["inputs"] == [] and exemplar["contract"]["outputs"] == ["report.md"]
     assert [(item["path"], item["kind"]) for item in exemplar["outputs"]] == [("report.md", "report")]
 
@@ -295,6 +298,11 @@ def test_default_azure_coordinator_assigns_grant_to_real_worker_and_replays_with
                     assert issued[0].token not in json.dumps(payloads)
                     assert "run bounded commands in the shared task container" in payloads[0]["rules"]["worker_capabilities"]["can"]
                     effects = payloads[0]["rules"]["worker_capabilities"]["terminal_effects"]
+                    # Measured: a coordinator assessed "not met" because the
+                    # integration state held only a report, for work done in
+                    # the container; container files are never in memory.
+                    environment_rule = payloads[0]["rules"]["task_environment"]
+                    assert "never appear" in environment_rule and "commands" in environment_rule
                     # A timeout ends the command. The planner must not be told it ends the container.
                     assert "killed with its child processes" in effects and "ends the task environment" not in effects
                     assert all(run.reaped for run in runtime.supervisor.runs())

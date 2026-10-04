@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from taste.brains.central_planner import PlannerTransportError
+from taste.brains.central_planner import InvalidPlannerOutput, PlannerTransportError
 from taste.brains.contract import Contract
 from taste.brains.python_process import isolated_python_argv
 from taste.brains.subbrain import SubBrain
@@ -20,6 +20,7 @@ from tests.test_brains_central_runtime import (
     simple_goal,
     stack,
 )
+from tests.test_brains_central_runtime import assignment_for as planned
 from tests.test_brains_runtime_boundaries import one
 from tests.test_brains_supervisor import assignment_for
 
@@ -81,6 +82,58 @@ def test_run_recovers_planner_errors_with_finite_attempts(store, mode):
         assert outcome.stop_reason == "generation_bound"
         assert calls == 2 and len(launcher.launch_calls) == 1
         assert outcome.delivered_assignment_ids == ("build",)
+
+
+def test_only_refused_plans_in_a_row_end_the_goal(store):
+    """Measured: a goal ended planner_failed after nine plans, its four refusals spread across them.
+
+    Every refusal here is followed by an accepted plan, so the planner never
+    fails twice running and the goal runs to its generation bound.
+    """
+    calls = 0
+
+    def respond(request, prompt):
+        nonlocal calls
+        calls += 1
+        if calls % 2 == 1:
+            return "not a planner JSON object"
+        g = request.generation
+        return (planned(request, f"build-{g}", f"worker-build-{g}", f"product-{g}.txt"),)
+
+    launcher, transport = FakeLauncher(), ScriptedTransport(respond)
+    runtime, _ = stack(store, simple_goal(), transport, launcher)
+    outcome = runtime.run(max_generations=3, wall_clock_seconds=60, max_planner_failures=2,
+                          between_cycles=lambda: [settle(runtime, launcher, f"build-{g}") for g in (1, 2, 3)])
+    assert outcome.stop_reason == "generation_bound", outcome.detail
+    assert calls == 6 and len(launcher.launch_calls) == 3
+
+
+def test_a_resumed_goal_counts_only_the_refusals_since_its_last_accepted_plan(store):
+    calls = 0
+
+    def respond(request, prompt):
+        nonlocal calls
+        calls += 1
+        if calls in (1, 3):
+            return "not a planner JSON object"
+        g = request.generation
+        return (planned(request, f"build-{g}", f"worker-build-{g}", f"product-{g}.txt"),)
+
+    launcher, transport = FakeLauncher(), ScriptedTransport(respond)
+    runtime, shared = stack(store, simple_goal(), transport, launcher)
+    with pytest.raises(InvalidPlannerOutput):
+        runtime.cycle()
+    runtime.cycle()
+    settle(runtime, launcher, "build-1")
+    with pytest.raises(InvalidPlannerOutput):
+        while calls < 3:
+            runtime.cycle()
+    # Two refusals so far, one accepted plan between them: a limit of two
+    # does not end the resumed goal.
+    resumed, _ = stack(store, simple_goal(), transport, launcher, shared=shared)
+    outcome = resumed.run(max_generations=2, wall_clock_seconds=60, max_planner_failures=2,
+                          between_cycles=lambda: [settle(resumed, launcher, f"build-{g}") for g in (1, 2)])
+    assert outcome.stop_reason == "generation_bound", outcome.detail
 
 
 def test_ambiguous_paid_error_stops_without_retry(store):

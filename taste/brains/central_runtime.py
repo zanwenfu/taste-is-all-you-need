@@ -456,6 +456,17 @@ class GoalOutcome:
         return cls.from_dict(json.loads(text))
 
 
+def _failures_in_a_row(attempts) -> int:
+    """Planner attempts that failed since the last accepted one, in time order."""
+    count = 0
+    for attempt in sorted(attempts, key=lambda item: item.at):
+        if attempt.status == "accepted":
+            count = 0
+        elif attempt.status in {"rejected", "transport_error", "orphaned"}:
+            count += 1
+    return count
+
+
 @dataclass(frozen=True, slots=True)
 class CycleOutcome:
     """One durable coordinator-cycle result returned to the host."""
@@ -2215,8 +2226,12 @@ class CentralRuntime:
         stop_reason = "generation_bound"
         detail = ""
         try:
-            planner_failures = sum(attempt.status in {"rejected", "transport_error", "orphaned"}
-                                   for attempt in self.planner.planner_attempts(self.goal.goal_id))
+            # Refused plans in a row, since the last accepted one: a goal whose
+            # planner recovers each time is not failing (measured: four
+            # refusals across nine plans ended a goal).
+            planner_failures = _failures_in_a_row(self.planner.planner_attempts(self.goal.goal_id))
+            current = self.planner.current_plan(self.goal.goal_id)
+            plan_id = None if current is None else current.plan_id
             while True:
                 self._raise_if_stop_requested()
                 remaining = self._remaining_wall()
@@ -2261,6 +2276,8 @@ class CentralRuntime:
                     time.sleep(min(self.supervisor.poll_interval,
                                    max(0.0, wall_clock_seconds - (clock() - started))))
                     continue
+                if outcome.plan.plan_id != plan_id:
+                    plan_id, planner_failures = outcome.plan.plan_id, 0
                 self._raise_if_stop_requested()
                 if self._remaining_wall() <= 0:
                     stop_reason, detail = "wall_clock", "goal deadline elapsed during a cycle"
