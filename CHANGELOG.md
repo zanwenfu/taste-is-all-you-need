@@ -30,6 +30,14 @@ behaviour and interfaces.
   matches the SHA-256 recorded when it was sent; with `--calls N` the same
   model is asked again. Every prompt change made after the first go/no-go run
   was checked this way before being kept.
+- **A check of what passing trials fetched online** (`scripts/online_check.py`):
+  every command a passing trial's agent ran, read from its settled record;
+  each fetch from the internet (a URL, or curl, wget, git clone and the like
+  run as a command; not package sources or the container's own addresses)
+  classed as named by the task, solution-like (the benchmark, its
+  repositories, a solution, or the task itself) or other, for review. On the
+  first go/no-go run's 41 passing trials: none solution-like
+  ([#37](https://github.com/zanwenfu/taste-is-all-you-need/issues/37)).
 - **The study's analysis** (`scripts/study_report.py`): registered
   comparisons between arms, paired by task: per-task differences in the share
   of runs solved, a bootstrap interval over tasks, a sign-flip permutation
