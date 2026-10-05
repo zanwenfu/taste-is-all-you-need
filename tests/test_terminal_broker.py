@@ -767,3 +767,68 @@ def test_explicit_abort_still_stops_an_interruptible_environment(tmp_path):
 def test_termination_cause_is_a_closed_set():
     with pytest.raises(ValueError, match="termination cause"):
         TerminalResult(0, terminated="maybe")
+
+
+class SlowToEnd(Interruptible):
+    """Ending a command takes a moment, as a real container's exec does."""
+
+    def interrupt(self):
+        self.interrupts += 1
+
+        def end():
+            self.ended.set()
+            self.release.set()
+
+        threading.Timer(0.3, end).start()
+
+
+def test_grading_waits_for_a_departed_callers_command_to_be_ended(tmp_path):
+    """#49: a worker stopped at the trial's end leaves its command being ended; sealing waits."""
+    env = SlowToEnd()
+    owner = broker(tmp_path, env)
+    env.release.clear()
+    abandoned = request("abandoned", timeout_seconds=30)
+
+    async def scenario():
+        active = asyncio.create_task(owner.execute(abandoned))
+        await wait_event(env.entered)
+        active.cancel()
+        await asyncio.sleep(0.05)
+        # What two trials of the go/no-go's second run hit, at the wall clock.
+        with pytest.raises(TerminalFenced, match="active or uncertain"):
+            owner.seal_for_grading()
+        assert await owner.wait_idle(5) is True
+        assert owner.seal_for_grading() == owner.binding
+        assert owner.phase == "sealed" and not env.stopped and env.stop_calls == 0
+        with pytest.raises(asyncio.CancelledError):
+            await active
+        assert owner.lookup(abandoned).terminated == "cancelled"
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        env.release.set()
+        owner.close()
+
+
+def test_waiting_for_an_idle_terminal_is_bounded_and_interrupts_nothing(tmp_path):
+    env = Environment()
+    owner = broker(tmp_path, env)
+    env.release.clear()
+
+    async def scenario():
+        assert await owner.wait_idle(0.1) is True
+        running = asyncio.create_task(owner.execute(request()))
+        await wait_event(env.entered)
+        assert await owner.wait_idle(0.2) is False
+        env.release.set()
+        assert await running == env.result
+        assert await owner.wait_idle(0.2) is True
+        with pytest.raises(ValueError):
+            await owner.wait_idle(0)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        env.release.set()
+        owner.close()

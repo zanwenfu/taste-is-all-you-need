@@ -337,6 +337,25 @@ class TerminalBroker:
             raise TerminalConflict("terminal receipt belongs to another actor")
         return self.lookup(request)
 
+    async def wait_idle(self, seconds: float) -> bool:
+        """Wait up to ``seconds`` until no command, checkpoint or restore is in progress.
+
+        For the hand-off to grading: a command whose caller was stopped at the
+        trial's end is still being ended, its exit confirmed and its receipt
+        written, for up to COMMAND_SETTLE_SECONDS. Nothing is interrupted here.
+        True when the terminal is idle.
+        """
+        self._on_loop()
+        _positive(seconds)
+        loop = asyncio.get_running_loop()
+        end = loop.time() + seconds
+        while self._lock.locked() or (self._operation is not None and not self._operation.done()):
+            remaining = end - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.05, remaining))
+        return True
+
     def seal_for_grading(self) -> TerminalBinding:
         """Irreversibly hand an idle environment to the outside verifier.
 

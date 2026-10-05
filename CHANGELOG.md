@@ -147,6 +147,15 @@ behaviour and interfaces.
 
 ### Fixed
 
+- **A trial is graded even when a command was still being ended at its
+  end.** A worker stopped at the wall clock leaves its last command to the
+  controller, which ends it alone and confirms its exit within 20 seconds;
+  sealing the environment for grading in that window was refused, and the
+  trial went ungraded (2 of 60 supervised trials in the go/no-go's second
+  run). The hand-off now waits up to 30 seconds for the terminal to fall idle
+  (`TerminalBroker.wait_idle`), through the benchmark's own cancellation as
+  settlement does, and interrupts nothing
+  ([#49](https://github.com/zanwenfu/taste-is-all-you-need/issues/49)).
 - **Work done in a task's container is judged where it is.** The coordinator
   assessed certified work "not met" because memory held only the run's
   report, and then wrote contracts requiring the task's files in memory, which

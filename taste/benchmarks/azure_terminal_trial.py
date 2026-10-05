@@ -40,7 +40,7 @@ from taste.brains.goal_entrypoint import GoalInputError, _canonical, _decode
 from taste.brains.input_limits import MAX_GOAL_INPUT_BYTES
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.process_scope import OwnedProcessScope, _owned_call
-from taste.brains.terminal_broker import TerminalBroker, _settle
+from taste.brains.terminal_broker import COMMAND_SETTLE_SECONDS, TerminalBroker, _settle
 from taste.brains.terminal_issuer import TerminalIssuerCredential
 from taste.brains.terminal_service import TerminalService
 
@@ -48,6 +48,8 @@ _SCHEMA = "taste.benchmarks/AzureTerminalTrial/1"
 _OPERATIONS = ("prepare", "run", "settle")
 # Credential-free settlement: reopening the goal and exporting its evidence.
 SETTLE_SECONDS = 90
+# How long the hand-off to grading waits for a command still being ended (#49).
+GRADING_IDLE_SECONDS = COMMAND_SETTLE_SECONDS + 10
 # Preparation is a few seconds of local work. Measured at 7 s alone, it shares
 # its machine with other trials and their image builds.
 PREPARE_SECONDS = 120
@@ -375,8 +377,22 @@ class AzureTerminalTrial:
                 # Our record of the run is missing or unusable. The task's
                 # state in the container is unaffected and is still graded.
                 flags.append("settlement_failed:" + type(exc).__name__)
-            # Every goal process has drained, so no command can start. A fenced
-            # or stopped environment raises here: it cannot be graded at all.
+            # Every goal process has drained, so no command can start; one whose
+            # worker was stopped at the end may still be being ended (its exit
+            # confirmed, its receipt written). Seal once the terminal is idle,
+            # like settlement, through the benchmark's own cancellation (#49).
+            idle = asyncio.ensure_future(self.broker.wait_idle(GRADING_IDLE_SECONDS))
+            while not idle.done():
+                try:
+                    await asyncio.wait((idle,))
+                except asyncio.CancelledError as exc:
+                    cancelled = cancelled or exc
+                    task = asyncio.current_task()
+                    while task is not None and task.cancelling():
+                        task.uncancel()
+                    flags.append("owner_cancelled")
+            # A fenced or stopped environment, or one still busy, raises here:
+            # it cannot be graded at all.
             self.service.seal_for_grading()
             self.sealed = True
             self.audit_flags = tuple(dict.fromkeys(flags))
