@@ -46,7 +46,7 @@ brains = ["claude-agent-sdk==0.2.152"]
 # are installed without dependencies from requirements-agents.txt.
 agents = ["jinja2>=3.1,<4", "platformdirs>=4,<5", "pyyaml>=6,<7"]
 dev = [
-    "pytest>=8.0",
+    "pytest>=8.0", "pytest-xdist>=3,<4",
     "ruff>=0.5",
     # mini-swe-agent's own model class, run beside Taste's in a comparison test.
     "tenacity>=8,<10",

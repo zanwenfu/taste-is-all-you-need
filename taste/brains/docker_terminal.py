@@ -407,6 +407,27 @@ class DockerTerminalBackend:
             with self._lock:
                 self._active = None
 
+    def checkpoint(self, directory, *, cap_bytes=None):
+        """Copy out what the task changed against its image, between commands.
+
+        Holds the terminal as a command would, so no command can start while
+        the files are read, and none is running when they are. See
+        ``taste.brains.docker_checkpoint``.
+        """
+        from taste.brains.docker_checkpoint import CHECKPOINT_BYTES, take
+
+        wire = _Wire(self.binding.socket_path)
+        with self._lock:
+            if self._closing or self._active is not None:
+                raise TerminalFenced("a checkpoint is taken only between commands")
+            self._active, self._interrupted = wire, False
+        try:
+            return take(self, wire, directory, cap_bytes=CHECKPOINT_BYTES if cap_bytes is None else cap_bytes)
+        finally:
+            wire.cancel()
+            with self._lock:
+                self._active = None
+
     def interrupt(self):
         """End only the active command; its execute call returns a ``cancelled`` receipt.
 

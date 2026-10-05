@@ -30,6 +30,16 @@ behaviour and interfaces.
   matches the SHA-256 recorded when it was sent; with `--calls N` the same
   model is asked again. Every prompt change made after the first go/no-go run
   was checked this way before being kept.
+- **A checkpoint of what a task changed in its container**
+  (`DockerTerminalBackend.checkpoint`, `taste/brains/docker_checkpoint.py`),
+  the first part of undoing an agent's work: the paths the container changed
+  against its image, as Docker lists them; the added paths (a top-most added
+  directory whole) and changed files copied out into one tar stored under its
+  SHA-256; the deleted paths listed; the kernel's trees and the container's
+  mounts left out and listed; a size cap past which the checkpoint is marked
+  partial. Taken only between commands. Checked against a real daemon by
+  `scripts/check_docker_checkpoint.py` (contents, modes, a symbolic link, a
+  changed and a deleted image file).
 - **An export of a study's trial records** (`scripts/export_records.py`):
   each trial's Harbor result and verifier output and Taste's settled record,
   nothing else, with a manifest of SHA-256 checksums that `--verify` checks;
