@@ -63,6 +63,11 @@ behaviour and interfaces.
   forged one. A checkpoint copies at most 512 MiB and a trial's store holds
   at most 4 GiB. After a controller restart, a restore that was begun and
   never recorded fences the environment.
+- **A rollback report** (`scripts/rollback_report.py`): per trial of a
+  Harbor job, every checkpoint and restore from the controller's ledger (size
+  and counts, exact or not, how long, or the error's class) and every
+  rollback with the checkpoint and reason the plan gave; per job, totals,
+  restore times and the checkpoint stores' size on disk. Read-only.
 - **Rollback decided by the coordinator** (`--ak rollback=on`,
   `taste/brains/environment_records.py`). The coordinator's runtime takes a
   checkpoint of the task's files before the first worker starts and after
