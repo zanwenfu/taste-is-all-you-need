@@ -264,6 +264,28 @@ def test_the_store_is_bounded_per_checkpoint_and_in_total(tmp_path, monkeypatch)
     run(owner, scenario)
 
 
+def test_checkpoint_files_are_discarded_only_once_no_restore_can_follow(tmp_path):
+    env = Checkpointing()
+    env.tar_bytes = 500
+    owner = broker(tmp_path, env)
+
+    async def scenario():
+        await owner.execute(request("first", command="one"))
+        await owner.checkpoint("cp1")
+        with pytest.raises(TerminalFenced, match="no restore can follow"):
+            owner.discard_checkpoint_files()
+        owner.seal_for_grading()
+        store = tmp_path / "terminal" / "checkpoints"
+        assert owner.discard_checkpoint_files() == 500
+        # The tar is gone; the checkpoint's manifest and its ledger record stay.
+        assert sorted(item.name for item in store.iterdir()) == ["cp1.json"]
+        assert owner.events()[-1] == ("checkpoint_files_discarded", {"bytes": 500})
+        assert owner.discard_checkpoint_files() == 0
+        assert [record["checkpoint_id"] for record in owner.checkpoints()] == ["cp1"]
+
+    run(owner, scenario)
+
+
 def test_restart_records_an_interrupted_checkpoint_and_fences_an_interrupted_restore(tmp_path):
     env = Checkpointing()
     owner = broker(tmp_path, env)

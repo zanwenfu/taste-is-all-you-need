@@ -604,6 +604,30 @@ class TerminalBroker:
 
             return await self._environment("restore_intent", intent, finished, self._put_back, manifest, store)
 
+    def discard_checkpoint_files(self) -> int:
+        """Delete the stored tars once no restore can follow; keep each manifest.
+
+        A sealed, stopped or fenced environment is never restored again, and
+        a trial's tars can fill the disk long before its records do. Returns
+        the bytes freed, which the ledger records.
+        """
+        self._check()
+        if self.phase not in ("sealed", "stopped", "fenced"):
+            raise TerminalFenced("checkpoint files are discarded only once no restore can follow")
+        store = self._directory / "checkpoints"
+        freed = 0
+        if store.is_dir():
+            for entry in store.iterdir():
+                if entry.name.endswith(".tar") and (re.fullmatch(r"[0-9a-f]{64}\.tar", entry.name)
+                                                    or entry.name.startswith(".checkpoint-")):
+                    freed += entry.lstat().st_size
+                    entry.unlink()
+        self._manifests.clear()
+        if freed:
+            with self._db:
+                self._event("checkpoint_files_discarded", {"bytes": freed})
+        return freed
+
     def _can_checkpoint(self):
         if not (callable(getattr(self.backend, "checkpoint", None))
                 and callable(getattr(self.backend, "restore", None))):

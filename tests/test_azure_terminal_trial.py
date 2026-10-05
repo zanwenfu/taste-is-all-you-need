@@ -209,6 +209,18 @@ def test_release_hands_the_sealed_container_to_its_grader_and_frees_everything_e
     run_scenario(trial, scenario())
 
 
+def test_release_discards_checkpoint_tars_and_keeps_their_manifests(trial):
+    async def scenario():
+        await trial.run(api_key="private-test-key")
+        store = trial.root / "controller/terminal/checkpoints"
+        store.mkdir(mode=0o700)
+        (store / ("a" * 64 + ".tar")).write_bytes(b"x" * 100)
+        (store / "initial.json").write_text("{}")
+        await trial.release()
+        assert sorted(item.name for item in store.iterdir()) == ["initial.json"]
+    run_scenario(trial, scenario())
+
+
 def test_release_of_an_unsealed_trial_stops_its_container(trial):
     async def scenario():
         await trial.release()

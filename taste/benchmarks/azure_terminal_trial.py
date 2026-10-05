@@ -429,6 +429,9 @@ class AzureTerminalTrial:
             receipts.append(await OwnedProcessScope(path, manager=self.manager).stop_async(
                 "terminal trial handed to its grader"))
         await self.service.release()
+        # Sealed: the container is never restored again, so its checkpoint
+        # tars only fill the disk. The ledger keeps every checkpoint's record.
+        self.broker.discard_checkpoint_files()
         _write(self.fd, "handoff.json", _json_bytes({
             "schema": "taste.benchmarks/TerminalTrialHandoff/1",
             "container_id": self.backend.environment_id, "container_stopped": False,
@@ -479,6 +482,10 @@ class AzureTerminalTrial:
                 _write(self.fd, "drain.json", _json_bytes(record))
             _remove_launch_material(self.root)
             if self.broker is not None:
+                # Stopped: nothing will be restored. See release(). A broker
+                # whose service never started was never asked for a checkpoint.
+                if self.broker.phase in ("sealed", "stopped", "fenced"):
+                    self.broker.discard_checkpoint_files()
                 self.broker.close()
             os.close(self.fd)
             self.closed = True

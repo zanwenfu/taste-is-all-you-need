@@ -83,7 +83,11 @@ behaviour and interfaces.
   policies are byte for byte as before. Against a real container
   (`scripts/check_rollback_wiring.py`, no model), the coordinator's
   checkpoints and restores through the controller's socket returned the files
-  exactly, in 1.6 and 2.4 seconds, and asking again read the record.
+  exactly, in 1.6 and 2.4 seconds, and asking again read the record. A
+  trial's checkpoint tars are deleted once its environment is sealed for
+  grading or stopped, when no restore can follow; each checkpoint's manifest
+  and ledger record stay (in the rollback pilot one trial's after-run
+  checkpoints reached 0.5-0.6 GB each).
 - **An export of a study's trial records** (`scripts/export_records.py`):
   each trial's Harbor result and verifier output and Taste's settled record,
   nothing else, with a manifest of SHA-256 checksums that `--verify` checks;
