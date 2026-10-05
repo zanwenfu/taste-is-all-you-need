@@ -391,6 +391,8 @@ class AzureTerminalTrial:
                     while task is not None and task.cancelling():
                         task.uncancel()
                     flags.append("owner_cancelled")
+            if not idle.result():
+                flags.append("terminal_busy_at_grading")
             # A fenced or stopped environment, or one still busy, raises here:
             # it cannot be graded at all.
             self.service.seal_for_grading()

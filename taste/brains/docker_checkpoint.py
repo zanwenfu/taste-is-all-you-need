@@ -310,10 +310,18 @@ def restore(backend, wire, manifest, directory) -> RestoreReceipt:
     container's changes are compared with the checkpoint's; a directory Docker
     lists as changed only because something under it was touched is not a
     difference. Running processes are not restored.
+
+    Refused before anything changes for a partial checkpoint (it lacks paths
+    it would delete) and when too little time remains for one of this size:
+    removals come before the copy back, and a restore cut short between them
+    would leave the files mixed.
     """
     from taste.brains.docker_terminal import DockerTransportError
+    from taste.brains.environment_records import restore_seconds
     from taste.brains.terminal_broker import TerminalConflict
 
+    if manifest.over_cap:
+        raise TerminalConflict("a partial checkpoint is not restored: it lacks paths it would delete")
     started = time.monotonic()
     container = backend.environment_id
     deadline = time.monotonic() + min(CHECKPOINT_SECONDS, backend.binding.deadline_unix - time.time())
@@ -345,6 +353,8 @@ def restore(backend, wire, manifest, directory) -> RestoreReceipt:
         if kind == "deleted":
             deleted_roots.add(path)
     deleted = sorted(path for path, kind in target.items() if kind == "deleted")
+    if deadline - time.monotonic() < restore_seconds(manifest.tar_bytes):
+        raise TerminalConflict("too little time remains to restore this checkpoint without leaving it half done")
     _remove(wire, container, removed, deadline)
     _originals(wire, backend, manifest.image, from_image, deadline)
     with open(tar, "rb") as stored:

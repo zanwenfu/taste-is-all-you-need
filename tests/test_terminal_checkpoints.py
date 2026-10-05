@@ -430,6 +430,32 @@ def test_a_lost_reply_is_read_again_by_its_id_and_never_restores_twice(rig, monk
     asyncio.run(scenario())
 
 
+def test_a_restore_its_coordinator_gave_up_on_while_it_waited_never_runs(rig):
+    """Found by review: a request queued behind a command must not run after its caller left."""
+    async def scenario():
+        async with rig() as r:
+            r.env.files = {"good": "x"}
+            await asyncio.to_thread(r.client.checkpoint, "cp1", timeout_seconds=30)
+            r.env.files = {"good": "x", "bad": "y"}
+            r.env.release.clear()
+            r.env.entered.clear()
+            busy = asyncio.create_task(r.owner.execute(request("slow", command="still running")))
+            assert await asyncio.to_thread(r.env.entered.wait, 5)
+            with pytest.raises(TerminalUnavailable):
+                await asyncio.to_thread(r.client.restore, "undo_1", "cp1", timeout_seconds=0.3)
+            await asyncio.sleep(0.3)
+            r.env.release.set()
+            await busy
+            await asyncio.sleep(0.3)
+            assert not r.env.restored and r.env.files == {"good": "x", "bad": "y", "slow": "still running"}
+            assert not [kind for kind, _ in r.owner.events() if kind.startswith("restore")]
+            # Asked again, it runs now: nothing was recorded for it.
+            again = await asyncio.to_thread(r.client.restore, "undo_1", "cp1", timeout_seconds=30)
+            assert again["exact"] is True and r.env.files == {"good": "x"}
+
+    asyncio.run(scenario())
+
+
 def test_the_client_refuses_bad_identifiers_and_allowances_before_connecting(rig):
     async def scenario():
         async with rig() as r:

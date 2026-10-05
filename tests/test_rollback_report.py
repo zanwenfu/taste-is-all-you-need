@@ -54,7 +54,7 @@ def _result(job, name, task, token, reward):
         "agent_result": {"metadata": {"taste": {"trial": token, "audit_flags": []}}}}))
 
 
-def test_the_report_counts_checkpoints_and_restores_with_the_planners_reason(tmp_path, capsys):
+def test_the_report_counts_checkpoints_and_restores_with_the_planners_reason(tmp_path, capsys, monkeypatch):
     trials, job = tmp_path / "trials", tmp_path / "jobs" / "pilot"
     token = "f" * 32
     _ledger(trials / token, [
@@ -67,6 +67,7 @@ def test_the_report_counts_checkpoints_and_restores_with_the_planners_reason(tmp
                       "removed": 1, "from_image": 3, "deleted": 0, "mismatches": []}),
         ("restore_failed", {"operation_id": "undo_2", "checkpoint_id": "after_1", "failed": True,
                             "error": "TerminalConflict"}),
+        ("checkpoint_files_discarded", {"bytes": 40960}),
     ])
     _memory(trials / token, {
         ".taste/environment/goals/g/restores/b.json": {"generation": 4, "at": "2026-10-05T01:00:00Z", "label": "cp2",
@@ -77,16 +78,23 @@ def test_the_report_counts_checkpoints_and_restores_with_the_planners_reason(tmp
     })
     _result(job, "kv-store-grpc__1", "kv-store-grpc", token, 1.0)
     _result(job, "polyglot-c-py__1", "polyglot-c-py", "e" * 32, 0.0)
+    # A trial with a ledger but no memory repository to read.
+    _ledger(trials / ("d" * 32), [("checkpoint", {"checkpoint_id": "initial", "bytes": 10240})])
+    _result(job, "sanitize-git-repo__1", "sanitize-git-repo", "d" * 32, 1.0)
     output = tmp_path / "report.json"
-    assert rollback_report.main(["--job", str(job), "--trials", str(trials), "--json", str(output)]) == 0
+    monkeypatch.chdir(tmp_path)
+    # A relative trials path works as well as an absolute one.
+    assert rollback_report.main(["--job", "jobs/pilot", "--trials", "trials", "--json", str(output)]) == 0
     report = json.loads(output.read_text())
     summary = report["summary"]
-    assert summary["trials"] == 2 and summary["with_ledger"] == 1 and summary["solved"] == 1
-    assert (summary["checkpoints"], summary["checkpoints_failed"]) == (3, 1)
+    assert summary["trials"] == 3 and summary["with_ledger"] == 2 and summary["solved"] == 2
+    assert summary["trials_without_control_branch"] == 1 and summary["discarded_bytes_total"] == 40960
+    assert (summary["checkpoints"], summary["checkpoints_failed"]) == (4, 1)
     assert (summary["restores"], summary["restores_exact"], summary["restores_failed"]) == (2, 1, 1)
-    assert summary["restore_seconds_max"] == 2.5 and summary["store_bytes_total"] == 3000
-    row = next(item for item in report["rows"] if item["ledger"])
+    assert summary["restore_seconds_max"] == 2.5 and summary["store_bytes_total"] == 6000
+    row = next(item for item in report["rows"] if item["task"] == "kv-store-grpc")
     assert row["rollbacks"] == [
         {"generation": 3, "to": "cp1", "reason": "tests passed before run 2", "result": "exact"},
         {"generation": 4, "to": "cp2", "reason": "a later run broke it", "result": "failed"}]
-    assert "g3 to cp1 (exact)" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "g3 to cp1 (exact)" in printed and "no control branch" in printed

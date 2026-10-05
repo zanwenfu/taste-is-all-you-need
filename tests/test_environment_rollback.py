@@ -42,14 +42,18 @@ class FakeEnvironment:
     def __init__(self):
         self.calls: list[tuple] = []
         self.failing: set[str] = set()
+        # The size and partiality of checkpoints taken after runs.
+        self.bytes, self.partial = 2048, False
 
     def checkpoint(self, identity, *, timeout_seconds):
         assert 0 < timeout_seconds <= 300
         self.calls.append(("checkpoint", identity))
         if "checkpoint" in self.failing:
             raise OSError("daemon unavailable at /var/run/docker.sock")
-        return {"checkpoint_id": identity, "tar_sha256": "f" * 64, "taken_at": 1.0, "bytes": 2048,
-                "added": 1, "changed": 1, "deleted": 0, "partial": False, "left_out": 0,
+        after = identity != "initial"
+        return {"checkpoint_id": identity, "tar_sha256": "f" * 64, "taken_at": 1.0,
+                "bytes": self.bytes if after else 10240,
+                "added": 1, "changed": 1, "deleted": 0, "partial": self.partial and after, "left_out": 0,
                 "paths": ["/app/server.py"], "more_paths": 0, "deleted_paths": [], "more_deleted_paths": 0,
                 "over_cap": [], "more_over_cap": 0}
 
@@ -256,25 +260,106 @@ def test_a_coordinator_that_restarts_after_a_restore_reads_it_back(store):
     assert len(history(replacement).restores) == 1 and len(launcher.launch_calls) == 2
 
 
-def _history_with(*labels_failed):
+def _history_with(*states):
+    """Checkpoints cp1, cp2, ... each "ok", "failed" or "partial"."""
+    results = {"ok": lambda number: {"checkpoint_id": f"id{number}"}, "failed": lambda number: {"failed": True},
+               "partial": lambda number: {"checkpoint_id": f"id{number}", "partial": True}}
     checkpoints = tuple(
         {"label": f"cp{number}", "checkpoint_id": f"id{number}", "runs_ended": [], "generation": 1,
-         "result": {"failed": True} if failed else {"checkpoint_id": f"id{number}"}}
-        for number, failed in enumerate(labels_failed, start=1))
+         "result": results[state](number)}
+        for number, state in enumerate(states, start=1))
     return EnvironmentHistory(checkpoints=checkpoints)
 
 
-def test_rollback_validation_names_only_checkpoints_that_were_taken():
-    listed = _history_with(False, True, False)
-    assert validate_rollback(None, "reason given anyway", listed) is None
-    assert validate_rollback("cp3", "fails after run 2", listed) == {
-        "checkpoint": "cp3", "checkpoint_id": "id3", "reason": "fails after run 2"}
-    for target in ("cp2", "cp4", "id1", 1, ""):
+def test_rollback_validation_names_only_checkpoints_that_can_be_restored():
+    listed = _history_with("ok", "failed", "ok", "partial")
+    for nothing in (None, "", "none", "NULL", "  "):
+        assert validate_rollback(nothing, "reason given anyway", listed) is None
+    for name in ("cp3", " CP3 ", "Cp3"):
+        assert validate_rollback(name, "fails after run 2", listed) == {
+            "checkpoint": "cp3", "checkpoint_id": "id3", "reason": "fails after run 2"}
+    for target in ("cp2", "cp4", "cp5", "id1", 1):
         with pytest.raises(ValueError, match="cp1, cp3"):
             validate_rollback(target, "evidence", listed)
     for reason in ("", "   ", None, "x" * 4001):
         with pytest.raises(ValueError, match="rollback_reason"):
             validate_rollback("cp1", reason, listed)
+
+
+def test_the_planner_is_told_plainly_what_a_failed_restore_did_to_the_files():
+    def restore(error):
+        return {"generation": 2, "label": "cp1", "reason": "r", "at": "t",
+                "result": {"failed": True, "error": error}}
+
+    history = EnvironmentHistory(restores=(restore("no_time"), restore("TerminalConflict"),
+                                           restore("TerminalUnavailable"), restore("DockerTransportError")))
+    outcomes = [item["outcome"] for item in history.for_planner()["rollbacks"]]
+    assert outcomes[0] == outcomes[1] == "not done: the files were left as they were"
+    assert outcomes[2].startswith("not confirmed") and outcomes[3].startswith("failed partway")
+
+
+def test_a_partial_checkpoint_is_never_offered(store):
+    environment, planner = FakeEnvironment(), Planner(to="cp2")
+    environment.partial = True
+    with pytest.raises(InvalidPlannerOutput, match="cp1"):
+        run_to_second_plan(store, environment, planner)
+    assert [item["checkpoint"] for item in planner.prompts[2]["task_environment_checkpoints"]] == ["cp1"]
+
+
+def test_a_restore_is_not_started_without_the_time_its_size_needs(store):
+    environment, planner = FakeEnvironment(), Planner(to="cp2")
+    environment.bytes = 10**12  # 50,000 s at the assumed copy rate
+    runtime, launcher, _, _, _ = run_to_second_plan(store, environment, planner)
+    third = runtime.cycle()
+    assert not any(call[0] == "restore" for call in environment.calls)
+    [restored] = history(runtime).restores
+    assert restored["result"] == {"failed": True, "error": "no_time"}
+    assert any(item.kind == "rollback_failed" for item in third.triggers) and len(launcher.launch_calls) == 1
+
+
+def test_a_rollback_left_pending_when_the_run_ends_is_made_before_the_closing_reply(store):
+    from datetime import UTC, datetime, timedelta
+
+    from taste.brains import benchmark_reply
+
+    goal = replace(simple_goal(), metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA,
+                                            benchmark_reply.RESERVE_KEY: 10})
+    seen = []
+
+    def respond(request, prompt):
+        seen.append(json.loads(prompt))
+        raw = json.loads(proposal(prompt, *(() if benchmark_reply.is_closing(request.operation_id) else
+                                           (assignment_for(request, f"build-{request.generation}",
+                                                           f"worker-build-{request.generation}", "product.txt"),))))
+        raw["metadata"] = {"final_reply": "Rolled back; nothing else was finished."
+                           if benchmark_reply.is_closing(request.operation_id) else ""}
+        if request.generation == 2 and not benchmark_reply.is_closing(request.operation_id):
+            raw.update(rollback_to="cp1", rollback_reason="run 1 broke the build")
+        return json.dumps(raw, sort_keys=True)
+
+    environment, transport, launcher = FakeEnvironment(), ScriptedTransport(respond), FakeLauncher()
+    lock = threading.RLock()
+    control = store.branch("central-control", producer="central-runtime")
+    integration = store.branch("integration", producer="central-integration")
+    planner = CentralPlanner(store, transport=transport, control=control, control_branch=control.name,
+                             integration_branch=integration.name, mutation_lock=lock)
+    supervisor = CentralSupervisor(store, launcher=launcher, control_branch=control,
+                                   integration_branch=integration, control_lock=lock)
+    runtime = CentralRuntime(store, goal, planner=planner, supervisor=supervisor, control=control,
+                             integration=integration, control_lock=lock, task_environment=environment)
+    runtime.cycle()
+    runtime.cycle()
+    settle(runtime, launcher, "build-1")
+    assert runtime.cycle().status == "replanned"
+    plan = runtime.planner.current_plan(goal.goal_id)
+    assert plan.metadata["rollback"]["checkpoint"] == "cp1" and not history(runtime).restores
+    # The run ends before another cycle could make the rollback.
+    runtime._plan_minimum = 0.0
+    runtime._closing_reply("wall_clock", "the run reached its bound", datetime.now(UTC) + timedelta(seconds=600))
+    assert runtime.closing_failure is None, runtime.closing_failure
+    assert ("restore", restore_operation_id(plan.plan_id), "initial") in environment.calls
+    closing = seen[-1]
+    assert closing["task_environment_rollbacks"][0]["outcome"] == "exact"
 
 
 def test_checkpoint_ids_follow_the_runs_not_their_order():

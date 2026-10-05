@@ -47,6 +47,7 @@ from taste.brains.environment_records import (
     read_history,
     restore_operation_id,
     restore_path,
+    restore_seconds,
 )
 from taste.brains.environment_records import checkpoint_id as environment_checkpoint_id
 from taste.brains.environment_records import label as checkpoint_label
@@ -1691,7 +1692,11 @@ class CentralRuntime:
         target = rollback["checkpoint_id"]
         seconds = self._environment_seconds(keep=keep, deadline=deadline)
         environment = self.task_environment
-        if seconds < ENVIRONMENT_FLOOR_SECONDS:
+        # A restore deletes before it copies back: it is not started without
+        # the time a checkpoint of this size needs (see restore_seconds).
+        size = next((record["result"].get("bytes", 0) for record in self._environment_history().checkpoints
+                     if record["checkpoint_id"] == target), 0)
+        if seconds < max(ENVIRONMENT_FLOOR_SECONDS, restore_seconds(size)):
             result: dict[str, Any] = {"failed": True, "error": "no_time"}
         else:
             result = self._perform(
@@ -2481,6 +2486,11 @@ class CentralRuntime:
                 if callable(bind_deadline):
                     bind_deadline(remaining_seconds=remaining)
                 cycle = self._begin_cycle(plan)
+                # A rollback the current plan named but never applied, because
+                # the run ended before its workers could start: applied now, if
+                # the closing proposal keeps its time, so that the files graded
+                # and the closing proposal both follow the plan that chose it.
+                self._apply_rollback(cycle, plan, keep=self._plan_minimum, deadline=deadline)
                 # A worker killed at its grace period left no report to collect.
                 # What its recorded turns show goes with the closing trigger.
                 unreported = [

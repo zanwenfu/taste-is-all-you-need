@@ -358,7 +358,14 @@ class TerminalService:
                 await _settle(operation)
 
     async def _environment(self, effect, reader):
-        """Await one coordinator checkpoint or restore; a departed caller does not end it."""
+        """Await one coordinator checkpoint or restore, and end it with its caller.
+
+        A coordinator that leaves has given up on the effect. One still waiting
+        for the terminal is dropped, so it never runs later behind the
+        coordinator's back; one already running finishes and is recorded (the
+        broker never leaves the files mid-copy), and asking again by its ID
+        reads that record.
+        """
         arguments = effect.arguments
         call = (self.broker.checkpoint(arguments["checkpoint_id"]) if effect.operation == "checkpoint"
                 else self.broker.restore(arguments["operation_id"], arguments["checkpoint_id"]))
@@ -367,9 +374,9 @@ class TerminalService:
         try:
             done, _ = await asyncio.wait((operation, disconnected), return_when=asyncio.FIRST_COMPLETED)
             if operation not in done:
-                # The broker finishes and records the effect; the coordinator
-                # reads the record again by its ID. Nothing is cancelled.
-                await _settle(operation)
+                operation.cancel()
+                with suppress(asyncio.CancelledError):
+                    await _settle(operation)
                 raise TerminalUnavailable("terminal coordinator disconnected")
             return operation.result()
         finally:

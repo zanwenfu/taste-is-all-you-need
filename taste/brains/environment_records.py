@@ -29,6 +29,15 @@ RESTORE_SCHEMA = "taste.brains/EnvironmentRestore/1"
 INITIAL = "initial"
 ROLLBACK_FIELDS = frozenset({"rollback_to", "rollback_reason"})
 MAX_REASON_CHARS = 4000
+# How long a restore may need: a floor for the daemon's round trips (inspect,
+# changes, a helper container), then the checkpoint's bytes at a conservative
+# copy rate. A restore is not started with less time left: it deletes before it
+# copies back, and cut short it would leave the files mixed.
+RESTORE_FLOOR_SECONDS = 15.0
+RESTORE_BYTES_PER_SECOND = 20e6
+# A failed restore's error class, and what it says about the files. A refusal
+# before any change leaves them as they were; a lost reply says nothing.
+_REFUSED = frozenset({"no_time", "TerminalConflict", "TerminalFenced", "TerminalAccessDenied", "ValueError"})
 # Fields of a controller's checkpoint summary that tell the model nothing.
 _UNSHOWN = frozenset({"checkpoint_id", "tar_sha256", "taken_at"})
 
@@ -67,6 +76,11 @@ def _key(value: str) -> str:
 
 def goal_root(goal_id: str) -> str:
     return f"{ENVIRONMENT_ROOT}/goals/{_key(goal_id)}"
+
+
+def restore_seconds(checkpoint_bytes: int) -> float:
+    """The least time to start a restore of a checkpoint of this size with."""
+    return RESTORE_FLOOR_SECONDS + max(0, checkpoint_bytes) / RESTORE_BYTES_PER_SECOND
 
 
 def checkpoint_path(goal_id: str, number: int) -> str:
@@ -108,8 +122,13 @@ class EnvironmentHistory:
     restores: tuple[dict[str, Any], ...] = ()
 
     def usable(self) -> dict[str, dict[str, Any]]:
-        """The checkpoints a plan may roll back to, by the model's name for them."""
-        return {record["label"]: record for record in self.checkpoints if not record["result"].get("failed")}
+        """The checkpoints a plan may roll back to, by the model's name for them.
+
+        Not a failed one, and not a partial one: past its size cap a checkpoint
+        lacks paths it lists, and restoring it would delete what it never copied.
+        """
+        return {record["label"]: record for record in self.checkpoints
+                if not record["result"].get("failed") and not record["result"].get("partial")}
 
     def covered_runs(self) -> set[str]:
         """Runs whose end some checkpoint already follows."""
@@ -121,12 +140,17 @@ class EnvironmentHistory:
              "taken": "after these runs ended" if record["runs_ended"] else "before any worker ran",
              "runs_ended": list(record["runs_ended"]),
              "files": {name: value for name, value in record["result"].items() if name not in _UNSHOWN}}
-            for record in self.checkpoints if not record["result"].get("failed")]
+            for record in self.usable().values()]
         rollbacks = []
         for record in self.restores:
             result = record["result"]
-            outcome = ("failed: the files may be partly restored" if result.get("failed")
-                       else "exact" if result.get("exact") else "done, with differences")
+            error = result.get("error")
+            outcome = ("exact" if result.get("exact") and not result.get("failed")
+                       else "done, with differences" if not result.get("failed")
+                       else "not done: the files were left as they were" if error in _REFUSED
+                       else "not confirmed: the controller's reply was lost, so the files may or may not "
+                            "have been returned" if error == "TerminalUnavailable"
+                       else "failed partway: the files may be partly restored")
             rollbacks.append({"plan_generation": record["generation"], "to": record["label"],
                               "reason": record["reason"], "outcome": outcome,
                               **({"differences": result["mismatches"]} if result.get("mismatches") else {})})
@@ -155,9 +179,14 @@ def read_history(state: Any, goal_id: str) -> EnvironmentHistory:
 def validate_rollback(target: Any, reason: Any, history: EnvironmentHistory) -> dict[str, str] | None:
     """A proposal's rollback, checked against the checkpoints its request listed.
 
-    Null means none (a reason given anyway is dropped). A named checkpoint must
-    be one listed, and needs its evidence.
+    Null means none (a reason given anyway is dropped), as do "", "none" and
+    "null". A named checkpoint must be one listed, in any case and spacing,
+    and needs its evidence.
     """
+    if isinstance(target, str):
+        target = target.strip().lower()
+        if target in ("", "none", "null"):
+            target = None
     if target is None:
         return None
     usable = history.usable()

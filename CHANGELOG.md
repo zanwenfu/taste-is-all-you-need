@@ -87,7 +87,11 @@ behaviour and interfaces.
   trial's checkpoint tars are deleted once its environment is sealed for
   grading or stopped, when no restore can follow; each checkpoint's manifest
   and ledger record stay (in the rollback pilot one trial's after-run
-  checkpoints reached 0.5-0.6 GB each).
+  checkpoints reached 0.5-0.6 GB each). A partial checkpoint (past its size
+  cap) is never offered and never restored; a restore is not started without
+  time for its size; a checkpoint or restore whose coordinator gave up while
+  it waited is dropped; a rollback the last plan named is made before the
+  closing reply; and "", "none" or "CP2 " are read as null or cp2.
 - **An export of a study's trial records** (`scripts/export_records.py`):
   each trial's Harbor result and verifier output and Taste's settled record,
   nothing else, with a manifest of SHA-256 checksums that `--verify` checks;

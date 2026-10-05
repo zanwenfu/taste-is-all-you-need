@@ -8,13 +8,15 @@ import io
 import json
 import posixpath
 import tarfile
+import time
 import urllib.parse
 from pathlib import Path
 
 import pytest
 
+from taste.brains.docker_terminal import DockerTerminalBackend
 from taste.brains.terminal_broker import TerminalConflict, TerminalFenced
-from tests.test_docker_terminal import CONTAINER, backend
+from tests.test_docker_terminal import CONTAINER, TOKEN, backend
 from tests.test_docker_terminal import daemon as _daemon
 
 daemon = _daemon
@@ -344,6 +346,34 @@ def test_a_container_that_changed_nothing_is_checkpointed_and_restored_to(raw_da
     receipt = executor.restore(manifest, tmp_path / "checkpoints")
     assert filesystem.files == IMAGE and receipt.exact
     assert receipt.removed == ("/app/new.py",) and receipt.from_image == ("/etc/app.conf", "/usr/lib/lib.so")
+
+
+def test_a_partial_checkpoint_is_refused_before_anything_changes(raw_daemon, tmp_path):
+    """A partial checkpoint lacks paths it would delete: found by review, seen in the pilot."""
+    filesystem = Filesystem(IMAGE)
+    restoring(raw_daemon, filesystem)
+    filesystem.files.update({"/app/util.py": b"U = 1\n", "/app/vendor": None, "/app/vendor/big.bin": b"x" * 64})
+    executor = backend(raw_daemon)
+    manifest = executor.checkpoint(tmp_path / "checkpoints", cap_bytes=1)
+    assert manifest.partial and manifest.over_cap
+    filesystem.files["/app/util.py"] = b"broken"
+    before = dict(filesystem.files)
+    with pytest.raises(TerminalConflict, match="partial"):
+        executor.restore(manifest, tmp_path / "checkpoints")
+    assert filesystem.files == before and raw_daemon.helpers == []
+
+
+def test_a_restore_without_the_time_its_size_needs_changes_nothing(raw_daemon, tmp_path):
+    filesystem = Filesystem(IMAGE)
+    restoring(raw_daemon, filesystem)
+    filesystem.files["/app/util.py"] = b"U = 1\n"
+    executor = DockerTerminalBackend.admit(raw_daemon.socket, CONTAINER, TOKEN, time.time() + 8)
+    manifest = executor.checkpoint(tmp_path / "checkpoints")
+    filesystem.files.update({"/app/build": None, "/app/build/out.o": b"obj"})
+    before = dict(filesystem.files)
+    with pytest.raises(TerminalConflict, match="too little time"):
+        executor.restore(manifest, tmp_path / "checkpoints")
+    assert filesystem.files == before and raw_daemon.helpers == []
 
 
 def test_a_restore_refuses_a_checkpoint_of_another_image(raw_daemon, tmp_path):

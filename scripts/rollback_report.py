@@ -21,7 +21,7 @@ import statistics
 import subprocess
 from pathlib import Path
 
-LEDGER_KINDS = ("checkpoint", "checkpoint_failed", "restored", "restore_failed")
+LEDGER_KINDS = ("checkpoint", "checkpoint_failed", "restored", "restore_failed", "checkpoint_files_discarded")
 ENVIRONMENT_PREFIX = ".taste/environment/"
 
 
@@ -35,7 +35,7 @@ def ledger_events(root):
     path = root / "controller" / "terminal" / "terminal.sqlite3"
     if not path.is_file():
         return None
-    connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         marks = ",".join("?" * len(LEDGER_KINDS))
         return [(kind, json.loads(payload)) for kind, payload in connection.execute(
@@ -51,17 +51,26 @@ def _git(repository, *args):
 
 
 def control_records(root):
-    """The environment records on the trial's control branch: checkpoints and restores, by path."""
+    """The environment records on the trial's control branch, by path; None when no one branch is found.
+
+    A record that cannot be read is left out and counted under "unreadable".
+    """
     repository = root / "agent-state" / "workspace"
     if not repository.is_dir():
-        return {}
+        return None
     refs = [line for line in _git(repository, "for-each-ref", "--format=%(refname)", "refs/heads/mem").split()
             if line.endswith("/central-control")]
     if len(refs) != 1:
-        return {}
-    paths = [line for line in _git(repository, "ls-tree", "-r", "--name-only", refs[0], ENVIRONMENT_PREFIX).split()
-             if line.endswith(".json")]
-    return {path: json.loads(_git(repository, "show", f"{refs[0]}:{path}")) for path in paths}
+        return None
+    records, unreadable = {}, 0
+    for path in _git(repository, "ls-tree", "-r", "--name-only", refs[0], ENVIRONMENT_PREFIX).split():
+        if not path.endswith(".json"):
+            continue
+        try:
+            records[path] = json.loads(_git(repository, "show", f"{refs[0]}:{path}"))
+        except ValueError:
+            unreadable += 1
+    return {"records": records, "unreadable": unreadable}
 
 
 def store_bytes(root):
@@ -79,19 +88,23 @@ def trial_row(result, trials_root):
     events = ledger_events(root) if root else None
     if events is None:
         return row
-    records = control_records(root)
+    control = control_records(root)
+    records = {} if control is None else control["records"]
     restores = sorted((item for path, item in records.items() if "/restores/" in path),
                       key=lambda item: (item["generation"], item["at"]))
     row.update(
-        ledger=True, store_bytes=store_bytes(root),
+        ledger=True, store_bytes=store_bytes(root), control_branch=control is not None,
+        unreadable_records=0 if control is None else control["unreadable"],
+        discarded_bytes=sum(payload.get("bytes", 0) for kind, payload in events
+                            if kind == "checkpoint_files_discarded"),
         checkpoints=[{"checkpoint_id": payload["checkpoint_id"], "failed": kind == "checkpoint_failed",
                       **{name: payload.get(name) for name in ("bytes", "added", "changed", "deleted", "partial",
                                                               "error") if name in payload}}
-                     for kind, payload in events if kind.startswith("checkpoint")],
+                     for kind, payload in events if kind in ("checkpoint", "checkpoint_failed")],
         restores=[{"checkpoint_id": payload["checkpoint_id"], "failed": kind == "restore_failed",
                    **{name: payload.get(name) for name in ("exact", "seconds", "removed", "from_image",
                                                            "deleted", "mismatches", "error") if name in payload}}
-                  for kind, payload in events if kind.startswith("restore")],
+                  for kind, payload in events if kind in ("restored", "restore_failed")],
         rollbacks=[{"generation": item["generation"], "to": item["label"], "reason": item["reason"],
                     "result": "failed" if item["result"].get("failed") else
                     "exact" if item["result"].get("exact") else "with differences"} for item in restores],
@@ -118,19 +131,24 @@ def summarize(rows):
         "restore_seconds_max": max(seconds, default=0), "restore_seconds_median": statistics.median(seconds) if seconds else 0,
         "store_bytes_total": sum(row.get("store_bytes", 0) for row in graded),
         "store_bytes_max": max((row.get("store_bytes", 0) for row in graded), default=0),
+        "discarded_bytes_total": sum(row.get("discarded_bytes", 0) for row in graded),
+        "trials_without_control_branch": sum(1 for row in graded if not row.get("control_branch")),
+        "unreadable_records": sum(row.get("unreadable_records", 0) for row in graded),
     }
 
 
 def markdown(rows, summary):
-    lines = ["| Task | Reward | Checkpoints (failed) | Rollbacks | Store MB | Flags |", "| --- | --- | --- | --- | --- | --- |"]
+    lines = ["| Task | Reward | Checkpoints (failed) | Rollbacks | Stored MB | Flags |", "| --- | --- | --- | --- | --- | --- |"]
     for row in sorted(rows, key=lambda item: (item["task"], item["trial"] or "")):
         if not row["ledger"]:
             lines.append(f"| {row['task']} | {row['reward']} | no ledger | | | {', '.join(row['audit_flags'])} |")
             continue
         failed = sum(1 for item in row["checkpoints"] if item["failed"])
         rollbacks = "; ".join(f"g{item['generation']} to {item['to']} ({item['result']})" for item in row["rollbacks"])
-        lines.append(f"| {row['task']} | {row['reward']} | {len(row['checkpoints'])} ({failed}) | {rollbacks or '-'} | "
-                     f"{row['store_bytes'] / 1e6:.1f} | {', '.join(row['audit_flags'])} |")
+        stored = (row["store_bytes"] + row["discarded_bytes"]) / 1e6
+        rollbacks = rollbacks or ("-" if row["control_branch"] else "no control branch")
+        lines.append(f"| {row['task']} | {row['reward']} | {len(row['checkpoints'])} ({failed}) | {rollbacks} | "
+                     f"{stored:.1f} | {', '.join(row['audit_flags'])} |")
     lines.append("")
     lines.append(json.dumps(summary, indent=1))
     return "\n".join(lines)
