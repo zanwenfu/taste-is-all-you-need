@@ -45,6 +45,9 @@ from taste.brains.terminal_broker import (
 REQUEST_BYTES = 512 * 1024
 RESPONSE_BYTES = 3 * 1024 * 1024
 HANDSHAKE_SECONDS = 5
+# Operations only the coordinator's issuer credential may ask for. A checkpoint
+# or restore is admitted within the handshake and awaited after it.
+COORDINATOR_OPERATIONS = frozenset({"issue", "issuer_ping", "checkpoint", "restore"})
 SETTLEMENT_SECONDS = 20
 WRITE_SECONDS = 3
 
@@ -354,19 +357,53 @@ class TerminalService:
                 operation.cancel()
                 await _settle(operation)
 
+    async def _environment(self, effect, reader):
+        """Await one coordinator checkpoint or restore; a departed caller does not end it."""
+        arguments = effect.arguments
+        call = (self.broker.checkpoint(arguments["checkpoint_id"]) if effect.operation == "checkpoint"
+                else self.broker.restore(arguments["operation_id"], arguments["checkpoint_id"]))
+        operation = asyncio.create_task(call)
+        disconnected = asyncio.create_task(reader.read(1))
+        try:
+            done, _ = await asyncio.wait((operation, disconnected), return_when=asyncio.FIRST_COMPLETED)
+            if operation not in done:
+                # The broker finishes and records the effect; the coordinator
+                # reads the record again by its ID. Nothing is cancelled.
+                await _settle(operation)
+                raise TerminalUnavailable("terminal coordinator disconnected")
+            return operation.result()
+        finally:
+            disconnected.cancel()
+            with suppress(asyncio.CancelledError):
+                await _settle(disconnected)
+            if not operation.done():
+                await _settle(operation)
+
     async def _handle(self, reader, writer):
         reply = {"version": 1, "status": "denied"}
         dispatched = False
+        effect = None
         try:
             async with asyncio.timeout(HANDSHAKE_SECONDS):
                 message = await _read(reader, REQUEST_BYTES)
-                if message.get("operation") in ("issue", "issuer_ping"):
-                    from taste.brains.terminal_issuer import handle_coordinator_request
+                if message.get("operation") in COORDINATOR_OPERATIONS:
+                    from taste.brains.terminal_issuer import (
+                        EnvironmentEffect,
+                        handle_coordinator_request,
+                    )
 
                     result = handle_coordinator_request(self, message, writer)
-                    reply.update(status="ok", scope=self._issuer.public_scope(), **result)
-                    return
-                grant = self._authorize(message, writer)
+                    if not isinstance(result, EnvironmentEffect):
+                        reply.update(status="ok", scope=self._issuer.public_scope(), **result)
+                        return
+                    effect = result
+                else:
+                    grant = self._authorize(message, writer)
+            if effect is not None:
+                dispatched = True
+                record = await self._environment(effect, reader)
+                reply.update(status="ok", scope=self._issuer.public_scope(), **{effect.operation: record})
+                return
             reply["grant"] = grant.to_dict()
             operation, arguments = message["operation"], message["arguments"]
             if not isinstance(arguments, dict):

@@ -8,8 +8,10 @@ and confirm its exit turns a timeout or a departed caller into a completed,
 explicitly terminated receipt; the environment and later commands survive.
 Without that confirmation, an uncertain exit, timeout or active cancellation
 still ends admission and requires stopping the entire environment.
-Package/service changes persist between successful requests; this module does
-not promise filesystem or operating-system rollback.
+Package/service changes persist between successful requests. A backend that
+can also take and restore checkpoints of the task's files lets the controller
+record them between commands and put one back (``checkpoint``, ``restore``):
+files only, never running processes, and only on the controller's request.
 
 This is the ownership core, not a Harbor agent, credential boundary or sandbox.
 The backend must bind an exact environment instance, bound its transport/output
@@ -41,6 +43,13 @@ MAX_TERMINAL_OUTPUT_BYTES = 1024 * 1024  # Per stream, before persistence or IPC
 # the command's own allowance. Past it the whole environment is stopped.
 COMMAND_SETTLE_SECONDS = 20
 TERMINATIONS = ("", "timeout", "cancelled")
+# One checkpoint copies at most this much; the store of one trial holds at most
+# the second. Past the first a checkpoint is partial (it lists what it left out);
+# past the second none is taken.
+CHECKPOINT_CAP_BYTES = 512 * 1024 * 1024
+CHECKPOINT_STORE_BYTES = 4 * 1024 * 1024 * 1024
+ENVIRONMENT_EVENTS = ("checkpoint_intent", "checkpoint", "checkpoint_failed",
+                      "restore_intent", "restored", "restore_failed")
 
 
 class TerminalFenced(RuntimeError):
@@ -49,6 +58,10 @@ class TerminalFenced(RuntimeError):
 
 class TerminalConflict(ValueError):
     """A request ID or environment identity was reused with different inputs."""
+
+
+class CheckpointStoreFull(RuntimeError):
+    """The controller's checkpoint store has no room for another checkpoint."""
 
 
 def _json(value):
@@ -141,6 +154,11 @@ class TerminalBackend(Protocol):
     allowance: at the request timeout, or when interrupt() is called, execute
     ends that command alone, confirms its exit and returns a receipt whose
     ``terminated`` names the cause. If the exit cannot be confirmed it raises.
+
+    A backend may also define ``checkpoint(directory, *, cap_bytes)``, which
+    returns a manifest with ``to_dict()`` and ``summary()``, and
+    ``restore(manifest, directory)``, which returns a receipt with
+    ``summary()``. Both are called only between commands.
     """
 
     @property
@@ -192,6 +210,10 @@ class TerminalBroker:
     def __init__(self, directory, binding, backend, *, fresh):
         directory = directory.absolute()
         self.binding, self.backend = binding, backend
+        self._directory = directory
+        # Checkpoints this controller took, by ID. A reopened controller can
+        # list earlier ones from its ledger but not restore them.
+        self._manifests = {}
         self._interruptible = callable(getattr(backend, "interrupt", None))
         self._pid, self._fd, self._db = os.getpid(), None, None
         self._operation, self._loop = None, None
@@ -235,6 +257,7 @@ class TerminalBroker:
             self._upgrade_schema()
             if self._db.execute("SELECT 1 FROM requests WHERE status='pending' LIMIT 1").fetchone():
                 self._fence("recovered incomplete request")
+            self._recover_environment()
         except BaseException:
             self._release()
             raise
@@ -425,11 +448,14 @@ class TerminalBroker:
             self._db.execute("UPDATE requests SET status='uncertain' WHERE status='pending'")
             self._event("stopped", {"environment_id": receipt})
 
-    def _execute_backend(self, request):
+    def _ready_for_transport(self):
         # The thread pool can queue work after the event-loop admission check.
         if self.binding.deadline_unix <= time.time():
             raise TimeoutError("terminal deadline expired before transport invocation")
         self._identity()
+
+    def _execute_backend(self, request):
+        self._ready_for_transport()
         return self.backend.execute(request)
 
     async def _execute_owned(self, request, interrupt):
@@ -490,6 +516,170 @@ class TerminalBroker:
             if len(failures) > 1:
                 raise BaseExceptionGroup("terminal execution and settlement failed", failures) from None
             raise
+
+    # -- checkpoints of the task's files -----------------------------------------
+
+    def checkpoints(self):
+        """Every checkpoint taken, in order, as its summary: never a tar or a path on disk."""
+        self._check()
+        return [payload for kind, payload in self._environment_events(("checkpoint",))]
+
+    async def checkpoint(self, checkpoint_id: str) -> dict:
+        """Record the task's files as they are, between commands; at most once per ID.
+
+        Returns the checkpoint's summary under its ID. When the backend fails,
+        returns a record with ``failed`` and the error's class instead: taking
+        a checkpoint only reads, so the environment keeps admitting commands.
+        """
+        self._on_loop()
+        _identifier(checkpoint_id)
+        self._can_checkpoint()
+        async with self._lock:
+            prior = self._recorded("checkpoint_id", checkpoint_id, ("checkpoint", "checkpoint_failed"))
+            if prior is not None:
+                return prior
+            self._admitting()
+            store = self._store()
+
+            def finished(manifest, failure):
+                if failure is None:
+                    self._manifests[checkpoint_id] = manifest
+                    return "checkpoint", {"checkpoint_id": checkpoint_id, **manifest.summary()}
+                return "checkpoint_failed", {"checkpoint_id": checkpoint_id, "failed": True,
+                                             "error": type(failure).__name__}
+
+            return await self._environment("checkpoint_intent", {"checkpoint_id": checkpoint_id}, finished,
+                                           self._take, checkpoint_id, store)
+
+    async def restore(self, operation_id: str, checkpoint_id: str) -> dict:
+        """Return the task's files to a checkpoint this controller took; at most once per operation ID.
+
+        Returns the receipt's summary (``exact`` when the files now match the
+        checkpoint). When the backend fails partway the files may be mixed:
+        the record says ``failed`` and the environment keeps admitting
+        commands, so the trial can still be graded as it stands.
+        """
+        self._on_loop()
+        _identifier(operation_id)
+        _identifier(checkpoint_id)
+        self._can_checkpoint()
+        intent = {"operation_id": operation_id, "checkpoint_id": checkpoint_id}
+        async with self._lock:
+            prior = self._recorded("operation_id", operation_id, ("restored", "restore_failed"))
+            if prior is not None:
+                if prior["checkpoint_id"] != checkpoint_id:
+                    raise TerminalConflict("restore operation ID was reused for another checkpoint")
+                return prior
+            if self._recorded("operation_id", operation_id, ("restore_intent",)) is not None:
+                raise TerminalFenced("this restore was begun and never recorded")
+            self._admitting()
+            manifest = self._manifests.get(checkpoint_id)
+            if manifest is None:
+                raise TerminalConflict("this controller took no checkpoint with that ID")
+            store = self._store()
+
+            def finished(receipt, failure):
+                if failure is None:
+                    return "restored", {**intent, **receipt.summary()}
+                return "restore_failed", {**intent, "failed": True, "error": type(failure).__name__}
+
+            return await self._environment("restore_intent", intent, finished, self._put_back, manifest, store)
+
+    def _can_checkpoint(self):
+        if not (callable(getattr(self.backend, "checkpoint", None))
+                and callable(getattr(self.backend, "restore", None))):
+            raise TerminalFenced("this environment's transport cannot take or restore checkpoints")
+
+    def _admitting(self):
+        if self._closing or self.phase != "ready":
+            raise TerminalFenced("terminal environment is no longer admitting effects")
+        self._identity()
+        if self.binding.deadline_unix - time.time() <= 0:
+            raise TerminalFenced("terminal admission deadline has expired")
+
+    def _store(self):
+        """The private directory of checkpoint tars and manifests, beside the ledger."""
+        store = self._directory / "checkpoints"
+        with suppress(FileExistsError):
+            store.mkdir(mode=0o700)
+        info = store.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise TerminalFenced("checkpoint store must be private and controller-owned")
+        return store
+
+    def _environment_events(self, kinds):
+        marks = ",".join("?" * len(kinds))
+        return [(kind, json.loads(payload)) for kind, payload in self._db.execute(
+            f"SELECT kind,payload FROM events WHERE kind IN ({marks}) ORDER BY seq", tuple(kinds))]
+
+    def _recorded(self, key, value, kinds):
+        found = [payload for _, payload in self._environment_events(kinds) if payload.get(key) == value]
+        return found[-1] if found else None
+
+    def _take(self, checkpoint_id, store):
+        self._ready_for_transport()
+        used = sum(entry.stat().st_size for entry in store.iterdir()
+                   if re.fullmatch(r"[0-9a-f]{64}\.tar", entry.name))
+        cap = min(CHECKPOINT_CAP_BYTES, CHECKPOINT_STORE_BYTES - used)
+        if cap <= 0:
+            raise CheckpointStoreFull("the controller's checkpoint store is full")
+        manifest = self.backend.checkpoint(store, cap_bytes=cap)
+        fd = os.open(store / f"{checkpoint_id}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as written:
+            written.write(_json(manifest.to_dict()))
+            written.flush()
+            os.fsync(written.fileno())
+        return manifest
+
+    def _put_back(self, manifest, store):
+        self._ready_for_transport()
+        return self.backend.restore(manifest, store)
+
+    async def _environment(self, kind, intent, finished, call, *args):
+        """Run one checkpoint or restore under the caller's lock; return its record."""
+        with self._db:
+            self._event(kind, intent)
+        self._operation = asyncio.create_task(self._environment_owned(finished, call, *args))
+        try:
+            await asyncio.wait((self._operation,))
+        except asyncio.CancelledError:
+            # A departing caller never leaves the files mid-copy: the effect
+            # finishes and is recorded, and its ID reads the record again.
+            with suppress(BaseException):
+                await _settle(self._operation)
+            raise
+        return self._operation.result()
+
+    async def _environment_owned(self, finished, call, *args):
+        # The record is written here, not by the caller, so that it is written
+        # even when the caller has gone.
+        try:
+            value, failure = await _settle(start_owned_thread(_call, call, *args)), None
+        except BaseException as exc:
+            value, failure = None, exc
+        kind, record = finished(value, failure)
+        with self._db:
+            self._event(kind, record)
+        if failure is not None and not isinstance(failure, Exception):
+            raise failure
+        return record
+
+    def _recover_environment(self):
+        """After a restart: a checkpoint begun only read files and is recorded as failed;
+        a restore begun and never recorded may have left them mixed, which fences."""
+        events = self._environment_events(ENVIRONMENT_EVENTS)
+        taken = {payload["checkpoint_id"] for kind, payload in events if kind in ("checkpoint", "checkpoint_failed")}
+        restored = {payload["operation_id"] for kind, payload in events if kind in ("restored", "restore_failed")}
+        for kind, payload in events:
+            if kind == "checkpoint_intent" and payload["checkpoint_id"] not in taken:
+                with self._db:
+                    self._event("checkpoint_failed", {"checkpoint_id": payload["checkpoint_id"], "failed": True,
+                                                      "error": "interrupted"})
+                taken.add(payload["checkpoint_id"])
+            elif (kind == "restore_intent" and payload["operation_id"] not in restored
+                    and self.phase not in ("fenced", "stopped")):
+                self._fence("recovered incomplete restore")
 
     async def abort(self):
         """End admission immediately, drain an active request or stop an idle environment."""

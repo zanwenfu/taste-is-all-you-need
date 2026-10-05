@@ -5,12 +5,16 @@ grants. The trusted coordinator binds each request to a prepared assignment;
 the broker independently checks its terminal policy and derives the actor ID.
 Issuance is idempotent only within this service lifetime. Service death requires
 outside-owner cleanup, not a new issuer and speculative worker replay.
+
+The same role may ask the controller to checkpoint the task's files or to
+restore a checkpoint (each at most once per ID); worker credentials cannot.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import os
 import re
 import secrets
@@ -20,8 +24,9 @@ import time
 from dataclasses import dataclass, field
 
 from taste.brains.records import Assignment, _state_id
-from taste.brains.terminal_broker import TerminalConflict, TerminalFenced
+from taste.brains.terminal_broker import TerminalConflict, TerminalFenced, _identifier
 from taste.brains.terminal_service import (
+    COORDINATOR_OPERATIONS,
     HANDSHAKE_SECONDS,
     REQUEST_BYTES,
     TerminalAccessDenied,
@@ -36,6 +41,22 @@ from taste.brains.terminal_service import (
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
 from taste.brains.worker_admission import EntrypointInputError
 from taste.brains.worker_protocol import assignment_run_id
+
+# The arguments of each checkpoint operation, all identifiers.
+ENVIRONMENT_OPERATIONS = {"checkpoint": frozenset({"checkpoint_id"}),
+                          "restore": frozenset({"operation_id", "checkpoint_id"})}
+# A grant or phase reply is small; a checkpoint's summary names up to a few
+# hundred paths.
+ISSUE_REPLY_BYTES = 16384
+ENVIRONMENT_REPLY_BYTES = 256 * 1024
+
+
+@dataclass(frozen=True)
+class EnvironmentEffect:
+    """A checkpoint or restore the coordinator was admitted to; the service awaits it."""
+
+    operation: str
+    arguments: dict
 
 
 @dataclass(frozen=True)
@@ -87,11 +108,15 @@ def _grant(issuer, assignment):
 
 
 def handle_coordinator_request(service, message, writer):
-    """Service-loop transaction; never waits between admission and registration."""
+    """Service-loop transaction; never waits between admission and registration.
+
+    A checkpoint or restore is only admitted here: the returned
+    ``EnvironmentEffect`` is awaited by the service after the handshake.
+    """
     issuer = service._issuer
     if (issuer is None or set(message) != {"version", "token", "scope", "operation", "arguments"}
             or type(message["version"]) is not int or message["version"] != 1
-            or message["operation"] not in {"issue", "issuer_ping"} or not isinstance(message["token"], str)
+            or message["operation"] not in COORDINATOR_OPERATIONS or not isinstance(message["token"], str)
             or re.fullmatch(r"[0-9a-f]{64}", message["token"]) is None
             or not hmac.compare_digest(hashlib.sha256(message["token"].encode()).digest(),
                                        hashlib.sha256(issuer.token.encode()).digest())
@@ -102,6 +127,13 @@ def handle_coordinator_request(service, message, writer):
             or time.time() >= issuer.policy.binding.deadline_unix):
         raise TerminalFenced("terminal issuer is not accepting assignments")
     arguments = message["arguments"]
+    if message["operation"] in ENVIRONMENT_OPERATIONS:
+        if (not isinstance(arguments, dict) or set(arguments) != ENVIRONMENT_OPERATIONS[message["operation"]]
+                or not all(isinstance(value, str) for value in arguments.values())):
+            raise TerminalAccessDenied("invalid terminal checkpoint arguments")
+        for value in arguments.values():
+            _identifier(value)
+        return EnvironmentEffect(message["operation"], dict(arguments))
     if message["operation"] == "issuer_ping" and arguments == {}:
         return {"phase": service.broker.phase}
     if message["operation"] != "issue":
@@ -138,13 +170,16 @@ class TerminalIssuerClient:
             raise TerminalAccessDenied("terminal launch identity differs from its assignment")
         return self.issue(spec.assignment, spec.prepared_state_id)
 
-    def _exchange(self, operation, arguments):
+    def _exchange(self, operation, arguments, *, seconds=HANDSHAKE_SECONDS):
         issuer = self.credential
         if os.getpid() != self._pid or os.geteuid() != issuer.coordinator_uid:
             raise TerminalAccessDenied("terminal issuer belongs to another process or UID")
-        allowance = min(HANDSHAKE_SECONDS, issuer.policy.binding.deadline_unix - time.time())
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("terminal coordinator requests need a finite positive allowance")
+        allowance = min(seconds, issuer.policy.binding.deadline_unix - time.time())
         if allowance <= 0:
             raise TerminalFenced("terminal assignment deadline expired")
+        limit = ENVIRONMENT_REPLY_BYTES if operation in ENVIRONMENT_OPERATIONS else ISSUE_REPLY_BYTES
         deadline = time.monotonic() + allowance
         wire = _json({"version": 1, "token": issuer.token, "scope": issuer.public_scope(),
                       "operation": operation, "arguments": arguments})
@@ -176,7 +211,7 @@ class TerminalIssuerClient:
                 remaining()
                 connection.sendall(len(wire).to_bytes(4, "big") + wire)
                 size = int.from_bytes(receive(4), "big")
-                if not 0 < size <= 16384:
+                if not 0 < size <= limit:
                     raise TerminalUnavailable("terminal issuer reply exceeds its byte limit")
                 try:
                     response = _decode_message(receive(size))
@@ -187,15 +222,37 @@ class TerminalIssuerClient:
         if response == {"version": 1, "status": "denied"}:
             raise TerminalAccessDenied("terminal issuer access denied")
         if response == {"version": 1, "status": "conflict"}:
-            raise TerminalConflict("terminal issuance conflicts with its prepared checkpoint")
+            raise TerminalConflict("terminal issuance conflicts with its prepared checkpoint" if operation == "issue"
+                                   else f"terminal {operation} conflicts with an earlier request or names no checkpoint")
         if response == {"version": 1, "status": "fenced"}:
             raise TerminalFenced("terminal issuer is fenced")
-        field = "credential" if operation == "issue" else "phase"
+        field = {"issue": "credential", "issuer_ping": "phase"}.get(operation, operation)
         if (set(response) != {"version", "status", "scope", field}
                 or type(response["version"]) is not int or response["version"] != 1
-                or response["status"] != "ok" or _json(response["scope"]) != _json(issuer.public_scope())):
+                or response["status"] != "ok" or _json(response["scope"]) != _json(issuer.public_scope())
+                or (operation in ENVIRONMENT_OPERATIONS and not isinstance(response[field], dict))):
             raise TerminalUnavailable("terminal issuer reply does not bind the admitted scope")
         return response
+
+    def checkpoint(self, checkpoint_id, *, timeout_seconds):
+        """Ask the controller to record the task's files now: the checkpoint's summary, or a failure record.
+
+        An unconfirmed reply raises TerminalUnavailable; asking again with the
+        same ID reads the controller's record instead of taking another.
+        """
+        _identifier(checkpoint_id)
+        return self._exchange("checkpoint", {"checkpoint_id": checkpoint_id}, seconds=timeout_seconds)["checkpoint"]
+
+    def restore(self, operation_id, checkpoint_id, *, timeout_seconds):
+        """Ask the controller to put a checkpoint back: the receipt's summary, or a failure record.
+
+        Asking again with the same operation ID reads the record; it never
+        restores twice.
+        """
+        _identifier(operation_id)
+        _identifier(checkpoint_id)
+        return self._exchange("restore", {"operation_id": operation_id, "checkpoint_id": checkpoint_id},
+                              seconds=timeout_seconds)["restore"]
 
     def ping(self):
         if self._exchange("issuer_ping", {})["phase"] != "ready":

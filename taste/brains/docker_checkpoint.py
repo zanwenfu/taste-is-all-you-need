@@ -36,7 +36,15 @@ CHECKPOINT_SECONDS = 600
 CHANGES_BYTES = 64 * 1024 * 1024
 KINDS = {0: "changed", 1: "added", 2: "deleted"}
 NOT_THE_TASKS = ("/proc", "/sys", "/dev", "/run")
+# A summary names at most this many paths of each list, each cut to PATH_CHARS.
+SUMMARY_PATHS = 40
+PATH_CHARS = 300
 _GO_DIR = 1 << 31
+
+
+def _first(name, items, count):
+    """The first ``count`` of ``items`` under ``name``, and how many more there are."""
+    return {name: [item[:PATH_CHARS] for item in items[:count]], f"more_{name}": max(0, len(items) - count)}
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,20 @@ class CheckpointManifest:
 
     def to_dict(self) -> dict:
         return {"schema": SCHEMA, **asdict(self), "partial": self.partial}
+
+    def summary(self, *, paths=SUMMARY_PATHS) -> dict:
+        """A bounded account for a planner or a reply: counts, size and the first paths.
+
+        ``added`` counts top-most added paths (a new directory once, whatever it
+        holds), ``changed`` the changed files, ``deleted`` the deleted paths.
+        """
+        kinds = dict(self.changes)
+        return {"taken_at": round(self.taken_at, 3), "tar_sha256": self.tar_sha256, "bytes": self.tar_bytes,
+                "added": sum(1 for path in self.copied if kinds.get(path) == "added"),
+                "changed": sum(1 for path in self.copied if kinds.get(path) == "changed"),
+                "deleted": len(self.deleted), "partial": self.partial, "left_out": len(self.left_out),
+                **_first("paths", self.copied, paths), **_first("deleted_paths", self.deleted, paths),
+                **_first("over_cap", self.over_cap, paths)}
 
 
 def _inside(path, roots):
@@ -204,6 +226,12 @@ class RestoreReceipt:
 
     def to_dict(self) -> dict:
         return {**asdict(self), "exact": self.exact}
+
+    def summary(self, *, paths=SUMMARY_PATHS) -> dict:
+        """A bounded account: whether the files now match, what was done, and how long it took."""
+        return {"tar_sha256": self.checkpoint, "exact": self.exact, "seconds": self.seconds,
+                "removed": len(self.removed), "from_image": len(self.from_image), "deleted": len(self.deleted),
+                **_first("mismatches", self.mismatches, paths)}
 
 
 def _remove(wire, container, paths, deadline):

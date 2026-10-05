@@ -50,6 +50,18 @@ behaviour and interfaces.
   container, or one whose tar no longer matches its checksum. Against a real
   daemon (`scripts/check_docker_checkpoint.py`), a container broken after its
   checkpoint was restored in 2.3 seconds with every file as it had been.
+- **Checkpoints and restores at the coordinator's request**
+  (`TerminalBroker.checkpoint` and `restore`, `TerminalIssuerClient.checkpoint`
+  and `restore`). The controller runs them between commands, holding the
+  terminal as a command does, so no command runs and nothing is handed to
+  grading meanwhile. Each is recorded in the terminal ledger before and after,
+  at most once per ID: asking again reads the record, a restore never runs
+  twice, and a caller that leaves does not stop one halfway. A failure is
+  recorded with the error's class, never its text, and commands go on. Only
+  the coordinator's private credential may ask; a worker's is refused like a
+  forged one. A checkpoint copies at most 512 MiB and a trial's store holds
+  at most 4 GiB. After a controller restart, a restore that was begun and
+  never recorded fences the environment.
 - **An export of a study's trial records** (`scripts/export_records.py`):
   each trial's Harbor result and verifier output and Taste's settled record,
   nothing else, with a manifest of SHA-256 checksums that `--verify` checks;
