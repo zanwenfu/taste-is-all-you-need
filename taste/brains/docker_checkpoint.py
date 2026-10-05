@@ -179,3 +179,161 @@ def take(backend, wire, directory, *, cap_bytes=CHECKPOINT_BYTES) -> CheckpointM
         tar_bytes=size, changes=tuple((path, KINDS[kind]) for path, kind in kept), copied=tuple(copied),
         deleted=tuple(path for path, kind in kept if kind == 2), left_out=tuple(left_out),
         over_cap=tuple(over_cap), taken_at=time.time())
+
+
+# -- restore ----------------------------------------------------------------------------
+
+ROLE_LABEL = "taste.terminal.role"
+RM_CHUNK = 256
+
+
+@dataclass(frozen=True)
+class RestoreReceipt:
+    """What a restore did, and whether the container now matches its checkpoint."""
+
+    checkpoint: str
+    removed: tuple[str, ...]
+    from_image: tuple[str, ...]
+    deleted: tuple[str, ...]
+    mismatches: tuple[str, ...]
+    seconds: float
+
+    @property
+    def exact(self) -> bool:
+        return not self.mismatches
+
+    def to_dict(self) -> dict:
+        return {**asdict(self), "exact": self.exact}
+
+
+def _remove(wire, container, paths, deadline):
+    """``rm -rf`` inside the container, as root: the controller undoes what any user made."""
+    from taste.brains.docker_terminal import DockerTransportError, _full_id
+
+    for start in range(0, len(paths), RM_CHUNK):
+        created = wire.control("POST", f"/containers/{container}/exec", deadline,
+                               {"Cmd": ["rm", "-rf", "--", *paths[start:start + RM_CHUNK]], "User": "0",
+                                "AttachStdout": False, "AttachStderr": False, "Tty": False}, statuses=(201,))
+        exec_id = created.get("Id") if isinstance(created, dict) else None
+        if not _full_id(exec_id):
+            raise DockerTransportError("Docker did not identify the created exec")
+        wire.control("POST", f"/exec/{exec_id}/start", deadline, {"Detach": True, "Tty": False})
+        while True:
+            state = wire.control("GET", f"/exec/{exec_id}/json", deadline)
+            if not isinstance(state, dict) or type(state.get("Running")) is not bool:
+                raise DockerTransportError("Docker exec has no readable state")
+            if not state["Running"]:
+                if state.get("ExitCode") != 0:
+                    raise DockerTransportError("removing paths inside the container failed")
+                break
+            time.sleep(0.05)
+
+
+def _put(wire, container, directory, body, deadline):
+    from taste.brains.docker_terminal import DockerTransportError
+
+    query = urllib.parse.quote(directory, safe="/")
+    with wire.request("PUT", f"/containers/{container}/archive?path={query}", deadline, raw=body) as response:
+        if response.status != 200:
+            raise DockerTransportError(f"Docker archive upload returned HTTP {response.status}")
+
+
+def _originals(wire, backend, image, paths, deadline):
+    """Copy the image's own versions of ``paths`` into the task container.
+
+    They come from a helper container made from the same image, never started,
+    labelled with the terminal's owner token, and removed afterwards.
+    """
+    from taste.brains.docker_terminal import OWNER_LABEL, DockerTransportError, _full_id
+
+    if not paths:
+        return
+    created = wire.control("POST", "/containers/create", deadline,
+                           {"Image": image, "Cmd": ["true"], "NetworkDisabled": True,
+                            "Labels": {OWNER_LABEL: backend.binding.owner_token,
+                                       ROLE_LABEL: "checkpoint-originals"},
+                            "HostConfig": {"NetworkMode": "none", "AutoRemove": False}}, statuses=(201,))
+    helper = created.get("Id") if isinstance(created, dict) else None
+    if not _full_id(helper):
+        raise DockerTransportError("Docker did not identify the helper container")
+    try:
+        for path in paths:
+            with _archive(wire, helper, path, deadline) as (_stat, response):
+                body = response.read()
+            _put(wire, backend.environment_id, posixpath.dirname(path) or "/", body, deadline)
+    finally:
+        wire.control("DELETE", f"/containers/{helper}?force=1", deadline, statuses=(204, 404))
+
+
+def _kinds_of(wire, container, mounts, deadline):
+    return {path: KINDS[kind] for path, kind in _changes(wire, container, deadline)
+            if not _inside(path, NOT_THE_TASKS + mounts)}
+
+
+def restore(backend, wire, manifest, directory) -> RestoreReceipt:
+    """Return the task's files to ``manifest``; the caller holds the terminal.
+
+    Everything added since is removed (what the checkpoint holds comes back
+    from its tar); paths the image holds that were changed or deleted since,
+    and that the checkpoint does not hold, get the image's version back; the
+    checkpoint's tar is put back and its deletions made again. Then the
+    container's changes are compared with the checkpoint's; a directory Docker
+    lists as changed only because something under it was touched is not a
+    difference. Running processes are not restored.
+    """
+    from taste.brains.docker_terminal import DockerTransportError
+    from taste.brains.terminal_broker import TerminalConflict
+
+    started = time.monotonic()
+    container = backend.environment_id
+    deadline = time.monotonic() + min(CHECKPOINT_SECONDS, backend.binding.deadline_unix - time.time())
+    tar = Path(directory) / manifest.tar
+    digest = hashlib.sha256()
+    with open(tar, "rb") as stored:
+        for block in iter(lambda: stored.read(1 << 20), b""):
+            digest.update(block)
+    if digest.hexdigest() != manifest.tar_sha256:
+        raise TerminalConflict("the checkpoint's tar does not match its checksum")
+    info = backend._inspect(wire, deadline)
+    if str(info.get("Image") or "") != manifest.image or container != manifest.environment_id:
+        raise TerminalConflict("the checkpoint is of another image or container")
+    mounts = tuple(item["Destination"] for item in info.get("Mounts") or ()
+                   if isinstance(item, dict) and isinstance(item.get("Destination"), str))
+    current = _kinds_of(wire, container, mounts, deadline)
+    target = dict(manifest.changes)
+    parents = {posixpath.dirname(path) for path in current} | {posixpath.dirname(path) for path in target}
+    added_now = {path for path, kind in current.items() if kind == "added"}
+    removed = sorted(path for path in added_now if not _under_added(path, added_now))
+    from_image, deleted_roots = [], set()
+    for path in sorted(current):
+        kind = current[path]
+        if path in target or kind == "added" or (kind == "changed" and path in parents):
+            continue
+        if any(path.startswith(root + "/") for root in deleted_roots):
+            continue  # inside a deleted tree that comes back whole
+        from_image.append(path)
+        if kind == "deleted":
+            deleted_roots.add(path)
+    deleted = sorted(path for path, kind in target.items() if kind == "deleted")
+    _remove(wire, container, removed, deadline)
+    _originals(wire, backend, manifest.image, from_image, deadline)
+    with open(tar, "rb") as stored:
+        _put(wire, container, "/", stored, deadline)
+    _remove(wire, container, deleted, deadline)
+    after = _kinds_of(wire, container, mounts, deadline)
+    mismatches = []
+    for path in sorted(set(after) | set(target)):
+        if after.get(path) == target.get(path):
+            continue
+        if "changed" in (after.get(path), target.get(path)) and None in (after.get(path), target.get(path)):
+            # Listed as changed on one side only: a directory touched along the way is no difference.
+            try:
+                with _archive(wire, container, path, deadline) as (stat, _response):
+                    if stat["mode"] & _GO_DIR:
+                        continue
+            except DockerTransportError:
+                pass  # not there to look at: a difference
+        mismatches.append(path)
+    return RestoreReceipt(checkpoint=manifest.tar_sha256, removed=tuple(removed), from_image=tuple(from_image),
+                          deleted=tuple(deleted), mismatches=tuple(mismatches),
+                          seconds=round(time.monotonic() - started, 3))

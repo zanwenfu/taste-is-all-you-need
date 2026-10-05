@@ -99,7 +99,7 @@ class _Wire:
                     sock.shutdown(socket.SHUT_RDWR)
 
     @contextmanager
-    def request(self, method, path, deadline, body=None, *, upgrade=False):
+    def request(self, method, path, deadline, body=None, *, upgrade=False, raw=None):
         connection = http.client.HTTPConnection("localhost")
         sock = _DeadlineSocket(deadline)
         response = None
@@ -113,12 +113,15 @@ class _Wire:
                 if self._closed:
                     raise TerminalFenced("Docker transport admission ended")
             connection.sock = sock
-            headers = {"Content-Type": "application/json"}
+            headers = {"Content-Type": "application/json" if raw is None else "application/x-tar"}
             if upgrade:
                 headers.update(Connection="Upgrade", Upgrade="tcp")
             else:
                 headers["Connection"] = "close"
-            payload = None if body is None else json.dumps(body, allow_nan=False).encode()
+            # A tar sent to the archive endpoint goes as it is, from bytes or a file.
+            payload = raw if raw is not None else (None if body is None else json.dumps(body, allow_nan=False).encode())
+            if raw is not None and not isinstance(raw, bytes | bytearray):
+                headers["Content-Length"] = str(os.fstat(raw.fileno()).st_size)
             connection.request(method, f"/{API_VERSION}{path}", body=payload, headers=headers)
             response = connection.getresponse()
             _remaining(deadline)
@@ -423,6 +426,22 @@ class DockerTerminalBackend:
             self._active, self._interrupted = wire, False
         try:
             return take(self, wire, directory, cap_bytes=CHECKPOINT_BYTES if cap_bytes is None else cap_bytes)
+        finally:
+            wire.cancel()
+            with self._lock:
+                self._active = None
+
+    def restore(self, manifest, directory):
+        """Return the task's files to a checkpoint, between commands. See ``docker_checkpoint``."""
+        from taste.brains.docker_checkpoint import restore
+
+        wire = _Wire(self.binding.socket_path)
+        with self._lock:
+            if self._closing or self._active is not None:
+                raise TerminalFenced("a checkpoint is restored only between commands")
+            self._active, self._interrupted = wire, False
+        try:
+            return restore(self, wire, manifest, directory)
         finally:
             wire.cancel()
             with self._lock:

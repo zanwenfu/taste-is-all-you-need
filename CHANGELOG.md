@@ -40,6 +40,16 @@ behaviour and interfaces.
   partial. Taken only between commands. Checked against a real daemon by
   `scripts/check_docker_checkpoint.py` (contents, modes, a symbolic link, a
   changed and a deleted image file).
+- **A restore of a checkpoint** (`DockerTerminalBackend.restore`): everything
+  the task added since is removed, the image's own versions of files changed
+  or deleted since come back from a helper container made from the same image
+  (never started, removed afterwards), the checkpoint's files are put back and
+  its deletions made again; then the container's changes are compared with the
+  checkpoint's, and every difference is listed in the receipt. Running
+  processes are not restored. Refused for a checkpoint of another image or
+  container, or one whose tar no longer matches its checksum. Against a real
+  daemon (`scripts/check_docker_checkpoint.py`), a container broken after its
+  checkpoint was restored in 2.3 seconds with every file as it had been.
 - **An export of a study's trial records** (`scripts/export_records.py`):
   each trial's Harbor result and verifier output and Taste's settled record,
   nothing else, with a manifest of SHA-256 checksums that `--verify` checks;

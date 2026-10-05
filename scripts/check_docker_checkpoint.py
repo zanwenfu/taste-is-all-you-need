@@ -9,7 +9,10 @@ Through the production terminal it adds a file, a directory and a symbolic
 link, changes a file's mode, changes a file and deletes another that the
 image holds; then it takes a checkpoint and checks that its tar holds exactly
 the added and changed paths, with their contents, modes and link, and that
-its manifest lists the deletion. The container is removed afterwards, and
+its manifest lists the deletion. Then it breaks things (a new tree, the file
+rewritten with another mode, an image file changed, another deleted, the
+deleted one back), restores the checkpoint and checks that every file is as
+it was at the checkpoint. The container is removed afterwards, and
 --cleanup-only removes anything left with the same owner token.
 """
 
@@ -27,6 +30,14 @@ from pathlib import Path
 from taste.brains.docker_terminal import OWNER_LABEL, DockerTerminalBackend
 from taste.brains.terminal_broker import TerminalRequest
 
+FINGERPRINT = ("cd / && find taste-check -type f -print0 | sort -z | xargs -0 -r sha256sum;"
+               " find taste-check | sort; find taste-check -type l -printf '%p -> %l\\n';"
+               " stat -c '%a %n' taste-check/new.txt;"
+               " for f in etc/issue etc/issue.net etc/debian_version etc/shells; do"
+               " if [ -e $f ]; then sha256sum $f; else echo missing $f; fi; done")
+BREAK = ("mkdir -p /taste-check/build && printf obj > /taste-check/build/out.o && printf broken > /taste-check/new.txt"
+         " && chmod 644 /taste-check/new.txt && printf 'patched\\n' >> /etc/debian_version && rm /etc/shells"
+         " && printf 'back\\n' > /etc/issue.net")
 CHANGES = ("mkdir -p /taste-check/pkg && printf 'A = 1\\n' > /taste-check/pkg/a.py && printf 'new\\n' > /taste-check/new.txt"
            " && chmod 600 /taste-check/new.txt && ln -s /taste-check/new.txt /taste-check/link"
            " && printf 'changed\\n' >> /etc/issue && rm /etc/issue.net")
@@ -89,7 +100,17 @@ def main():
                     "deletion listed": "/etc/issue.net" in manifest.deleted,
                     "nothing over the cap": not manifest.partial,
                 }
-            report.update(checks=checks, manifest=manifest.to_dict())
+            before = backend.execute(TerminalRequest("check_3", "check_actor", FINGERPRINT, "/", 30))
+            broken = backend.execute(TerminalRequest("check_4", "check_actor", BREAK, "/", 30))
+            assert broken.return_code == 0, broken
+            receipt = backend.restore(manifest, directory)
+            after = backend.execute(TerminalRequest("check_5", "check_actor", FINGERPRINT, "/", 30))
+            checks.update({
+                "restored files as at the checkpoint": before.stdout == after.stdout and before.return_code == 0,
+                "restore reports no difference": receipt.exact,
+            })
+            report.update(checks=checks, manifest=manifest.to_dict(), restore=receipt.to_dict(),
+                          fingerprint=before.stdout.decode(errors="replace"))
         report["status"] = "passed" if all(checks.values()) else "failed"
     finally:
         report["removed"] = cleanup(args.owner_token)
