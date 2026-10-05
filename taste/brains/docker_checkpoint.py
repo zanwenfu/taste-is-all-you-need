@@ -117,6 +117,8 @@ def _changes(wire, container, deadline):
         entries = json.loads(data) if data else []
     except ValueError as exc:
         raise DockerTransportError("invalid Docker changes JSON") from exc
+    if entries is None:
+        entries = []  # Docker answers null for a container that changed nothing
     if not isinstance(entries, list) or not all(
             isinstance(item, dict) and isinstance(item.get("Path"), str) and item["Path"].startswith("/")
             and item.get("Kind") in KINDS for item in entries):

@@ -214,7 +214,8 @@ def restoring(daemon, filesystem, mounts=()):
                          (("X-Docker-Container-Path-Stat", stat(tree, wanted)), ("Content-Type", "application/x-tar")))
                 return True
         if path == f"/containers/{CONTAINER}/changes":
-            daemon.reply(handler, filesystem.changes())
+            # As the real daemon: null, not [], when nothing changed.
+            daemon.reply(handler, filesystem.changes() or None)
         elif path.startswith("/containers/create"):
             body = json.loads(handler.body)
             assert body["Image"] == daemon.info["Image"] and body["Labels"]
@@ -329,6 +330,20 @@ def test_a_restore_returns_the_container_to_its_checkpoint(raw_daemon, tmp_path)
     assert receipt.deleted == ("/etc/hosts.allow",)
     # The image's originals came from a helper container, created and then removed.
     assert raw_daemon.helpers == ["created", "removed"]
+
+
+def test_a_container_that_changed_nothing_is_checkpointed_and_restored_to(raw_daemon, tmp_path):
+    """Found against a real daemon: it lists no changes as null."""
+    filesystem = Filesystem(IMAGE)
+    restoring(raw_daemon, filesystem)
+    executor = backend(raw_daemon)
+    manifest = executor.checkpoint(tmp_path / "checkpoints")
+    assert manifest.changes == () and manifest.copied == () and manifest.deleted == ()
+    filesystem.files.update({"/app/new.py": b"N = 1\n", "/etc/app.conf": b"x = 9\n"})
+    del filesystem.files["/usr/lib/lib.so"]
+    receipt = executor.restore(manifest, tmp_path / "checkpoints")
+    assert filesystem.files == IMAGE and receipt.exact
+    assert receipt.removed == ("/app/new.py",) and receipt.from_image == ("/etc/app.conf", "/usr/lib/lib.so")
 
 
 def test_a_restore_refuses_a_checkpoint_of_another_image(raw_daemon, tmp_path):

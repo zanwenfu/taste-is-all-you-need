@@ -29,6 +29,7 @@ from taste.brains.central_communication import CentralCommunication
 from taste.brains.central_planner import CentralPlanner, Goal, PlannerTransport
 from taste.brains.central_runtime import CentralRuntime, CycleOutcome, GoalOutcome
 from taste.brains.communication import Communicator
+from taste.brains.environment_records import TaskEnvironment
 from taste.brains.owned_thread import start_owned_thread
 from taste.brains.planner_transport import PLANNER_RECEIPT_BRANCH, LLMPlannerTransport
 from taste.brains.supervisor import (
@@ -346,6 +347,7 @@ def compose_central_runtime(
     azure_policy: AzureExecutionPolicy | None = None,
     owns_planner_sdk: bool = False,
     work_record: Callable[[Any], Sequence[str]] | None = None,
+    task_environment: TaskEnvironment | None = None,
 ) -> CentralRuntimeHost:
     """Build the concrete central coordinator around one exact shared state.
 
@@ -549,6 +551,7 @@ def compose_central_runtime(
             # running it, so what a killed one ran can be read from there.
             work_record=work_record if work_record is not None or azure_policy is None
             else partial(unreported_commands, opened_store),
+            task_environment=task_environment,
         )
         return CentralRuntimeHost(
             store=opened_store,

@@ -37,9 +37,10 @@ behaviour and interfaces.
   directory whole) and changed files copied out into one tar stored under its
   SHA-256; the deleted paths listed; the kernel's trees and the container's
   mounts left out and listed; a size cap past which the checkpoint is marked
-  partial. Taken only between commands. Checked against a real daemon by
-  `scripts/check_docker_checkpoint.py` (contents, modes, a symbolic link, a
-  changed and a deleted image file).
+  partial. Taken only between commands. A container that changed nothing
+  (Docker lists its changes as null) has an empty checkpoint. Checked against
+  a real daemon by `scripts/check_docker_checkpoint.py` (contents, modes, a
+  symbolic link, a changed and a deleted image file).
 - **A restore of a checkpoint** (`DockerTerminalBackend.restore`): everything
   the task added since is removed, the image's own versions of files changed
   or deleted since come back from a helper container made from the same image
@@ -62,6 +63,22 @@ behaviour and interfaces.
   forged one. A checkpoint copies at most 512 MiB and a trial's store holds
   at most 4 GiB. After a controller restart, a restore that was begun and
   never recorded fences the environment.
+- **Rollback decided by the coordinator** (`--ak rollback=on`,
+  `taste/brains/environment_records.py`). The coordinator's runtime takes a
+  checkpoint of the task's files before the first worker starts and after
+  worker runs end, before each new plan, and records each on the control
+  branch. The planner is shown the checkpoints (what the files then held
+  against the image, by counts and first paths) and may name one in a
+  proposal (`rollback_to`, with its evidence in `rollback_reason`); a name not
+  listed, or a rollback without evidence, refuses the proposal. The files are
+  restored once per plan: before its workers start, or before the goal ends
+  when the plan is complete or closing. A restore that fails starts no worker
+  and asks for a new plan. Reports and records of the undone runs stay in
+  memory as history. With rollback off (the default) prompts, plans and
+  policies are byte for byte as before. Against a real container
+  (`scripts/check_rollback_wiring.py`, no model), the coordinator's
+  checkpoints and restores through the controller's socket returned the files
+  exactly, in 1.6 and 2.4 seconds, and asking again read the record.
 - **An export of a study's trial records** (`scripts/export_records.py`):
   each trial's Harbor result and verifier output and Taste's settled record,
   nothing else, with a manifest of SHA-256 checksums that `--verify` checks;

@@ -31,7 +31,7 @@ POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
                      "planner_effort": "", "request_seconds": None, "planner_model": AZURE_PLANNER_MODEL,
-                     "worker_agent": "", "services": "all"}
+                     "worker_agent": "", "services": "all", "rollback": False}
 SERVICES = ("all", "none")
 
 
@@ -80,6 +80,9 @@ class AzureExecutionPolicy:
     # "none" runs that agent alone through the same machinery: the fixed plan
     # as its planner (taste.brains.single_run), no monitor, no certification.
     services: str = "all"
+    # The coordinator may return the task's files to a checkpoint taken before
+    # the first worker or after a run (taste.brains.environment_records).
+    rollback: bool = False
 
     def __post_init__(self):
         if self.terminal is not None and (
@@ -96,6 +99,10 @@ class AzureExecutionPolicy:
             raise ValueError("the fixed plan is the planner of an agent run alone, and only that")
         if self.services == "none" and not self.worker_agent:
             raise ValueError("services can be off only for a hosted agent")
+        if type(self.rollback) is not bool:
+            raise ValueError("rollback must be true or false")
+        if self.rollback and (self.terminal is None or self.services != "all"):
+            raise ValueError("rollback needs a task terminal and a coordinator that plans")
         if (self.worker_model == self.planner_model) != (self.worker_deployment == self.planner_deployment):
             raise ValueError("one served model must use exactly one deployment")
         if self.worker_effort not in WORKER_EFFORTS:

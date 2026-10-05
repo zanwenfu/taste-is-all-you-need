@@ -274,3 +274,39 @@ class TerminalIssuerClient:
                 or credential.token == issuer.token):
             raise TerminalUnavailable("terminal issuer returned a different assignment grant")
         return credential
+
+
+class IssuerEnvironment:
+    """The task's files through the coordinator's issuer credential, for its runtime.
+
+    Implements ``taste.brains.environment_records.TaskEnvironment``. A reply
+    that never came is asked for again with the same ID while time remains:
+    that reads the controller's record and never repeats the effect.
+    """
+
+    def __init__(self, client: TerminalIssuerClient, *, attempts: int = 3):
+        if not isinstance(client, TerminalIssuerClient):
+            raise TypeError("checkpoints need the coordinator's terminal issuer client")
+        if type(attempts) is not int or attempts < 1:
+            raise ValueError("attempts must be a positive integer")
+        self.client, self.attempts = client, attempts
+
+    def checkpoint(self, checkpoint_id, *, timeout_seconds):
+        return self._ask(lambda seconds: self.client.checkpoint(checkpoint_id, timeout_seconds=seconds),
+                         timeout_seconds)
+
+    def restore(self, operation_id, checkpoint_id, *, timeout_seconds):
+        return self._ask(lambda seconds: self.client.restore(operation_id, checkpoint_id, timeout_seconds=seconds),
+                         timeout_seconds)
+
+    def _ask(self, call, timeout_seconds):
+        deadline = time.monotonic() + timeout_seconds
+        for _ in range(self.attempts):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                return call(remaining)
+            except TerminalUnavailable:
+                continue
+        raise TerminalUnavailable("the controller's checkpoint reply was never confirmed")

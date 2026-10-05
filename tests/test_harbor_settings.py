@@ -113,6 +113,20 @@ def test_the_continue_control_has_the_supervised_arms_generations():
     assert again.disclosure()["alone"] == "continue" and "alone" not in replace(once, services="all").disclosure()
 
 
+def test_rollback_reaches_the_policy_and_the_disclosure_only_when_on():
+    supervised = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent"})
+    rolling = replace(supervised, rollback="on")
+    deadline = time.time() + 1500
+    on, off = policy_for(rolling, deadline), policy_for(supervised, deadline)
+    assert on.rollback is True and off.rollback is False
+    assert rolling.disclosure()["rollback"] == "on" and "rollback" not in supervised.disclosure()
+    # Off, a policy keeps its exact earlier wire form; on, it round-trips.
+    assert "rollback" not in off.to_dict() and on.to_dict()["rollback"] is True
+    assert type(on).from_dict(on.to_dict()) == on
+    with pytest.raises(ValueError, match="fields or schema"):
+        type(on).from_dict({**off.to_dict(), "rollback": False})
+
+
 def test_a_cheaper_worker_model_keeps_its_own_route():
     settings = TrialSettings.from_options({"model": "gpt-6-astra", "worker_model": "gpt-6-sol",
                                            "worker_effort": "medium"})
@@ -175,6 +189,8 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
     ({"agent": "mini-swe-agent", "services": "some"}, "services must be all or none"),
     ({"agent": "mini-swe-agent", "alone": "twice"}, "alone must be once or continue"),
     ({"agent": "mini-swe-agent", "alone": "continue"}, "needs services none"),
+    ({"rollback": "maybe"}, "rollback must be off or on"),
+    ({"agent": "mini-swe-agent", "services": "none", "rollback": "on"}, "needs services all"),
     ({"worker_model": "claude"}, "model must be one of"),
     ({"spend_cap_usd": "0"}, "must be positive"),
     ({"handoff_seconds": "nan"}, "must be positive"),

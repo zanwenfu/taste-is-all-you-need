@@ -39,6 +39,12 @@ from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import POLICY_KEY, AzureExecutionPolicy
 from taste.brains.contract import Contract
 from taste.brains.delivery import validate_artifact_path
+from taste.brains.environment_records import (
+    ROLLBACK_FIELDS,
+    ROLLBACK_RULE,
+    read_history,
+    validate_rollback,
+)
 from taste.brains.planner_transport import (
     PLANNER_RECEIPT_BRANCH,
     PLANNER_TRANSPORT_ROOT,
@@ -2299,6 +2305,16 @@ class CentralPlanner:
         # JSON; the system text does not count.
         payload["rules"]["reply_format"] = (
             "Reply with exactly one JSON object in the required_output_shape, and nothing else.")
+        # Only where the task's files have checkpoints (a container task whose
+        # coordinator may roll back): every other prompt stays as it was.
+        environment = self._environment_history(request)
+        if environment.usable():
+            shown = environment.for_planner()
+            payload["task_environment_checkpoints"] = shown["checkpoints"]
+            if shown["rollbacks"]:
+                payload["task_environment_rollbacks"] = shown["rollbacks"]
+            payload["required_output_shape"].update(rollback_to=None, rollback_reason="")
+            payload["rules"]["task_environment_rollback"] = ROLLBACK_RULE
         rejections = self._earlier_rejections(request)
         if rejections:
             payload["earlier_rejections"] = rejections
@@ -2536,7 +2552,15 @@ class CentralPlanner:
             ) from exc
         return {**item, "contract_digest": derived}
 
-    def _fill_bookkeeping(self, raw: Any, request: PlanningRequest) -> tuple[Any, list[str]]:
+    def _environment_history(self, request: PlanningRequest):
+        """The task environment's checkpoints and restores, as the request's control state holds them."""
+        try:
+            return read_history(self.store.state(request.world.control_state_id), request.goal.goal_id)
+        except ValueError as exc:
+            raise PlannerStateError(str(exc)) from exc
+
+    def _fill_bookkeeping(self, raw: Any, request: PlanningRequest, *,
+                          rollback_offered: bool = False) -> tuple[Any, list[str]]:
         """What the request and the policy already fix, written here and not by the model.
 
         A proposal carries the model's decisions (the work to assign, how each
@@ -2554,9 +2578,15 @@ class CentralPlanner:
         if not isinstance(raw, dict):
             return raw, []
         value, filled = dict(raw), []
-        for name in sorted(value.keys() - _PROPOSAL_FIELDS - {"schema"}):
+        allowed = _PROPOSAL_FIELDS | (ROLLBACK_FIELDS if rollback_offered else frozenset())
+        for name in sorted(value.keys() - allowed - {"schema"}):
             del value[name]
             filled.append("ignored:" + name)
+        if rollback_offered:
+            for name, default in (("rollback_to", None), ("rollback_reason", "")):
+                if name not in value:
+                    value[name] = default
+                    filled.append(name)
         expected = self._proposal_template(request)
         if value.get("schema") != PROPOSAL_SCHEMA:
             value["schema"] = PROPOSAL_SCHEMA
@@ -2626,12 +2656,15 @@ class CentralPlanner:
     def _parse_proposal(self, response: str, request: PlanningRequest) -> PlanRevision:
         if not isinstance(response, str):
             raise InvalidPlannerOutput("planner transport must return JSON text")
+        # Read before the reply is judged: a malformed record is not the model's fault.
+        environment = self._environment_history(request)
+        offered = bool(environment.usable())
         try:
             raw = _load_json(response, "PlannerProposal")
             # The proposal is bound to exactly what the model wrote.
             proposal_digest = _digest(_canonical(raw))
-            raw, filled = self._fill_bookkeeping(raw, request)
-            _fields(raw, PROPOSAL_SCHEMA, set(_PROPOSAL_FIELDS))
+            raw, filled = self._fill_bookkeeping(raw, request, rollback_offered=offered)
+            _fields(raw, PROPOSAL_SCHEMA, set(_PROPOSAL_FIELDS) | (set(ROLLBACK_FIELDS) if offered else set()))
             expected = self._proposal_template(request)
             for name in (
                 "request_id",
@@ -2668,6 +2701,8 @@ class CentralPlanner:
             metadata = _mapping(raw["metadata"], "PlannerProposal.metadata")
             if benchmark_reply.required(request.goal.metadata):
                 benchmark_reply.validate(metadata, complete=raw["complete"], closing=closing)
+            rollback = (validate_rollback(raw["rollback_to"], raw["rollback_reason"], environment)
+                        if offered else None)
             plan = PlanRevision(
                 plan_id=f"plan.{proposal_digest.removeprefix('sha256:')}",
                 generation=request.generation,
@@ -2690,6 +2725,7 @@ class CentralPlanner:
                     "proposal_digest": proposal_digest,
                     "proposal": _thaw(metadata),
                     **({"filled_by_harness": filled} if filled else {}),
+                    **({"rollback": rollback} if rollback is not None else {}),
                 },
             )
         except InvalidPlannerOutput:

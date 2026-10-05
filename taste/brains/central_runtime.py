@@ -39,6 +39,17 @@ from taste.brains.central_planner import (
     StalePlanningWorld,
 )
 from taste.brains.delivery import DeliveryIdentityConflict, DeliveryRecoveryRequired
+from taste.brains.environment_records import (
+    CHECKPOINT_SCHEMA,
+    RESTORE_SCHEMA,
+    TaskEnvironment,
+    checkpoint_path,
+    read_history,
+    restore_operation_id,
+    restore_path,
+)
+from taste.brains.environment_records import checkpoint_id as environment_checkpoint_id
+from taste.brains.environment_records import label as checkpoint_label
 from taste.brains.records import Assignment, CriteriaRevision, PlanRevision, WorkerReport
 from taste.brains.supervisor import (
     CentralSupervisor,
@@ -90,6 +101,10 @@ _CLOSING_MINIMUM_SECONDS = 5.0
 # at, and the longest the coordinator goes without a full durable cycle.
 IDLE_POLL_SECONDS = 0.25
 IDLE_HEARTBEAT_SECONDS = 30.0
+# The longest a checkpoint or restore of the task's files may take, and the
+# least time worth starting one with.
+ENVIRONMENT_SECONDS = 300.0
+ENVIRONMENT_FLOOR_SECONDS = 10.0
 
 
 class CoordinatorError(RuntimeError):
@@ -539,6 +554,7 @@ class CentralRuntime:
         clock: Callable[[], datetime] = _now,
         fault_injector: Callable[[str, Mapping[str, Any]], None] | None = None,
         work_record: Callable[[SupervisorRun], Sequence[str]] | None = None,
+        task_environment: TaskEnvironment | None = None,
     ) -> None:
         if not isinstance(goal, Goal):
             raise ValueError("goal must be a Goal")
@@ -581,6 +597,10 @@ class CentralRuntime:
         # What a run that left no report is recorded as having done, where
         # this host's workers keep such a record. See _work_record.
         self.work_record = work_record
+        # Where the task's files live outside memory (a container), the
+        # controller's checkpoints of them: taken before the first worker and
+        # after runs end, restored when a plan names one. None: no checkpoints.
+        self.task_environment = task_environment
         # While its workers work and nothing changes, run() watches them this
         # often and makes a durable cycle only this often. See _await_change.
         self.idle_poll_seconds = IDLE_POLL_SECONDS
@@ -1590,6 +1610,104 @@ class CentralRuntime:
     def _pending_triggers(self, plan: PlanRevision) -> tuple[RuntimeTrigger, ...]:
         return self._pending_trigger_records(plan.plan_id, plan.generation)
 
+    # -- checkpoints of the task's files ---------------------------------------
+
+    def _environment_history(self):
+        with self.control_lock:
+            return read_history(self.control.head, self.goal.goal_id)
+
+    def _environment_seconds(self, *, keep: float, deadline: datetime | None = None) -> float:
+        """How long a checkpoint or restore may take, leaving ``keep`` seconds of work time."""
+        if deadline is not None:
+            left = (deadline - self.clock()).total_seconds()
+        elif self._remaining_wall is not None:
+            left = self._remaining_wall()
+        else:
+            left = ENVIRONMENT_SECONDS
+        return min(ENVIRONMENT_SECONDS, left - keep)
+
+    @staticmethod
+    def _ask_environment(call: Callable[[], Mapping[str, Any]]) -> dict[str, Any]:
+        # A checkpoint is evidence, not a step the goal depends on: a failure,
+        # whatever it is, is recorded by its class and the goal goes on.
+        try:
+            value = call()
+            if not isinstance(value, Mapping):
+                return {"failed": True, "error": "malformed_record"}
+            return json.loads(_canonical(_thaw(value)))
+        except Exception as exc:
+            return {"failed": True, "error": type(exc).__name__}
+
+    def _ended_runs(self) -> set[str]:
+        return {run.run_id for run in self.supervisor.runs() if run.phase in _TERMINAL_CURRENT_PHASES}
+
+    def _checkpoint_environment(self, cycle: _Cycle, generation: int, runs_ended: set[str]) -> None:
+        """Record the task's files after these runs ended, or before any worker ran; once."""
+        if self.task_environment is None:
+            return
+        history = self._environment_history()
+        identity = environment_checkpoint_id(runs_ended)
+        if any(record["checkpoint_id"] == identity for record in history.checkpoints):
+            return
+        seconds = self._environment_seconds(keep=self._plan_minimum)
+        if seconds < ENVIRONMENT_FLOOR_SECONDS:
+            return
+        number = len(history.checkpoints) + 1
+        environment = self.task_environment
+        result = self._perform(
+            cycle, "environment_checkpoint", identity,
+            {"checkpoint_id": identity, "runs_ended": sorted(runs_ended)},
+            lambda: self._ask_environment(
+                lambda: environment.checkpoint(identity, timeout_seconds=seconds)),
+            lambda value: value,
+        )
+        if not result.get("failed") and result.get("checkpoint_id") != identity:
+            result = {"failed": True, "error": "another_checkpoint"}
+        self._immutable(
+            checkpoint_path(self.goal.goal_id, number),
+            {"schema": CHECKPOINT_SCHEMA, "goal_id": self.goal.goal_id, "number": number,
+             "label": checkpoint_label(number), "checkpoint_id": identity, "generation": generation,
+             "runs_ended": sorted(runs_ended), "at": _iso(self.clock()), "result": result},
+            f"environment checkpoint {checkpoint_label(number)}",
+        )
+
+    def _apply_rollback(
+        self, cycle: _Cycle, plan: PlanRevision, *, keep: float, deadline: datetime | None = None,
+    ) -> Mapping[str, Any] | None:
+        """Return the task's files to the checkpoint a plan names, once, before it acts.
+
+        Returns the restore's record, made now or read back; None when the
+        plan names no checkpoint.
+        """
+        rollback = plan.metadata.get("rollback")
+        if rollback is None or self.task_environment is None:
+            return None
+        path = restore_path(self.goal.goal_id, plan.plan_id)
+        with self.control_lock:
+            prior = self.control.head.record(path)
+        if prior is not None:
+            return prior
+        operation_id = restore_operation_id(plan.plan_id)
+        target = rollback["checkpoint_id"]
+        seconds = self._environment_seconds(keep=keep, deadline=deadline)
+        environment = self.task_environment
+        if seconds < ENVIRONMENT_FLOOR_SECONDS:
+            result: dict[str, Any] = {"failed": True, "error": "no_time"}
+        else:
+            result = self._perform(
+                cycle, "environment_restore", operation_id,
+                {"operation_id": operation_id, "checkpoint_id": target, "plan_id": plan.plan_id},
+                lambda: self._ask_environment(
+                    lambda: environment.restore(operation_id, target, timeout_seconds=seconds)),
+                lambda value: value,
+            )
+        record = {"schema": RESTORE_SCHEMA, "goal_id": self.goal.goal_id, "plan_id": plan.plan_id,
+                  "generation": plan.generation, "operation_id": operation_id,
+                  "label": rollback["checkpoint"], "checkpoint_id": target, "reason": rollback["reason"],
+                  "at": _iso(self.clock()), "result": result}
+        self._immutable(path, record, f"environment restore to {rollback['checkpoint']}")
+        return record
+
     def _record_trigger(self, cycle: _Cycle, trigger: RuntimeTrigger) -> None:
         if cycle.plan_id is None:
             raise CoordinatorCorruption("a bootstrap cycle cannot own a replan trigger")
@@ -2378,6 +2496,7 @@ class CentralRuntime:
                               **({"unreported_work": unreported} if unreported else {})},
                 )
                 revised = self._replan(cycle, plan, (trigger,), closing=True)
+                self._apply_rollback(cycle, revised, keep=0.0, deadline=deadline)
                 runs = self.supervisor.runs()
                 self._complete_cycle(cycle, CycleOutcome(
                     cycle_id=cycle.cycle_id, status="closed", plan=revised,
@@ -2507,6 +2626,20 @@ class CentralRuntime:
                 return self._complete_cycle(cycle, outcome)
 
             self._retire_stale_trigger_context(cycle, plan)
+            # Before any of this plan's workers start, or its completion is
+            # reconciled, the task's files return to the checkpoint it names.
+            restored = self._apply_rollback(
+                cycle, plan, keep=0.0 if plan.complete else self._plan_minimum)
+            if restored is not None and restored["result"].get("failed") and not plan.complete:
+                # The plan was made for files that are not there: plan again.
+                # Recorded from the restore's record, so a restart after it
+                # still starts no worker.
+                self._record_trigger(cycle, RuntimeTrigger(
+                    kind="rollback_failed", subject_id=plan.plan_id,
+                    detail="the task's files could not be returned to the checkpoint this plan named",
+                    evidence={"checkpoint": restored["label"],
+                              "error": str(restored["result"].get("error", ""))},
+                ))
 
             # A complete plan is the sole completion authority.  No worker
             # status, all-delivered heuristic, or stale completion claim can
@@ -2865,6 +2998,8 @@ class CentralRuntime:
                         failed.add(assignment.assignment_id)
                         waiting.add(assignment.assignment_id)
                         break
+                    if self.task_environment is not None and not self.supervisor.runs():
+                        self._checkpoint_environment(cycle, plan.generation, set())
                     try:
                         timeout = self._wall_timeout(assignment, self.default_wall_timeout_seconds)
                         if self._remaining_wall is not None:
@@ -3020,6 +3155,10 @@ class CentralRuntime:
                     waiting_assignment_ids=tuple(sorted(waiting)),
                     failed_assignment_ids=tuple(sorted(failed)), triggers=unique_triggers, budget=budget,
                 ))
+            if self.task_environment is not None:
+                ended = self._ended_runs() - self._environment_history().covered_runs()
+                if ended:
+                    self._checkpoint_environment(cycle, plan.generation, ended)
             try:
                 revised = self._replan(cycle, plan, unique_triggers)
             except BudgetBlocked:
@@ -3035,6 +3174,8 @@ class CentralRuntime:
                     budget=budget,
                 )
                 return self._complete_cycle(cycle, outcome)
+            if revised.complete:
+                self._apply_rollback(cycle, revised, keep=0.0)
             revised_runs = tuple(self.supervisor.runs())
             outcome = CycleOutcome(
                 cycle_id=cycle.cycle_id,

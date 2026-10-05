@@ -8,6 +8,7 @@ from taste.brains.azure_worker_launch import worker_command_factory
 from taste.brains.central_host import compose_central_runtime
 from taste.brains.single_run import FIXED_PLAN_MODEL
 from taste.brains.supervisor import SubprocessLauncher
+from taste.brains.terminal_issuer import IssuerEnvironment
 from taste.llm import LLM
 from taste.providers.base import ProtocolFailure
 
@@ -30,7 +31,7 @@ def compose_azure_central_runtime(
     environment=None, launcher=None, store=None, python_executable=None,
     launcher_handshake_timeout=5.0, default_wall_timeout_seconds=900.0,
     supervisor_poll_interval=0.05, supervisor_termination_grace=2.0,
-    settlement_only=False, terminal_credential_provider=None,
+    settlement_only=False, terminal_credential_provider=None, task_environment=None,
 ):
     """Bind non-secret policy into host.goal before any planning or launch.
 
@@ -45,6 +46,13 @@ def compose_azure_central_runtime(
         raise ValueError("settlement requires its fixed recovery-only launcher")
     if policy.terminal is not None and not settlement_only and launcher is None and terminal_credential_provider is None:
         raise ValueError("terminal execution requires a trusted per-assignment credential provider")
+    if not policy.rollback or settlement_only:
+        # Settlement records an ended goal; it never changes the task's files.
+        task_environment = None
+    elif task_environment is None:
+        # The coordinator reaches the controller's checkpoints with the same
+        # private credential that issues its workers' terminal grants.
+        task_environment = IssuerEnvironment(terminal_credential_provider)
     bound_goal = policy.bind_goal(goal)
     environment = dict(os.environ if environment is None else environment)
     # Settlement needs the original route identity for receipt audit, never
@@ -70,7 +78,7 @@ def compose_azure_central_runtime(
         repo_root, session, bound_goal, store=store, planner_llm=llm, launcher=launcher,
         planner_model=policy.planner_model, monitor_model=policy.worker_model,
         planner_max_tokens=policy.planner_max_output_tokens, azure_policy=policy,
-        owns_planner_sdk=True,
+        owns_planner_sdk=True, task_environment=task_environment,
         default_wall_timeout_seconds=default_wall_timeout_seconds,
         supervisor_poll_interval=supervisor_poll_interval,
         supervisor_termination_grace=supervisor_termination_grace,

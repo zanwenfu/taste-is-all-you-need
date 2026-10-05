@@ -64,6 +64,10 @@ class TrialSettings:
     # given each time, until the generation bound or the task's time runs
     # out: the supervised arm's attempts without its supervision.
     alone: str = "once"
+    # "on": the coordinator may return the task's files to a checkpoint taken
+    # before the first worker or after a run, when the evidence shows later
+    # work broke them (taste.brains.environment_records).
+    rollback: str = "off"
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
     # little: 47 to 70 reasoning tokens on one small puzzle from low to high,
@@ -140,6 +144,10 @@ class TrialSettings:
             raise ValueError("alone must be once or continue")
         if self.alone == "continue" and self.services != "none":
             raise ValueError("alone=continue runs the agent alone: it needs services none")
+        if self.rollback not in ("off", "on"):
+            raise ValueError("rollback must be off or on")
+        if self.rollback == "on" and self.services != "all":
+            raise ValueError("rollback=on is decided by the coordinator: it needs services all")
         if self.planner_effort not in ("", *WORKER_EFFORTS):
             raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
 
@@ -207,7 +215,7 @@ class TrialSettings:
             pricing_sha=table_sha(),
             terminal=TerminalWorkerPolicy(binding, self.command_seconds, workdir),
             planner_model=planner, worker_model=worker, worker_effort=self.worker_effort,
-            worker_agent=self.agent, services=self.services,
+            worker_agent=self.agent, services=self.services, rollback=self.rollback == "on",
             planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
@@ -230,6 +238,7 @@ class TrialSettings:
                 "monitor_model": worker_served, "worker_effort": self.worker_effort,
                 "worker_agent": self.agent or "taste", "services": self.services,
                 **({"alone": self.alone} if self.services == "none" else {}),
+                **({"rollback": self.rollback} if self.rollback != "off" else {}),
                 "coordinator_effort": self.planner_effort or "provider default",
                 "monitor_effort": "low",
                 "spend_cap_usd": self.spend_cap_usd, "admission_budgets_usd": {
