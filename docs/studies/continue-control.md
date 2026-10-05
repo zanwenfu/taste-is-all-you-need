@@ -2,7 +2,8 @@
 
 Registered on 2026-10-05, before any trial of this arm ran
 ([issue 34](https://github.com/zanwenfu/taste-is-all-you-need/issues/34)).
-The code and settings are fixed at the commit tagged `continue-control-1`.
+The code and settings are fixed at the commit tagged `continue-control-2`
+(see the amendment below; `continue-control-1` was the first registration).
 
 ## Question
 
@@ -16,7 +17,7 @@ planning, monitoring or checking, do as well?
 `continue`: the go/no-go's settings for the agent alone, plus
 `--ak alone=continue`:
 
-    --ak agent=mini-swe-agent --ak services=none --ak alone=continue --ak reply_reserve_seconds=10
+    --ak agent=mini-swe-agent --ak services=none --ak alone=continue
     --ak spend_cap_usd=2 --ak worker_spend_cap_usd=2 --ak monitor_spend_cap_usd=1
     --ak worker_max_calls=1000 --ak monitor_max_calls=400 --ak max_commands=2000
 
@@ -53,5 +54,22 @@ changes how the other two arms work.
 At most $10 of model spend (expected $3 to $5).
 
 ## Record
+
+**First attempt, at `continue-control-1` (2026-10-05, 00:17 to 00:50 UTC),
+stopped and not reported.** Two faults, neither the arm's. At 00:44 a test
+suite run on the same VM filled its temporary space (`/tmp`, held in
+memory), and about half of the trials then failed with "no space left on
+device". Before that, seven trials had ended with the goal's process killed
+at the task's time limit: this arm keeps the agent working until the time
+is up, and the 10-second closing reserve copied from the agent-alone
+settings left no time to stop and record the run still going. The trials'
+records are kept on the VM under `/root/tb/jobs/cc1-continue`.
+
+**Amendment (2026-10-05, before the second attempt): code at
+`continue-control-2`.** The continue arm keeps the supervised arm's closing
+reserve (the default, 210 seconds) instead of 10 seconds: a run still going
+at the end is then stopped and recorded within the task's time, and the two
+arms have the same time to work, which the comparison with the supervised
+arm needs. Nothing else runs on the VM during the run.
 
 (Filled in after the run: the command, the report and what it shows.)
