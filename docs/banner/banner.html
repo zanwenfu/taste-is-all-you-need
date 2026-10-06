@@ -29,7 +29,7 @@ body {
   --edge: #253b33; --hl: #dfc792;
   background: var(--paper); color: var(--ink);
 }
-body.dark, body.og {
+body.dark {
   --paper: #253c32; --ink: #f7f8f1; --muted: #b3c5b8; --kicker: #c2d1c5; --rule: #52655c;
   --edge: #6e8a7b; --gold: #d4be93;
 }
@@ -46,7 +46,7 @@ canvas { position: absolute; inset: 0; }
   font-weight: 400; padding: 0 3px; margin: 0 -3px;
   background: linear-gradient(176deg, transparent 52%, var(--hl) 52%, var(--hl) 90%, transparent 90%);
 }
-body.dark .tagline .hl, body.og .tagline .hl { background: none; color: var(--gold); }
+body.dark .tagline .hl { background: none; color: var(--gold); }
 .rule { position: absolute; z-index: 2; left: 64px; width: 700px; height: 1px; background: var(--rule); top: 286px; }
 .row { position: absolute; z-index: 2; left: 64px; top: 306px; width: 700px; display: flex; justify-content: space-between; }
 .row b { display: block; font-size: 19px; font-weight: 440; letter-spacing: -0.01em; }
@@ -91,7 +91,7 @@ const OG = variant === "og";
 const W = 1280, H = OG ? 640 : 400, CELL = 4;
 const COLS = W / CELL, ROWS = H / CELL;
 const FPS = 12, LOOP = 192; // the animation: a 16-second loop
-const PAINT = variant === "light" ? [null, "#253b33", "#c8913a"] : [null, "#11221a", "#d2c098"];
+const PAINT = variant === "dark" ? [null, "#11221a", "#d2c098"] : [null, "#253b33", "#c8913a"];
 const INK = 1, GOLD = 2, CLEAR = 3; // CLEAR keeps a cell empty: the gap around a shape
 const grid = new Uint8Array(COLS * ROWS);
 const put = (c, r, v) => { if (c >= 0 && c < COLS && r >= 0 && r < ROWS) grid[r * COLS + c] = v; };
