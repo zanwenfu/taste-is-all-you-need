@@ -10,3 +10,8 @@ John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press and
 Karthik R Narasimhan, used under the MIT License. That license is reproduced
 in LICENSES/SWE-bench-MIT.txt. Each file's docstring records the upstream
 commit it was taken from.
+
+docs/banner/fonts contains the Geist and Geist Mono typefaces
+(https://github.com/vercel/geist-font), Copyright (c) 2023 Vercel, in
+collaboration with basement.studio, used under the SIL Open Font License,
+Version 1.1. That license is reproduced in LICENSES/Geist-OFL.txt.

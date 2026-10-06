@@ -1,6 +1,9 @@
-# taste is all you need
-
-> **The harness, not the model, is where agents get their taste.**
+<a href="https://zanwenfu.com/blog/agent_harness_blog">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/banner-dark.png">
+  <img src="docs/img/banner-light.png" alt="taste is all you need: an operating system for AI agents. The harness, not the model, is where agents get their taste. In pixel art, a central brain starts worker terminals, each watched by a monitor; each worker commits on its own git branch, a failed attempt is rolled back and kept, and certified work merges into one integration branch." width="100%">
+</picture>
+</a>
 
 [![CI](https://github.com/zanwenfu/taste-is-all-you-need/actions/workflows/ci.yml/badge.svg)](https://github.com/zanwenfu/taste-is-all-you-need/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/zanwenfu/taste-is-all-you-need?sort=semver&label=release)](https://github.com/zanwenfu/taste-is-all-you-need/releases)

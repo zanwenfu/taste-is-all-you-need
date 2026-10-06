@@ -1,0 +1,328 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>taste: banner and social card</title>
+<!-- The README banner (light and dark) and the repository's social card, in the
+     identity of zanwenfu.com: paper, forest ink, gold, Geist, and pixel art in
+     4 px cells (8 px at 2x). The art is the system in docs/img/architecture-light.svg:
+     the central brain starts each worker over a dotted line; each worker is its
+     own process (a terminal) with an observe-only monitor (the eye); each commits
+     on its own branch of memory: checkpoints (rings), a failed attempt kept and
+     rolled back (the circled cross and the arc), and certified work (gold)
+     delivered into the integration branch (the thick line).
+     Variants: banner.html?variant=light | dark | og. Render: docs/banner/render.sh -->
+<style>
+@font-face { font-family: "Geist"; src: url("fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; }
+@font-face { font-family: "Geist Mono"; src: url("fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { overflow: hidden; }
+body {
+  position: relative; width: 1280px; height: 400px;
+  font-family: "Geist", sans-serif; -webkit-font-smoothing: antialiased;
+  --paper: #f7f7f2; --ink: #232722; --muted: #625e56; --kicker: #706b61; --rule: #cccbc7;
+  --edge: #253b33; --hl: #dfc792;
+  background: var(--paper); color: var(--ink);
+}
+body.dark, body.og {
+  --paper: #253c32; --ink: #f7f8f1; --muted: #b3c5b8; --kicker: #c2d1c5; --rule: #52655c;
+  --edge: #6e8a7b; --gold: #d4be93;
+}
+body.og { height: 640px; }
+canvas { position: absolute; inset: 0; }
+.frame { position: absolute; inset: 0; box-shadow: inset 0 0 0 2px var(--edge); pointer-events: none; z-index: 3; }
+.copy { position: absolute; z-index: 2; left: 64px; top: 42px; }
+.kicker { font: 400 13px/1 "Geist Mono", monospace; letter-spacing: 0.14em; color: var(--kicker); text-transform: uppercase; }
+.title { margin-top: 26px; margin-left: -5px; white-space: nowrap; line-height: 1; }
+.title .name { font-size: 108px; font-weight: 440; letter-spacing: -0.05em; }
+.title .rest { font-size: 38px; font-weight: 330; letter-spacing: -0.015em; color: var(--muted); margin-left: 14px; }
+.tagline { margin-top: 30px; font-size: 26px; font-weight: 330; letter-spacing: -0.015em; white-space: nowrap; }
+.tagline .hl {
+  font-weight: 400; padding: 0 3px; margin: 0 -3px;
+  background: linear-gradient(176deg, transparent 52%, var(--hl) 52%, var(--hl) 90%, transparent 90%);
+}
+body.dark .tagline .hl, body.og .tagline .hl { background: none; color: var(--gold); }
+.rule { position: absolute; z-index: 2; left: 64px; width: 700px; height: 1px; background: var(--rule); top: 286px; }
+.row { position: absolute; z-index: 2; left: 64px; top: 306px; width: 700px; display: flex; justify-content: space-between; }
+.row b { display: block; font-size: 19px; font-weight: 440; letter-spacing: -0.01em; }
+.row span { display: block; margin-top: 9px; font-size: 14.5px; color: var(--muted); }
+.top { display: none; }
+/* The social card: the same parts with room to breathe, and the address. */
+body.og .copy { top: 58px; }
+body.og .top { display: block; position: absolute; z-index: 2; top: 58px; right: 64px; font: 400 15px/1 "Geist Mono", monospace; letter-spacing: 0.04em; color: var(--kicker); }
+body.og .kicker { font-size: 15px; }
+body.og .title { margin-top: 52px; }
+body.og .title .name { font-size: 150px; }
+body.og .title .rest { display: block; font-size: 50px; margin: 4px 0 0 4px; }
+body.og .tagline { margin-top: 36px; font-size: 34px; line-height: 1.25; }
+body.og .tagline .l2 { display: block; }
+body.og .rule { width: 1152px; top: 488px; }
+body.og .row { top: 514px; width: 1152px; }
+body.og .row b { font-size: 25px; }
+body.og .row span { font-size: 18px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<canvas id="art"></canvas>
+<div class="frame"></div>
+<div class="top">github.com/zanwenfu/taste-is-all-you-need</div>
+<div class="copy">
+  <p class="kicker">An operating system for AI agents</p>
+  <p class="title"><span class="name">taste</span><span class="rest">is all you need</span></p>
+  <p class="tagline"><span class="hl">The harness</span>, not the model,<span class="l2"> is where agents get their taste.</span></p>
+</div>
+<div class="rule"></div>
+<div class="row">
+  <div><b>Central brain</b><span>Plans and replans</span></div>
+  <div><b>Workers</b><span>Own process, own branch</span></div>
+  <div><b>Monitors</b><span>Observe and certify</span></div>
+  <div><b>Git memory</b><span>Every step is a commit</span></div>
+</div>
+<script>
+const variant = new URLSearchParams(location.search).get("variant") || "light";
+document.body.className = variant;
+const OG = variant === "og";
+const W = 1280, H = OG ? 640 : 400, CELL = 4;
+const COLS = W / CELL, ROWS = H / CELL;
+const PAINT = variant === "light" ? [null, "#253b33", "#c8913a"] : [null, "#11221a", "#d2c098"];
+const INK = 1, GOLD = 2, CLEAR = 3; // CLEAR keeps a cell empty: the gap around a shape
+const grid = new Uint8Array(COLS * ROWS);
+const put = (c, r, v) => { if (c >= 0 && c < COLS && r >= 0 && r < ROWS) grid[r * COLS + c] = v; };
+const get = (c, r) => (c >= 0 && c < COLS && r >= 0 && r < ROWS ? grid[r * COLS + c] : 0);
+
+// A fixed seed: the same picture every render.
+let seed = 0x7a57e;
+const rand = () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+// The cells of a path of straight runs: horizontal, vertical or at 45 degrees.
+function trace(points) {
+  const cells = [];
+  points.slice(1).forEach(([c1, r1], i) => {
+    const [c0, r0] = points[i], n = Math.max(Math.abs(c1 - c0), Math.abs(r1 - r0));
+    for (let k = i ? 1 : 0; k <= n; k++) cells.push([c0 + Math.sign(c1 - c0) * k, r0 + Math.sign(r1 - r0) * k]);
+  });
+  return cells;
+}
+const dotted = (points, v = INK) => trace(points).forEach(([c, r], k) => { if (k % 2 === 0) put(c, r, v); });
+// A two-cell line: horizontal runs grow down, sloped runs grow right.
+const line = (points) => trace(points).forEach(([c, r], k, all) => {
+  put(c, r, INK);
+  const next = all[k + 1] || all[k - 1];
+  put(next[1] === r ? c : c + 1, next[1] === r ? r + 1 : r, INK);
+});
+
+// Pixel shapes: X ink, G gold, o kept empty, space untouched. A halo keeps a
+// one-cell gap between the shape and whatever it sits on.
+function stamp(c0, r0, rows, halo = false) {
+  const cells = [];
+  rows.forEach((row, r) => [...row].forEach((ch, c) => { if (ch !== " ") cells.push([c0 + c, r0 + r, ch]); }));
+  if (halo) for (const [c, r] of cells) for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) put(c + dc, r + dr, CLEAR);
+  for (const [c, r, ch] of cells) put(c, r, ch === "X" ? INK : ch === "G" ? GOLD : CLEAR);
+}
+const NODE = {
+  checkpoint: [" XXXX ", "XooooX", "XooooX", "XooooX", "XooooX", " XXXX "],
+  certified: [" XXXX ", "XGGGGX", "XGGGGX", "XGGGGX", "XGGGGX", " XXXX "],
+  failed: [" XXXXXX ", "XooooooX", "XoXooXoX", "XooXXooX", "XooXXooX", "XoXooXoX", "XooooooX", " XXXXXX "],
+};
+const DELIVERED = [" XXXXXX ", "XooooooX", "XoGGGGoX", "XoGGGGoX", "XoGGGGoX", "XoGGGGoX", "XooooooX", " XXXXXX "];
+const EYE = ["   XXXXX   ", " XXoGGGoXX ", "XooGGXGGooX", " XXoGGGoXX ", "   XXXXX   "];
+
+// A separable Gaussian blur of a w x h field.
+function blur(x, w, h, sigma) {
+  const R = Math.ceil(3 * sigma), k = [];
+  for (let i = -R; i <= R; i++) k.push(Math.exp(-(i * i) / (2 * sigma * sigma)));
+  const sum = k.reduce((a, b) => a + b), pass = (src, horizontal) => {
+    const out = new Float32Array(w * h);
+    for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+      let a = 0;
+      for (let i = -R; i <= R; i++) {
+        const cc = horizontal ? Math.min(w - 1, Math.max(0, c + i)) : c;
+        const rr = horizontal ? r : Math.min(h - 1, Math.max(0, r + i));
+        a += src[rr * w + cc] * k[i + R];
+      }
+      out[r * w + c] = a / sum;
+    }
+    return out;
+  };
+  return pass(pass(x, true), false);
+}
+// A labyrinth, the pattern of brain folds: noise pushed toward the sign of a
+// difference of Gaussians until it settles into stripes.
+function labyrinth(w, h, s1, s2, iterations) {
+  const x = new Float32Array(w * h).map(() => rand() * 2 - 1);
+  for (let k = 0; k < iterations; k++) {
+    const a = blur(x, w, h, s1), b = blur(x, w, h, s2);
+    for (let i = 0; i < w * h; i++) x[i] = Math.max(-1, Math.min(1, x[i] + 0.35 * Math.sign(a[i] - b[i])));
+  }
+  return x;
+}
+// The central brain, facing left: an outline; folds, drawn as the edges of a
+// labyrinth and filled in on the side away from the light; the striped
+// cerebellum; a dithered shadow; and a few gold sparks on the lit side.
+function brain(cc, rc) {
+  const lobes = [[0, -1.2, 20, 14.4], [-10, 2.5, 11.9, 11.2], [-1.2, 6.2, 13.7, 8.1]];
+  const cerebellum = [11.2, 11.5, 8.5, 5.5];
+  const inside = (c, r, [dc, dr, rx, ry]) => ((c + 0.5 - cc - dc) / rx) ** 2 + ((r + 0.5 - rc - dr) / ry) ** 2 <= 1;
+  const part = (c, r) => (lobes.some((e) => inside(c, r, e)) ? 1 : inside(c, r, cerebellum) ? 2 : 0);
+  const c0 = cc - 23, r0 = rc - 17, w = 46, h = 36, field = labyrinth(w, h, 1.2, 2.4, 40);
+  const fold = (c, r) => (c < c0 || c >= c0 + w || r < r0 || r >= r0 + h ? 1 : field[(r - r0) * w + c - c0]);
+  const [lx, ly, lz] = [-0.5, -0.62, 0.6], ln = Math.hypot(lx, ly, lz);
+  const sparks = [];
+  for (let r = r0; r < r0 + h; r++) for (let c = c0; c < c0 + w; c++) {
+    const k = part(c, r);
+    if (!k) continue;
+    const edge = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dc, dr]) => part(c + dc, r + dr) !== k);
+    const dx = (c + 0.5 - cc) / 21, dy = (r + 0.5 - rc - 1.2) / 17, d2 = Math.min(0.98, dx * dx + dy * dy);
+    const lit = Math.max(0, (dx * lx + dy * ly + Math.sqrt(1 - d2) * lz) / ln);
+    let v = CLEAR;
+    if (edge) v = INK;
+    else if (k === 2) v = (r - rc) % 2 === 0 ? INK : CLEAR;
+    else if (fold(c, r) < 0) {
+      const groove = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dc, dr]) => fold(c + dc, r + dr) > 0);
+      if (groove || lit < 0.45) v = INK;
+      if (groove && lit > 0.6) sparks.push([c, r]);
+    } else if (lit < 0.2 && (c + r) % 2 === 0) v = INK;
+    put(c, r, v);
+  }
+  for (let k = 0; k < 9 && sparks.length; k++) {
+    const [c, r] = sparks.splice(Math.floor(rand() * sparks.length), 1)[0];
+    put(c, r, GOLD);
+  }
+}
+// A worker: a terminal with commands (gold prompts) and their output.
+const TW = 30, TH = 18;
+function terminal(c0, r0, w = TW, h = TH) {
+  for (let r = r0; r < r0 + h; r++) for (let c = c0; c < c0 + w; c++) {
+    const edge = r === r0 || r === r0 + h - 1 || c === c0 || c === c0 + w - 1;
+    put(c, r, edge || r < r0 + 3 ? INK : CLEAR);
+  }
+  for (const c of [2, 4, 6]) put(c0 + c, r0 + 1, CLEAR);
+  const lines = Math.floor((h - 6) / 2);
+  for (let i = 0; i < lines; i++) {
+    const r = r0 + 5 + 2 * i, command = i % 2 === 0, last = i === lines - 1;
+    let c = c0 + 2;
+    if (command) { put(c, r, GOLD); c += 2; }
+    const end = last ? c + 6 : c0 + w - 3 - Math.floor(rand() * (command ? 9 : 4));
+    while (c < end) {
+      const len = 1 + Math.floor(rand() * 4);
+      for (let k = 0; k < len && c < end; k++) put(c++, r, INK);
+      c++;
+    }
+    if (last) put(c, r, GOLD); // the cursor: this command is still running
+  }
+}
+
+// The composition, in cells. The card shifts it down and starts its trunk below the address.
+const DX = OG ? 4 : 0, DY = OG ? 16 : 0;
+const BRAIN = [174 + DX, 27 + DY], BUS = 203 + DX, TRUNK = 299 + DX;
+const TRUNK_ROWS = OG ? [26, 118] : [0, ROWS];
+const WORKERS = [
+  { at: [209, 9], nodes: ["checkpoint", "checkpoint", "certified"], merge: 285 },
+  { at: [212, 40], nodes: ["checkpoint", "checkpoint", "failed", "checkpoint", "certified"], merge: 288, rollback: [2, 1] },
+  { at: [221, 71], nodes: ["checkpoint", "checkpoint", "certified"], merge: 286 },
+].map((w) => ({ ...w, at: [w.at[0] + DX, w.at[1] + DY], merge: w.merge + DX }));
+
+function draw() {
+  brain(...BRAIN);
+
+  // The trunk: the integration branch, where certified work is delivered.
+  for (let r = TRUNK_ROWS[0]; r < TRUNK_ROWS[1]; r++) {
+    for (let c = TRUNK; c < TRUNK + 6; c++) put(c, r, INK);
+    for (let c = TRUNK + 6; c < TRUNK + 8; c++) if ((c + r) % 2 === 0) put(c, r, INK);
+  }
+  if (OG) for (const [r, step] of [[TRUNK_ROWS[0] - 2, 0], [TRUNK_ROWS[1] + 1, 1]]) {
+    for (let c = TRUNK; c < TRUNK + 6; c++) if ((c + r + step) % 2 === 0) put(c, r, INK);
+  }
+  stamp(TRUNK - 1, TRUNK_ROWS[0] + 3, DELIVERED);
+
+  // Contracts: dotted lines from the brain to each worker.
+  const lanes = WORKERS.map((w) => w.at[1] + TH / 2 - 1);
+  dotted([[BRAIN[0] + 22, BRAIN[1]], [BUS, BRAIN[1]]]);
+  dotted([[BUS, lanes[0]], [BUS, lanes[2]]]);
+  WORKERS.forEach((w, i) => {
+    dotted([[BUS, lanes[i]], [w.at[0] - 1, lanes[i]]]);
+    if (i) stamp(Math.round((BUS + w.at[0]) / 2), lanes[i], ["GG", "GG"]); // a contract on its way
+  });
+
+  // Memory: each worker's branch, its commits, and the merge into the trunk.
+  WORKERS.forEach((w, i) => {
+    const r = lanes[i], start = w.at[0] + TW, end = TRUNK - 1, drop = end - w.merge;
+    line([[start, r], [w.merge, r], [end, r + drop]]);
+    let c = start + 5;
+    const at = w.nodes.map((kind, k) => {
+      if (k && w.nodes[k - 1] === "failed") c += 3;
+      if (kind === "failed") c += 3;
+      const size = NODE[kind].length, here = c;
+      stamp(here - size / 2, r + 1 - size / 2, NODE[kind]); c += 8; return here;
+    });
+    stamp(TRUNK - 1, r + drop - 3, DELIVERED);
+    if (w.rollback) { // undo: the failed attempt stays, the files go back to a checkpoint
+      const [from, to] = w.rollback.map((k) => at[k]), mid = (from + to) / 2, rad = (from - to) / 2;
+      const arc = [];
+      for (let k = 0; k <= 60; k++) {
+        const a = (k / 60) * Math.PI, cell = [Math.round(mid + rad * Math.cos(a)), Math.round(r - 4 - rad * 0.75 * Math.sin(a))];
+        if (!arc.length || arc[arc.length - 1] + "" !== cell + "") arc.push(cell);
+      }
+      arc.forEach(([ac, ar], k) => { if (k % 2 === 0) put(ac, ar, GOLD); });
+      stamp(to - 2, r - 5, ["G   G", " G G ", "  G  "]);
+    }
+  });
+
+  // Workers and their monitors, each terminal with a dithered shadow.
+  WORKERS.forEach((w) => {
+    const [c0, r0] = w.at;
+    for (let r = r0 + 2; r < r0 + TH + 2; r++) for (let c = c0 + 2; c < c0 + TW + 2; c++) {
+      if ((c >= c0 + TW || r >= r0 + TH) && (c + r) % 2 === 0) put(c, r, INK);
+    }
+    terminal(c0, r0);
+    stamp(c0 + TW - 9, r0 - 2, EYE, true);
+  });
+
+  // A sparse scatter of bits around the art, never near the text.
+  const boxes = [...document.querySelectorAll(".kicker, .title .name, .title .rest, .tagline, .rule, .row > div, .top")]
+    .map((e) => e.getBoundingClientRect()).filter((b) => b.width > 0);
+  const clearance = (x, y) => Math.min(...boxes.map((b) =>
+    Math.hypot(Math.max(b.left - x, 0, x - b.right), Math.max(b.top - y, 0, y - b.bottom))));
+  const S = COLS + 1, sat = new Float32Array(S * (ROWS + 1));
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const v = get(c, r), on = v === INK || v === GOLD ? 1 : 0;
+    sat[(r + 1) * S + c + 1] = on + sat[r * S + c + 1] + sat[(r + 1) * S + c] - sat[r * S + c];
+  }
+  const near = (c, r, k) => {
+    const c0 = Math.max(0, c - k), c1 = Math.min(COLS, c + k + 1), r0 = Math.max(0, r - k), r1 = Math.min(ROWS, r + k + 1);
+    return (sat[r1 * S + c1] - sat[r0 * S + c1] - sat[r1 * S + c0] + sat[r0 * S + c0]) / ((c1 - c0) * (r1 - r0));
+  };
+  const touches = (c, r) => [-1, 0, 1].some((dr) => [-1, 0, 1].some((dc) => get(c + dc, r + dr) === INK || get(c + dc, r + dr) === GOLD));
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (get(c, r) || touches(c, r)) continue;
+    const x = (c + 0.5) * CELL, y = (r + 0.5) * CELL;
+    const room = smooth(16, 90, clearance(x, y)) * smooth(560, 700, x);
+    if (!room) continue;
+    const p = 0.11 * near(c, r, 5) + (near(c, r, 12) > 0 ? 0.004 : 0);
+    if (rand() < p * room) put(c, r, rand() < 0.3 ? GOLD : INK);
+  }
+
+  const canvas = document.getElementById("art"), dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const v = grid[r * COLS + c];
+    if (v !== INK && v !== GOLD) continue;
+    ctx.fillStyle = PAINT[v];
+    ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+  }
+  document.body.dataset.ready = "1";
+}
+// The scatter keeps clear of the text, so draw once the fonts have set it.
+document.fonts.ready.then(draw);
+</script>
+</body>
+</html>

@@ -24,6 +24,7 @@ htmlcov/
 # The public documentation is listed here by name.
 docs/*
 !docs/img/
+!docs/banner/
 !docs/architecture.md
 !docs/azure-harness.md
 !docs/studies/
