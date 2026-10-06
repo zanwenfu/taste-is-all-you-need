@@ -25,6 +25,9 @@ htmlcov/
 docs/*
 !docs/img/
 !docs/banner/
+docs/banner/node_modules/
+docs/banner/out/
+docs/banner/package-lock.json
 !docs/architecture.md
 !docs/azure-harness.md
 !docs/studies/

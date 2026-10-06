@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "description": "Renders the README banner and the social card of taste-is-all-you-need.",
+  "scripts": { "build": "sh build.sh" },
+  "devDependencies": { "@playwright/test": "1.63.0" }
+}

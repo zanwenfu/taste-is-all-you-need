@@ -1,7 +1,9 @@
 <a href="https://zanwenfu.com/blog/agent_harness_blog">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/banner-dark.png">
-  <img src="docs/img/banner-light.png" alt="taste is all you need: an operating system for AI agents. The harness, not the model, is where agents get their taste. In pixel art, a central brain starts worker terminals, each watched by a monitor; each worker commits on its own git branch, a failed attempt is rolled back and kept, and certified work merges into one integration branch." width="100%">
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/img/banner.png">
+  <source media="(prefers-color-scheme: dark)" type="image/avif" srcset="docs/img/banner-dark.avif">
+  <source type="image/avif" srcset="docs/img/banner.avif">
+  <img src="docs/img/banner.png" alt="taste is all you need: an operating system for AI agents. The harness, not the model, is where agents get their taste. In moving pixel art, a central brain sends contracts to worker terminals, each watched by a monitor; each worker commits on its own git branch, a failed attempt is rolled back and kept, and certified work merges into one integration branch." width="100%">
 </picture>
 </a>
 

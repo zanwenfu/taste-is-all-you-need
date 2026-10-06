@@ -11,7 +11,12 @@
      on its own branch of memory: checkpoints (rings), a failed attempt kept and
      rolled back (the circled cross and the arc), and certified work (gold)
      delivered into the integration branch (the thick line).
-     Variants: banner.html?variant=light | dark | og. Render: docs/banner/render.sh -->
+     It moves in a 16-second loop: each worker in turn receives its contract,
+     types, commits, rolls back (the middle one), is certified and merges; its
+     branch stays until the next contract arrives, then runs into the trunk.
+     Variants: ?variant=light | dark | og; add &play to watch it here.
+     window.draw(t) draws the moment t seconds into the loop, or the still for null.
+     Build: docs/banner/build.sh -->
 <style>
 @font-face { font-family: "Geist"; src: url("fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; }
 @font-face { font-family: "Geist Mono"; src: url("fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; }
@@ -79,11 +84,13 @@ body.og .row span { font-size: 18px; margin-top: 10px; }
   <div><b>Git memory</b><span>Every step is a commit</span></div>
 </div>
 <script>
-const variant = new URLSearchParams(location.search).get("variant") || "light";
+const params = new URLSearchParams(location.search);
+const variant = params.get("variant") || "light";
 document.body.className = variant;
 const OG = variant === "og";
 const W = 1280, H = OG ? 640 : 400, CELL = 4;
 const COLS = W / CELL, ROWS = H / CELL;
+const FPS = 12, LOOP = 192; // the animation: a 16-second loop
 const PAINT = variant === "light" ? [null, "#253b33", "#c8913a"] : [null, "#11221a", "#d2c098"];
 const INK = 1, GOLD = 2, CLEAR = 3; // CLEAR keeps a cell empty: the gap around a shape
 const grid = new Uint8Array(COLS * ROWS);
@@ -99,6 +106,7 @@ const rand = () => {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 };
 const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const clamp01 = (x) => Math.min(1, Math.max(0, x));
 
 // The cells of a path of straight runs: horizontal, vertical or at 45 degrees.
 function trace(points) {
@@ -110,28 +118,37 @@ function trace(points) {
   return cells;
 }
 const dotted = (points, v = INK) => trace(points).forEach(([c, r], k) => { if (k % 2 === 0) put(c, r, v); });
-// A two-cell line: horizontal runs grow down, sloped runs grow right.
-const line = (points) => trace(points).forEach(([c, r], k, all) => {
+// A two-cell line along traced cells, from the cell `from` to the cell `upto`:
+// horizontal runs grow down, sloped runs grow right.
+const line = (cells, upto = Infinity, from = 0) => cells.forEach(([c, r], k) => {
+  if (k > upto || k < from) return;
   put(c, r, INK);
-  const next = all[k + 1] || all[k - 1];
+  const next = cells[k + 1] || cells[k - 1];
   put(next[1] === r ? c : c + 1, next[1] === r ? r + 1 : r, INK);
 });
+const block = (c, r, v = GOLD) => { put(c, r, v); put(c + 1, r, v); put(c, r + 1, v); put(c + 1, r + 1, v); };
 
-// Pixel shapes: X ink, G gold, o kept empty, space untouched. A halo keeps a
-// one-cell gap between the shape and whatever it sits on.
-function stamp(c0, r0, rows, halo = false) {
-  const cells = [];
-  rows.forEach((row, r) => [...row].forEach((ch, c) => { if (ch !== " ") cells.push([c0 + c, r0 + r, ch]); }));
-  if (halo) for (const [c, r] of cells) for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) put(c + dc, r + dr, CLEAR);
-  for (const [c, r, ch] of cells) put(c, r, ch === "X" ? INK : ch === "G" ? GOLD : CLEAR);
+// Pixel shapes: X ink, G gold, o kept empty, space untouched. A halo (the cells
+// of `halo`, or of the shape) keeps a one-cell gap around the shape.
+function stamp(c0, r0, rows, halo = null) {
+  const cells = (pattern) => pattern.flatMap((row, r) => [...row].flatMap((ch, c) => (ch !== " " ? [[c0 + c, r0 + r, ch]] : [])));
+  if (halo) for (const [c, r] of cells(halo)) for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) put(c + dc, r + dr, CLEAR);
+  for (const [c, r, ch] of cells(rows)) put(c, r, ch === "X" ? INK : ch === "G" ? GOLD : CLEAR);
 }
+const gilded = (rows) => rows.map((row) => row.replaceAll("X", "G"));
 const NODE = {
   checkpoint: [" XXXX ", "XooooX", "XooooX", "XooooX", "XooooX", " XXXX "],
   certified: [" XXXX ", "XGGGGX", "XGGGGX", "XGGGGX", "XGGGGX", " XXXX "],
   failed: [" XXXXXX ", "XooooooX", "XoXooXoX", "XooXXooX", "XooXXooX", "XoXooXoX", "XooooooX", " XXXXXX "],
 };
 const DELIVERED = [" XXXXXX ", "XooooooX", "XoGGGGoX", "XoGGGGoX", "XoGGGGoX", "XoGGGGoX", "XooooooX", " XXXXXX "];
-const EYE = ["   XXXXX   ", " XXoGGGoXX ", "XooGGXGGooX", " XXoGGGoXX ", "   XXXXX   "];
+const ARRIVED = [" GGGGGGGG ", "G        G", "G        G", "G        G", "G        G", "G        G", "G        G", "G        G", "G        G", " GGGGGGGG "];
+const EYE = {
+  open: ["   XXXXX   ", " XXoGGGoXX ", "XooGGXGGooX", " XXoGGGoXX ", "   XXXXX   "],
+  looking: ["   XXXXX   ", " XXooGGGXX ", "XoooGGXGGoX", " XXooGGGXX ", "   XXXXX   "],
+  shut: ["           ", "           ", "XXX     XXX", "   XXXXX   ", "           "],
+};
+const ARROW = ["G   G", " G G ", "  G  "];
 
 // A separable Gaussian blur of a w x h field.
 function blur(x, w, h, sigma) {
@@ -164,8 +181,8 @@ function labyrinth(w, h, s1, s2, iterations) {
 }
 // The central brain, facing left: an outline; folds, drawn as the edges of a
 // labyrinth and filled in on the side away from the light; the striped
-// cerebellum; a dithered shadow; and a few gold sparks on the lit side.
-function brain(cc, rc) {
+// cerebellum; a dithered shadow; and gold sparks on the lit side.
+function brainCells(cc, rc) {
   const lobes = [[0, -1.2, 20, 14.4], [-10, 2.5, 11.9, 11.2], [-1.2, 6.2, 13.7, 8.1]];
   const cerebellum = [11.2, 11.5, 8.5, 5.5];
   const inside = (c, r, [dc, dr, rx, ry]) => ((c + 0.5 - cc - dc) / rx) ** 2 + ((r + 0.5 - rc - dr) / ry) ** 2 <= 1;
@@ -173,7 +190,7 @@ function brain(cc, rc) {
   const c0 = cc - 23, r0 = rc - 17, w = 46, h = 36, field = labyrinth(w, h, 1.2, 2.4, 40);
   const fold = (c, r) => (c < c0 || c >= c0 + w || r < r0 || r >= r0 + h ? 1 : field[(r - r0) * w + c - c0]);
   const [lx, ly, lz] = [-0.5, -0.62, 0.6], ln = Math.hypot(lx, ly, lz);
-  const sparks = [];
+  const cells = [], candidates = [], sparks = [];
   for (let r = r0; r < r0 + h; r++) for (let c = c0; c < c0 + w; c++) {
     const k = part(c, r);
     if (!k) continue;
@@ -186,105 +203,108 @@ function brain(cc, rc) {
     else if (fold(c, r) < 0) {
       const groove = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dc, dr]) => fold(c + dc, r + dr) > 0);
       if (groove || lit < 0.45) v = INK;
-      if (groove && lit > 0.6) sparks.push([c, r]);
+      if (groove && lit > 0.6) candidates.push([c, r]);
     } else if (lit < 0.2 && (c + r) % 2 === 0) v = INK;
-    put(c, r, v);
+    cells.push([c, r, v]);
   }
-  for (let k = 0; k < 9 && sparks.length; k++) {
-    const [c, r] = sparks.splice(Math.floor(rand() * sparks.length), 1)[0];
-    put(c, r, GOLD);
-  }
+  for (let k = 0; k < 9 && candidates.length; k++) sparks.push(candidates.splice(Math.floor(rand() * candidates.length), 1)[0]);
+  return { cells, sparks };
 }
-// A worker: a terminal with commands (gold prompts) and their output.
+// A worker: a terminal with a dithered shadow, commands (gold prompts) and their output.
 const TW = 30, TH = 18;
-function terminal(c0, r0, w = TW, h = TH) {
-  for (let r = r0; r < r0 + h; r++) for (let c = c0; c < c0 + w; c++) {
-    const edge = r === r0 || r === r0 + h - 1 || c === c0 || c === c0 + w - 1;
+function terminalBox(c0, r0) {
+  for (let r = r0 + 2; r < r0 + TH + 2; r++) for (let c = c0 + 2; c < c0 + TW + 2; c++) {
+    if ((c >= c0 + TW || r >= r0 + TH) && (c + r) % 2 === 0) put(c, r, INK);
+  }
+  for (let r = r0; r < r0 + TH; r++) for (let c = c0; c < c0 + TW; c++) {
+    const edge = r === r0 || r === r0 + TH - 1 || c === c0 || c === c0 + TW - 1;
     put(c, r, edge || r < r0 + 3 ? INK : CLEAR);
   }
   for (const c of [2, 4, 6]) put(c0 + c, r0 + 1, CLEAR);
-  const lines = Math.floor((h - 6) / 2);
+}
+function terminalText(c0, r0) {
+  const rows = [], lines = Math.floor((TH - 6) / 2);
   for (let i = 0; i < lines; i++) {
-    const r = r0 + 5 + 2 * i, command = i % 2 === 0, last = i === lines - 1;
+    const r = r0 + 5 + 2 * i, command = i % 2 === 0, last = i === lines - 1, cells = [];
     let c = c0 + 2;
-    if (command) { put(c, r, GOLD); c += 2; }
-    const end = last ? c + 6 : c0 + w - 3 - Math.floor(rand() * (command ? 9 : 4));
+    if (command) { cells.push([c, GOLD]); c += 2; }
+    const end = last ? c + 6 : c0 + TW - 3 - Math.floor(rand() * (command ? 9 : 4));
     while (c < end) {
       const len = 1 + Math.floor(rand() * 4);
-      for (let k = 0; k < len && c < end; k++) put(c++, r, INK);
+      for (let k = 0; k < len && c < end; k++) cells.push([c++, INK]);
       c++;
     }
-    if (last) put(c, r, GOLD); // the cursor: this command is still running
+    rows.push({ r, cells, cursor: c });
   }
+  return rows;
 }
 
 // The composition, in cells. The card shifts it down and starts its trunk below the address.
 const DX = OG ? 4 : 0, DY = OG ? 16 : 0;
 const BRAIN = [174 + DX, 27 + DY], BUS = 203 + DX, TRUNK = 299 + DX;
 const TRUNK_ROWS = OG ? [26, 118] : [0, ROWS];
+// Each worker's cycle, in frames after its contract arrives (A): when each commit
+// lands (the last one certified, after the monitor looks and blinks), and when a
+// rollback is drawn. Until the next contract arrives the finished branch stays.
 const WORKERS = [
-  { at: [209, 9], nodes: ["checkpoint", "checkpoint", "certified"], merge: 285 },
-  { at: [212, 40], nodes: ["checkpoint", "checkpoint", "failed", "checkpoint", "certified"], merge: 288, rollback: [2, 1] },
-  { at: [221, 71], nodes: ["checkpoint", "checkpoint", "certified"], merge: 286 },
+  { at: [209, 9], nodes: ["checkpoint", "checkpoint", "certified"], merge: 285,
+    offset: 0, commits: [18, 38, 64], idle: 26 },
+  { at: [212, 40], nodes: ["checkpoint", "checkpoint", "failed", "checkpoint", "certified"], merge: 288,
+    offset: 64, commits: [12, 24, 36, 58, 72], idle: 20, rollback: { nodes: [2, 1], at: 40 } },
+  { at: [221, 71], nodes: ["checkpoint", "checkpoint", "certified"], merge: 286,
+    offset: 128, commits: [16, 36, 62], idle: 24 },
 ].map((w) => ({ ...w, at: [w.at[0] + DX, w.at[1] + DY], merge: w.merge + DX }));
+const ROW_EVERY = 10; // frames between lines typed
 
-function draw() {
-  brain(...BRAIN);
-
-  // The trunk: the integration branch, where certified work is delivered.
-  for (let r = TRUNK_ROWS[0]; r < TRUNK_ROWS[1]; r++) {
-    for (let c = TRUNK; c < TRUNK + 6; c++) put(c, r, INK);
-    for (let c = TRUNK + 6; c < TRUNK + 8; c++) if ((c + r) % 2 === 0) put(c, r, INK);
-  }
-  if (OG) for (const [r, step] of [[TRUNK_ROWS[0] - 2, 0], [TRUNK_ROWS[1] + 1, 1]]) {
-    for (let c = TRUNK; c < TRUNK + 6; c++) if ((c + r + step) % 2 === 0) put(c, r, INK);
-  }
-  stamp(TRUNK - 1, TRUNK_ROWS[0] + 3, DELIVERED);
-
-  // Contracts: dotted lines from the brain to each worker.
-  const lanes = WORKERS.map((w) => w.at[1] + TH / 2 - 1);
-  dotted([[BRAIN[0] + 22, BRAIN[1]], [BUS, BRAIN[1]]]);
-  dotted([[BUS, lanes[0]], [BUS, lanes[2]]]);
+let scene = null;
+function build() {
+  scene = { brain: brainCells(...BRAIN) };
   WORKERS.forEach((w, i) => {
-    dotted([[BUS, lanes[i]], [w.at[0] - 1, lanes[i]]]);
-    if (i) stamp(Math.round((BUS + w.at[0]) / 2), lanes[i], ["GG", "GG"]); // a contract on its way
-  });
-
-  // Memory: each worker's branch, its commits, and the merge into the trunk.
-  WORKERS.forEach((w, i) => {
-    const r = lanes[i], start = w.at[0] + TW, end = TRUNK - 1, drop = end - w.merge;
-    line([[start, r], [w.merge, r], [end, r + drop]]);
+    w.text = terminalText(...w.at);
+    w.lane = w.at[1] + TH / 2 - 1;
+    const r = w.lane, start = (w.start = w.at[0] + TW), end = TRUNK - 1, drop = end - w.merge;
+    w.path = trace([[start, r], [w.merge, r], [end, r + drop]]);
+    w.delivered = [TRUNK - 1, r + drop - 3];
     let c = start + 5;
-    const at = w.nodes.map((kind, k) => {
+    w.at_ = w.nodes.map((kind, k) => {
       if (k && w.nodes[k - 1] === "failed") c += 3;
       if (kind === "failed") c += 3;
-      const size = NODE[kind].length, here = c;
-      stamp(here - size / 2, r + 1 - size / 2, NODE[kind]); c += 8; return here;
+      const here = c; c += 8; return here;
     });
-    stamp(TRUNK - 1, r + drop - 3, DELIVERED);
-    if (w.rollback) { // undo: the failed attempt stays, the files go back to a checkpoint
-      const [from, to] = w.rollback.map((k) => at[k]), mid = (from + to) / 2, rad = (from - to) / 2;
-      const arc = [];
+    w.contract = trace([[BRAIN[0] + 22, BRAIN[1]], [BUS, BRAIN[1]], [BUS, r], [w.at[0] - 1, r]]);
+    w.arrive = Math.ceil(w.contract.length / 3);
+    if (w.rollback) {
+      const [from, to] = w.rollback.nodes.map((k) => w.at_[k]), mid = (from + to) / 2, rad = (from - to) / 2;
+      w.arc = [];
       for (let k = 0; k <= 60; k++) {
         const a = (k / 60) * Math.PI, cell = [Math.round(mid + rad * Math.cos(a)), Math.round(r - 4 - rad * 0.75 * Math.sin(a))];
-        if (!arc.length || arc[arc.length - 1] + "" !== cell + "") arc.push(cell);
+        if (!w.arc.length || w.arc[w.arc.length - 1] + "" !== cell + "") w.arc.push(cell);
       }
-      arc.forEach(([ac, ar], k) => { if (k % 2 === 0) put(ac, ar, GOLD); });
-      stamp(to - 2, r - 5, ["G   G", " G G ", "  G  "]);
+      w.arrow = [to - 2, r - 5];
     }
+    // The branch's head along its path: it reaches each commit as it lands, waits
+    // out a rollback, and runs to the trunk two cells a frame once certified.
+    const A = w.arrive, last = w.nodes.length - 1, idx = (k) => w.at_[k] - start + 3;
+    const keys = [[A + 4, 0]];
+    w.nodes.forEach((kind, k) => {
+      if (w.rollback && k === w.rollback.nodes[0] + 1) keys.push([A + w.rollback.at + 8, idx(k - 1)]);
+      keys.push([A + w.commits[k], idx(k)]);
+    });
+    w.mergeFrom = A + w.commits[last] + 2;
+    keys.push([w.mergeFrom, idx(last)]);
+    w.mergeEnd = w.mergeFrom + Math.ceil((w.path.length - 1 - idx(last)) / 2);
+    keys.push([w.mergeEnd, w.path.length - 1]);
+    w.head = (g) => {
+      if (g < keys[0][0]) return -1;
+      for (let k = 1; k < keys.length; k++) {
+        const [f0, h0] = keys[k - 1], [f1, h1] = keys[k];
+        if (g < f1) return Math.round(h0 + ((h1 - h0) * (g - f0)) / (f1 - f0));
+      }
+      return w.path.length - 1;
+    };
   });
-
-  // Workers and their monitors, each terminal with a dithered shadow.
-  WORKERS.forEach((w) => {
-    const [c0, r0] = w.at;
-    for (let r = r0 + 2; r < r0 + TH + 2; r++) for (let c = c0 + 2; c < c0 + TW + 2; c++) {
-      if ((c >= c0 + TW || r >= r0 + TH) && (c + r) % 2 === 0) put(c, r, INK);
-    }
-    terminal(c0, r0);
-    stamp(c0 + TW - 9, r0 - 2, EYE, true);
-  });
-
-  // A sparse scatter of bits around the art, never near the text.
+  // A sparse scatter of bits around the art, never near the text, fixed for every frame.
+  compose(null, false);
   const boxes = [...document.querySelectorAll(".kicker, .title .name, .title .rest, .tagline, .rule, .row > div, .top")]
     .map((e) => e.getBoundingClientRect()).filter((b) => b.width > 0);
   const clearance = (x, y) => Math.min(...boxes.map((b) =>
@@ -299,30 +319,126 @@ function draw() {
     return (sat[r1 * S + c1] - sat[r0 * S + c1] - sat[r1 * S + c0] + sat[r0 * S + c0]) / ((c1 - c0) * (r1 - r0));
   };
   const touches = (c, r) => [-1, 0, 1].some((dr) => [-1, 0, 1].some((dc) => get(c + dc, r + dr) === INK || get(c + dc, r + dr) === GOLD));
+  scene.scatter = [];
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
     if (get(c, r) || touches(c, r)) continue;
     const x = (c + 0.5) * CELL, y = (r + 0.5) * CELL;
     const room = smooth(16, 90, clearance(x, y)) * smooth(560, 700, x);
     if (!room) continue;
     const p = 0.11 * near(c, r, 5) + (near(c, r, 12) > 0 ? 0.004 : 0);
-    if (rand() < p * room) put(c, r, rand() < 0.3 ? GOLD : INK);
+    if (rand() < p * room) { // drawn as it is chosen, so no two bits touch
+      const v = rand() < 0.3 ? GOLD : INK;
+      put(c, r, v); scene.scatter.push([c, r, v]);
+    }
   }
+}
 
-  const canvas = document.getElementById("art"), dpr = window.devicePixelRatio || 1;
-  canvas.width = W * dpr; canvas.height = H * dpr;
-  canvas.style.width = W + "px"; canvas.style.height = H + "px";
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
+// One moment: `frame` 0..LOOP-1 in the loop, or null for the still, where every
+// branch is complete and nothing moves.
+function compose(frame, scatter = true) {
+  grid.fill(0);
+  const still = frame === null, local = (w) => (frame - w.offset + LOOP) % LOOP;
+
+  for (const [c, r, v] of scene.brain.cells) put(c, r, v);
+  scene.brain.sparks.forEach(([c, r], k) => { if (still || (frame + 13 * k) % 48 < 30) put(c, r, GOLD); });
+
+  // The trunk: the integration branch, where certified work is delivered.
+  for (let r = TRUNK_ROWS[0]; r < TRUNK_ROWS[1]; r++) {
+    for (let c = TRUNK; c < TRUNK + 6; c++) put(c, r, INK);
+    for (let c = TRUNK + 6; c < TRUNK + 8; c++) if ((c + r) % 2 === 0) put(c, r, INK);
+  }
+  if (OG) for (const [r, step] of [[TRUNK_ROWS[0] - 2, 0], [TRUNK_ROWS[1] + 1, 1]]) {
+    for (let c = TRUNK; c < TRUNK + 6; c++) if ((c + r + step) % 2 === 0) put(c, r, INK);
+  }
+  stamp(TRUNK - 1, TRUNK_ROWS[0] + 3, DELIVERED);
+
+  // Contracts: dotted lines from the brain to each worker, and a contract on its way.
+  dotted([[BRAIN[0] + 22, BRAIN[1]], [BUS, BRAIN[1]]]);
+  dotted([[BUS, WORKERS[0].lane], [BUS, WORKERS[2].lane]]);
+  WORKERS.forEach((w, i) => {
+    dotted([[BUS, w.lane], [w.at[0] - 1, w.lane]]);
+    if (still) { if (i) block(Math.round((BUS + w.at[0]) / 2), w.lane); }
+    else if (local(w) < w.arrive) block(...w.contract[Math.min(3 * local(w), w.contract.length - 1)]);
+  });
+
+  // Memory: each worker's branch, its commits, the rollback, and the merge into the
+  // trunk. Until its next contract arrives a worker's last branch is whole; as the
+  // contract travels, that branch runs into the trunk from the worker's end.
+  WORKERS.forEach((w) => {
+    const g = still ? null : local(w), A = w.arrive, r = w.lane, previous = still || g < A;
+    const tail = still || !previous ? 0 : Math.round((w.path.length * g) / A);
+    const head = previous ? w.path.length - 1 : w.head(g);
+    line(w.path, head, tail);
+    w.nodes.forEach((kind, k) => {
+      const t = previous ? Infinity : g - (A + w.commits[k]);
+      if (t < 0 || w.at_[k] - w.start < tail) return;
+      const size = NODE[kind].length;
+      stamp(w.at_[k] - size / 2, r + 1 - size / 2, t < 4 ? gilded(NODE[kind]) : NODE[kind]);
+    });
+    if (w.arc && w.at_[w.rollback.nodes[1]] - w.start >= tail) {
+      const t = previous ? Infinity : g - (A + w.rollback.at);
+      const shown = Math.ceil(w.arc.length * clamp01((t + 1) / 8));
+      w.arc.slice(0, shown).forEach(([c, rr], k) => { if (k % 2 === 0) put(c, rr, GOLD); });
+      if (t >= 8) stamp(...w.arrow, ARROW);
+    }
+    if (!previous && g >= w.mergeFrom && g < w.mergeEnd) block(...w.path[Math.max(0, head - 1)]);
+    stamp(...w.delivered, DELIVERED);
+    if (!previous && g >= w.mergeEnd && g < w.mergeEnd + 6) stamp(w.delivered[0] - 1, w.delivered[1] - 1, ARRIVED);
+  });
+
+  // Workers and their monitors: a new contract clears the terminal and its text types out.
+  WORKERS.forEach((w) => {
+    const [c0, r0] = w.at, g = still ? null : local(w), A = w.arrive;
+    terminalBox(c0, r0);
+    let cursor = null;
+    w.text.forEach((row, k) => {
+      const shown = still || g < A ? row.cells.length
+        : Math.ceil(row.cells.length * clamp01((g - (A + 4 + ROW_EVERY * k) + 1) / 6));
+      row.cells.slice(0, shown).forEach(([c, v]) => put(c, row.r, v));
+      if (shown) cursor = [shown === row.cells.length ? (k === w.text.length - 1 ? row.cursor : row.cells[shown - 1][0] + 2) : row.cells[shown - 1][0] + 1, row.r];
+    });
+    if (cursor && (still ? cursor[0] === w.text[w.text.length - 1].cursor : frame % 12 < 6)) put(...cursor, GOLD);
+    const certify = A + w.commits[w.commits.length - 1];
+    const eye = still ? EYE.open
+      : (g >= certify - 2 && g < certify) || (g >= A + w.idle && g < A + w.idle + 2) ? EYE.shut
+      : g >= certify - 12 && g < certify - 2 ? EYE.looking : EYE.open;
+    stamp(c0 + TW - 9, r0 - 2, eye, EYE.open);
+  });
+
+  if (scatter) for (const [c, r, v] of scene.scatter) put(c, r, v);
+}
+
+const canvas = document.getElementById("art"), ctx = canvas.getContext("2d");
+function paint() {
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== W * dpr) {
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
     const v = grid[r * COLS + c];
     if (v !== INK && v !== GOLD) continue;
     ctx.fillStyle = PAINT[v];
     ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
   }
-  document.body.dataset.ready = "1";
 }
-// The scatter keeps clear of the text, so draw once the fonts have set it.
-document.fonts.ready.then(draw);
+window.draw = (t) => {
+  compose(t === null || t === undefined ? null : ((Math.round(t * FPS) % LOOP) + LOOP) % LOOP);
+  paint();
+};
+// The scatter keeps clear of the text, so build once the fonts have set it.
+document.fonts.ready.then(() => {
+  build();
+  window.draw(null);
+  window.ready = true;
+  document.body.dataset.ready = "1";
+  if (params.has("play") && !OG) {
+    let frame = 0;
+    setInterval(() => window.draw(frame++ / FPS), 1000 / FPS);
+  }
+});
 </script>
 </body>
 </html>
