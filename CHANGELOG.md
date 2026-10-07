@@ -154,6 +154,24 @@ behaviour and interfaces.
   and the checker's findings; and two rules need no model: the last step
   after which the visible tests passed, and the step before the last large
   edit.
+- **Drivers and analysis for the recovery study** (`taste/recovery_study/`).
+  `scripts/recovery_map.py` finds, for each failed base run, the step after
+  which no branch of it succeeds: a binary search over probes (8 branches
+  from one step, 16 on each side of the boundary), with a full scan every N
+  steps on a share of the runs to show curves that recover after a drop.
+  `scripts/recovery_runs.py` has the checker check each failed run and, when
+  it rejects it, recovers it four ways at one base run's dollars and agent
+  time: plain retry, retry with feedback, rewind with feedback (to the map's
+  best step, the trajectory reader's or the rules') and continue with
+  feedback, round after round until the checker accepts or the budget is
+  spent. Both write `run-harbor.sh` command lines into a launcher, read the
+  finished jobs back (rewards from Harbor, cost and time from Taste's
+  records) and keep their state in one JSON file, so they are run, waited
+  for, and run again. `scripts/recovery_report.py` reports the curves with
+  Wilson intervals, the decisive steps, how far the reader and the rules land
+  from them, the recoveries paired by failed run (bootstrap intervals,
+  sign-flip tests, Holm), changes that touch tests or checks, and a small
+  policy tree that picks a recovery, scored by cross-validation.
 - On the Azure route, a request that could not be connected is sent again,
   as a rate-limit refusal already was: nothing was sent, so nothing was
   billed. A connection has 30 seconds to open.
