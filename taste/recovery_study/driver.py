@@ -262,8 +262,12 @@ def finish(driver, launcher=None, max_trials=MAX_TRIALS, title="", spool=None):
     return RUNNING if any(not job["complete"] for job in driver.jobs.values()) else FINISHED
 
 
-def progress(driver, launcher=None):
+def progress(driver, launcher=None, spool=None):
     """One line on how the study stands, for the command line."""
     unfinished = sum(1 for job in driver.jobs.values() if not job["complete"])
-    where = f"; {launcher} starts those not started yet" if launcher and unfinished else ""
+    where = ""
+    if spool and unfinished:
+        where = f"; queued in {spool} for the host's scheduler"
+    elif launcher and unfinished:
+        where = f"; {launcher} starts those not started yet"
     return f"{len(driver.new)} new jobs, {unfinished} not finished{where}."

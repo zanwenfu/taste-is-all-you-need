@@ -205,3 +205,15 @@ def test_the_command_line_writes_a_launcher_and_says_how_the_study_stands(tmp_pa
     assert status == FINISHED
     assert next(iter(json.loads(summary.read_text()).values()))["decisive_step"] == 12
     assert "| done |" in capsys.readouterr().out
+
+
+def test_with_a_spool_the_command_line_queues_its_jobs_and_ends_on_how_the_study_stands(tmp_path, capsys):
+    jobs_dir, trials, _ = study(tmp_path)
+    spool = tmp_path / "spool"
+    assert cli.main(["--state", str(tmp_path / "map.json"), "--base-job", str(jobs_dir / "base"),
+                     "--calibration", str(jobs_dir / "calibration"), "--jobs-dir", str(jobs_dir),
+                     "--trials", str(trials), "--mode", "rebuild", "--prefix", "pilot", "--spool", str(spool)]) == STARTED
+    assert len(list(spool.glob("*.job"))) == 1
+    # No commands to start by hand: the last line says how the study stands, and where its jobs wait.
+    last = capsys.readouterr().out.strip().splitlines()[-1]
+    assert last == f"1 new jobs, 1 not finished; queued in {spool} for the host's scheduler."

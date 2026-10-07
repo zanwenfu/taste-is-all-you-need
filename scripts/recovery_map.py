@@ -90,8 +90,8 @@ def main(argv=None):
     if arguments.json:
         arguments.json.write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")
     print(table(summary), end="")
-    print("\n" + progress(driver, arguments.launcher))
-    if not arguments.launcher:
+    print("\n" + progress(driver, arguments.launcher, arguments.spool))
+    if not arguments.launcher and not arguments.spool:
         for spec in driver.new:
             print(spec.shell())
     return status
