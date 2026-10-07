@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import json
+import shutil
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -148,6 +151,33 @@ def test_the_export_holds_each_step_as_the_agent_had_it(base):
         "FAILED test_parse\n", 1, True, False)
     # Each request is the conversation before it plus what came since.
     assert [step["messages"]["base"] for step in script["steps"]] == [0, 2, 5]
+
+
+def test_the_command_line_finds_a_trials_records_from_harbors_trial(base, tmp_path, capsys):
+    """A trial's directory as its owner leaves it, reached from Harbor's trial directory."""
+    spec = importlib.util.spec_from_file_location(
+        "replay_script", Path(__file__).resolve().parents[1] / "scripts" / "replay_script.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    trial = tmp_path / "trials" / "f00d"
+    worker = trial / "agent-state/workspace/.git" / ("taste.azure.terminal-trial." + "a" * 64) / "worker"
+    worker.mkdir(parents=True)
+    shutil.copy(base.journal, worker / "calls.sqlite3")
+    (trial / "controller/terminal").mkdir(parents=True)
+    shutil.copy(base.ledger, trial / "controller/terminal/terminal.sqlite3")
+    harbor = tmp_path / "jobs/job/task__1"
+    harbor.mkdir(parents=True)
+    (harbor / "result.json").write_text(json.dumps({"agent_result": {"metadata": {"taste": {"trial": "f00d"}}}}))
+    out = tmp_path / "script.json"
+    assert cli.main([str(harbor), "-o", str(out), "--trials", str(tmp_path / "trials")]) == 0
+    written = json.loads(out.read_text())
+    assert written["source"]["trial"] == "f00d"
+    assert {key: value for key, value in written.items() if key != "source"} == {
+        key: value for key, value in base.script.items() if key != "source"}
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["steps"] == 3 and summary["rebuildable"] and summary["outputs_exact"] == 3
+    with pytest.raises(ValueError, match="worker runs"):
+        cli.main([str(trial), "-o", str(out), "--run", "another-run"])
 
 
 def test_a_branch_rebuilds_k_steps_replays_them_and_its_first_live_request_is_the_recorded_one(
