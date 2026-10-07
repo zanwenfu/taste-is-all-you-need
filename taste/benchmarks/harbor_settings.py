@@ -22,6 +22,7 @@ from pathlib import Path
 from taste.agents import HOSTED_AGENTS
 from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import WORKER_EFFORTS, AzureExecutionPolicy
+from taste.brains.branch_replay import MODES, OVERRIDES, BranchPolicy
 from taste.brains.central_planner import SPEND_CAP_KEY, Goal
 from taste.brains.single_run import FIXED_PLAN_MODEL
 from taste.brains.terminal_broker import TerminalBinding
@@ -68,6 +69,28 @@ class TrialSettings:
     # before the first worker or after a run, when the evidence shows later
     # work broke them (taste.brains.environment_records).
     rollback: str = "off"
+    # A branch of an earlier run of the agent alone (taste.brains.branch_replay):
+    # the replay script (scripts/replay_script.py) and the step k it starts
+    # from. "rebuild" runs the recorded commands 1..k again in the fresh task
+    # container; "restore" puts back the checkpoint in branch_checkpoint, which
+    # a rebuild with branch_live=off saved there. The agent's first k steps are
+    # answered from the record; then it goes on live, or (off) is stopped so
+    # that the verifier grades the files of step k. branch_override changes
+    # what step k showed: "append" adds the text in branch_note after its
+    # output; "reject", at the submission step, shows that text with exit 1
+    # instead. branch_tolerance rebuilt commands may diverge from the record.
+    branch: str = ""
+    branch_step: int = 0
+    branch_mode: str = "rebuild"
+    branch_checkpoint: str = ""
+    branch_live: str = "on"
+    branch_note: str = ""
+    branch_override: str = ""
+    branch_tolerance: int = 0
+    # For a fresh trial: the task's text replaced by this file's, and this
+    # file's text added after it (after a blank line).
+    task_text: str = ""
+    task_suffix: str = ""
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
     # little: 47 to 70 reasoning tokens on one small puzzle from low to high,
@@ -150,6 +173,34 @@ class TrialSettings:
             raise ValueError("rollback=on is decided by the coordinator: it needs services all")
         if self.planner_effort not in ("", *WORKER_EFFORTS):
             raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
+        self._check_branch()
+
+    def _check_branch(self):
+        given = {name for name, default in _BRANCH_DEFAULTS.items() if getattr(self, name) != default}
+        if not self.branch:
+            if given:
+                raise ValueError(", ".join(sorted(given)) + " needs branch=<replay script>")
+            return
+        if self.services != "none" or self.alone != "once":
+            raise ValueError("a branch continues a run of the agent alone: it needs services none, alone once")
+        if self.branch_step < 0 or self.branch_tolerance < 0:
+            raise ValueError("branch_step and branch_tolerance must be nonnegative")
+        if self.branch_mode not in MODES:
+            raise ValueError("branch_mode must be rebuild or restore")
+        if self.branch_live not in ("on", "off"):
+            raise ValueError("branch_live must be on or off")
+        if self.branch_override not in ("", *OVERRIDES):
+            raise ValueError("branch_override must be append or reject")
+        if bool(self.branch_override) != bool(self.branch_note):
+            raise ValueError("branch_override and branch_note go together")
+        if self.branch_override and self.branch_live == "off":
+            raise ValueError("an override changes what the agent sees next: it needs branch_live=on")
+        if self.branch_mode == "restore" and not self.branch_checkpoint:
+            raise ValueError("branch_mode=restore needs branch_checkpoint=<directory>")
+        if self.branch_mode == "rebuild" and self.branch_checkpoint and self.branch_live != "off":
+            raise ValueError("a rebuild saves its checkpoint of step k only with branch_live=off")
+        if self.task_text or self.task_suffix:
+            raise ValueError("a branch replays the recorded task; task_text and task_suffix are for fresh trials")
 
     @property
     def models(self):
@@ -193,7 +244,13 @@ class TrialSettings:
             raise ValueError("the agent's time is too short for work, a closing reply and handoff")
         return started_unix + goal_seconds, started_unix + agent_timeout_seconds + 3600
 
-    def policy(self, endpoint, deadline_unix, *, owner_token, container_id, workdir):
+    def branch_policy(self, script, script_sha256, note=""):
+        """The worker's branch: the replay script as the worker reads it (in the trial) and its digest."""
+        return BranchPolicy(script=str(script), script_sha256=script_sha256, step=self.branch_step,
+                            mode=self.branch_mode, live=self.branch_live == "on",
+                            override=self.branch_override, note=note, tolerance=self.branch_tolerance)
+
+    def policy(self, endpoint, deadline_unix, *, owner_token, container_id, workdir, branch=None):
         coordinator, planner, worker_name, worker = self.models
         worker_cap, monitor_cap, _ = self.budgets()
         binding = TerminalBinding(owner_token, container_id, deadline_unix, self.max_commands)
@@ -219,7 +276,7 @@ class TrialSettings:
             planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
-            worker_wall_seconds=604800.0, max_assignments=self.max_assignments,
+            worker_wall_seconds=604800.0, max_assignments=self.max_assignments, branch=branch,
         )
 
     def goal(self, goal_id, instruction):
@@ -239,6 +296,13 @@ class TrialSettings:
                 "worker_agent": self.agent or "taste", "services": self.services,
                 **({"alone": self.alone} if self.services == "none" else {}),
                 **({"rollback": self.rollback} if self.rollback != "off" else {}),
+                **({"branch": {"script": self.branch, "step": self.branch_step, "mode": self.branch_mode,
+                               "live": self.branch_live, "tolerance": self.branch_tolerance,
+                               **({"checkpoint": self.branch_checkpoint} if self.branch_checkpoint else {}),
+                               **({"override": self.branch_override, "note": self.branch_note}
+                                  if self.branch_override else {})}} if self.branch else {}),
+                **({"task_text": self.task_text} if self.task_text else {}),
+                **({"task_suffix": self.task_suffix} if self.task_suffix else {}),
                 "coordinator_effort": self.planner_effort or "provider default",
                 "monitor_effort": "low",
                 "spend_cap_usd": self.spend_cap_usd, "admission_budgets_usd": {
@@ -249,6 +313,23 @@ class TrialSettings:
                 "handoff_seconds": self.handoff_seconds, "command_seconds": self.command_seconds,
                 "request_seconds": self.request_seconds,
                 "max_request_bytes": self.max_request_bytes}
+
+
+# The branch's own settings, which mean nothing without a branch.
+_BRANCH_DEFAULTS = {item.name: item.default for item in fields(TrialSettings) if item.name.startswith("branch_")}
+
+
+def task_instruction(settings, instruction):
+    """The task's text as this trial gives it: replaced by task_text, then task_suffix added after it."""
+    text = Path(settings.task_text).read_text(encoding="utf-8") if settings.task_text else instruction
+    if settings.task_suffix:
+        suffix = Path(settings.task_suffix).read_text(encoding="utf-8")
+        if not suffix.strip():
+            raise ValueError("the task suffix is empty")
+        text = text.rstrip("\n") + "\n\n" + suffix
+    if not text.strip():
+        raise ValueError("the task's text is empty")
+    return text
 
 
 def agent_timeout_seconds(task_toml, override=None):

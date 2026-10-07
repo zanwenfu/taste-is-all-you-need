@@ -22,6 +22,13 @@ processes, and AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY are in Harbor's
 environment. The key is delivered to the goal as a private credential and
 never enters the task container, a prompt or this record.
 
+A trial can instead continue an earlier trial's agent from step k
+(``--ak branch=<replay script> --ak branch_step=<k>``; ``harbor_settings``,
+``branch_trial``): the replay script is copied into the trial for its worker,
+the files of step k are rebuilt by the worker or restored here before the goal
+starts, and a rebuild with live off can leave a checkpoint of them for later
+branches. A fresh trial can be given another task text, or more of it.
+
 This module is the only one that imports Harbor. Trial settings live in
 ``harbor_settings``; they are the run's disclosed configuration.
 """
@@ -29,6 +36,7 @@ This module is the only one that imports Harbor. Trial settings live in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import pwd
@@ -43,6 +51,7 @@ from harbor.agents.base import BaseAgent
 from harbor.agents.capabilities import AgentCapabilities
 
 from taste import __version__
+from taste.benchmarks import branch_trial
 from taste.benchmarks.azure_terminal_trial import AzureTerminalTrial
 from taste.benchmarks.flat_trajectory import encode, flat_trajectory, ledger_trajectory
 from taste.benchmarks.harbor_settings import (
@@ -50,7 +59,9 @@ from taste.benchmarks.harbor_settings import (
     agent_timeout_seconds,
     compose_project,
     safe_parent,
+    task_instruction,
 )
+from taste.brains.branch_replay import MAX_SCRIPT_BYTES
 from taste.brains.docker_terminal import COMPOSE_PROJECT_LABEL, DockerTerminalBackend
 from taste.brains.goal_entrypoint import python_source_digest
 from taste.brains.terminal_broker import MAX_TERMINAL_OUTPUT_BYTES, TerminalResult
@@ -141,6 +152,9 @@ class TasteAgent(BaseAgent):
     async def run(self, instruction, environment, context):
         started = time.time()
         settings, token = self.settings, secrets.token_hex(16)
+        # A fresh trial may be given another task text; a branch, the recorded run's.
+        instruction = task_instruction(settings, instruction)
+        branch = branch_trial.load_inputs(settings)
         deadline, container_deadline = settings.deadlines(
             started, agent_timeout_seconds(self._task_toml, self.timeout_override))
         endpoint = os.environ.get("AZURE_OPENAI_BASE_URL", "").rstrip("/") + "/"
@@ -151,15 +165,29 @@ class TasteAgent(BaseAgent):
             DockerTerminalBackend.admit, self.docker_socket, self._container, token, container_deadline,
             output_limit=MAX_TERMINAL_OUTPUT_BYTES, compose_project=self._project,
             image_id=self._image, exec_user=self._exec_user)
-        policy = settings.policy(endpoint, deadline, owner_token=token,
-                                 container_id=backend.environment_id, workdir=self._workdir)
-        goal = settings.goal("trial-" + token[:20], instruction)
         root = safe_parent(self.trials_root) / token
+        summary = {"trial": token, "configuration": settings.disclosure()}
+        context.metadata = {"taste": summary}
+        if settings.task_text or settings.task_suffix:
+            summary["task_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
+        if branch is not None:
+            summary["branch"] = branch_trial.disclosure(settings, branch)
+            if settings.branch_mode == "restore":
+                # The files of step k, put back before anything runs; a trial
+                # whose files do not match them is not started.
+                summary["branch"]["restore"] = await asyncio.to_thread(
+                    branch_trial.restore_checkpoint, backend, settings, branch)
+        policy = settings.policy(endpoint, deadline, owner_token=token,
+                                 container_id=backend.environment_id, workdir=self._workdir,
+                                 branch=None if branch is None else settings.branch_policy(
+                                     root / branch_trial.BRANCH_SCRIPT, branch.sha256, branch.note))
+        goal = settings.goal("trial-" + token[:20], instruction)
         self.owner = AzureTerminalTrial.create(
             root, backend, goal, policy, service_uid=self._service_uid,
             python_executable=self.worker_python, max_generations=settings.generations,
             wall_clock_seconds=deadline - started, max_planner_failures=settings.max_planner_failures)
-        context.metadata = {"taste": {"trial": token, "configuration": settings.disclosure()}}
+        if branch is not None:
+            self.owner.add_input(branch_trial.BRANCH_SCRIPT, branch.raw, maximum=MAX_SCRIPT_BYTES)
         outcome = None
         try:
             outcome = await self.owner.run(api_key=key)
@@ -169,6 +197,9 @@ class TasteAgent(BaseAgent):
             # before the verifier reads it.
             try:
                 self._record(goal.goal_id, instruction, outcome, context, started)
+                if (outcome is not None and branch is not None and settings.branch_checkpoint
+                        and settings.branch_mode == "rebuild" and self.owner.sealed):
+                    await self._save_checkpoint(backend, branch, summary, token)
             finally:
                 if self.owner.sealed:
                     try:
@@ -178,6 +209,19 @@ class TasteAgent(BaseAgent):
                         # and running. A resource this owner could not free
                         # is no reason to keep the trial from its verifier.
                         context.metadata["taste"]["release_failed"] = type(failure).__name__
+
+    async def _save_checkpoint(self, backend, branch, summary, token):
+        """After a rebuild with live off, the files of step k, for later branches to restore.
+
+        The container is sealed: no command can run while they are read. A
+        failure is recorded; the trial is graded all the same.
+        """
+        try:
+            summary["branch"]["checkpoint"] = await asyncio.to_thread(
+                branch_trial.save_checkpoint, backend, self.settings, branch,
+                summary["branch"].get("replay"), token)
+        except Exception as failure:
+            summary["branch"]["checkpoint"] = {"saved": False, "failed": type(failure).__name__}
 
     def _record(self, goal_id, instruction, outcome, context, started):
         owner, flags = self.owner, list(self.owner.audit_flags)
@@ -207,6 +251,10 @@ class TasteAgent(BaseAgent):
                        seconds=round(time.time() - started, 1),
                        final_reply=bool(record["extra"].get("final_reply_present")),
                        record=record["extra"]["record"])
+        if "branch" in summary:
+            # What the worker found serving the branch: how many steps it
+            # replayed, whether each matched the record, and if it went live.
+            summary["branch"]["replay"] = branch_trial.replay_outcome(nested)
         if outcome is not None:
             budget = outcome.budget
             summary.update(stop_reason=outcome.stop_reason, complete=outcome.complete,

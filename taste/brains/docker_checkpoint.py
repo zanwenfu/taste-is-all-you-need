@@ -70,6 +70,27 @@ class CheckpointManifest:
     def to_dict(self) -> dict:
         return {"schema": SCHEMA, **asdict(self), "partial": self.partial}
 
+    @classmethod
+    def from_dict(cls, value) -> CheckpointManifest:
+        """A manifest as ``to_dict`` wrote it, as when a later trial restores a saved checkpoint."""
+        names = {item for item in cls.__dataclass_fields__}
+        if not isinstance(value, dict) or value.get("schema") != SCHEMA or set(value) != {*names, "schema", "partial"}:
+            raise ValueError("not a checkpoint manifest of schema " + SCHEMA)
+        try:
+            manifest = cls(**{name: value[name] for name in names if name not in (
+                "changes", "copied", "deleted", "left_out", "over_cap")},
+                changes=tuple((str(path), str(kind)) for path, kind in value["changes"]),
+                **{name: tuple(str(path) for path in value[name])
+                   for name in ("copied", "deleted", "left_out", "over_cap")})
+        except (TypeError, ValueError) as exc:
+            raise ValueError("checkpoint manifest is malformed") from exc
+        # The tar is named by its own digest, beside the manifest: never a path elsewhere.
+        if (not isinstance(manifest.tar_sha256, str) or len(manifest.tar_sha256) != 64
+                or manifest.tar != manifest.tar_sha256 + ".tar" or posixpath.basename(manifest.tar) != manifest.tar
+                or manifest.partial != value["partial"]):
+            raise ValueError("checkpoint manifest is malformed")
+        return manifest
+
     def summary(self, *, paths=SUMMARY_PATHS) -> dict:
         """A bounded account for a planner or a reply: counts, size and the first paths.
 
@@ -300,8 +321,12 @@ def _kinds_of(wire, container, mounts, deadline):
             if not _inside(path, NOT_THE_TASKS + mounts)}
 
 
-def restore(backend, wire, manifest, directory) -> RestoreReceipt:
+def restore(backend, wire, manifest, directory, *, any_container=False) -> RestoreReceipt:
     """Return the task's files to ``manifest``; the caller holds the terminal.
+
+    ``any_container``: the checkpoint may have been taken in another container
+    of the same image, as when a branch trial restores the files of step k
+    that an earlier trial rebuilt. The image must still be the same.
 
     Everything added since is removed (what the checkpoint holds comes back
     from its tar); paths the image holds that were changed or deleted since,
@@ -333,7 +358,8 @@ def restore(backend, wire, manifest, directory) -> RestoreReceipt:
     if digest.hexdigest() != manifest.tar_sha256:
         raise TerminalConflict("the checkpoint's tar does not match its checksum")
     info = backend._inspect(wire, deadline)
-    if str(info.get("Image") or "") != manifest.image or container != manifest.environment_id:
+    if str(info.get("Image") or "") != manifest.image or (container != manifest.environment_id
+                                                          and not any_container):
         raise TerminalConflict("the checkpoint is of another image or container")
     mounts = tuple(item["Destination"] for item in info.get("Mounts") or ()
                    if isinstance(item, dict) and isinstance(item.get("Destination"), str))

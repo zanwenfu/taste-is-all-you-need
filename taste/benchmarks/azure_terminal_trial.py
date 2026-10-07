@@ -277,15 +277,26 @@ class AzureTerminalTrial:
             os.close(fd)
             raise
 
-    def _input(self, name, raw):
+    def _input(self, name, raw, *, maximum=None):
         parent = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            _write(parent, name, raw)
+            _write(parent, name, raw, **({} if maximum is None else {"maximum": maximum}))
             os.chmod(name, 0o444, dir_fd=parent, follow_symlinks=False)
             os.fsync(parent)
         finally:
             os.close(parent)
         return hashlib.sha256(raw).hexdigest()
+
+    def add_input(self, name, raw, *, maximum):
+        """One more read-only file beside the goal's inputs, for its processes to read; its SHA-256.
+
+        Before run(), as a branch's replay script (taste.benchmarks.branch_trial).
+        Never one of the trial's own inputs, and never written over.
+        """
+        if (self.started or not isinstance(name, str) or name != os.path.basename(name) or name.startswith(".")
+                or name in ("prepare.json", "goal.json", "controller", "agent-state", "exchange", "rpc")):
+            raise GoalInputError("a trial input is one new plain file name, added before the run")
+        return self._input(name, raw, maximum=maximum)
 
     def _operation(self, name, input_name, digest, *, credential=None):
         runtime = SETTLE_SECONDS if name == "settle" else min(PREPARE_SECONDS if name == "prepare" else 604800,
