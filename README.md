@@ -289,7 +289,24 @@ optional dependencies are missing.
 
 ## Citation
 
-If you use Taste in your work, please cite it:
+If you build on the idea of git as the memory layer for AI agents, or use
+Taste, please cite the essay:
+
+```bibtex
+@misc{fu2026beyond,
+  author       = {Fu, Zanwen},
+  title        = {Beyond the Harness: An Operating System for {AI} Agents},
+  year         = {2026},
+  month        = mar,
+  howpublished = {\url{https://zanwenfu.com/blog/agent_harness_blog}},
+  note         = {Published March 28, 2026}
+}
+```
+
+The essay was published on 28 March 2026, and the Internet Archive captured it
+on 31 March 2026 ([archived copy](https://web.archive.org/web/20260331102524/https://zanwenfu.com/blog/agent_harness_blog)).
+
+To cite the software itself:
 
 ```bibtex
 @software{fu2026taste,
@@ -301,9 +318,8 @@ If you use Taste in your work, please cite it:
 }
 ```
 
-GitHub's "Cite this repository" button gives the same from
-[CITATION.cff](CITATION.cff). The thesis behind the system is laid out in
-[Beyond the Harness](https://zanwenfu.com/blog/agent_harness_blog).
+GitHub's "Cite this repository" button gives the essay, from
+[CITATION.cff](CITATION.cff).
 
 ## License
 

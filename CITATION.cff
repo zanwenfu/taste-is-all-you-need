@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use Taste in your research, please cite it as below."
+message: "If you build on the idea of git as the memory layer for AI agents, or use this software, please cite the essay below."
 title: "Taste Is All You Need: An Operating System for AI Agents"
 type: software
 authors:
@@ -16,3 +16,13 @@ keywords:
   - multi-agent systems
   - LLM orchestration
   - git
+preferred-citation:
+  type: blog
+  title: "Beyond the Harness: An Operating System for AI Agents"
+  authors:
+    - family-names: Fu
+      given-names: Zanwen
+  date-published: "2026-03-28"
+  year: 2026
+  month: 3
+  url: "https://zanwenfu.com/blog/agent_harness_blog"
