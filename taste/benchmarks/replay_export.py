@@ -25,6 +25,7 @@ steps it took live. A branch that was unfaithful is refused.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sqlite3
@@ -232,3 +233,33 @@ def trial_files(path, *, trials_root="/var/lib/taste-trials", run_id=None):
 def encode_script(script):
     """The bytes a replay script is written as; a branch is admitted against their SHA-256."""
     return (json.dumps(script, indent=1, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def main(argv=None):
+    """python3 -m taste.benchmarks.replay_export RECORD -o SCRIPT (scripts/replay_script.py says more)."""
+    parser = argparse.ArgumentParser(description="Write the replay script of a finished trial's hosted agent")
+    parser.add_argument("record", type=Path, help="a trial's directory, Harbor's trial directory or a journal")
+    parser.add_argument("-o", "--output", "--out", type=Path, required=True, help="where to write the script")
+    parser.add_argument("--trials", default="/var/lib/taste-trials", help="Taste's trial directories")
+    parser.add_argument("--run", help="the worker run's ID, when the trial holds more than one")
+    parser.add_argument("--ledger", type=Path, help="the trial's terminal ledger, with a journal")
+    parser.add_argument("--parent", type=Path, help="the script a branch trial branched, with a journal")
+    arguments = parser.parse_args(argv)
+    journal, ledger, parent, trial = trial_files(arguments.record, trials_root=arguments.trials,
+                                                 run_id=arguments.run)
+    script = export_script(journal, ledger=arguments.ledger or ledger, parent=arguments.parent or parent,
+                           trial=trial)
+    raw = encode_script(script)
+    arguments.output.write_bytes(raw)
+    runs = [run for step in script["steps"] for run in step["runs"]]
+    print(json.dumps({"steps": len(script["steps"]), "submission_step": script["submission_step"],
+                      "dropped_steps": script["source"]["dropped_steps"], "commands": len(runs),
+                      "outputs_exact": sum(run["output_exact"] for run in runs),
+                      "rebuildable": all(run["executed"] is not None for run in runs),
+                      "exit": script["exit"], "trial": trial, "sha256": hashlib.sha256(raw).hexdigest(),
+                      "bytes": len(raw), "output": str(arguments.output)}, indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

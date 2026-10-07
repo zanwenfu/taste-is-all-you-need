@@ -123,8 +123,9 @@ def script_of(results):
                       "runs": [{"command": command, "executed": shell(command), "cwd": "/", "timeout_seconds": 60.0,
                                 "output": output, "returncode": code, "timed_out": timed_out,
                                 "output_exact": True}]})
-    return ReplayScript.from_dict({"schema": SCRIPT_SCHEMA, "source": {"trial": "branch-check"},
-                                   "task": "Make answer() return 42.", "steps": steps, "exit": None})
+    return ReplayScript.from_dict({"schema": SCRIPT_SCHEMA, "source": {
+        "trial": "branch-check", "agent": {"name": "mini-swe-agent"}, "dropped_steps": 0},
+        "task": "Make answer() return 42.", "steps": steps, "exit": None})
 
 
 async def check(image, token, directory):
@@ -154,13 +155,12 @@ async def check(image, token, directory):
         terminals.append(rebuilt)
         account = await rebuild(inputs.script, STEP, rebuilt.execute)
         rebuilt_files = (await rebuilt.run(FINGERPRINT))[0]
-        saved = await asyncio.to_thread(branch_trial.save_checkpoint, rebuilt.backend, rebuilding, inputs,
+        saved = await asyncio.to_thread(branch_trial.save_checkpoint, rebuilt.backend, saved_to, inputs, STEP,
                                         {"faithful": account["faithful"]}, "branch-check")
 
         restored = Terminal(container(image, token), token, directory, "restored")
         terminals.append(restored)
-        restoring = TrialSettings.from_options({**options, "branch_mode": "restore"})
-        receipt = await asyncio.to_thread(branch_trial.restore_checkpoint, restored.backend, restoring, inputs)
+        receipt = await asyncio.to_thread(branch_trial.restore_checkpoint, restored.backend, saved_to, inputs, STEP)
         restored_files = (await restored.run(FINGERPRINT))[0]
 
         changed = script.to_dict()
@@ -169,14 +169,15 @@ async def check(image, token, directory):
         terminals.append(divergent)
         refused = await rebuild(ReplayScript.from_dict(changed), STEP, divergent.execute)
 
-        # A checker's trial: the run's final files restored for its script's last step, no replay.
+        # A checker's trial: another agent, so only the files come back, the
+        # run's final files restored for its script's last step.
         checking = TrialSettings.from_options({**options, "agent": "checker", "branch_step": str(len(RUN)),
-                                               "branch_replay": "off", "branch_mode": "restore",
-                                               "branch_checkpoint": str(directory / "final")})
+                                               "branch_mode": "restore", "branch_checkpoint": str(directory / "final")})
+        checked = branch_trial.load_inputs(checking)
         checker = Terminal(container(image, token), token, directory, "checker")
         terminals.append(checker)
-        final_receipt = await asyncio.to_thread(branch_trial.restore_checkpoint, checker.backend, checking,
-                                                branch_trial.load_inputs(checking))
+        final_receipt = await asyncio.to_thread(branch_trial.restore_checkpoint, checker.backend,
+                                                directory / "final", checked, len(RUN))
         checker_files = (await checker.run(FINGERPRINT))[0]
 
         checks = {
@@ -192,6 +193,7 @@ async def check(image, token, directory):
             "a changed exit code is unfaithful at its command": (
                 not refused["faithful"] and refused["commands"] == 2 and refused["rows"][-1]["divergent"]),
             "the run's final files were saved": final.get("saved") is True,
+            "another agent is given the files, not the context": checked.replay is False,
             "a checker's container gets the final files back exactly": final_receipt.get("exact") is True,
             "the checker's files are the run's final files": checker_files == final_files,
         }

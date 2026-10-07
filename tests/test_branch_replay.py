@@ -121,7 +121,8 @@ class Recorder:
 
     def script(self):
         return ReplayScript.from_dict({"schema": SCRIPT_SCHEMA, "task": TASK, "steps": self.steps, "exit": None,
-                                       "source": {"effort": "low", "tools_sha256": digest([TOOL])}})
+                                       "source": {"effort": "low", "tools_sha256": digest([TOOL]),
+                                                  "agent": {"name": "mini-swe-agent"}}})
 
 
 OUTPUTS = {"make test": ("FAILED test_parse\n", 1),

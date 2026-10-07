@@ -84,9 +84,12 @@ class TrialSettings:
     # what step k showed: "append" adds the text in branch_note after its
     # output; "reject", at the submission step, shows that text with exit 1
     # instead. branch_tolerance rebuilt commands may diverge from the record.
-    # branch_replay=off brings back only the files of step k: the trial's own
-    # agent starts fresh with its own task text, as a checker given a run's
-    # final files does (step k the run's last, its files rebuilt or restored).
+    # The agent's context is replayed when the trial's agent is the one the
+    # record is of (branch_replay=auto; on or off to say so). Otherwise only
+    # the files of step k come back and the trial's own agent starts fresh
+    # with its own task text, as a checker given a run's final files does
+    # (step k the run's last, its files rebuilt or restored). A checkpoint is
+    # a directory path or an ID under the checkpoints root.
     branch: str = ""
     branch_step: int = 0
     branch_mode: str = "rebuild"
@@ -95,15 +98,16 @@ class TrialSettings:
     branch_note: str = ""
     branch_override: str = ""
     branch_tolerance: int = 0
-    branch_replay: str = "on"
-    # For a fresh trial (or one given only a run's files): the task's text
-    # replaced by this file's, and this file's text added after it (after a
-    # blank line).
+    branch_replay: str = "auto"
+    # For a fresh trial (or an agent given only a run's files): the task's
+    # text replaced by this file's, and this file's text added after it (after
+    # a blank line).
     task_text: str = ""
     task_suffix: str = ""
-    # A directory where the container's files are saved when the trial ends,
-    # before its verifier runs: the run's final state, which a checker trial
-    # restores (branch_mode=restore, branch_step = the run's last step).
+    # Where the container's files are saved when the trial ends, before its
+    # verifier runs (a directory path or an ID): the run's final state, which
+    # a checker's trial restores (branch_mode=restore, branch_step = the run's
+    # last step).
     final_checkpoint: str = ""
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
@@ -203,8 +207,8 @@ class TrialSettings:
             raise ValueError("branch_mode must be rebuild or restore")
         if self.branch_live not in ("on", "off"):
             raise ValueError("branch_live must be on or off")
-        if self.branch_replay not in ("on", "off"):
-            raise ValueError("branch_replay must be on or off")
+        if self.branch_replay not in ("auto", "on", "off"):
+            raise ValueError("branch_replay must be auto, on or off")
         if self.branch_override not in ("", *OVERRIDES):
             raise ValueError("branch_override must be append or reject")
         if bool(self.branch_override) != bool(self.branch_note):
@@ -218,8 +222,8 @@ class TrialSettings:
         if self.branch_mode == "rebuild" and self.branch_checkpoint and self.branch_live != "off":
             raise ValueError("a rebuild saves its checkpoint of step k only with branch_live=off")
         if (self.task_text or self.task_suffix) and self.branch_replay == "on":
-            raise ValueError("a branch replays the recorded task; task_text and task_suffix are for fresh "
-                             "trials, or with branch_replay=off")
+            raise ValueError("a replayed agent is given its record's task; task_text and task_suffix are for "
+                             "fresh trials and for an agent given only the files")
 
     @property
     def models(self):
@@ -263,12 +267,16 @@ class TrialSettings:
             raise ValueError("the agent's time is too short for work, a closing reply and handoff")
         return started_unix + goal_seconds, started_unix + agent_timeout_seconds + 3600
 
-    def branch_policy(self, script, script_sha256, note=""):
-        """The worker's branch: the replay script as the worker reads it (in the trial) and its digest."""
+    def branch_policy(self, script, script_sha256, note="", *, replay=True):
+        """The worker's branch: the replay script as the worker reads it (in the trial) and its digest.
+
+        ``replay`` is the decision ``branch_trial.load_inputs`` made from the
+        record: whether the agent's context is replayed or only the files return.
+        """
         return BranchPolicy(script=str(script), script_sha256=script_sha256, step=self.branch_step,
                             mode=self.branch_mode, live=self.branch_live == "on",
                             override=self.branch_override, note=note, tolerance=self.branch_tolerance,
-                            replay=self.branch_replay == "on")
+                            replay=replay)
 
     def policy(self, endpoint, deadline_unix, *, owner_token, container_id, workdir, branch=None):
         coordinator, planner, worker_name, worker = self.models
@@ -318,7 +326,7 @@ class TrialSettings:
                 **({"rollback": self.rollback} if self.rollback != "off" else {}),
                 **({"branch": {"script": self.branch, "step": self.branch_step, "mode": self.branch_mode,
                                "live": self.branch_live, "tolerance": self.branch_tolerance,
-                               **({"replay": "off"} if self.branch_replay == "off" else {}),
+                               **({"replay": self.branch_replay} if self.branch_replay != "auto" else {}),
                                **({"checkpoint": self.branch_checkpoint} if self.branch_checkpoint else {}),
                                **({"override": self.branch_override, "note": self.branch_note}
                                   if self.branch_override else {})}} if self.branch else {}),
