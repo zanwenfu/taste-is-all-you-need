@@ -17,6 +17,11 @@ the assignment's one output, its report, which is certified like any other.
 A hosted agent works only in the task's container. It cannot read or write
 memory artifacts, take inbox messages or acknowledge verdicts, so none of
 these can hold up its report.
+
+A run can be a branch of an earlier one (``taste.brains.branch_replay``): the
+recorded commands of steps 1..k are run again in the task's container first,
+the agent's first k steps are answered from the record, and it then goes on
+live. What was replayed is on the record, apart from what the agent paid for.
 """
 
 from __future__ import annotations
@@ -34,6 +39,14 @@ from dataclasses import asdict
 from taste.agents import HostedStop, ModelReply, ShellResult
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.azure_worker_runtime import LOST_REPLIES, AzureWorkerRuntime
+from taste.brains.branch_replay import (
+    MAX_SCRIPT_BYTES,
+    REBUILD_OUTPUT_CHARS,
+    ReplayHost,
+    ReplayScript,
+    check_branch,
+    rebuild,
+)
 from taste.brains.records import Assignment
 from taste.brains.responses_feedback import WorkerClaim
 from taste.brains.responses_session import ResponsesFenced, ResponsesSession
@@ -93,6 +106,23 @@ def hosted_task(assignment: Assignment, original: str | None) -> str:
         parts.append("For reference, the original task as its author wrote it. Your work is "
                      "what is asked above.\n\n" + original)
     return "\n\n".join(parts)
+
+
+def branch_script(branch):
+    """The replay script a branch names, read once and held to the digest it was admitted with."""
+    try:
+        with open(branch.script, "rb") as handle:
+            raw = handle.read(MAX_SCRIPT_BYTES + 1)
+    except OSError as exc:
+        raise ContractMismatch("the branch's replay script cannot be read") from exc
+    if hashlib.sha256(raw).hexdigest() != branch.script_sha256:
+        raise ContractMismatch("the branch's replay script differs from the one admitted")
+    try:
+        script = ReplayScript.from_bytes(raw)
+        check_branch(script, branch.step, mode=branch.mode, override=branch.override, note=branch.note)
+    except ValueError as exc:
+        raise ContractMismatch(f"the branch cannot be served: {exc}") from exc
+    return script
 
 
 def _reply(completion, cost):
@@ -173,8 +203,12 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         self.report_spec = present[0]
         self.terminal_client, self.workdir = terminal_client, terminal_policy.workdir or "/"
         self.agent, self.model_name = agent, model_name
+        policy = AzureWorkerPolicy.from_assignment(assignment)
         # An agent run alone is neither judged nor certified: it is the baseline.
-        self.CERTIFIES = AzureWorkerPolicy.from_assignment(assignment).supervised
+        self.CERTIFIES = policy.supervised
+        # A branch of an earlier run: its replay script, read and checked before anything is recorded.
+        self.fork = policy.branch
+        self.script = None if self.fork is None else branch_script(self.fork)
         self.host = None
         self._inflight = None
         self._commands = 0
@@ -186,6 +220,12 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
                 "endpoint": session.binding.endpoint, "deployment": session.binding.deployment,
                 "workdir": self.workdir})
             self._append("task", content=self.task)
+            if self.fork is not None:
+                source = self.script.source
+                self._append("branch", **self.fork.to_dict(), source={
+                    key: source.get(key) for key in ("trial", "run_id", "model")},
+                    task_matches=self.script.task == self.task,
+                    agent_matches=source.get("agent") == agent.identity())
         self.session.reconcile_conversation_audit(self._events())
 
     # -- memory record ----------------------------------------------------
@@ -320,6 +360,83 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
             self.host.stop("monitor_" + stops[0], now=False)
         return ShellResult(output, result.return_code, timed_out=result.terminated == "timeout")
 
+    # -- a branch of an earlier run --------------------------------------------
+
+    def _unfaithful(self, step, reason, detail):
+        self._append("unfaithful", step=step, reason=reason, detail=detail)
+        return False
+
+    async def _noted(self, kind, payload):
+        """One replayed step on the record, from the agent's thread by way of the host."""
+        self._admitted()
+        self._append(kind, **payload)
+
+    def _end_rebuild(self, effect_id, why):
+        with contextlib.suppress(Exception):
+            self._append("rebuild_output", effect_id=effect_id, returncode=-1, terminated=why, divergent=True,
+                         output="", output_chars=0)
+
+    async def _rebuild(self):
+        """Run the recorded commands of steps 1..k again, as the agent's own commands go; True if faithful."""
+        fork, grant = self.fork, self.terminal_client.credential.grant
+        started, effects = time.monotonic(), []
+
+        async def execute(number, run):
+            self._admitted()
+            effect_id = "effect_" + _sha([self.session.binding.run_id, "rebuild", len(effects) + 1])
+            effects.append(effect_id)
+            timeout = min(run.timeout_seconds, float(grant.max_timeout_seconds))
+            self._append("rebuild_command", effect_id=effect_id, step=number,
+                         command=_excerpt(run.command, COMMAND_CHARS), cwd=run.cwd, timeout_seconds=timeout)
+            try:
+                result = await self.terminal_client.execute(
+                    TerminalRequest(effect_id, grant.actor_id, run.executed, run.cwd, timeout))
+            except HostedStop:
+                raise
+            except Exception:
+                self._end_rebuild(effect_id, "terminal_unavailable")
+                raise HostedStop("terminal_unavailable") from None
+            except BaseException:
+                self._end_rebuild(effect_id, "cancelled")
+                raise
+            return _text(result.stdout) + _text(result.stderr), result.return_code, result.terminated == "timeout"
+
+        def on_row(row, output):
+            self._append("rebuild_output", effect_id=effects[-1], **row, terminated="",
+                         output=_excerpt(output, REBUILD_OUTPUT_CHARS), output_chars=len(output))
+
+        try:
+            account = await rebuild(self.script, fork.step, execute, tolerance=fork.tolerance, on_row=on_row)
+        except HostedStop as stop:
+            self._append("rebuilt", commands=len(effects), divergent=None, faithful=False,
+                         seconds=round(time.monotonic() - started, 3), stopped_by=str(stop))
+            return self._unfaithful(0, "rebuild_stopped", {"stopped_by": str(stop)})
+        self._append("rebuilt", commands=account["commands"], divergent=account["divergent"],
+                     faithful=account["faithful"], seconds=round(time.monotonic() - started, 3))
+        if not account["faithful"]:
+            last = account["rows"][-1]
+            return self._unfaithful(last["step"], "rebuild", {"divergent": account["divergent"],
+                                                              "tolerance": fork.tolerance})
+        return True
+
+    async def _branch(self, live):
+        """Bring back step k: the files (a rebuild; a restore came before this run) and the agent's context."""
+        fork, script = self.fork, self.script
+        faithful = True
+        if script.task != self.task:
+            # The task is in the agent's first request, which could not match.
+            faithful = self._unfaithful(0, "task", {"note": "the agent is given another task than the record's"})
+        elif fork.mode == "rebuild" and fork.step:
+            faithful = await self._rebuild()
+        if fork.step == 0:
+            self._append("prefix", steps=0)
+
+        def record(kind, payload):
+            live._call(lambda: self._noted(kind, payload))
+
+        return ReplayHost(live, script, fork.step, record=record, live_after=fork.live,
+                          override=fork.override, note=fork.note, faithful=faithful)
+
     # -- the run --------------------------------------------------------------
 
     def _pending_inbox(self):
@@ -372,6 +489,8 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
     async def _drive(self) -> WorkerClaim:
         loop = asyncio.get_running_loop()
         self.host = _Host(self, loop)
+        if self.fork is not None:
+            self.host = await self._branch(self.host)
         done = loop.create_future()
 
         def settle(outcome):
@@ -421,4 +540,11 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         return WorkerClaim(status, summary, tuple(self._activity()), (), {})
 
     def _extra_metadata(self):
-        return {"agent": self.agent.identity(), "supervised": self.CERTIFIES}
+        extra = {"agent": self.agent.identity(), "supervised": self.CERTIFIES}
+        if self.fork is not None:
+            replay = self.host if isinstance(self.host, ReplayHost) else None
+            extra["branch"] = {"step": self.fork.step, "mode": self.fork.mode, "live": self.fork.live,
+                               "override": self.fork.override, "script_sha256": self.fork.script_sha256,
+                               "replayed_steps": 0 if replay is None else replay.replayed,
+                               "faithful": replay is not None and replay.faithful and replay.prefix_complete}
+        return extra

@@ -124,17 +124,33 @@ def worker_trajectory(rows, *, run_id):
                 "unobserved_tool_calls": len(unseen_results), "includes_discarded_context": True}}
 
 
+def _branch_account(branch, rebuilt, rebuilds, replayed, prefix, live, unfaithful):
+    """What serving a branch of an earlier run came to (taste.brains.branch_replay)."""
+    rebuild_ok = branch["mode"] != "rebuild" or branch["step"] == 0 or bool(rebuilt and rebuilt["faithful"])
+    return {**branch, "replayed_steps": replayed, "prefix_complete": prefix,
+            "rebuild": None if rebuilt is None else {
+                **rebuilt, "divergences": [row for row in rebuilds if row.get("divergent")][:20]},
+            "went_live": bool(live and live["live"]), "context": None if live is None else live["context"],
+            "unfaithful": unfaithful, "faithful": prefix and unfaithful is None and rebuild_ok}
+
+
 def hosted_trajectory(rows, *, run_id):
     """ATIF evidence for a hosted agent's run: its model replies, commands and outputs.
 
     The agent's own messages stay its own; this is Taste's record of what
     crossed the host: each reply's text and commands, each command's output as
-    recorded in memory, a call given up as lost, and how the run ended.
+    recorded in memory, a call given up as lost, and how the run ended. In a
+    branch of an earlier run, the steps answered from that run's record are
+    shown as replayed (no model call, no cost), and the account of the branch
+    (what was rebuilt, whether each step matched the record, whether the
+    agent went on live) is in ``extra.branch``.
     """
     if not rows or not isinstance(run_id, str) or not run_id:
         raise ResponsesAuditError("a hosted trajectory requires its run and durable evidence")
     steps, history, pending, lost, results = [], set(), set(), [], {}
     binding, current, incomplete, exit_event = None, None, False, None
+    branch, rebuilt, rebuilds, rebuilding, replayed, prefix, live, unfaithful = (
+        None, None, [], {}, 0, False, None, None)
 
     def step(row, source, message, **fields):
         value = {"step_id": len(steps) + 1, "timestamp": row["at"], "source": source, "message": message,
@@ -194,6 +210,48 @@ def hosted_trajectory(rows, *, run_id):
                 owner.setdefault("observation", {"results": []})["results"].append(observed)
         elif kind == "hosted_exit":
             exit_event = event
+        elif kind == "hosted_branch":
+            if branch is not None:
+                raise ResponsesAuditError("hosted trajectory names two branches")
+            branch = {key: event[key] for key in ("script_sha256", "step", "mode", "live", "tolerance",
+                                                  "source", "task_matches", "agent_matches")}
+            branch["override"] = event.get("override", "")
+        elif kind == "hosted_rebuild_command":
+            rebuilding[event["effect_id"]] = event
+        elif kind == "hosted_rebuild_output":
+            if rebuilding.pop(event["effect_id"], None) is None:
+                raise ResponsesAuditError("rebuilt output has no recorded command")
+            rebuilds.append({key: event[key] for key in (
+                "step", "returncode", "recorded_returncode", "timed_out", "recorded_timed_out", "similarity",
+                "divergent", "terminated") if key in event})
+        elif kind == "hosted_rebuilt":
+            rebuilt = {key: event[key] for key in ("commands", "divergent", "faithful", "seconds")}
+        elif kind == "hosted_replay":
+            # Answered from the earlier run's record: no model was asked.
+            replayed += 1
+            current = step(row, "agent", "\n".join(event["text"]), model_name=event["model"], llm_call_count=0)
+            current["extra"].update(replayed=True, branch_step=event["step"], request_sha=event["request_sha"],
+                                    recorded_cost_usd=event["recorded_cost_usd"])
+            calls = [{"tool_call_id": "call_" + hashlib.sha256(
+                         f"replay\0{event['step']}\0{call['id']}".encode()).hexdigest(),
+                      "function_name": call["name"], "arguments": deepcopy(call["arguments"])}
+                     for call in event["calls"]]
+            if calls:
+                current["tool_calls"] = calls
+        elif kind == "hosted_replay_output":
+            if current is None or not current["extra"].get("replayed"):
+                raise ResponsesAuditError("replayed output has no replayed reply")
+            current.setdefault("observation", {"results": []})["results"].append({
+                "content": event["output"], "extra": {
+                    "command": event["command"], "returncode": event["returncode"],
+                    "timed_out": event["timed_out"], "output_chars": event["output_chars"],
+                    "replayed": True, "override": event["override"], "timestamp": row["at"]}})
+        elif kind == "hosted_prefix":
+            prefix = True
+        elif kind == "hosted_live":
+            live = live or {"live": event["live"], "context": event["context"]}
+        elif kind == "hosted_unfaithful":
+            unfaithful = unfaithful or {key: event[key] for key in ("step", "reason", "detail")}
         else:
             raise ResponsesAuditError("hosted trajectory contains an unsupported audit event")
 
@@ -202,8 +260,10 @@ def hosted_trajectory(rows, *, run_id):
             "agent": {"name": agent["name"], "version": agent["version"], "model_name": binding["model"]},
             "steps": steps, "extra": {
                 "trace_scope": "internal_worker", "hosted_agent": agent, "complete_attempt": False,
-                "incomplete_worker_trace": incomplete or bool(pending) or bool(results),
+                "incomplete_worker_trace": incomplete or bool(pending) or bool(results) or bool(rebuilding),
                 "pending_model_requests": sorted(pending), "lost_model_requests": lost,
-                "unfinished_commands": len(results),
+                "unfinished_commands": len(results) + len(rebuilding),
                 "exit": None if exit_event is None else {
-                    "exit_status": exit_event["exit_status"], "stopped_by": exit_event["stopped_by"]}}}
+                    "exit_status": exit_event["exit_status"], "stopped_by": exit_event["stopped_by"]},
+                **({} if branch is None else {"branch": _branch_account(
+                    branch, rebuilt, rebuilds, replayed, prefix, live, unfaithful)})}}

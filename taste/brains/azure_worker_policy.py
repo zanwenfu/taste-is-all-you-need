@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from taste.agents import HOSTED_AGENTS
+from taste.brains.branch_replay import BranchPolicy
 from taste.brains.records import Assignment
 from taste.brains.responses_session import ResponsesBinding
 from taste.brains.worker_admission import EntrypointConfig, EntrypointInputError
@@ -30,7 +31,7 @@ _FIELDS = frozenset({
 
 _EFFORTS = ("medium", "high")  # "low" is the original choice and is not written.
 # Written only when chosen, so assignments made before them keep their form.
-_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent", "services"})
+_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent", "services", "branch"})
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,8 @@ class AzureWorkerPolicy:
     agent: str = ""
     # False for an agent run alone: no monitor judges it and nothing certifies it.
     supervised: bool = True
+    # A branch of an earlier run of that agent alone (taste.brains.branch_replay).
+    branch: BranchPolicy | None = None
 
     @classmethod
     def from_assignment(cls, assignment: Assignment) -> AzureWorkerPolicy:
@@ -61,6 +64,14 @@ class AzureWorkerPolicy:
             raise EntrypointInputError("the assignment names no hosted agent this worker can run")
         if "services" in raw and (raw["services"] != "none" or "worker_agent" not in raw):
             raise EntrypointInputError("only a hosted agent can run without services")
+        branch = None
+        if "branch" in raw:
+            if raw.get("services") != "none":
+                raise EntrypointInputError("only a hosted agent run alone can branch an earlier run")
+            try:
+                branch = BranchPolicy.from_dict(raw["branch"])
+            except (TypeError, ValueError) as exc:
+                raise EntrypointInputError("the assignment's branch is not admitted") from exc
         ceiling = raw.get("request_seconds")
         try:
             monitor_budget = _assignment_monitor_budget_usd(assignment)
@@ -98,7 +109,7 @@ class AzureWorkerPolicy:
             # Do not echo arbitrary policy values into launch diagnostics.
             raise EntrypointInputError("Azure routing or spending limits are invalid") from exc
         return cls(worker, monitor, batch, raw.get("worker_effort", "low"), raw.get("worker_agent", ""),
-                   raw.get("services") != "none")
+                   raw.get("services") != "none", branch)
 
     def validate_launch(self, config: EntrypointConfig) -> None:
         if (config.expected_model != self.worker.model or config.monitor_model != self.monitor.model
