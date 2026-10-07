@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you build on the idea of git as the memory layer for AI agents, or use this software, please cite the essay below."
+message: "If you build on this essay's design, an agent operating system whose memory is git, or use this software, please cite the essay below."
 title: "Taste Is All You Need: An Operating System for AI Agents"
 type: software
 authors:

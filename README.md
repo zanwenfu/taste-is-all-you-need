@@ -289,8 +289,8 @@ optional dependencies are missing.
 
 ## Citation
 
-If you build on the idea of git as the memory layer for AI agents, or use
-Taste, please cite the essay:
+If you build on the essay's design, an agent operating system whose memory
+is git, or use Taste, please cite the essay:
 
 ```bibtex
 @misc{fu2026beyond,
