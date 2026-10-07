@@ -62,7 +62,10 @@ VIEWS = ("retry", "retry_feedback", "rewind_oracle", "rewind_reader", "rewind_ru
 SELECTABLE = ("retry", "retry_feedback", "rewind_reader", "rewind_rules", "continue", "continue_bare")
 # usd and seconds are everything an episode spent, the checker's included;
 # agent_usd and agent_seconds are what its budget was charged (the agent's).
-MEASURES = ("solved", "usd", "agent_usd", "tokens", "seconds", "agent_seconds", "rounds")
+# solved: the episode's last trial passed the hidden tests (what a harness would keep);
+# ever_solved: some trial of it did (a recovery that found a fix the checker then sent back).
+MEASURES = ("solved", "ever_solved", "usd", "agent_usd", "tokens", "seconds", "agent_seconds", "rounds")
+HIGHER_IS_BETTER = ("solved", "ever_solved")
 METHODS = ("reader", "visible_tests", "before_large_edit", "start", "rules", "oracle_highest_v", "oracle_latest")
 FEATURES = ("run_length", "checker_confidence", "visible_tests_passed")
 
@@ -178,7 +181,13 @@ def per_run(episodes):
     def mean(key):
         return statistics.fmean(float(episode.get(key) or 0) for episode in episodes)
     return {"solved": statistics.fmean(1.0 if episode["solved"] else 0.0 for episode in episodes),
-            **{key: mean(key) for key in MEASURES if key != "solved"}, "episodes": len(episodes)}
+            "ever_solved": statistics.fmean(1.0 if ever_solved(episode) else 0.0 for episode in episodes),
+            **{key: mean(key) for key in MEASURES if key not in HIGHER_IS_BETTER}, "episodes": len(episodes)}
+
+
+def ever_solved(episode):
+    """Whether some trial of the episode passed the hidden tests: its last, or one a check looked at."""
+    return bool(episode["solved"]) or any(item.get("solved") for item in episode.get("verdicts") or ())
 
 
 def recovery_table(summary):
@@ -200,8 +209,8 @@ def compare(table, other, base, measure, resamples, rng):
     low, high = _study.bootstrap_interval(differences, resamples, rng)
     return {"runs": len(runs), "mean_difference": rounded(math.fsum(differences) / len(runs)),
             "bootstrap_95": [rounded(low), rounded(high)],
-            "other_better": sum(1 for d in differences if (d > 0) == (measure == "solved") and d != 0),
-            "base_better": sum(1 for d in differences if (d < 0) == (measure == "solved") and d != 0),
+            "other_better": sum(1 for d in differences if (d > 0) == (measure in HIGHER_IS_BETTER) and d != 0),
+            "base_better": sum(1 for d in differences if (d < 0) == (measure in HIGHER_IS_BETTER) and d != 0),
             "permutation_p": _study.permutation_p(differences, resamples, rng)}
 
 
@@ -215,8 +224,10 @@ def recovery_section(summary, comparisons, resamples, rng):
         shares = [found[view]["solved"] for found in table.values() if view in found]
         low, high = _study.bootstrap_interval(shares, resamples, rng) if shares else (None, None)
         solved = sum(1 for episode in episodes if episode["solved"])
+        ever = [found[view]["ever_solved"] for found in table.values() if view in found]
         arms[view] = {"runs": len(shares), "episodes": len(episodes),
                       "solved_share": round(statistics.fmean(shares), 6) if shares else None,
+                      "ever_solved_share": round(statistics.fmean(ever), 6) if ever else None,
                       "solved_share_bootstrap_95": [low, high],
                       "usd_per_episode": round(statistics.fmean(e["usd"] for e in episodes), 6) if episodes else None,
                       "usd_per_solved": round(math.fsum(e["usd"] for e in episodes) / solved, 6) if solved else None,
@@ -377,13 +388,13 @@ def markdown(result):
                   "## Recoveries, paired by failed run", "",
                   "Dollars and seconds are everything an episode spent; its budget was charged only the "
                   "agent's (agent $, agent s), and the checker's are beside them.", "",
-                  "| Recovery | Runs | Episodes | Solved share | Bootstrap 95% | $/episode | agent $ | checker $ | "
-                  "$/solved | s/episode | agent s | Tokens/episode | Rounds | Ends |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                  "| Recovery | Runs | Episodes | Solved share | Bootstrap 95% | Solved at some round | $/episode | "
+                  "agent $ | checker $ | $/solved | s/episode | agent s | Tokens/episode | Rounds | Ends |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         for view, arm in result["recoveries"]["arms"].items():
             low, high = arm["solved_share_bootstrap_95"]
             lines.append(f"| {view} | {arm['runs']} | {arm['episodes']} | {_f(arm['solved_share'])} | "
-                         f"[{_f(low)}, {_f(high)}] | {_f(arm['usd_per_episode'], 4)} | "
+                         f"[{_f(low)}, {_f(high)}] | {_f(arm['ever_solved_share'])} | {_f(arm['usd_per_episode'], 4)} | "
                          f"{_f(arm['agent_usd_per_episode'], 4)} | {_f(arm['check_usd_per_episode'], 4)} | "
                          f"{_f(arm['usd_per_solved'], 4)} | {_f(arm['seconds_per_episode'], 0)} | "
                          f"{_f(arm['agent_seconds_per_episode'], 0)} | {_f(arm['tokens_per_episode'], 0)} | "

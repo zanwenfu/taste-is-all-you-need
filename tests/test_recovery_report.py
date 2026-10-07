@@ -177,3 +177,16 @@ def test_the_report_runs_on_the_drivers_state_files(tmp_path, capsys):
     assert "## Where failed runs become unwinnable" in text and "## Recoveries, paired by failed run" in text
     assert "| rewind_oracle |" in text
     assert f"| {run_id} | 0: 1/3 [" in text and "## Curves" in text
+
+
+def test_an_episode_that_solved_then_broke_its_fix_counts_as_solved_at_some_round():
+    # Round one passed the hidden tests, the checker rejected it, round two broke it.
+    broke = [{"end": "budget", "rounds": 2, "reward": 0.0, "solved": False, "usd": 0.2, "seconds": 100.0,
+              "tokens": 1000, "agent_usd": 0.1, "check_usd": 0.1, "changed_paths": [], "flags": [],
+              "verdicts": [{"verdict": "not_done", "confidence": 0.99, "solved": True}]}] * 2
+    summary = {f"r{i}": rejected({"continue": broke, "retry": episodes(False, 0.5)}) for i in range(4)}
+    found = report.recovery_section(summary, None, 500, random.Random(1))
+    assert found["arms"]["continue"]["solved_share"] == 0.0
+    assert found["arms"]["continue"]["ever_solved_share"] == 1.0 and found["arms"]["retry"]["ever_solved_share"] == 0.0
+    [ever] = found["comparisons"]["ever_solved"]
+    assert (ever["other"], ever["base"], ever["mean_difference"]) == ("continue", "retry", 1.0)
