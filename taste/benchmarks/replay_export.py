@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -254,7 +255,11 @@ def main(argv=None):
     script = export_script(journal, ledger=arguments.ledger or ledger, parent=arguments.parent or parent,
                            trial=trial)
     raw = encode_script(script)
-    arguments.output.write_bytes(raw)
+    # Written whole or not at all: a launcher skips the export when the script exists.
+    arguments.output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = arguments.output.with_name(f".{arguments.output.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(raw)
+    os.replace(temporary, arguments.output)
     runs = [run for step in script["steps"] for run in step["runs"]]
     print(json.dumps({"steps": len(script["steps"]), "submission_step": script["submission_step"],
                       "dropped_steps": script["source"]["dropped_steps"], "commands": len(runs),

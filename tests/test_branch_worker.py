@@ -188,6 +188,10 @@ def test_the_command_line_finds_a_trials_records_from_harbors_trial(base, tmp_pa
     again = tmp_path / "again.json"
     assert export_main(["--record", str(trial), "--out", str(again)]) == 0
     assert again.read_bytes() == out.read_bytes()
+    # A driver's work directory may not exist yet; a script is written whole or not at all.
+    nested = tmp_path / "work" / "scripts" / "f00d.json"
+    assert export_main(["--record", str(trial), "--out", str(nested)]) == 0
+    assert nested.read_bytes() == out.read_bytes() and sorted(p.name for p in nested.parent.iterdir()) == ["f00d.json"]
     with pytest.raises(ValueError, match="worker runs"):
         cli.main([str(trial), "-o", str(out), "--run", "another-run"])
 
