@@ -11,7 +11,7 @@ import pytest
 from taste.recovery_study.driver import FINISHED, RUNNING, STARTED
 from taste.recovery_study.jobs import JobSpec, run_key
 from taste.recovery_study.map_driver import MapDriver
-from tests.recovery_fakes import FakeHarbor, agent_steps, base_jobs, branches
+from tests.recovery_fakes import BASE_SETTINGS, FakeHarbor, agent_steps, base_jobs, branches, trial
 
 _SPEC = importlib.util.spec_from_file_location(
     "recovery_map", Path(__file__).resolve().parents[1] / "scripts" / "recovery_map.py")
@@ -167,6 +167,18 @@ def test_runs_the_study_cannot_branch_are_left_out_with_the_reason(tmp_path):
     reasons = sorted(run["skipped"] for run in driver.runs.values())
     assert reasons == ["1 steps", "base model azure/gpt-5.6-luna is not this study's gpt-6-luna"]
     assert driver.advance() == []
+
+
+def test_a_run_whose_agent_never_started_is_neither_a_base_run_nor_a_run_from_scratch(tmp_path):
+    jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
+    base_jobs(jobs_dir, trials, [agent_steps(9), []], calibration=[(1.0, 0.5, 300.0)])
+    # Graded 0 on a container the agent never touched: Taste failed to start it.
+    trial(jobs_dir, "calibration", "task-a", reward=0.0, trials_root=trials, steps=[], settings=BASE_SETTINGS)
+    driver = MapDriver.open(tmp_path / "map.json", {"jobs_dir": str(jobs_dir), "trials_root": str(trials)})
+    driver.add_sources([jobs_dir / "base"], [jobs_dir / "calibration"])
+    assert sorted(run.get("skipped", "") for run in driver.runs.values()) == ["", "the agent never took a step"]
+    # One success from scratch and the one failed base run that started.
+    assert driver.v0("task-a") == [1, 2]
 
 
 def test_the_command_line_writes_a_launcher_and_says_how_the_study_stands(tmp_path, capsys):

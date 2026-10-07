@@ -49,6 +49,13 @@ ENVIRONMENT_OPERATIONS = {"checkpoint": frozenset({"checkpoint_id"}),
 # hundred paths.
 ISSUE_REPLY_BYTES = 16384
 ENVIRONMENT_REPLY_BYTES = 256 * 1024
+# An issuance whose reply never came is asked for again, in this many
+# attempts within this many seconds in all: the service answers a repeated
+# request with the credential it already issued for the run, never a second
+# one. The service's loop is shared with every trial its benchmark runner
+# holds, so on a busy host one reply can come later than one handshake.
+ISSUE_ATTEMPTS = 3
+ISSUE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -263,8 +270,20 @@ class TerminalIssuerClient:
         issuer = self.credential
         grant = _grant(issuer, assignment)
         _state_id(prepared_state_id, "prepared_state_id")
-        response = self._exchange("issue", {"assignment": assignment.to_dict(),
-                                             "prepared_state_id": prepared_state_id})
+        arguments = {"assignment": assignment.to_dict(), "prepared_state_id": prepared_state_id}
+        deadline = time.monotonic() + ISSUE_SECONDS
+        response = None
+        for _ in range(ISSUE_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                response = self._exchange("issue", arguments, seconds=min(remaining, ISSUE_SECONDS / ISSUE_ATTEMPTS))
+                break
+            except TerminalUnavailable:
+                continue
+        if response is None:
+            raise TerminalUnavailable("terminal issuance ended without a confirmed reply")
         try:
             credential = TerminalCredential.from_dict(response["credential"])
         except ValueError as exc:

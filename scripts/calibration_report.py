@@ -13,8 +13,11 @@ have at least --min-steps steps (the median over its runs).
 
 A trial the verifier never graded (Docker or Harbor failed before a reward was
 written) is not an attempt: it says nothing about the task's difficulty. It is
-listed with its exception, to be run again. A trial the benchmark's time limit
-cut off is graded as usual and counts.
+listed with its exception, to be run again. So is a trial graded although its
+record holds no step of the agent: Taste never started the agent, and the
+verifier graded an untouched container (newer trials end with
+HostedAgentNotStarted instead). A trial the benchmark's time limit cut off is
+graded as usual and counts.
 
 Only Harbor's result files and Taste's settled trial records are read, as in
 the go/no-go report. Dollars are the record's spending over every role; a
@@ -72,8 +75,11 @@ def calibration_row(result, trials_root):
     row = _records.trial_row(result, trials_root)
     taste = ((result.get("agent_result") or {}).get("metadata") or {}).get("taste") or {}
     row["benchmark"] = str(result.get("task_name", "")).rpartition("/")[0]
-    row["graded"] = row["reward"] is not None
     row["steps"] = agent_steps(trials_root, taste.get("trial"))
+    started = row["steps"] is None or sum(row["steps"]) > 0
+    row["graded"] = row["reward"] is not None and started
+    if not started and row["exception"] is None:
+        row["exception"] = "HostedAgentNotStarted"
     if row["settled"]:
         row["usd"], row["usd_source"] = round(math.fsum(row["cost_usd"].values()), 8), "record"
     else:

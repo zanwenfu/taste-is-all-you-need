@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import shlex
+import subprocess
 
 import pytest
 
@@ -18,7 +20,7 @@ def test_a_branch_probe_is_one_run_harbor_call_with_its_settings_in_order():
                            prepare=[jobs.export_script("/var/lib/taste-trials/tok1", "/w/scripts/tok1.json")])
     assert list(spec.argv) == [
         "/opt/taste/infra/azure/run-harbor.sh", "map-run-abc123-s12-b1", "/study/tasks", "-i", "task-a",
-        "-k", "8", "-n", "8", "--ak", "agent=mini-swe-agent", "--ak", "services=none",
+        "-k", "8", "-n", "8", "--max-retries", "2", "--ak", "agent=mini-swe-agent", "--ak", "services=none",
         "--ak", "reply_reserve_seconds=10", "--ak", "branch=/w/scripts/tok1.json", "--ak", "branch_step=12",
         "--ak", "branch_mode=rebuild", "--ak", "branch_live=on"]
     assert dict(spec.env) == {"MODEL": "azure/gpt-6-luna", "JOBS": "/study/jobs"}
@@ -95,15 +97,41 @@ def test_job_names_are_safe_for_run_harbor_and_bounded():
     assert jobs.model_flag("azure/gpt-6-sol") == "azure/gpt-6-sol" and jobs.model_flag("gpt-6-sol") == "azure/gpt-6-sol"
 
 
-def test_the_launcher_starts_each_job_once_within_the_limit_and_then_waits():
+def test_the_launcher_starts_each_job_once_within_the_trial_limit_and_then_waits():
     spec = jobs.harbor_job("map-a-s3-b1", tasks_dir="/t", task="a", attempts=2, settings={"agent": "x y"},
                            model="gpt-6-luna", jobs_dir="/study/jobs", run_harbor="/r.sh")
-    text = jobs.launcher([spec], prefix="map", max_active=3, title="round 1")
+    text = jobs.launcher([spec], prefix="map", max_trials=24, title="round 1")
     assert text.startswith("#!/bin/sh\n# round 1\n")
-    assert "MAX_ACTIVE=${MAX_ACTIVE:-3}" in text and "'taste-harbor-map-*'" in text
+    assert "MAX_TRIALS=${MAX_TRIALS:-24}" in text and "'taste-harbor-map-*'" in text
     start = next(line for line in text.splitlines() if line.startswith("start map-a-s3-b1 "))
-    _, name, directory, command = shlex.split(start)
-    assert (name, directory) == ("map-a-s3-b1", "/study/jobs") and command == spec.shell()
-    assert "'agent=x y'" in command
+    _, name, directory, trials, command = shlex.split(start)
+    assert (name, directory, trials) == ("map-a-s3-b1", "/study/jobs", "2") and command == spec.shell()
+    assert spec.concurrent == 2 and "'agent=x y'" in command
     assert text.rstrip().endswith("run the driver again\"")
-    assert not any(line.startswith("start ") for line in jobs.launcher([], prefix="map", max_active=3).splitlines())
+    assert not any(line.startswith("start ") for line in jobs.launcher([], prefix="map", max_trials=24).splitlines())
+
+
+def test_the_launcher_counts_a_running_job_as_the_trials_it_runs_at_once(tmp_path):
+    # A probe of eight and a checkpoint of one weigh what they run, whichever round started them.
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "systemctl").write_text("""#!/bin/sh
+case "$1" in
+  list-units) printf 'taste-harbor-map-a-s3-b1.service loaded active running x\\n'
+              printf 'taste-harbor-map-b-s5-c1.service loaded active running x\\n';;
+  show) case "$*" in
+          *s3-b1*) echo '{ path=/h ; argv[]=/h run -p /t -i a -k 8 -n 8 --max-retries 2 --ak b=1 ; }';;
+          *) echo '{ path=/h ; argv[]=/h run -p /t -i b -k 1 -n 1 --max-retries 2 ; }';;
+        esac;;
+esac
+""")
+    (fake / "systemctl").chmod(0o755)
+    text = jobs.launcher([], prefix="map", max_trials=24)
+    functions = text[:text.rindex("while [")]
+    done = subprocess.run(["sh", "-c", functions + "trials\nrunning\n"], capture_output=True, text=True,
+                          env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"}, check=True)
+    assert done.stdout.split() == ["9", "2"]
+    # WAIT=0 returns at once, with the study's jobs still running.
+    returned = subprocess.run(["sh", "-c", text], capture_output=True, text=True, timeout=10,
+                              env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "WAIT": "0"})
+    assert returned.returncode == 0 and "run the driver again" not in returned.stdout

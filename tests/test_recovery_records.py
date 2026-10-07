@@ -52,7 +52,7 @@ def test_a_trial_reads_its_reward_from_harbor_and_its_spend_and_steps_from_taste
     assert (summary["faithful"], summary["checkpoint"], summary["changed_paths"]) == (True, "cp-9", ["a.txt"])
     assert summary["exit_status"] == "Submitted" and summary["steps"] == 4 and summary["checker"] is None
     assert summary["written_paths"] == ["src/app.py"] and summary["submission_paths"] == ["src/app.py"]
-    assert not summary["skip_marker"] and records.usable(summary)
+    assert not summary["skip_marker"] and summary["agent_started"] is True and records.usable(summary)
     view = records.agent_view(records.settled(summary["token"], trials))
     assert view["task"] == "Fix the bug." and view["final_message"] == "I fixed the bug and ran the tests."
     assert view["submission"].startswith("diff --git") and SENTINEL not in view["submission"]
@@ -68,6 +68,11 @@ def test_without_a_record_harbors_figures_stand_and_an_unfaithful_branch_is_not_
     assert summary["faithful"] is False and not records.usable(summary)
     ungraded = trial(jobs_dir, "j", "task-a", reward=None, trials_root=trials, exception="AgentSetupError")
     assert not records.usable(records.trial(jobs_dir / "j" / ungraded, trials))
+    # Graded, but its record holds no step of the agent: Taste never started it.
+    untouched = records.trial(jobs_dir / "j" / trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials,
+                                                     steps=[]), trials)
+    assert untouched["agent_started"] is False and not records.usable(untouched)
+    assert summary["agent_started"] is None  # no record: Harbor's figures stand
 
 
 def test_time_is_the_agents_execution_by_harbors_clock_less_the_prefix_for_a_branch(tmp_path):

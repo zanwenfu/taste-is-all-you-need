@@ -79,3 +79,59 @@ def test_a_trial_without_settled_evidence_still_leaves_a_flagged_record(harbor_a
     summary = context.metadata["taste"]
     assert summary["sealed"] is True and summary["audit_flags"] == record["extra"]["audit_flags"]
     assert "stop_reason" not in summary  # no outcome, so none is claimed
+
+
+def _settled(tmp_path, *runs):
+    """A settled record holding the coordinator's run and these (name, step sources) runs."""
+    nested = {"steps": [], "subagent_trajectories": [
+        {"agent": {"name": "taste-coordinator"}, "steps": [{"source": "system"}, {"source": "agent"}]},
+        *({"agent": {"name": name}, "steps": [{"source": source} for source in sources]} for name, sources in runs)]}
+    path = tmp_path / "settled.json"
+    path.write_text(json.dumps(nested))
+    return path
+
+
+@pytest.mark.parametrize("runs,steps", [
+    ((), 0),                                                        # the launch failed: no run of the agent
+    ((("taste-azure-worker", ["system"]),), 0),                     # a run that never reached the agent
+    ((("taste-monitor", ["agent"]), ("mini-swe-agent", ["user"])), 0),  # the agent got its task, no reply
+    ((("mini-swe-agent", ["user", "agent", "agent"]),), 2),
+])
+def test_the_record_counts_the_hosted_agents_steps_and_a_run_without_one_is_not_graded(
+        harbor_agent, tmp_path, runs, steps):
+    agent = harbor_agent.TasteAgent(tmp_path, model_name="azure/gpt-6-luna", agent="mini-swe-agent",
+                                    services="none", worker_python="/usr/bin/python3")
+    agent.owner = SimpleNamespace(audit_flags=(), outcome=None, trajectory_path=_settled(tmp_path, *runs),
+                                  root=tmp_path / "trial", sealed=True)
+    context = SimpleNamespace(metadata={"taste": {"trial": "t", "configuration": {}}})
+    agent._record("goal-1", "Fix the build.", None, context, started=0.0)
+    assert context.metadata["taste"]["agent_steps"] == steps
+    ended = SimpleNamespace(stop_reason="generation_bound")
+    if steps:
+        agent._check_started(ended, context)
+    else:
+        # The harness failed the agent, not the agent the task: Harbor retries such a trial.
+        with pytest.raises(harbor_agent.HostedAgentNotStarted, match="never took a step"):
+            agent._check_started(ended, context)
+    # A run cut short by the benchmark's own time limit is graded as it stands.
+    agent._check_started(None, context)
+
+
+def test_without_a_settled_record_or_a_hosted_agent_no_step_count_is_claimed(harbor_agent, tmp_path):
+    context = SimpleNamespace(metadata={"taste": {"trial": "t", "configuration": {}}})
+    agent = harbor_agent.TasteAgent(tmp_path, model_name="azure/gpt-6-luna", agent="mini-swe-agent",
+                                    services="none", worker_python="/usr/bin/python3")
+    agent.owner = SimpleNamespace(audit_flags=(), outcome=None, trajectory_path=None,
+                                  root=tmp_path / "trial", sealed=True)
+    agent._record("goal-1", "Fix the build.", None, context, started=0.0)
+    assert context.metadata["taste"]["agent_steps"] is None
+    agent._check_started(SimpleNamespace(stop_reason="complete"), context)
+    # Taste's own worker is no hosted agent: its runs are not counted as one.
+    native = harbor_agent.TasteAgent(tmp_path / "native", model_name="azure/gpt-6-luna",
+                                     worker_python="/usr/bin/python3")
+    native.owner = SimpleNamespace(audit_flags=(), outcome=None, root=tmp_path / "trial", sealed=True,
+                                   trajectory_path=_settled(tmp_path, ("taste-azure-worker", ["agent"])))
+    (tmp_path / "native").mkdir()
+    native._record("goal-1", "Fix the build.", None, context, started=0.0)
+    assert context.metadata["taste"]["agent_steps"] is None
+    native._check_started(SimpleNamespace(stop_reason="complete"), context)

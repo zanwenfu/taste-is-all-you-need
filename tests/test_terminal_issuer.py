@@ -168,7 +168,28 @@ def test_closed_admission_cannot_issue_more_authority(rig, monkeypatch, phase):
     asyncio.run(scenario())
 
 
-def test_lost_reply_has_no_automatic_retry_and_explicit_retrieval_keeps_the_same_token(rig, monkeypatch):
+def test_a_lost_reply_is_asked_for_again_and_the_retry_keeps_the_same_token(rig, monkeypatch):
+    # A host busy with other trials can hold the service's loop past one
+    # attempt's allowance: the issuance was made, its reply came too late.
+    async def scenario():
+        async with rig() as r:
+            original, late = rpc._write, []
+
+            async def first_reply_late(writer, value, limit):
+                if "credential" in value and not late:
+                    late.append(value)
+                    await asyncio.sleep(0.6)
+                await original(writer, value, limit)
+
+            monkeypatch.setattr(rpc, "_write", first_reply_late)
+            monkeypatch.setattr(issuer_rpc, "ISSUE_SECONDS", 1.5)
+            credential = await asyncio.to_thread(r.client.issue, r.assignment, r.prepared)
+            assert len(late) == 1 and len(r.service._issued) == 1 and not r.env.calls
+            assert credential == next(iter(r.service._issued.values()))[1]
+    asyncio.run(scenario())
+
+
+def test_replies_that_never_come_end_issuance_unconfirmed_and_a_later_call_keeps_the_same_token(rig, monkeypatch):
     async def scenario():
         async with rig() as r:
             original = rpc._write
@@ -181,16 +202,16 @@ def test_lost_reply_has_no_automatic_retry_and_explicit_retrieval_keeps_the_same
                 await original(writer, value, limit)
 
             monkeypatch.setattr(rpc, "_write", delay_reply)
-            monkeypatch.setattr(issuer_rpc, "HANDSHAKE_SECONDS", 0.1)
+            monkeypatch.setattr(issuer_rpc, "ISSUE_SECONDS", 0.3)
             try:
-                with pytest.raises(TerminalUnavailable):
+                with pytest.raises(TerminalUnavailable, match="without a confirmed reply"):
                     await asyncio.to_thread(r.client.issue, r.assignment, r.prepared)
                 assert entered.is_set() and len(r.service._issued) == 1 and not r.env.calls
                 saved = next(iter(r.service._issued.values()))[1]
             finally:
                 release.set()
             monkeypatch.setattr(rpc, "_write", original)
-            monkeypatch.setattr(issuer_rpc, "HANDSHAKE_SECONDS", 5)
+            monkeypatch.setattr(issuer_rpc, "ISSUE_SECONDS", 60)
             assert await asyncio.to_thread(r.client.issue, r.assignment, r.prepared) == saved
     asyncio.run(scenario())
 

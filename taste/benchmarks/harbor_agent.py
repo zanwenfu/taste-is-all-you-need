@@ -14,7 +14,11 @@ What the benchmark receives is the sealed container and one trajectory at
 worker step in the order it happened, and the coordinator's final reply. The
 trial is handed over for grading whatever this system's own audit found; a
 gap is recorded in the trajectory's ``extra.audit_flags`` and in the trial
-metadata, never used to withhold the task from its verifier.
+metadata, never used to withhold the task from its verifier. One run is not
+graded: a hosted agent that never took a step was failed by this harness, not
+by the task, and grading its untouched container would count that against the
+agent. The trial ends with ``HostedAgentNotStarted`` instead, which Harbor
+retries (``--max-retries``) or records as an error, never as a score.
 
 Requirements of the machine, not of the task: Harbor runs as root on the
 Docker host (cgroup v2, systemd), an unprivileged account runs the goal's
@@ -71,6 +75,19 @@ from taste.brains.terminal_broker import MAX_TERMINAL_OUTPUT_BYTES, TerminalResu
 
 _SETTINGS = frozenset(item.name for item in fields(TrialSettings))
 _DOCKER_SECONDS = 20
+# Taste's own runs in a settled record; any other run is the hosted agent's.
+TASTE_RUNS = frozenset({"taste", "taste-coordinator", "taste-monitor", "taste-azure-worker"})
+
+
+class HostedAgentNotStarted(RuntimeError):
+    """The hosted agent never took a step: the harness failed it, so the trial is not graded."""
+
+
+def hosted_agent_steps(nested):
+    """The hosted agent's steps in a settled record: the model replies it was given."""
+    return sum(1 for run in nested.get("subagent_trajectories") or ()
+               if (run.get("agent") or {}).get("name") not in TASTE_RUNS
+               for step in run.get("steps") or () if step.get("source") == "agent")
 
 
 def _docker(socket, *arguments):
@@ -221,6 +238,16 @@ class TasteAgent(BaseAgent):
                         # and running. A resource this owner could not free
                         # is no reason to keep the trial from its verifier.
                         context.metadata["taste"]["release_failed"] = type(failure).__name__
+        self._check_started(outcome, context)
+
+    def _check_started(self, outcome, context):
+        """A run that ended on its own with no step of the hosted agent is not handed to grading.
+
+        A run the benchmark's time limit cut short (no outcome) is graded as it
+        stands, as is one whose record could not be read (no step count).
+        """
+        if outcome is not None and context.metadata["taste"].get("agent_steps") == 0:
+            raise HostedAgentNotStarted(f"the hosted agent never took a step; the run stopped: {outcome.stop_reason}")
 
     async def _save_checkpoints(self, backend, branch, summary, token):
         """The files the verifier is about to grade, saved where the settings ask.
@@ -280,7 +307,9 @@ class TasteAgent(BaseAgent):
         summary.update(audit_flags=record["extra"]["audit_flags"], sealed=owner.sealed,
                        seconds=round(time.time() - started, 1),
                        final_reply=bool(record["extra"].get("final_reply_present")),
-                       record=record["extra"]["record"])
+                       record=record["extra"]["record"],
+                       agent_steps=hosted_agent_steps(nested)
+                       if self.settings.agent and isinstance(nested, dict) else None)
         if "branch" in summary:
             # What the worker found serving the branch: how many steps it
             # replayed, whether each matched the record, and if it went live;

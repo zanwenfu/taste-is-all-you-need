@@ -178,6 +178,11 @@ class JobSpec:
     def jobs_dir(self):
         return dict(self.env).get("JOBS", "")
 
+    @property
+    def concurrent(self):
+        """The trials it runs at once (its ``-n``)."""
+        return int(self.argv[self.argv.index("-n") + 1])
+
     def settings(self):
         """The ``--ak`` settings, in order, as written."""
         return {self.argv[i + 1].split("=", 1)[0]: self.argv[i + 1].split("=", 1)[1]
@@ -191,15 +196,22 @@ class JobSpec:
         return " && ".join([*steps, launch])
 
 
+# A trial Harbor ended with an error is run again, up to this many times:
+# Docker failed, or Taste never started the hosted agent
+# (harbor_agent.HostedAgentNotStarted). A graded trial never is, nor one the
+# time limit cut off.
+RETRIES = 2
+
+
 def harbor_job(name, *, tasks_dir, task, attempts, settings, model, jobs_dir, run_harbor=RUN_HARBOR,
-               concurrent=8, env=None, prepare=()):
-    """``run-harbor.sh <name> <tasks dir> -i <task> -k <attempts> -n <n> --ak ...``."""
+               concurrent=8, env=None, prepare=(), retries=RETRIES):
+    """``run-harbor.sh <name> <tasks dir> -i <task> -k <attempts> -n <n> --max-retries <r> --ak ...``."""
     if attempts < 1:
         raise ValueError("a job runs at least one attempt")
     if safe(name, len(name)) != name:
         raise ValueError(f"job name {name!r}: letters, digits, - and _ only")
     argv = [str(run_harbor), name, str(tasks_dir), "-i", str(task), "-k", str(attempts),
-            "-n", str(max(1, min(int(concurrent), attempts)))]
+            "-n", str(max(1, min(int(concurrent), attempts))), "--max-retries", str(int(retries))]
     for key, raw in settings.items():
         argv += ["--ak", f"{key}={value(raw)}"]
     environment = {"MODEL": model_flag(model), "JOBS": str(jobs_dir), **(env or {})}
@@ -224,31 +236,51 @@ def write_text(path, text):
     return path
 
 
-def launcher(specs, *, prefix, max_active, title=""):
-    """A shell script that starts each job once, at most ``max_active`` of the study's at a time.
+def launcher(specs, *, prefix, max_trials, title=""):
+    """A shell script that starts each job once, keeping the study's running trials at most ``max_trials``.
 
-    It skips a job whose directory or systemd unit exists (run-harbor.sh never
-    overwrites a job), runs each job's preparation before starting it, and at
-    the end waits until none of the study's jobs is running, so that the
-    driver can be run again on finished jobs.
+    A running job counts as the trials it runs at once (its ``-n``, read from
+    its unit's command line, so jobs another round started count too); a job
+    starts when its own fit beside them, or when nothing runs. It skips a job
+    whose directory or systemd unit exists (run-harbor.sh never overwrites a
+    job), runs each job's preparation before starting it, and at the end waits
+    until none of the study's jobs is running, so that the driver can be run
+    again on finished jobs (with WAIT=0 it returns once its jobs have started).
     """
     pattern = shlex.quote(f"{UNIT_PREFIX}{prefix}-*")
-    lines = ["#!/bin/sh", f"# {title}".rstrip(), "# Run as root on the measurement host. Concurrent trials are at",
-             "# most MAX_ACTIVE jobs times each job's -n.", "set -u",
-             f"MAX_ACTIVE=${{MAX_ACTIVE:-{int(max_active)}}}",
+    lines = ["#!/bin/sh", f"# {title}".rstrip(),
+             "# Run as root on the measurement host. A job starts while the study's running",
+             "# trials, each running job's -n, stay at most MAX_TRIALS.", "set -u",
+             f"MAX_TRIALS=${{MAX_TRIALS:-{int(max_trials)}}}",
+             "units() {",
+             f"  systemctl list-units --plain --no-legend --state=active,activating {pattern} 2>/dev/null"
+             " | awk '{print $1}'",
+             "}",
              "running() {",
-             f"  systemctl list-units --plain --no-legend --state=active,activating {pattern} 2>/dev/null | wc -l",
+             "  units | wc -l",
+             "}",
+             "trials() {",
+             "  total=0",
+             "  for unit in $(units); do",
+             "    n=$(systemctl show -p ExecStart --value \"$unit\" | grep -o -- ' -n [0-9]*' | head -1 | tr -dc 0-9)",
+             "    total=$((total + ${n:-1}))",
+             "  done",
+             '  echo "$total"',
              "}",
              "start() {",
-             "  job=$1; dir=$2; command=$3",
+             "  job=$1; dir=$2; n=$3; command=$4",
              f'  if [ -e "$dir/$job" ] || systemctl is-active --quiet "{UNIT_PREFIX}$job"; then',
              '    echo "already started: $job"; return 0',
              "  fi",
-             '  while [ "$(running)" -ge "$MAX_ACTIVE" ]; do sleep 20; done',
+             '  while now=$(trials) && [ "$now" -gt 0 ] && [ $((now + n)) -gt "$MAX_TRIALS" ]; do sleep 20; done',
              '  sh -c "$command" || echo "could not start: $job" >&2',
              "}"]
     for spec in specs:
-        lines.append(f"start {shlex.quote(spec.name)} {shlex.quote(spec.jobs_dir)} {shlex.quote(spec.shell())}")
-    lines += ['while [ "$(running)" -gt 0 ]; do sleep 30; done',
+        lines.append(f"start {shlex.quote(spec.name)} {shlex.quote(spec.jobs_dir)} {spec.concurrent} "
+                     f"{shlex.quote(spec.shell())}")
+    # WAIT=0: return once every job has started, for a loop that runs the
+    # driver again meanwhile, so one run's next probes need not wait for all.
+    lines += ['[ "${WAIT:-1}" = 0 ] && exit 0',
+              'while [ "$(running)" -gt 0 ]; do sleep 30; done',
               'echo "none of this study\'s jobs is running: run the driver again"', ""]
     return "\n".join(lines)

@@ -92,6 +92,17 @@ def test_an_ungraded_trial_is_not_an_attempt_and_is_listed(scene):
     assert (result["trials"], result["graded"]) == (12, 11)
 
 
+def test_a_run_whose_agent_never_started_is_not_an_attempt_though_harbor_graded_it(scene):
+    jobs, trials = scene
+    # Graded 0 on an untouched container: the record holds no step of the agent.
+    trial(jobs, trials, "cal-b", "middle", 3, reward=0.0, steps=[])
+    result = report_module.report([jobs / "cal-a", jobs / "cal-b"], trials)
+    middle = per_task(result)["middle"]
+    assert (middle["attempts"], middle["solved"], middle["kept"]) == (2, 1, True)
+    assert middle["ungraded"] == [{"trial": "middle__cal-b3", "exception": "HostedAgentNotStarted"}]
+    assert (result["trials"], result["graded"]) == (13, 11)
+
+
 def test_a_timed_out_run_is_graded_and_counted(scene):
     jobs, trials = scene
     hard = per_task(report_module.report([jobs / "cal-a", jobs / "cal-b"], trials))["hard"]

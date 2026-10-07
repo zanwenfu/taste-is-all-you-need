@@ -46,7 +46,8 @@ BRANCH = "branch"
 # An audit flag, starting with this, that also marks a branch unfaithful.
 UNFAITHFUL_FLAG = "branch_unfaithful"
 FLAT_RECORD = Path("agent") / "trajectory.json"
-TASTE_ROLES = frozenset({"taste-coordinator", "taste-monitor"})
+# Taste's own runs in a settled record ("taste-azure-worker": a run that never reached the agent).
+TASTE_ROLES = frozenset({"taste-coordinator", "taste-monitor", "taste-azure-worker"})
 SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 
@@ -191,6 +192,9 @@ def trial(trial_dir, trials_root):
         "faithful": faithful, "unfaithful_at": branch.get("unfaithful_at"), "checkpoint": branch.get("checkpoint"),
         "changed_paths": [str(path) for path in changed] if isinstance(changed, list) else None,
         "exit_status": view.get("exit_status"), "steps": len(view["steps"]) if view else None,
+        # False: a settled record with no step of the agent. Taste never started
+        # it; a reward Harbor gave its untouched container is not the agent's.
+        "agent_started": None if nested is None else bool(view.get("steps")),
         "checker": checker_submission(trial_dir),
         "written_paths": sorted({path for step in view.get("steps", ()) for path in written_paths(step.command)}),
         "submission_paths": diff_paths(view.get("submission", "")),
@@ -200,8 +204,8 @@ def trial(trial_dir, trials_root):
 
 
 def usable(summary):
-    """A graded trial whose prefix, if it had one, was faithful: a sample of the outcome."""
-    return summary["reward"] is not None and summary["faithful"] is not False
+    """A graded trial of an agent that started, whose prefix, if it had one, was faithful: a sample of the outcome."""
+    return summary["reward"] is not None and summary["faithful"] is not False and summary["agent_started"] is not False
 
 
 def verdict(summary):

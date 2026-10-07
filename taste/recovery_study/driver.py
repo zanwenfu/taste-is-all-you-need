@@ -21,6 +21,12 @@ from taste.recovery_study import jobs, records, rules, state
 # A driver's exit status: new jobs were written; none, but some are running;
 # every run is finished.
 STARTED, RUNNING, FINISHED = 0, 2, 3
+# The launcher's default limit on the study's running trials, for the
+# 32-vCPU measurement host: each task container may use one CPU, and Harbor,
+# the goals and the hosted agents need the rest. More trials than CPUs slow
+# every trial's commands and stall the terminal services, which skews the
+# time each recovery takes and can keep an agent from starting.
+MAX_TRIALS = 24
 
 COMMON = {
     "prefix": "study",          # every job name starts with it; one prefix per state file
@@ -145,8 +151,8 @@ class Driver:
         record = Path(self.settings["trials_root"]) / str(token)
         return str(path), jobs.export_script(record, path, self.settings["export_template"])
 
-    def launcher(self, specs, max_active, title=""):
-        return jobs.launcher(specs, prefix=self.settings["prefix"], max_active=max_active, title=title)
+    def launcher(self, specs, max_trials, title=""):
+        return jobs.launcher(specs, prefix=self.settings["prefix"], max_trials=max_trials, title=title)
 
     # Runs ------------------------------------------------------------------
 
@@ -169,13 +175,15 @@ class Driver:
                     summary = records.trial(path.parent, self.settings["trials_root"])
                     fresh[key] = {"kind": kind, "job_dir": str(directory),
                                   **{name: summary[name] for name in ("trial", "task", "reward", "solved", "cost_usd",
-                                                                      "seconds", "model", "exit_status")}}
+                                                                      "seconds", "model", "exit_status",
+                                                                      "agent_started")}}
                     if kind == "base" and summary["reward"] is not None and not summary["solved"]:
                         self._add_run(summary, directory)
 
     def fresh(self, task, kinds=("calibration", "base")):
         return [run for run in self.data["fresh"].values()
-                if run["task"] == task and run["kind"] in kinds and run["reward"] is not None]
+                if run["task"] == task and run["kind"] in kinds and run["reward"] is not None
+                and run.get("agent_started") is not False]
 
     def v0(self, task):
         """(successes, runs) of the task from scratch, by calibration and base runs."""
@@ -197,8 +205,10 @@ class Driver:
         view = records.agent_view(nested)
         tasks_dir = summary["tasks_dir"] or values["tasks_dir"]
         skipped = None
-        if view is None:
+        if nested is None:
             skipped = "no settled record of the agent's run"
+        elif view is None or not view["steps"]:
+            skipped = "the agent never took a step"
         elif len(view["steps"]) < values["min_steps"]:
             skipped = f"{len(view['steps'])} steps"
         elif jobs.short_model(summary["model"]) != jobs.short_model(values["model"]):
@@ -230,7 +240,7 @@ def pairs(items):
     return found
 
 
-def finish(driver, launcher=None, max_active=4, title=""):
+def finish(driver, launcher=None, max_trials=MAX_TRIALS, title=""):
     """Save the state, write the launcher, and say how the study stands.
 
     The launcher lists every job not yet finished, in the order they were
@@ -242,7 +252,7 @@ def finish(driver, launcher=None, max_active=4, title=""):
         unfinished = [jobs.JobSpec.from_dict(job["spec"]) for job in driver.jobs.values() if not job["complete"]]
         path = Path(launcher)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(driver.launcher(unfinished, max_active, title))
+        path.write_text(driver.launcher(unfinished, max_trials, title))
         os.chmod(path, 0o755)
     if driver.new:
         return STARTED

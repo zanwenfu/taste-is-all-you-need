@@ -5,13 +5,13 @@
         [--prefix map1] [--model gpt-6-luna] [--k 8] [--extra 8] [--mode restore|rebuild] \\
         [--scan-every 5 --scan-fraction 0.2] [--jobs-dir /root/study/jobs] [--trials /var/lib/taste-trials] \\
         [--ak NAME=VALUE ...] [--env NAME=VALUE ...] [--launcher /root/study/map-next.sh] \\
-        [--max-active 4] [--json /root/study/map-summary.json]
+        [--max-trials 24] [--json /root/study/map-summary.json]
 
 Every failed trial of the base jobs is a run. Each time this is run it reads
 the jobs that have finished, decides each run's next probes (K branches from
 one step; K + extra on both sides of the boundary once found), records them in
 the state file and writes them to the launcher. Run the launcher as root; it
-starts the jobs, at most --max-active of the study's at once, and returns when
+starts the jobs, at most --max-trials of the study's trials at once, and returns when
 none is running. Then run this again. Settings given when the state file is
 first written are the study's; a later run may repeat them, not change them.
 
@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from taste.recovery_study import state
-from taste.recovery_study.driver import finish, pairs, progress
+from taste.recovery_study.driver import MAX_TRIALS, finish, pairs, progress
 from taste.recovery_study.map_driver import MapDriver
 
 OPTIONS = {"prefix": str, "model": str, "k": int, "extra": int, "mode": str, "checkpoint_attempts": int,
@@ -69,7 +69,8 @@ def main(argv=None):
     parser.add_argument("--env", action="append", help="NAME=VALUE: environment for run-harbor.sh")
     parser.add_argument("--close", action="append", default=[], help="take this job as finished with what it has")
     parser.add_argument("--launcher", type=Path, help="write the jobs to start to this shell script")
-    parser.add_argument("--max-active", type=int, default=4, help="the launcher's limit on running jobs")
+    parser.add_argument("--max-trials", type=int, default=MAX_TRIALS,
+                        help="the launcher's limit on the study's running trials (each running job's -n)")
     parser.add_argument("--json", type=Path, help="also write every run's summary here")
     arguments = parser.parse_args(argv)
     given = {name: getattr(arguments, name) for name in [*OPTIONS, "prefetch"]}
@@ -81,7 +82,7 @@ def main(argv=None):
         driver.add_sources(arguments.base_job, arguments.calibration)
         driver.refresh()
         driver.advance()
-        status = finish(driver, arguments.launcher, arguments.max_active,
+        status = finish(driver, arguments.launcher, arguments.max_trials,
                         f"recovery map {arguments.state}: {len(driver.new)} new jobs, {state.now()}")
         summary = driver.summary()
     if arguments.json:

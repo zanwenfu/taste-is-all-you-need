@@ -7,7 +7,7 @@
         [--oracle highest_v|latest] [--repeats 3] [--prefix rec1] [--model gpt-6-luna] \\
         [--checker-model gpt-6-sol] [--checker-effort medium] [--mode restore|rebuild] \\
         [--jobs-dir /root/study/jobs] [--trials /var/lib/taste-trials] \\
-        [--launcher /root/study/rec-next.sh] [--max-active 4] [--json /root/study/rec-summary.json]
+        [--launcher /root/study/rec-next.sh] [--max-trials 24] [--json /root/study/rec-summary.json]
 
 Every failed base trial that submitted is a run. A checker trial
 (``taste.agents.checker``) checks its final state; a run it rejects is
@@ -41,7 +41,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from taste.recovery_study import state
-from taste.recovery_study.driver import finish, pairs, progress
+from taste.recovery_study.driver import MAX_TRIALS, finish, pairs, progress
 from taste.recovery_study.map_driver import MapDriver
 from taste.recovery_study.recovery_driver import RECOVERIES, SOURCES, RecoveryDriver, readings
 
@@ -87,7 +87,8 @@ def main(argv=None):
     parser.add_argument("--env", action="append", help="NAME=VALUE: environment for run-harbor.sh")
     parser.add_argument("--close", action="append", default=[], help="take this job as finished with what it has")
     parser.add_argument("--launcher", type=Path, help="write the jobs to start to this shell script")
-    parser.add_argument("--max-active", type=int, default=4, help="the launcher's limit on running jobs")
+    parser.add_argument("--max-trials", type=int, default=MAX_TRIALS,
+                        help="the launcher's limit on the study's running trials (each running job's -n)")
     parser.add_argument("--json", type=Path, help="also write every run's summary here")
     arguments = parser.parse_args(argv)
     given = {name: getattr(arguments, name) for name in OPTIONS}
@@ -107,7 +108,7 @@ def main(argv=None):
         driver.add_sources(arguments.base_job, arguments.calibration)
         driver.refresh()
         driver.advance()
-        status = finish(driver, arguments.launcher, arguments.max_active,
+        status = finish(driver, arguments.launcher, arguments.max_trials,
                         f"recoveries {arguments.state}: {len(driver.new)} new jobs, {state.now()}")
         summary = driver.summary()
     if arguments.json:
