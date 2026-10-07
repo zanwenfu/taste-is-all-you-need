@@ -104,6 +104,9 @@ def test_dollars_come_from_the_record_or_else_from_harbor(scene):
     tasks = per_task(result)
     assert tasks["middle"]["usd_total"] == pytest.approx(0.02) and tasks["middle"]["usd_per_trial"] == pytest.approx(0.01)
     assert tasks["unrecorded"]["usd_total"] == pytest.approx(0.75)
+    # The recovery budget's unit: the median graded run.
+    assert tasks["unrecorded"]["median_usd"] == pytest.approx(0.375)
+    assert tasks["flaky"]["median_usd"] == pytest.approx(0.01)
     # The OSError trial has neither a record nor a Harbor cost.
     assert tasks["flaky"]["usd_unknown_trials"] == 1 and result["usd_unknown_trials"] == 1
     assert result["usd_total"] == pytest.approx(9 * 0.01 + 0.75)

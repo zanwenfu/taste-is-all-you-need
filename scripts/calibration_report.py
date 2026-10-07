@@ -111,6 +111,9 @@ def summarize_task(task, rows, low, high, min_steps):
         "steps_per_run": steps, "median_steps": _median(steps),
         "usd_total": round(math.fsum(known_usd), 6), "usd_unknown_trials": len(rows) - len(known_usd),
         "usd_per_trial": round(math.fsum(known_usd) / len(known_usd), 6) if known_usd else None,
+        # A recovery's budget is one full run of its task: the median of the
+        # calibration's graded runs, in dollars and in wall-clock.
+        "median_usd": _median([row["usd"] for row in graded]),
         "median_trial_seconds": _median([row["trial_seconds"] for row in graded]),
         "max_trial_seconds": max((row["trial_seconds"] for row in graded if row["trial_seconds"] is not None),
                                  default=None),
@@ -172,12 +175,12 @@ def markdown(result):
                                                   if result["usd_unknown_trials"] else "") + ".",
              "", "Outcomes (solved/attempts: tasks): " + ", ".join(f"{key}: {value}"
                                                                  for key, value in result["outcomes"].items()),
-             "", "| Task | Solved | Steps per run | $/trial | Median s | Kept | Why not |",
+             "", "| Task | Solved | Steps per run | Median $ | Median s | Kept | Why not |",
              "| --- | --- | --- | --- | --- | --- | --- |"]
     for task in result["per_task"]:
         steps = ", ".join(str(value) for value in task["steps_per_run"]) or "?"
         lines.append(f"| {task['task']} | {task['solved']}/{task['attempts']} | {steps} | "
-                     f"{_fmt(task['usd_per_trial'], '.4f')} | {_fmt(task['median_trial_seconds'], '.0f')} | "
+                     f"{_fmt(task['median_usd'], '.4f')} | {_fmt(task['median_trial_seconds'], '.0f')} | "
                      f"{'yes' if task['kept'] else ''} | {task['reason']} |")
     if result["ungraded"]:
         lines += ["", "Not graded, to run again:"]
