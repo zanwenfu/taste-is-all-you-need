@@ -44,6 +44,10 @@ def test_a_trial_reads_its_reward_from_harbor_and_its_spend_and_steps_from_taste
     assert (summary["reward"], summary["solved"], summary["task"], summary["tasks_dir"]) == (0.0, False, "task-a", "/study/tasks")
     assert summary["cost_usd"] == pytest.approx(0.08) and summary["prompt_tokens"] == 4000
     assert summary["completion_tokens"] == 400 and summary["settled"] is True
+    # One clock: the agent's execution by Harbor (301.5 s), not Taste's own count (318.5 s) nor the
+    # whole trial's hour; charged without the 41.5 s branching spent bringing the prefix back.
+    result = json.loads((jobs_dir / "j" / name / "result.json").read_text())
+    assert result["agent_result"]["metadata"]["taste"]["seconds"] == 318.5
     assert summary["seconds"] == 301.5 and summary["charged_seconds"] == 260.0 and summary["prefix_seconds"] == 41.5
     assert (summary["faithful"], summary["checkpoint"], summary["changed_paths"]) == (True, "cp-9", ["a.txt"])
     assert summary["exit_status"] == "Submitted" and summary["steps"] == 4 and summary["checker"] is None
@@ -64,6 +68,18 @@ def test_without_a_record_harbors_figures_stand_and_an_unfaithful_branch_is_not_
     assert summary["faithful"] is False and not records.usable(summary)
     ungraded = trial(jobs_dir, "j", "task-a", reward=None, trials_root=trials, exception="AgentSetupError")
     assert not records.usable(records.trial(jobs_dir / "j" / ungraded, trials))
+
+
+def test_time_is_the_agents_execution_by_harbors_clock_less_the_prefix_for_a_branch(tmp_path):
+    jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
+    never = trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials, seconds=None, exception="AgentSetupError")
+    summary = records.trial(jobs_dir / "j" / never, trials)
+    assert (summary["seconds"], summary["prefix_seconds"], summary["charged_seconds"]) == (None, None, None)
+    plain = records.trial(jobs_dir / "j" / trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials,
+                                                  seconds=200.0), trials)
+    assert (plain["seconds"], plain["prefix_seconds"], plain["charged_seconds"]) == (200.0, None, 200.0)
+    assert records.charged(100.0, 30.0) == 70.0 and records.charged(20.0, 30.0) == 0.0
+    assert records.charged(50.0, None) == 50.0 and records.charged(None, 5.0) is None
 
 
 def test_a_checker_trials_verdict_is_the_submission_it_handed_back_on_a_faithful_copy(tmp_path):
@@ -104,8 +120,9 @@ def test_budgets_are_medians_of_runs_from_scratch_or_the_calibration_reports(tmp
          "attempts": 2},
         {"task": "b", "kept": False, "median_usd": 0.1, "median_agent_seconds": None, "median_trial_seconds": 90.0,
          "attempts": 2}]}))
+    # The agent's time only: a whole trial's time is another clock, so "b" has none.
     assert records.calibration_budgets(path) == {"a": {"kept": True, "usd": 0.4, "seconds": 420.0, "runs": 2},
-                                                 "b": {"kept": False, "usd": 0.1, "seconds": 90.0, "runs": 2}}
+                                                 "b": {"kept": False, "usd": 0.1, "seconds": None, "runs": 2}}
 
 
 def test_rules_rewind_to_the_last_passing_tests_or_before_the_last_large_edit_or_the_start():

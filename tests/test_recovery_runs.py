@@ -127,6 +127,8 @@ def test_rounds_continue_until_the_budget_cannot_pay_for_another_and_spending_ad
             # final state for a check is not charged.
             assert episode["usd"] == pytest.approx(0.7) and episode["seconds"] == pytest.approx(550.0)
             assert episode["agent_usd"] == pytest.approx(0.6) and episode["check_usd"] == pytest.approx(0.1)
+            # No trial recorded a prefix, so what is charged is what Harbor measured.
+            assert episode["raw_seconds"] == pytest.approx(550.0) and episode["prefix_seconds"] == 0.0
             assert [item["verdict"] for item in episode["verdicts"]] == ["not_done", "not_done"]
             assert episode["tokens"] == 3 * 5 * 1100
     onward, again = rounds_of(driver, "continue"), rounds_of(driver, "retry")
@@ -144,6 +146,22 @@ def test_rounds_continue_until_the_budget_cannot_pay_for_another_and_spending_ad
     # A plain retry stays plain: each round is a fresh trial, told nothing.
     assert all("branch" not in s and "task_suffix" not in s for s in again)
     assert summary["check_usd"] == pytest.approx(0.05)
+
+
+def test_a_branch_is_charged_its_agent_time_less_its_prefix_and_both_are_kept(tmp_path):
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue"])
+    harbor = FakeHarbor(trials, recoveries(prefix={"agent": 40.0, "checker": 10.0}))
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, harbor)
+    for episode in driver.summary()[run_id]["arms"]["continue"]["episodes"]:
+        # Three branches of 150 s with 40 s of prefix each, two checks of 50 s with 10 s each: the
+        # dollars run out first, after the third round.
+        assert (episode["end"], episode["rounds"], episode["usd"]) == ("budget", 3, pytest.approx(0.7))
+        assert episode["seconds"] == pytest.approx(410.0) and episode["raw_seconds"] == pytest.approx(550.0)
+        assert episode["prefix_seconds"] == pytest.approx(140.0)
+        assert (episode["agent_seconds"], episode["check_seconds"]) == (pytest.approx(330.0), pytest.approx(80.0))
+    # The next round's deadline is what is left by the charged time, plus the handoff and the allowance.
+    assert sorted((s["spend_cap_usd"], s["agent_timeout_sec"]) for s in rounds_of(driver, "continue")) == (
+        [("0.2", "750")] * 2 + [("0.45", "900")] * 2)
 
 
 def test_the_checkers_done_ends_an_episode_whose_last_trial_is_its_outcome(tmp_path):

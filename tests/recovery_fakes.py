@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 import json
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from taste.agents.checker import SCHEMA
@@ -84,10 +85,19 @@ def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submi
 def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None, model="azure/gpt-6-luna",
           tasks_dir="/study/tasks", seconds=120.0, cost=0.02, exit_status="Submitted", branch=None,
           handed_back=None, exception=None, name=None, task_text="Fix the bug.", audit_flags=()):
-    """One finished Harbor trial; with steps, its settled Taste record; with ``handed_back``, its final reply."""
+    """One finished Harbor trial; with steps, its settled Taste record; with ``handed_back``, its final reply.
+
+    ``seconds`` is the agent's execution by Harbor's clock (None: it never
+    ran). Taste's own count of the run's time differs from it on purpose: the
+    study's clock is Harbor's.
+    """
     token = f"tok{next(_tokens):06d}"
     name = name or f"{task}__{token[-6:]}"
-    taste = {"trial": token, "seconds": seconds, "audit_flags": list(audit_flags)}
+    taste = {"trial": token, "seconds": None if seconds is None else seconds + 17.0, "audit_flags": list(audit_flags)}
+    began = datetime(2026, 10, 7, 10, 0, 5, tzinfo=UTC)
+    execution = None if seconds is None else {
+        "started_at": began.isoformat().replace("+00:00", "Z"),
+        "finished_at": (began + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")}
     if branch is not None:
         taste["branch"] = branch
     if steps is not None:
@@ -99,7 +109,8 @@ def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None
                                "metadata": {"taste": taste}},
               "verifier_result": None if reward is None else {"rewards": {"reward": reward}},
               "exception_info": None if exception is None else {"exception_type": exception},
-              "started_at": "2026-10-07T10:00:00Z", "finished_at": "2026-10-07T10:02:00Z"}
+              "started_at": "2026-10-07T10:00:00Z", "finished_at": "2026-10-07T11:00:00Z",
+              "agent_execution": execution}
     directory = Path(jobs_dir) / job / name
     directory.mkdir(parents=True)
     (directory / "result.json").write_text(json.dumps(result))
@@ -187,18 +198,27 @@ def branches(success, *, state=None, unfaithful_from=None):
 
 
 def recoveries(verdict=lambda spec: "not_done", reward=lambda spec: 0.0, status=lambda spec: "Submitted",
-               faithful=lambda spec: True):
+               faithful=lambda spec: True, prefix=None):
     """Recovery outcomes. A checker trial hands back ``verdict(spec)`` and costs $0.05 and 50 s; a trial
     that saves a final state costs nothing and lists the changed paths; an agent trial submits
-    (``status``), costs $0.20 and 150 s and is graded ``reward``."""
+    (``status``), costs $0.20 and 150 s and is graded ``reward``. With ``prefix``, a branch trial and a
+    checker trial record that many of their seconds as bringing their prefix back
+    (``{"agent": s, "checker": s}``)."""
+    prefix = prefix or {}
+
     def outcome(spec, task, settings, harbor):
         if settings.get("agent") == "checker":
             return {"reward": 1.0, "handed_back": submission(verdict(spec)), "cost": 0.05, "seconds": 50.0,
-                    "branch": {"faithful": faithful(spec)}}
+                    "branch": {"faithful": faithful(spec), **_prefix(prefix.get("checker"))}}
         if settings.get("branch_live") == "off":
             return {"reward": 0.0, "cost": 0.0, "seconds": 30.0,
                     "branch": {"faithful": True, "checkpoint": settings["branch_checkpoint"],
                                "changed_paths": ["src/app.py"]}}
         return {"reward": reward(spec), "steps": agent_steps(5), "cost": 0.2, "seconds": 150.0,
-                "exit_status": status(spec), "branch": {"faithful": True} if "branch" in settings else None}
+                "exit_status": status(spec),
+                "branch": {"faithful": True, **_prefix(prefix.get("agent"))} if "branch" in settings else None}
     return outcome
+
+
+def _prefix(seconds):
+    return {} if seconds is None else {"prefix_seconds": seconds}
