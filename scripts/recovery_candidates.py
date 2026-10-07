@@ -2,11 +2,14 @@
 
     python scripts/recovery_candidates.py --pro /root/recovery-bench/swebench-pro-os/v2 \\
         --tb3 /root/recovery-bench/terminal-bench --pro-seats 242 \\
-        --salt taste-recovery-calibration-2026-10-07 --out candidates.json
+        --salt taste-recovery-calibration-2026-10-07 --out candidates.json \\
+        [--drop task="its reference solution fails here"]
 
 The study's states are files: a branch brings back the agent's container's
 files, never a running process or another container. So a task qualifies only
-if its hidden tests grade files the agent left in its own container.
+if its hidden tests grade files the agent left in its own container. A task
+the rule admits is still dropped, with its reason recorded, when a check run
+here shows it cannot be graded fairly (its reference solution fails).
 
 SWE-Bench Pro V2: every verifier applies the task's tests to the repository in
 the agent's container and runs them itself, so all 642 tasks qualify. The
@@ -142,22 +145,33 @@ def tb3_verdict(task):
     return True, ""
 
 
-def candidates(pro_root, tb3_root, pro_seats, salt):
-    """The record: the rule, and per benchmark the tasks and a digest of the dataset they came from."""
+def candidates(pro_root, tb3_root, pro_seats, salt, drop=None):
+    """The record: the rule, and per benchmark the tasks and a digest of the dataset they came from.
+
+    `drop` maps a task the rule would admit to the reason it is left out.
+    """
+    drop = dict(drop or {})
     record = {"schema": SCHEMA, "salt": salt, "rule": __doc__.split("\n\n", 2)[2].strip()}
     if pro_root:
         chosen, strata = choose_pro(pro_tasks(pro_root), pro_seats, salt)
+        names = sorted(name for group in chosen.values() for name in group)
         record["swebench_pro_v2"] = {
             "dataset": "github.com/scaleapi/SWE-bench_Pro-os v2/tasks",
             "dataset_digest": dataset_digest(Path(pro_root) / "tasks"), "strata": strata,
-            "tasks": sorted(name for names in chosen.values() for name in names)}
+            "tasks": [name for name in names if name not in drop],
+            "excluded": {name: drop[name] for name in names if name in drop}}
     if tb3_root:
         verdicts = {task.name: tb3_verdict(task) for task in sorted(Path(tb3_root).iterdir())
                     if (task / "task.toml").is_file()}
+        verdicts.update({name: (False, why) for name, why in drop.items() if verdicts.get(name, (False,))[0]})
         record["terminal_bench_3"] = {
             "dataset": "terminal-bench/terminal-bench@3.0.0", "dataset_digest": dataset_digest(tb3_root),
             "tasks": [name for name, (ok, _) in verdicts.items() if ok],
             "excluded": {name: why for name, (ok, why) in verdicts.items() if not ok}}
+    unknown = set(drop) - {name for part in ("swebench_pro_v2", "terminal_bench_3") if part in record
+                           for name in record[part]["excluded"]}
+    if unknown:
+        raise ValueError("--drop names tasks that are not candidates: " + ", ".join(sorted(unknown)))
     return record
 
 
@@ -168,8 +182,11 @@ def main(argv=None):
     parser.add_argument("--pro-seats", type=int, default=242)
     parser.add_argument("--salt", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--drop", action="append", default=[], metavar="TASK=REASON",
+                        help="leave out a task the rule admits, for the reason given")
     arguments = parser.parse_args(argv)
-    record = candidates(arguments.pro, arguments.tb3, arguments.pro_seats, arguments.salt)
+    drop = dict(item.split("=", 1) for item in arguments.drop)
+    record = candidates(arguments.pro, arguments.tb3, arguments.pro_seats, arguments.salt, drop)
     arguments.out.write_text(json.dumps(record, indent=1) + "\n")
     for key in ("swebench_pro_v2", "terminal_bench_3"):
         if key in record:

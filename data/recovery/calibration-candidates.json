@@ -1,7 +1,7 @@
 {
  "schema": "taste.recovery/CalibrationCandidates/1",
  "salt": "taste-recovery-calibration-2026-10-07",
- "rule": "The study's states are files: a branch brings back the agent's container's\nfiles, never a running process or another container. So a task qualifies only\nif its hidden tests grade files the agent left in its own container.\n\nSWE-Bench Pro V2: every verifier applies the task's tests to the repository in\nthe agent's container and runs them itself, so all 642 tasks qualify. The\nHARD-51 subset is left out (it was chosen to separate frontier models). The\nrest are stratified by language (the most common extension among the files\nthe reference patch changes) and by the size of the reference patch (changed\nlines, terciles within the language). Each stratum gets seats in proportion\nto its size, rounded by the largest remainder (ties by name); inside a stratum\ntasks are taken in the order of SHA-256 of the salt and the task name.\n\nTerminal-Bench 3.0: a task qualifies when its verifier runs in a separate\ncontainer (Harbor stops the agent's container first and hands the verifier\nonly the declared artifact files), its environment has no service but the\nagent's own container (a sidecar's state is neither in the agent's files nor\nrestorable with them, and several sidecar tasks collect their artifacts from\nthe running services), and it needs no GPU (the measurement VM has none).",
+ "rule": "The study's states are files: a branch brings back the agent's container's\nfiles, never a running process or another container. So a task qualifies only\nif its hidden tests grade files the agent left in its own container. A task\nthe rule admits is still dropped, with its reason recorded, when a check run\nhere shows it cannot be graded fairly (its reference solution fails).\n\nSWE-Bench Pro V2: every verifier applies the task's tests to the repository in\nthe agent's container and runs them itself, so all 642 tasks qualify. The\nHARD-51 subset is left out (it was chosen to separate frontier models). The\nrest are stratified by language (the most common extension among the files\nthe reference patch changes) and by the size of the reference patch (changed\nlines, terciles within the language). Each stratum gets seats in proportion\nto its size, rounded by the largest remainder (ties by name); inside a stratum\ntasks are taken in the order of SHA-256 of the salt and the task name.\n\nTerminal-Bench 3.0: a task qualifies when its verifier runs in a separate\ncontainer (Harbor stops the agent's container first and hands the verifier\nonly the declared artifact files), its environment has no service but the\nagent's own container (a sidecar's state is neither in the agent's files nor\nrestorable with them, and several sidecar tasks collect their artifacts from\nthe running services), and it needs no GPU (the measurement VM has none).",
  "swebench_pro_v2": {
   "dataset": "github.com/scaleapi/SWE-bench_Pro-os v2/tasks",
   "dataset_digest": "sha256:4b8aa6f37f4c3990333f1c073813744fd7dcbdc4a0790ca48ce19e7f678cc217",
@@ -286,7 +286,8 @@
    "instance_qutebrowser__qutebrowser-fcfa069a06ade76d91bac38127f3235c13d78eb1-v5fc38aaf22415ab0b70567368332beee7955b367",
    "instance_tutao__tutanota-de49d486feef842101506adf040a0f00ded59519-v10a26bfb45a064b93f4fc044a0254925037b88f1",
    "instance_tutao__tutanota-f3ffe17af6e8ab007e8d461355057ad237846d9d-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf"
-  ]
+  ],
+  "excluded": {}
  },
  "terminal_bench_3": {
   "dataset": "terminal-bench/terminal-bench@3.0.0",
@@ -296,7 +297,6 @@
    "batched-eval-parity",
    "biped-contact-dynamics",
    "bun-sourcemap-leak",
-   "cad-model",
    "cargo-flight-dispatch",
    "cli-2ph-simplex",
    "coq-block-bound",
@@ -352,6 +352,7 @@
    "wdm-design"
   ],
   "excluded": {
+   "cad-model": "its reference solution fails here: build123d 0.10.0 pulls an ocp_gordon that needs OCP.collections",
    "ctr-optimization": "sidecar services: api",
    "cumulative-layout-shift": "sidecar services: barber-shop-data-backend",
    "erp-procurement-planning": "sidecar services: postgres, odoo",

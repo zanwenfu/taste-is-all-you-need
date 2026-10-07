@@ -113,3 +113,18 @@ def test_the_record_names_its_rule_and_both_benchmarks(pro_root, tmp_path):
     assert record["swebench_pro_v2"]["dataset_digest"] == candidates_module.dataset_digest(pro_root / "tasks")
     (tb3 / "files-only" / "task.toml").write_text('[verifier]\nenvironment_mode = "shared"\n')
     assert candidates_module.dataset_digest(tb3) != tb3_part["dataset_digest"]
+
+
+def test_a_dropped_task_leaves_the_list_with_its_reason(pro_root, tmp_path):
+    tb3 = tmp_path / "tb3"
+    tb3_task(tb3, "files-only")
+    tb3_task(tb3, "broken")
+    chosen = candidates_module.candidates(pro_root, tb3, 6, "salt-a")["swebench_pro_v2"]["tasks"]
+    drop = {"broken": "its reference solution fails here", chosen[0]: "image will not start"}
+    record = candidates_module.candidates(pro_root, tb3, 6, "salt-a", drop)
+    assert record["terminal_bench_3"]["tasks"] == ["files-only"]
+    assert record["terminal_bench_3"]["excluded"] == {"broken": "its reference solution fails here"}
+    assert record["swebench_pro_v2"]["tasks"] == chosen[1:]
+    assert record["swebench_pro_v2"]["excluded"] == {chosen[0]: "image will not start"}
+    with pytest.raises(ValueError, match="not candidates: no-such-task"):
+        candidates_module.candidates(pro_root, tb3, 6, "salt-a", {"no-such-task": "typo"})
