@@ -46,6 +46,7 @@ from taste.brains.branch_replay import (
     ReplayScript,
     check_branch,
     rebuild,
+    rebuild_timeout,
 )
 from taste.brains.records import Assignment
 from taste.brains.responses_feedback import WorkerClaim
@@ -386,7 +387,7 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
             self._admitted()
             effect_id = "effect_" + _sha([self.session.binding.run_id, "rebuild", len(effects) + 1])
             effects.append(effect_id)
-            timeout = min(run.timeout_seconds, float(grant.max_timeout_seconds))
+            timeout = rebuild_timeout(run, grant.max_timeout_seconds)
             self._append("rebuild_command", effect_id=effect_id, step=number,
                          command=_excerpt(run.command, COMMAND_CHARS), cwd=run.cwd, timeout_seconds=timeout)
             try:

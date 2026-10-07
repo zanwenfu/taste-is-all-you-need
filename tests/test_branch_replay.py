@@ -21,6 +21,7 @@ from taste.brains.branch_replay import (
     digest,
     message_shas,
     rebuild,
+    rebuild_timeout,
     reply_from_completion,
     reply_to_dict,
     request_sha,
@@ -308,6 +309,16 @@ def test_rebuilt_outputs_are_compared_by_their_normalized_lines():
                        printed={"output": "4 passed\n", "returncode": 0, "timed_out": False})
     assert compare(rejected, "4 passed\n", 0, False)["divergent"] is False
     assert type(rejected).from_dict(rejected.to_dict()) == rejected
+    # Cut off by its time limit when recorded: whether it is cut off again, and its exit code, depend
+    # on the host's speed, so it is matched by its output alone.
+    cut = replace(run, returncode=137, timed_out=True)
+    assert compare(cut, "4 passed\n", 0, False)["divergent"] is False
+    assert compare(cut, "4 passed\n", 137, True)["divergent"] is False
+    assert compare(cut, "2 failed\n", 137, True)["divergent"] is True
+    # A command the record shows finishing gets twice its limit, within the terminal's maximum;
+    # one it shows cut off keeps its own, so its effects are cut off as before.
+    assert rebuild_timeout(run, 600) == 10.0 and rebuild_timeout(run, 8) == 8.0
+    assert rebuild_timeout(cut, 600) == 5.0
 
 
 def test_a_rebuild_stops_once_more_commands_diverge_than_it_tolerates(recorded):

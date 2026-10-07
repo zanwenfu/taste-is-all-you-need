@@ -40,7 +40,12 @@ the former.
 
 Rebuild fidelity rule. A rebuilt command diverges from the record when its
 exit code differs, when one timed out and the other did not, or when the
-similarity of their outputs is below OUTPUT_FLOOR. Similarity is the Dice
+similarity of their outputs is below OUTPUT_FLOOR. A command the record shows
+cut off by its time limit is matched by its output alone: whether it is cut
+off again, and its exit code, depend on the host's speed, not on the files. A
+command the record shows finishing is given REBUILD_TIME_FACTOR times its
+limit to finish again (within the terminal's maximum); one cut off keeps its
+own limit, so that its effects are cut off as they were. Similarity is the Dice
 coefficient of the two outputs' line multisets, 2|A&B| / (|A| + |B|), after
 each line is normalized (runs of seven or more hexadecimal digits become '#',
 runs of digits become '0', whitespace is collapsed, empty lines are dropped);
@@ -76,6 +81,9 @@ OVERRIDES = ("append", "reject")
 SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 REJECT_EXIT = 1
 OUTPUT_FLOOR = 0.5
+# How much longer than its recorded limit a rebuilt command that the record
+# shows finishing may take: a host slower than the recording's must not cut it off.
+REBUILD_TIME_FACTOR = 2.0
 # A note travels in the trial's policy, beside the task, inside the goal's input limit.
 MAX_NOTE_CHARS = 16_384
 MAX_SCRIPT_BYTES = 256 * 1024 * 1024
@@ -135,12 +143,27 @@ def similarity(recorded, observed):
     return 1.0 if total == 0 else 2 * sum((first & second).values()) / total
 
 
+def cut_off(run):
+    """Whether the record shows the command cut off by its time limit (as the container printed it)."""
+    return bool((run.printed or {}).get("timed_out", run.timed_out))
+
+
+def rebuild_timeout(run, limit):
+    """The time a rebuilt command is given: its own limit if the record shows it cut off, else
+    REBUILD_TIME_FACTOR times that; never more than ``limit``, the terminal's maximum."""
+    seconds = run.timeout_seconds if cut_off(run) else REBUILD_TIME_FACTOR * run.timeout_seconds
+    return min(float(seconds), float(limit))
+
+
 def compare(run, output, returncode, timed_out):
     """One rebuilt command against what the container printed when it was recorded."""
     recorded = run.printed or {"output": run.output, "returncode": run.returncode, "timed_out": run.timed_out}
     score = round(similarity(recorded["output"], output), 4)
-    divergent = (returncode != recorded["returncode"] or bool(timed_out) != recorded["timed_out"]
-                 or score < OUTPUT_FLOOR)
+    if recorded["timed_out"]:
+        # Cut off when recorded: matched by its output alone (see the fidelity rule).
+        divergent = score < OUTPUT_FLOOR
+    else:
+        divergent = returncode != recorded["returncode"] or bool(timed_out) or score < OUTPUT_FLOOR
     return {"returncode": returncode, "recorded_returncode": recorded["returncode"],
             "timed_out": bool(timed_out), "recorded_timed_out": recorded["timed_out"],
             "similarity": score, "divergent": divergent}
