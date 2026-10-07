@@ -240,16 +240,19 @@ def pairs(items):
     return found
 
 
-def finish(driver, launcher=None, max_trials=MAX_TRIALS, title=""):
-    """Save the state, write the launcher, and say how the study stands.
+def finish(driver, launcher=None, max_trials=MAX_TRIALS, title="", spool=None):
+    """Save the state, queue or write the jobs to start, and say how the study stands.
 
-    The launcher lists every job not yet finished, in the order they were
-    decided, and skips those already started; so a job recorded by a run that
-    stopped before writing its launcher is started by the next one.
+    Every job not yet finished, in the order they were decided: queued in the
+    host's ``spool`` for its scheduler, or listed in a ``launcher`` that skips
+    those already started; so a job recorded by a run that stopped before
+    queueing it is started by the next one.
     """
     driver.save()
+    unfinished = [jobs.JobSpec.from_dict(job["spec"]) for job in driver.jobs.values() if not job["complete"]]
+    if spool:
+        jobs.spool(unfinished, spool)
     if launcher:
-        unfinished = [jobs.JobSpec.from_dict(job["spec"]) for job in driver.jobs.values() if not job["complete"]]
         path = Path(launcher)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(driver.launcher(unfinished, max_trials, title))

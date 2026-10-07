@@ -19,9 +19,11 @@ keeps at most a given number of the study's jobs running.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -234,6 +236,32 @@ def write_text(path, text):
     temporary.chmod(0o644)
     os.replace(temporary, path)
     return path
+
+
+def spool(specs, directory):
+    """Queue jobs for the host's scheduler (``scripts/spool_scheduler.py``); how many were queued.
+
+    One file per job, named by when it was first queued, which is the order the
+    scheduler starts them in. A job already queued keeps its place, and one whose
+    directory exists has started and is not queued again; so a driver can queue
+    every unfinished job each time it runs, and return at once.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    queued = {path.name.split("-", 1)[1][:-len(".job")] for path in directory.glob("*.job")}
+    added, stamp = 0, 0
+    for spec in specs:
+        if spec.name in queued or (Path(spec.jobs_dir) / spec.name).exists():
+            continue
+        stamp = max(time.time_ns(), stamp + 1)
+        target = directory / f"{stamp:020d}-{spec.name}.job"
+        temporary = directory / f".{target.name}.tmp"
+        temporary.write_text(json.dumps({"name": spec.name, "trials": spec.concurrent, "jobs_dir": spec.jobs_dir,
+                                         "command": spec.shell()}, sort_keys=True))
+        os.replace(temporary, target)
+        queued.add(spec.name)
+        added += 1
+    return added
 
 
 def launcher(specs, *, prefix, max_trials, title=""):

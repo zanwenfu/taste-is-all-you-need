@@ -69,6 +69,7 @@ def main(argv=None):
     parser.add_argument("--env", action="append", help="NAME=VALUE: environment for run-harbor.sh")
     parser.add_argument("--close", action="append", default=[], help="take this job as finished with what it has")
     parser.add_argument("--launcher", type=Path, help="write the jobs to start to this shell script")
+    parser.add_argument("--spool", type=Path, help="queue the jobs to start here, for the host's scheduler")
     parser.add_argument("--max-trials", type=int, default=MAX_TRIALS,
                         help="the launcher's limit on the study's running trials (each running job's -n)")
     parser.add_argument("--json", type=Path, help="also write every run's summary here")
@@ -83,7 +84,8 @@ def main(argv=None):
         driver.refresh()
         driver.advance()
         status = finish(driver, arguments.launcher, arguments.max_trials,
-                        f"recovery map {arguments.state}: {len(driver.new)} new jobs, {state.now()}")
+                        f"recovery map {arguments.state}: {len(driver.new)} new jobs, {state.now()}",
+                        spool=arguments.spool)
         summary = driver.summary()
     if arguments.json:
         arguments.json.write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")

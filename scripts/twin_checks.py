@@ -121,18 +121,23 @@ def main(argv=None):
     parser.add_argument("--model", default="gpt-6-luna", help="the twin checker's model")
     parser.add_argument("--effort", default="medium", choices=jobs.EFFORTS)
     parser.add_argument("--launcher", type=Path, help="emit: write the twin jobs' launcher here")
+    parser.add_argument("--spool", type=Path, help="emit: queue the twin jobs here, for the host's scheduler")
     parser.add_argument("--max-trials", type=int, default=MAX_TRIALS, help="the host's limit on running trials")
     parser.add_argument("--json", type=Path, help="report: also write the result here")
     arguments = parser.parse_args(argv)
     state = json.loads(arguments.state.read_text())
     if arguments.action == "emit":
-        if arguments.launcher is None:
-            parser.error("emit needs --launcher")
+        if arguments.launcher is None and arguments.spool is None:
+            parser.error("emit needs --launcher or --spool")
         specs = twins(state, model=arguments.model, effort=arguments.effort, prefix=arguments.prefix)
-        arguments.launcher.write_text(jobs.launcher(specs, prefix=arguments.prefix, max_trials=arguments.max_trials,
-                                                    title=f"twin checks with {arguments.model} ({arguments.effort})"))
-        arguments.launcher.chmod(0o755)
-        print(f"{len(specs)} twin checks in {arguments.launcher}")
+        if arguments.spool:
+            print(f"{len(specs)} twin checks; {jobs.spool(specs, arguments.spool)} newly queued in {arguments.spool}")
+        if arguments.launcher:
+            arguments.launcher.write_text(jobs.launcher(
+                specs, prefix=arguments.prefix, max_trials=arguments.max_trials,
+                title=f"twin checks with {arguments.model} ({arguments.effort})"))
+            arguments.launcher.chmod(0o755)
+            print(f"{len(specs)} twin checks in {arguments.launcher}")
         return 0
     found = score(state, prefix=arguments.prefix)
     if arguments.json:
