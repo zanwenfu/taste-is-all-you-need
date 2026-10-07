@@ -24,8 +24,8 @@ def test_a_branch_probe_is_one_run_harbor_call_with_its_settings_in_order():
     assert dict(spec.env) == {"MODEL": "azure/gpt-6-luna", "JOBS": "/study/jobs"}
     assert spec.settings()["branch_step"] == "12"
     # The replay script is exported once, before the first job that reads it.
-    assert spec.prepare == (("sh", "-c", "[ -e /w/scripts/tok1.json ] || python3 -m taste.benchmarks.branching "
-                             "export --record /var/lib/taste-trials/tok1 --out /w/scripts/tok1.json"),)
+    assert spec.prepare == (("sh", "-c", "[ -e /w/scripts/tok1.json ] || python3 -m taste.benchmarks.replay_export "
+                             "--record /var/lib/taste-trials/tok1 --out /w/scripts/tok1.json"),)
     line = spec.shell()
     assert line.startswith("sh -c ") and " && env JOBS=/study/jobs MODEL=azure/gpt-6-luna " in line
     assert shlex.split(line)[-2:] == ["--ak", "branch_live=on"]

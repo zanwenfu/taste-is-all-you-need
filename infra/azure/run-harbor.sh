@@ -15,6 +15,8 @@
 #   SECRETS        root-only file with AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY
 #   EXTRA_PATH     further entries for PYTHONPATH (a benchmark's own agents)
 #   MODEL          the model every role uses unless --ak worker_model says otherwise
+#   TASTE_CHECKPOINTS_ROOT  where branch trials save and find checkpoints
+#                  (default /var/lib/taste-checkpoints; the recovery study uses /data)
 set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run as root: the trial owner needs Docker and systemd" >&2; exit 1; }
@@ -29,6 +31,7 @@ JOBS=${JOBS:-/root/errata/jobs}
 MODEL=${MODEL:-azure/gpt-6-astra}
 DOCKER_CONFIG=${DOCKER_CONFIG:-/root/taste-harbor-20260927/docker-config}
 TRIALS=${TASTE_TRIALS_ROOT:-/var/lib/taste-trials}
+CHECKPOINTS=${TASTE_CHECKPOINTS_ROOT:-/var/lib/taste-checkpoints}
 
 case $JOB in *[!A-Za-z0-9_-]*|"") echo "job name: letters, digits, - and _ only" >&2; exit 2;; esac
 # Name every unmet requirement now, rather than fail at the first trial.
@@ -52,6 +55,7 @@ exec systemd-run --unit="taste-harbor-$JOB" --collect \
   --setenv=PYTHONPATH="$TASTE_SOURCE${EXTRA_PATH:+:$EXTRA_PATH}" \
   --setenv=HARBOR_TELEMETRY=0 --setenv=PYTHONDONTWRITEBYTECODE=1 --setenv=HOME=/root \
   --setenv=DOCKER_CONFIG="$DOCKER_CONFIG" --setenv=TASTE_TRIALS_ROOT="$TRIALS" \
+  --setenv=TASTE_CHECKPOINTS_ROOT="$CHECKPOINTS" \
   --setenv=PATH="$HARBOR_VENV/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   "$HARBOR_VENV/bin/harbor" run -p "$TASKS" \
     -a taste.benchmarks.harbor_agent:TasteAgent -m "$MODEL" \

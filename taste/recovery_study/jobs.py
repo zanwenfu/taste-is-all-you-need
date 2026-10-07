@@ -55,7 +55,7 @@ OWN = frozenset({SETTING[name] for name in ("script", "step", "mode", "checkpoin
                                             "note", "task_text")} | {"worker_python"})
 # A's exporter: writes a finished trial's replay script (its ordered model
 # calls and commands) from the trial's settled record.
-EXPORT_TEMPLATE = "python3 -m taste.benchmarks.branching export --record {record} --out {out}"
+EXPORT_TEMPLATE = "python3 -m taste.benchmarks.replay_export --record {record} --out {out}"
 # The study's models: the agent's (GPT-6 Luna; GPT-6 Sol on a subset) and the checker's.
 WORKER_MODEL = "gpt-6-luna"
 CHECKER_MODEL = "gpt-6-sol"
