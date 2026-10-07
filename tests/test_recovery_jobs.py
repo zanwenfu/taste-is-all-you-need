@@ -159,7 +159,8 @@ esac
     spec = jobs.JobSpec("map-a-s3-b1", 1, ("sh", "-c", f"touch {marker}", "-n", "1"), (("JOBS", str(tmp_path / "jobs")),))
     text = jobs.launcher([spec], prefix="map", max_trials=24)
     assert 'flock 9' in text and "LOCK=${LOCK:-/run/lock/taste-harbor-launch.lock}" in text
-    env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "WAIT": "0", "LOCK": str(lock)}
+    env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "WAIT": "0", "LOCK": str(lock),
+           "QUEUE": str(tmp_path / "queue")}
     # The host is full: the job waits (here, until the test gives up on it).
     with contextlib.suppress(subprocess.TimeoutExpired):
         subprocess.run(["sh", "-c", text], env={**env, "BUSY": "1"}, timeout=3, capture_output=True)
@@ -168,3 +169,31 @@ esac
     done = subprocess.run(["sh", "-c", text], env=env, timeout=10, capture_output=True, text=True)
     assert done.returncode == 0 and marker.exists()
     assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0
+
+
+def test_jobs_start_in_the_order_they_began_waiting_across_launchers(tmp_path):
+    # A probe of eight waiting for room must not be overtaken by later one-trial jobs that fit.
+    fake, marker, lock, queue = tmp_path / "bin", tmp_path / "started", tmp_path / "launch.lock", tmp_path / "queue"
+    fake.mkdir()
+    queue.mkdir()
+    (fake / "systemctl").write_text("""#!/bin/sh
+case "$1" in
+  list-units) printf 'taste-harbor-cal-w2.service loaded active running x\\n';;
+  show) echo '{ path=/h ; argv[]=/h run -p /t -k 2 -n 20 ; }';;
+  is-active) exit 1;;
+esac
+""")
+    (fake / "systemctl").chmod(0o755)
+    spec = jobs.JobSpec("map-a-s3-b1", 1, ("sh", "-c", f"touch {marker}", "-n", "1"), (("JOBS", str(tmp_path / "jobs")),))
+    text = jobs.launcher([spec], prefix="map", max_trials=24)
+    env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "WAIT": "0", "LOCK": str(lock), "QUEUE": str(queue)}
+    # An older ticket of a live launcher (this test) is first in line: the job fits but waits.
+    older = queue / f"{1:019d}-{os.getpid()}-map-b-s5-b1"
+    older.write_text("")
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        subprocess.run(["sh", "-c", text], env=env, timeout=3, capture_output=True)
+    assert not marker.exists()
+    # A ticket whose launcher has died is cleared, and the job then starts and gives up its own.
+    older.rename(queue / f"{1:019d}-999999999-map-b-s5-b1")
+    done = subprocess.run(["sh", "-c", text], env=env, timeout=30, capture_output=True, text=True)
+    assert done.returncode == 0 and marker.exists() and list(queue.iterdir()) == []
