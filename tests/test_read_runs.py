@@ -80,3 +80,11 @@ def test_the_command_line_writes_readings_the_driver_reads_and_keeps_earlier_one
     assert "run-unrecorded: not read: no settled record" in capsys.readouterr().out
     from taste.recovery_study.recovery_driver import readings
     assert readings(out)["run-a"]["step"] == 4
+
+
+def test_the_default_budget_holds_the_worst_case_a_call_reserves():
+    # The LLM reserves a call's worst case (the model's full context window) before sending it.
+    from taste.benchmarks.harbor_settings import SERVED_MODELS
+    from taste.pricing import max_call_cost_usd
+    worst = max_call_cost_usd(SERVED_MODELS["gpt-6-sol"], max_output_tokens=cli.MAX_OUTPUT_TOKENS, cap_on="billed")
+    assert worst < cli.BUDGET_USD < 2 * worst + 1

@@ -3,7 +3,7 @@
     sudo sh -c 'set -a; . /root/taste-secrets/azure.env; set +a; \\
         PYTHONPATH=/opt/taste/<sha> /home/bugbash/taste-openai-20260923.venv/bin/python \\
         scripts/read_runs.py --state /root/study/recoveries.json --out /root/study/readings.json \\
-        [--trials /var/lib/taste-trials] [--model gpt-6-sol] [--effort medium] [--budget-usd 5]'
+        [--trials /var/lib/taste-trials] [--model gpt-6-sol] [--effort medium] [--budget-usd 10]'
 
 For every run the recovery driver's checker rejected (its first check's reply
 is ``not_done``), the reader (``taste.agents.trajectory_reader``) is given the
@@ -32,6 +32,10 @@ from taste.benchmarks.harbor_settings import SERVED_MODELS
 from taste.recovery_study import records
 
 MAX_OUTPUT_TOKENS = 4096
+# Before each call the LLM reserves its worst case, the model's full context
+# window: about $5.31 for GPT-6 Sol. The budget must hold one such reservation;
+# a reading itself costs a few cents.
+BUDGET_USD = 10.0
 
 
 def rejected(state):
@@ -83,7 +87,8 @@ def main(argv=None, llm=None):
     parser.add_argument("--trials", default="/var/lib/taste-trials", help="Taste's settled trial records")
     parser.add_argument("--model", default="gpt-6-sol", choices=sorted(SERVED_MODELS))
     parser.add_argument("--effort", default="medium", choices=("low", "medium", "high"))
-    parser.add_argument("--budget-usd", type=float, default=5.0, help="what all of this run's calls may spend")
+    parser.add_argument("--budget-usd", type=float, default=BUDGET_USD,
+                        help="what all of this run's calls may spend; must exceed one call's worst case")
     arguments = parser.parse_args(argv)
     state = json.loads(arguments.state.read_text())
     found = json.loads(arguments.out.read_text()) if arguments.out.exists() else {}
