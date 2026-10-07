@@ -345,8 +345,9 @@ behaviour at its prices ($0.10 input, $0.01 cached, $0.125 cache write and
 $0.50 output per million tokens) and SWE-Bench Pro's larger observations, a
 run costs about $0.02-0.03 at 30 steps, $0.05-0.07 at 60 and $0.11-0.14 at
 100. The 484 SWE-Bench Pro V2 trials should come to $15-35 and the 114
-Terminal-Bench trials to $5-20: about $30 in all, and at most about $600
-under the cap. At 24 trials at once and about 10 minutes a trial, the
+Terminal-Bench trials to $5-20: about $30 in all. The caps bound it at $760:
+an agent alone stops at its $1 cap plus at most one call in flight, $1.27 a
+trial on GPT-6 Luna (as Taste's settings compute it for these options). At 24 trials at once and about 10 minutes a trial, the
 SWE-Bench Pro V2 part takes 3.5-4 hours once its images are on disk; the
 Terminal-Bench part 3-4 hours if most runs end within half an hour, and up to
 a day if many use their multi-hour limits.
