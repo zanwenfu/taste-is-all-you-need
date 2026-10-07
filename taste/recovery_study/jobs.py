@@ -268,13 +268,26 @@ def launcher(specs, *, prefix, max_trials, title=""):
              "  done",
              '  echo "$total"',
              "}",
+             # Every launcher on the host checks for room and starts a job holding one lock,
+             # so two cannot both see room and both start.
+             "LOCK=${LOCK:-/run/lock/taste-harbor-launch.lock}",
              "start() {",
              "  job=$1; dir=$2; n=$3; command=$4",
              f'  if [ -e "$dir/$job" ] || systemctl is-active --quiet "{UNIT_PREFIX}$job"; then',
              '    echo "already started: $job"; return 0',
              "  fi",
-             '  while now=$(trials) && [ "$now" -gt 0 ] && [ $((now + n)) -gt "$MAX_TRIALS" ]; do sleep 20; done',
-             '  sh -c "$command" || echo "could not start: $job" >&2',
+             "  while :; do",
+             '    exec 9>"$LOCK"',
+             "    flock 9",
+             "    now=$(trials)",
+             '    if [ "$now" -eq 0 ] || [ $((now + n)) -le "$MAX_TRIALS" ]; then',
+             '      sh -c "$command" 9>&- || echo "could not start: $job" >&2',
+             "      exec 9>&-",
+             "      return 0",
+             "    fi",
+             "    exec 9>&-",
+             "    sleep 20",
+             "  done",
              "}"]
     for spec in specs:
         lines.append(f"start {shlex.quote(spec.name)} {shlex.quote(spec.jobs_dir)} {spec.concurrent} "

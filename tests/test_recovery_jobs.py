@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
 import subprocess
@@ -140,3 +141,30 @@ esac
     returned = subprocess.run(["sh", "-c", text], capture_output=True, text=True, timeout=10,
                               env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "WAIT": "0"})
     assert returned.returncode == 0 and "run the driver again" not in returned.stdout
+
+
+def test_a_job_starts_under_the_hosts_lock_only_when_it_fits(tmp_path):
+    # Two launchers must not both see room and both start: the check and the start hold one lock.
+    fake, marker, lock = tmp_path / "bin", tmp_path / "started", tmp_path / "launch.lock"
+    fake.mkdir()
+    (fake / "systemctl").write_text("""#!/bin/sh
+case "$1" in
+  list-units) [ -n "${BUSY:-}" ] && printf 'taste-harbor-cal-w2.service loaded active running x\\n';;
+  show) echo '{ path=/h ; argv[]=/h run -p /t -k 2 -n 24 ; }';;
+  is-active) exit 1;;
+esac
+""")
+    (fake / "systemctl").chmod(0o755)
+    # A job of one trial whose launch only leaves a mark (sh ignores the arguments after its script).
+    spec = jobs.JobSpec("map-a-s3-b1", 1, ("sh", "-c", f"touch {marker}", "-n", "1"), (("JOBS", str(tmp_path / "jobs")),))
+    text = jobs.launcher([spec], prefix="map", max_trials=24)
+    assert 'flock 9' in text and "LOCK=${LOCK:-/run/lock/taste-harbor-launch.lock}" in text
+    env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "WAIT": "0", "LOCK": str(lock)}
+    # The host is full: the job waits (here, until the test gives up on it).
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        subprocess.run(["sh", "-c", text], env={**env, "BUSY": "1"}, timeout=3, capture_output=True)
+    assert not marker.exists()
+    # Room again: it starts, and the lock is free afterwards.
+    done = subprocess.run(["sh", "-c", text], env=env, timeout=10, capture_output=True, text=True)
+    assert done.returncode == 0 and marker.exists()
+    assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0
