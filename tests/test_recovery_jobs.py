@@ -103,6 +103,8 @@ def test_the_launcher_starts_each_job_once_within_the_trial_limit_and_then_waits
     text = jobs.launcher([spec], prefix="map", max_trials=24, title="round 1")
     assert text.startswith("#!/bin/sh\n# round 1\n")
     assert "MAX_TRIALS=${MAX_TRIALS:-24}" in text and "'taste-harbor-map-*'" in text
+    # The limit is the host's: every Harbor job counts, this study's or not.
+    assert "$(units 'taste-harbor-*')" in text
     start = next(line for line in text.splitlines() if line.startswith("start map-a-s3-b1 "))
     _, name, directory, trials, command = shlex.split(start)
     assert (name, directory, trials) == ("map-a-s3-b1", "/study/jobs", "2") and command == spec.shell()
@@ -118,9 +120,11 @@ def test_the_launcher_counts_a_running_job_as_the_trials_it_runs_at_once(tmp_pat
     (fake / "systemctl").write_text("""#!/bin/sh
 case "$1" in
   list-units) printf 'taste-harbor-map-a-s3-b1.service loaded active running x\\n'
+              case "$*" in *taste-harbor-\\**) printf 'taste-harbor-cal-w2.service loaded active running x\\n';; esac
               printf 'taste-harbor-map-b-s5-c1.service loaded active running x\\n';;
   show) case "$*" in
           *s3-b1*) echo '{ path=/h ; argv[]=/h run -p /t -i a -k 8 -n 8 --max-retries 2 --ak b=1 ; }';;
+          *cal-w2*) echo '{ path=/h ; argv[]=/h run -p /t -k 2 -n 6 --max-retries 2 ; }';;
           *) echo '{ path=/h ; argv[]=/h run -p /t -i b -k 1 -n 1 --max-retries 2 ; }';;
         esac;;
 esac
@@ -130,7 +134,8 @@ esac
     functions = text[:text.rindex("while [")]
     done = subprocess.run(["sh", "-c", functions + "trials\nrunning\n"], capture_output=True, text=True,
                           env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"}, check=True)
-    assert done.stdout.split() == ["9", "2"]
+    # A calibration job of 6 counts toward the host's trials, not toward this study's jobs.
+    assert done.stdout.split() == ["15", "2"]
     # WAIT=0 returns at once, with the study's jobs still running.
     returned = subprocess.run(["sh", "-c", text], capture_output=True, text=True, timeout=10,
                               env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "WAIT": "0"})

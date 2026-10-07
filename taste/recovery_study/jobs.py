@@ -239,9 +239,10 @@ def write_text(path, text):
 def launcher(specs, *, prefix, max_trials, title=""):
     """A shell script that starts each job once, keeping the study's running trials at most ``max_trials``.
 
-    A running job counts as the trials it runs at once (its ``-n``, read from
-    its unit's command line, so jobs another round started count too); a job
-    starts when its own fit beside them, or when nothing runs. It skips a job
+    The limit is the host's: every running Harbor job counts, this study's
+    and any other (calibration, another driver), as the trials it runs at
+    once (its ``-n``, read from its unit's command line); a job starts when its
+    own fit beside them, or when nothing runs. It skips a job
     whose directory or systemd unit exists (run-harbor.sh never overwrites a
     job), runs each job's preparation before starting it, and at the end waits
     until none of the study's jobs is running, so that the driver can be run
@@ -249,19 +250,19 @@ def launcher(specs, *, prefix, max_trials, title=""):
     """
     pattern = shlex.quote(f"{UNIT_PREFIX}{prefix}-*")
     lines = ["#!/bin/sh", f"# {title}".rstrip(),
-             "# Run as root on the measurement host. A job starts while the study's running",
-             "# trials, each running job's -n, stay at most MAX_TRIALS.", "set -u",
+             "# Run as root on the measurement host. A job starts while the host's running",
+             "# Harbor trials, each running job's -n, stay at most MAX_TRIALS.", "set -u",
              f"MAX_TRIALS=${{MAX_TRIALS:-{int(max_trials)}}}",
              "units() {",
-             f"  systemctl list-units --plain --no-legend --state=active,activating {pattern} 2>/dev/null"
+             '  systemctl list-units --plain --no-legend --state=active,activating "$1" 2>/dev/null'
              " | awk '{print $1}'",
              "}",
              "running() {",
-             "  units | wc -l",
+             f"  units {pattern} | wc -l",
              "}",
              "trials() {",
              "  total=0",
-             "  for unit in $(units); do",
+             f"  for unit in $(units {shlex.quote(UNIT_PREFIX + '*')}); do",
              "    n=$(systemctl show -p ExecStart --value \"$unit\" | grep -o -- ' -n [0-9]*' | head -1 | tr -dc 0-9)",
              "    total=$((total + ${n:-1}))",
              "  done",
