@@ -60,11 +60,20 @@ share of compressed layers on disk.
     sudo /root/taste-harbor-20260927/venv/bin/harbor download \
         terminal-bench/terminal-bench@3.0.0 -o /root/recovery-bench
 
-74 tasks (content `sha256:a32a6187...6da3`, 509 MB with their data). The
-registry's latest is 4.0.0 (66 tasks), with a 63-task CPU-only subset
-`terminal-bench/terminal-bench-cpu-only`; neither was examined here. No task
-has a prebuilt image: Harbor builds each task's environment and, for its
-verifier, a second image from `tests/Dockerfile`.
+74 tasks (content `sha256:a32a6187...6da3`, 509 MB with their data). No
+task has a prebuilt image: Harbor builds each task's environment and, for its
+verifier, a second image from `tests/Dockerfile`. Those Dockerfiles install
+packages without pinning every version, so an image built weeks apart can
+differ: build each task's images once and keep them for the whole study.
+
+The registry's latest is 4.0.0 (`terminal-bench/terminal-bench@4.0.0`, content
+`sha256:39d9f44b...7732`): the same tasks less eight (cli-2ph-simplex,
+erp-procurement-planning, exam-pdf-eval, fix-uautomizer-soundness,
+gpt2-codegolf, ico-path-patch, lean-midpoint-proof, memcached-backdoor),
+revised, every one with an 8-hour agent limit and with prebuilt images pinned
+by digest for both its environment and its verifier. The rule below leaves 52
+of its 66 tasks (11 have sidecars, 3 need a GPU). A 63-task CPU-only subset is
+`terminal-bench/terminal-bench-cpu-only`.
 
 **Rule.** Every TB 3.0 task runs its verifier in a separate container
 (`environment_mode = "separate"`). Harbor collects the task's declared
@@ -197,15 +206,19 @@ model. Times are per trial, in seconds.
 | Terminal-Bench 3.0 | music-harmony | solved | unsolved | 268 / - | 110-143 |
 | Terminal-Bench 3.0 | sound-change-cascade | solved | unsolved | 277 / 50 | 80-191 |
 | Terminal-Bench 3.0 | cad-model | **not solved** | unsolved | 268 / 51 | 30-83 |
+| Terminal-Bench 4.0 | sound-change-cascade | solved | unsolved | 14 (pull) | 28 |
+| Terminal-Bench 4.0 | cad-model | **not solved** | unsolved | 14-15 (pull) | 15-29 |
 
 A cold start includes pulling the image (SWE-Bench Pro V2, four images at once,
-while other jobs ran) or building it (Terminal-Bench); a warm start reuses it.
-A Terminal-Bench verifier includes building and starting its own container.
+while other jobs ran; Terminal-Bench 4.0's images are small) or building it
+(Terminal-Bench 3.0); a warm start reuses it. A Terminal-Bench 3.0 verifier
+includes building and starting its own container.
 
-- cad-model's reference solution installs the current `build123d` from PyPI,
-  which no longer imports with the OCP library in the image
-  (`No module named 'OCP.collections'`). The task fails its own reference
-  check here and should be left out until fixed upstream.
+- cad-model's reference solution installs `build123d==0.10.0` from PyPI at
+  solve time, which pulls today's `ocp_gordon`, which no longer imports with
+  the OCP library in the image (`No module named 'OCP.collections'`). The task
+  fails its own reference check here, in 3.0 and in 4.0, and should be left
+  out until fixed upstream.
 - A verifier can take far longer on an unsolved attempt than on a solved one:
   qutebrowser's hidden tests took 298 seconds on the unchanged code against
   12 after the reference patch. A calibration's failed attempts can use much
@@ -214,22 +227,25 @@ A Terminal-Bench verifier includes building and starting its own container.
   Terminal-Bench jobs, qutebrowser's empty patch) ended with `CancelledError`:
   the host's unattended upgrade (below) restarted their units. They were run
   again; where a task has two times, they are the two runs.
-- Every Terminal-Bench 3.0 candidate should pass the same two-sided check
-  before it is calibrated: it costs no model calls, and builds the images the
-  calibration needs anyway.
+- Only four Terminal-Bench tasks were checked here; the calibration section
+  runs the same check on every candidate before any model call.
 
 ## Disk and concurrency
 
 The VM's disk is the limit. It had 59 GB free; the 242 SWE-Bench Pro V2
 candidates below hold 208 GB of distinct compressed layers, about 0.9 TB on
 this Docker (here 14 GB of compressed layers took 45 GB unpacked besides).
-A data disk of 1 TiB for Docker's and containerd's data holds the SWE-Bench
-Pro V2 candidates' images; 2 TiB holds every candidate's images at once and
-leaves room for the study's checkpoints. On the present disk the calibration
-must run in waves of about ten tasks, removing each wave's images after it. Pulls are slow enough to plan for: the
-four smoke images (3 GB compressed) took 4.4 minutes together while other jobs
-ran, which for the 208 GB would be about five hours. Pull ahead of the run,
-several images at a time.
+Terminal-Bench 4.0's pinned images for the 52 tasks it shares with the 58
+above total 53 GB compressed (median 0.12 GB an image, at most 3.8 GB); the
+3.0 builds should be about as large, some 150-250 GB on this Docker. A data
+disk of 1 TiB for Docker's and containerd's data holds the SWE-Bench Pro V2
+candidates' images; 2 TiB holds every candidate's images at once and leaves
+room for the study's checkpoints. On the present disk the calibration must
+run in waves of about ten tasks, removing each wave's images after it.
+
+Pulls are slow enough to plan for: the four smoke images (3 GB compressed)
+took 4.4 minutes together while other jobs ran, which for the 208 GB would be
+about five hours. Pull ahead of the run, several images at a time.
 
 An agent-alone trial asks the host for little beyond its task container
 (mini-swe-agent and Taste's processes wait on model calls). A SWE-Bench Pro V2
@@ -245,7 +261,7 @@ during measurement (`systemctl disable --now apt-daily-upgrade.timer`, or
 
 ## Calibration
 
-`data/recovery/calibration-candidates.json` holds 300 candidates, and pins
+`data/recovery/calibration-candidates.json` holds 299 candidates, and pins
 each dataset they come from by a digest of its files (as the Terminal-Bench
 2.1 split does):
 
@@ -254,14 +270,15 @@ each dataset they come from by a digest of its files (as the Terminal-Bench
   and by the size of the reference patch (terciles within the language), seats
   in proportion to each stratum, taken in the order of SHA-256 of the salt
   `taste-recovery-calibration-2026-10-07` and the task name;
-- the 58 Terminal-Bench 3.0 tasks above that grade files only (cad-model to be
-  dropped if its reference check still fails).
+- 57 Terminal-Bench 3.0 tasks: the 58 above that grade files only, less
+  cad-model, whose reference solution fails.
 
 The record is made by
 
     python3 scripts/recovery_candidates.py --pro /root/recovery-bench/swebench-pro-os/v2 \
         --tb3 /root/recovery-bench/terminal-bench --pro-seats 242 \
-        --salt taste-recovery-calibration-2026-10-07 --out data/recovery/calibration-candidates.json
+        --salt taste-recovery-calibration-2026-10-07 --out data/recovery/calibration-candidates.json \
+        --drop "cad-model=its reference solution fails here: build123d 0.10.0 pulls an ocp_gordon that needs OCP.collections"
 
 As root, each part's tasks are linked into a directory of their own (hard
 links, on the same disk):
@@ -272,22 +289,34 @@ links, on the same disk):
     python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("\n".join(r["terminal_bench_3"]["tasks"]))' \
         <checkout>/data/recovery/calibration-candidates.json | while read -r t; do cp -al terminal-bench/$t runs/cal-tb3/; done
 
+Before any model runs, every Terminal-Bench candidate gets the reference and
+empty-patch checks (no model calls; they also build the images the
+calibration needs), and a task that fails them is dropped as cad-model was:
+
+    sudo env HARBOR_TELEMETRY=0 DOCKER_CONFIG=/root/taste-harbor-20260927/docker-config \
+        /root/taste-harbor-20260927/venv/bin/harbor run -p /root/recovery-bench/runs/cal-tb3 \
+        -a oracle -n 12 -o /root/recovery-bench/jobs --job-name gate-tb3-oracle
+    # and the same with -a nop --job-name gate-tb3-nop
+
 mini-swe-agent alone, GPT-6 Luna, two runs per task, as Taste's agent-alone
 arm (`run-harbor.sh` runs the job in its own systemd unit; `JOBS` keeps it out
 of other projects' job directories):
 
     sudo MODEL=azure/gpt-6-luna JOBS=/root/recovery-bench/jobs infra/azure/run-harbor.sh \
         cal-pro /root/recovery-bench/runs/cal-pro -k 2 -n 24 --max-retries 2 \
-        --ak agent=mini-swe-agent --ak services=none --ak spend_cap_usd=1 \
+        --ak agent=mini-swe-agent --ak services=none --ak spend_cap_usd=1 --ak worker_spend_cap_usd=1 \
         --ak worker_max_calls=1000 --ak max_commands=2000 --ak reply_reserve_seconds=10
 
     sudo MODEL=azure/gpt-6-luna JOBS=/root/recovery-bench/jobs infra/azure/run-harbor.sh \
         cal-tb3 /root/recovery-bench/runs/cal-tb3 -k 2 -n 12 --max-retries 2 \
-        --ak agent=mini-swe-agent --ak services=none --ak spend_cap_usd=1 \
+        --ak agent=mini-swe-agent --ak services=none --ak spend_cap_usd=1 --ak worker_spend_cap_usd=1 \
         --ak worker_max_calls=1000 --ak max_commands=2000 --ak reply_reserve_seconds=10
 
 An agent alone may spend the trial's whole cap (`spend_cap_usd`); $1 stops a
-run that loops long before it matters to the estimate below. Harbor retries a
+run that loops long before it matters to the estimate below. The call and
+command limits are raised from their defaults (150 and 600), as in earlier
+agent-alone baselines, so that the agent's own run, not Taste, decides its
+length: the step counts are what the calibration measures. Harbor retries a
 trial only for infrastructure errors: a timed-out agent or verifier is graded
 as it stands. The two jobs together would ask for 36 trials at once: run them
 one after the other, or halve both. With GPT-5.6 Luna instead
@@ -309,14 +338,14 @@ strata that kept the most.
 
 **Expected cost and time.** On Terminal-Bench 2.1's tuning tasks (133 runs),
 mini-swe-agent with GPT-5.6 Luna averaged 5,700 input tokens (83% cached) and
-290 output tokens per step, nearly every uncached token was written to the
-cache, and a run's input grew with the square of its steps (median 9 steps,
-$0.0076 a run). GPT-6 Luna has not been measured here; taking the same
+290 output tokens per step, its uncached input was billed almost entirely as
+cache writes, and a run's input grew with the square of its steps (median 9
+steps, under a cent a run). GPT-6 Luna has not been measured here; taking the same
 behaviour at its prices ($0.10 input, $0.01 cached, $0.125 cache write and
 $0.50 output per million tokens) and SWE-Bench Pro's larger observations, a
 run costs about $0.02-0.03 at 30 steps, $0.05-0.07 at 60 and $0.11-0.14 at
-100. The 484 SWE-Bench Pro V2 trials should come to $15-35 and the 116
-Terminal-Bench trials to $5-20: about $30 in all, and never more than $600
+100. The 484 SWE-Bench Pro V2 trials should come to $15-35 and the 114
+Terminal-Bench trials to $5-20: about $30 in all, and at most about $600
 under the cap. At 24 trials at once and about 10 minutes a trial, the
 SWE-Bench Pro V2 part takes 3.5-4 hours once its images are on disk; the
 Terminal-Bench part 3-4 hours if most runs end within half an hour, and up to
