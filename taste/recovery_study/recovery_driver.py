@@ -38,10 +38,13 @@ it; on ``not_done`` the next round continues from its submission
 ``done``, the trial ends without submitting, or the budget cannot pay for
 another round. A plain retry stays plain: its next round is another fresh
 trial, told nothing (``retry_rounds=continue`` continues it with feedback
-instead). Spending adds up over the rounds, the checker's included. A
-branch is charged without the time spent bringing its prefix back when the
-trial records that time. Every trial is graded by the hidden tests; the
-episode's outcome is its last trial's grade, and no grade decides anything.
+instead). Spending adds up over the rounds, the checker's included. Time has
+one clock, Harbor's agent execution, for the budget (the calibration's median)
+and for every recovery and checker trial charged against it; a branch is
+charged without the time branching spent bringing its prefix back
+(``prefix_seconds``), and both the raw and the charged seconds are kept.
+Every trial is graded by the hidden tests; the episode's outcome is its last
+trial's grade, and no grade decides anything.
 
 State (``kind`` taste.recovery_runs/1), beside the shared fields of ``driver``:
 
@@ -331,27 +334,29 @@ class RecoveryDriver(Driver):
     # Episodes --------------------------------------------------------------
 
     def spent(self, episode):
-        """What an episode has spent so far: dollars, charged seconds, tokens, and the parts.
+        """What an episode has spent so far: dollars, seconds, tokens, and the parts.
 
         Its trials, and every checker trial of its checks; not the trials that
         rebuilt a final state for a check, which a harness restoring a
-        snapshot would not run.
+        snapshot would not run. Seconds are Harbor's agent execution times:
+        ``seconds`` is what the budget is charged (a branch's without its
+        prefix's time), ``raw_seconds`` the times as measured, and
+        ``prefix_seconds`` the difference.
         """
-        agent_usd = agent_seconds = check_usd = check_seconds = 0.0
+        total = {name: 0.0 for name in ("agent_usd", "check_usd", "agent_seconds", "check_seconds",
+                                        "raw_seconds", "prefix_seconds")}
         tokens = 0
         for step in episode["rounds"]:
             trials = [("agent", self.trial(step["agent"]))] if step.get("agent") else []
             trials += [("check", summary) for _, summary in self.results(step["check"]["jobs"])]
             for kind, summary in trials:
-                usd, seconds = summary["cost_usd"] or 0.0, summary["charged_seconds"] or 0.0
-                if kind == "agent":
-                    agent_usd, agent_seconds = agent_usd + usd, agent_seconds + seconds
-                else:
-                    check_usd, check_seconds = check_usd + usd, check_seconds + seconds
+                total[kind + "_usd"] += summary["cost_usd"] or 0.0
+                total[kind + "_seconds"] += summary["charged_seconds"] or 0.0
+                total["raw_seconds"] += summary["seconds"] or 0.0
+                total["prefix_seconds"] += (summary["seconds"] or 0.0) - (summary["charged_seconds"] or 0.0)
                 tokens += (summary["prompt_tokens"] or 0) + (summary["completion_tokens"] or 0)
-        return {"usd": agent_usd + check_usd, "seconds": agent_seconds + check_seconds, "tokens": tokens,
-                "agent_usd": agent_usd, "check_usd": check_usd,
-                "agent_seconds": agent_seconds, "check_seconds": check_seconds}
+        return {"usd": total["agent_usd"] + total["check_usd"],
+                "seconds": total["agent_seconds"] + total["check_seconds"], "tokens": tokens, **total}
 
     def remaining(self, run, episode):
         spent = self.spent(episode)

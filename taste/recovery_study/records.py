@@ -8,8 +8,14 @@ checker trial, the checker's submission). Taste writes the trial's settled
 record under its token, ``<trials root>/<token>/controller/trajectory.json``:
 every model call with its cost and tokens, every command the agent ran with its
 output and exit code, and how the agent's run ended. Rewards are read from
-Harbor; cost, tokens, time and steps from Taste's record, and Harbor's own
-figures only for a trial without one.
+Harbor; cost, tokens and steps from Taste's record, and Harbor's own figures
+only for a trial without one.
+
+Time has one clock, Harbor's: a trial's seconds are its agent's execution
+(``agent_execution``, start to finish), the same span the calibration report's
+``median_agent_seconds`` measures, so a budget and what is charged against it
+agree. A branch is charged its seconds less the time branching spent bringing
+its prefix back (``prefix_seconds``); both are kept.
 
 A run's steps are numbered as the study numbers them, by the trajectory reader
 (``taste.agents.trajectory_reader.steps_from_trajectory``): one per model reply
@@ -65,16 +71,18 @@ def _moment(text):
     return datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
 
 
-def harbor_seconds(result):
-    """The agent's run time by Harbor's clock, for a trial Taste has no time for."""
+def agent_seconds(result):
+    """The agent's execution time by Harbor's clock, the study's one clock; None if it never ran."""
     execution = result.get("agent_execution") or {}
-    for start, end in ((execution.get("started_at"), execution.get("finished_at")),
-                       (result.get("started_at"), result.get("finished_at"))):
-        try:
-            return (_moment(end) - _moment(start)).total_seconds()
-        except (AttributeError, TypeError, ValueError):
-            continue
-    return None
+    try:
+        return round((_moment(execution["finished_at"]) - _moment(execution["started_at"])).total_seconds(), 3)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def charged(seconds, prefix):
+    """What a trial's time counts against a budget: its seconds less its prefix's, never below 0."""
+    return None if seconds is None else round(max(0.0, seconds - (prefix or 0.0)), 3)
 
 
 def settled(token, trials_root):
@@ -165,9 +173,7 @@ def trial(trial_dir, trials_root):
     nested = settled(taste.get("trial"), trials_root)
     view = agent_view(nested) or {}
     cost, prompt, completion = spend(nested, agent)
-    seconds = number(taste.get("seconds"))
-    seconds = harbor_seconds(result) if seconds is None else seconds
-    prefix = number(branch.get("prefix_seconds")) or 0.0
+    seconds, prefix = agent_seconds(result), number(branch.get("prefix_seconds"))
     graded = reward(result)
     changed = branch.get("changed_paths")
     return {
@@ -180,8 +186,8 @@ def trial(trial_dir, trials_root):
         "model": (config.get("agent") or {}).get("model_name"),
         "settings": dict((config.get("agent") or {}).get("kwargs") or {}),
         "cost_usd": cost, "prompt_tokens": prompt, "completion_tokens": completion,
-        "seconds": seconds, "charged_seconds": None if seconds is None else max(0.0, seconds - prefix),
-        "prefix_seconds": number(branch.get("prefix_seconds")),
+        # Raw: the agent's execution by Harbor's clock; charged: without the prefix's time.
+        "seconds": seconds, "prefix_seconds": prefix, "charged_seconds": charged(seconds, prefix),
         "faithful": faithful, "unfaithful_at": branch.get("unfaithful_at"), "checkpoint": branch.get("checkpoint"),
         "changed_paths": [str(path) for path in changed] if isinstance(changed, list) else None,
         "exit_status": view.get("exit_status"), "steps": len(view["steps"]) if view else None,
@@ -236,7 +242,7 @@ def fresh_runs(job_dirs, trials_root):
 
 
 def budget(runs):
-    """One base run's dollars and seconds for a task: the medians over its runs from scratch."""
+    """One base run's dollars and agent seconds for a task: the medians over its runs from scratch."""
     dollars = [run["cost_usd"] for run in runs if run["cost_usd"] is not None]
     seconds = [run["seconds"] for run in runs if run["seconds"] is not None]
     if not dollars or not seconds:
@@ -248,15 +254,15 @@ def budget(runs):
 def calibration_budgets(path):
     """Per task, from ``scripts/calibration_report.py --json``: kept, and one run's median dollars and time.
 
-    The time is the agent's (Harbor's agent execution), which is what a
-    trial's charged seconds measure; the whole trial's when that is missing.
+    The time is the agent's execution by Harbor's clock (``median_agent_seconds``),
+    the clock every trial is charged by; a task without it has no time here.
     """
     report = read_json(path)
     if not isinstance(report, dict):
         raise ValueError(f"{path} is not a calibration report")
     found = {}
     for task in report.get("per_task") or ():
-        seconds = task.get("median_agent_seconds") or task.get("median_trial_seconds")
+        seconds = task.get("median_agent_seconds")
         found[task["task"]] = {"kept": bool(task.get("kept")), "usd": task.get("median_usd"), "seconds": seconds,
                                "runs": task.get("attempts")}
     return found
