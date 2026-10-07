@@ -14,6 +14,7 @@ budget of one base run.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 from taste.recovery_study import jobs, records, rules, state
@@ -101,8 +102,17 @@ class Driver:
         self.new.append(spec)
         return spec
 
-    def refresh(self):
-        """Read every started job that has finished; the number read."""
+    def refresh(self, unit_active=None):
+        """Read every started job that has finished; the number read.
+
+        A job is finished when it has all its trials or Harbor has closed it, or
+        when its Harbor unit has stopped without closing it (Harbor stopped with
+        an error, as when it could not set a trial up): then it is finished with
+        what it has and marked crashed, and the driver's attempts go on from there.
+        Without ``unit_active`` (the command lines pass ``harbor_unit_active``)
+        every unit is taken as running.
+        """
+        unit_active = unit_active or (lambda name: True)
         read = 0
         for name, job in self.jobs.items():
             if job["complete"]:
@@ -111,8 +121,10 @@ class Driver:
             if not directory.is_dir():
                 continue
             found = records.job_trials(directory, self.settings["trials_root"])
-            if len(found) >= job["spec"]["attempts"] or records.job_finished(directory):
-                job.update(complete=True, results=found, finished=state.now())
+            done = len(found) >= job["spec"]["attempts"] or records.job_finished(directory)
+            crashed = not done and not unit_active(name)
+            if done or crashed:
+                job.update(complete=True, results=found, finished=state.now(), **({"crashed": True} if crashed else {}))
                 read += 1
         return read
 
@@ -225,6 +237,16 @@ class Driver:
         script, _ = self.script(summary["token"])
         return {**run, "steps": len(taken), "settings": jobs.inherited(summary["settings"]), "script": script,
                 "rules": rules.rewind_points(taken, values["large_edit_lines"]), "features": rules.features(taken)}
+
+
+def harbor_unit_active(name):
+    """Whether a job's Harbor unit is still running; True when systemd cannot be asked."""
+    try:
+        found = subprocess.run(["systemctl", "is-active", jobs.UNIT_PREFIX + name], capture_output=True, text=True,
+                               timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return found.stdout.strip() in ("active", "activating", "deactivating", "reloading")
 
 
 def pairs(items):

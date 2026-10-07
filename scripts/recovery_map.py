@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from taste.recovery_study import state
-from taste.recovery_study.driver import MAX_TRIALS, finish, pairs, progress
+from taste.recovery_study.driver import MAX_TRIALS, finish, harbor_unit_active, pairs, progress
 from taste.recovery_study.map_driver import MapDriver
 
 OPTIONS = {"prefix": str, "model": str, "k": int, "extra": int, "mode": str, "checkpoint_attempts": int,
@@ -81,7 +81,7 @@ def main(argv=None):
         for name in arguments.close:
             driver.close(name)
         driver.add_sources(arguments.base_job, arguments.calibration)
-        driver.refresh()
+        driver.refresh(unit_active=harbor_unit_active)
         driver.advance()
         status = finish(driver, arguments.launcher, arguments.max_trials,
                         f"recovery map {arguments.state}: {len(driver.new)} new jobs, {state.now()}",

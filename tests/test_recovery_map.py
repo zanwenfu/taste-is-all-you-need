@@ -217,3 +217,16 @@ def test_with_a_spool_the_command_line_queues_its_jobs_and_ends_on_how_the_study
     # No commands to start by hand: the last line says how the study stands, and where its jobs wait.
     last = capsys.readouterr().out.strip().splitlines()[-1]
     assert last == f"1 new jobs, 1 not finished; queued in {spool} for the host's scheduler."
+
+
+def test_a_job_whose_harbor_stopped_without_closing_it_is_taken_as_finished(tmp_path):
+    # Harbor can stop with an error before writing a job's result (a check it could not set up):
+    # once its unit has stopped, the job is finished with what it has, and is marked crashed.
+    jobs_dir, _, given = study(tmp_path)
+    driver, specs = step(tmp_path / "map.json", given, jobs_dir)
+    [spec] = specs
+    (jobs_dir / spec.name).mkdir(parents=True)
+    assert driver.refresh(unit_active=lambda name: True) == 0 and not driver.jobs[spec.name]["complete"]
+    assert driver.refresh(unit_active=lambda name: False) == 1
+    assert driver.jobs[spec.name]["complete"] and driver.jobs[spec.name]["crashed"]
+    assert driver.jobs[spec.name]["results"] == []
