@@ -66,6 +66,17 @@ def test_gpt_5_6_luna_on_azure_carries_its_dated_global_standard_price() -> None
     assert price.tiers[0][0] == _LONG_CONTEXT_THRESHOLD and price.as_of == "2026-10-04"
 
 
+def test_gpt_6_luna_on_azure_carries_its_dated_global_standard_price() -> None:
+    # Azure retail prices for the deployment's version 2026-09-22, Global
+    # Standard, checked 2026-10-07: per million tokens, input, output, cached
+    # input and cache write, short context and then long.
+    price = PRICES["gpt-6-luna-2026-09-22"]
+    short, long = price.tiers[0][1], price.tiers[1][1]
+    assert (short.input, short.output, short.cache_read, short.cache_write) == (0.10, 0.50, 0.01, 0.125)
+    assert (long.input, long.output, long.cache_read, long.cache_write) == (0.20, 0.75, 0.02, 0.25)
+    assert price.tiers[0][0] == _LONG_CONTEXT_THRESHOLD and price.as_of == "2026-10-07"
+
+
 def test_only_the_fixed_plan_may_cost_nothing() -> None:
     from taste.pricing import ModelPrice, Rates
 

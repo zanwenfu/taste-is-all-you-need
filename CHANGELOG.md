@@ -134,6 +134,26 @@ behaviour and interfaces.
   goal's known spending reaches it, no new plan is asked for and the goal
   closes with its reply (stop reason `spend_cap`). Benchmark trials already
   disclosed a cap of $15; nothing enforced it.
+- **A checker for the recovery study** (`taste/agents/checker.py`,
+  `--ak agent=checker --ak services=none`): a reviewer, hosted like
+  mini-swe-agent, that decides whether a coding agent's submission does what
+  the task asks from evidence it gathers in a fresh copy of the agent's final
+  files: the change, the repository's tests, tests of its own, what the task
+  names. It never uses hidden tests, graders or reference solutions: its
+  prompt forbids them, and a command that names their places (`/tests`,
+  `/solution`, `/logs/verifier` and others) or a benchmark's published
+  sources is refused before it runs. It ends with one JSON verdict (for
+  `not_done`, the unmet requirement and the check that shows it, with no
+  solution code) within its own limits of steps, dollars and time;
+  `feedback` renders the verdict for the coding agent with its evidence, or
+  bare. Checked against a real container by `scripts/check_checker_tools.py`.
+- **Where to rewind a failed run, from its record alone**
+  (`taste/agents/trajectory_reader.py`): a model, through a callable the
+  caller supplies, names the first step where the agent went wrong, from
+  each step's command and the ends of its output, the agent's final message
+  and the checker's findings; and two rules need no model: the last step
+  after which the visible tests passed, and the step before the last large
+  edit.
 - On the Azure route, a request that could not be connected is sent again,
   as a rate-limit refusal already was: nothing was sent, so nothing was
   billed. A connection has 30 seconds to open.

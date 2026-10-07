@@ -72,8 +72,11 @@ class Host(Protocol):
 
 
 # Agents that can be hosted, by the name a trial or policy uses. Loaded only
-# when a worker runs one, so importing this package imports none of them.
-HOSTED_AGENTS = {"mini-swe-agent": ("taste.agents.mini_swe_agent", "MiniSweAgent")}
+# when a worker runs one, so importing this package imports none of them. The
+# checker is the recovery study's reviewer, written here and hosted the same
+# way; it is run alone (services none) on a copy of an agent's final files.
+HOSTED_AGENTS = {"mini-swe-agent": ("taste.agents.mini_swe_agent", "MiniSweAgent"),
+                 "checker": ("taste.agents.checker", "Checker")}
 
 
 def hosted_agent(name: str, *, effort: str):
