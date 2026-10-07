@@ -110,6 +110,17 @@ def _inside(path, roots):
     return any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
 
 
+def _holds_mount(path, mounts):
+    """A mount, or a directory with a mount under it: ``rm -rf`` cannot take it whole.
+
+    A harness mounts directories into a task's container (Harbor mounts
+    /logs/agent, /logs/artifacts and /logs/verifier, so /logs itself is added
+    to the image). Such a directory is left in place; what was added inside it
+    beside the mounts is removed path by path.
+    """
+    return any(mount == path or mount.startswith(path.rstrip("/") + "/") for mount in mounts)
+
+
 def _under_added(path, added):
     parent = posixpath.dirname(path)
     while parent not in ("", "/"):
@@ -367,7 +378,8 @@ def restore(backend, wire, manifest, directory, *, any_container=False) -> Resto
     target = dict(manifest.changes)
     parents = {posixpath.dirname(path) for path in current} | {posixpath.dirname(path) for path in target}
     added_now = {path for path, kind in current.items() if kind == "added"}
-    removed = sorted(path for path in added_now if not _under_added(path, added_now))
+    removable = {path for path in added_now if not _holds_mount(path, mounts)}
+    removed = sorted(path for path in removable if not _under_added(path, removable))
     from_image, deleted_roots = [], set()
     for path in sorted(current):
         kind = current[path]

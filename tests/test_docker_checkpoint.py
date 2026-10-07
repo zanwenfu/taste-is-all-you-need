@@ -134,6 +134,8 @@ class Filesystem:
 
     def __init__(self, image):
         self.image, self.files = dict(image), dict(image)
+        self.mounts = set()  # mount points: rm -rf removes around them and fails
+        self.removed_ok = True
 
     def changes(self):
         entries = {}
@@ -174,8 +176,13 @@ class Filesystem:
                 self.files[path] = None if member.isdir() else archive.extractfile(member).read()
 
     def remove(self, paths):
+        self.removed_ok = True
         for path in paths:
             for name in [item for item in self.files if item == path or item.startswith(path + "/")]:
+                if any(mount == name or mount.startswith(name + "/") or name.startswith(mount + "/")
+                       for mount in self.mounts):
+                    self.removed_ok = False  # "Device or resource busy"
+                    continue
                 del self.files[name]
 
 
@@ -236,7 +243,8 @@ def restoring(daemon, filesystem, mounts=()):
             filesystem.remove(pending["cmd"][3:])
             send(handler, 200)
         elif path == f"/exec/{EXEC_RM}/json":
-            daemon.reply(handler, {"ID": EXEC_RM, "ContainerID": CONTAINER, "Running": False, "ExitCode": 0})
+            daemon.reply(handler, {"ID": EXEC_RM, "ContainerID": CONTAINER, "Running": False,
+                                   "ExitCode": 0 if filesystem.removed_ok else 1})
         else:
             return False
         return True
@@ -332,6 +340,25 @@ def test_a_restore_returns_the_container_to_its_checkpoint(raw_daemon, tmp_path)
     assert receipt.deleted == ("/etc/hosts.allow",)
     # The image's originals came from a helper container, created and then removed.
     assert raw_daemon.helpers == ["created", "removed"]
+
+
+def test_a_restore_leaves_a_harness_mount_and_its_directory_in_place(raw_daemon, tmp_path):
+    """Found under Harbor: its mounts under an added /logs made rm -rf /logs fail."""
+    filesystem = Filesystem(IMAGE)
+    mounts = ("/logs/agent", "/logs/verifier")
+    filesystem.mounts = set(mounts)
+    filesystem.files.update({"/logs": None, "/logs/agent": None, "/logs/verifier": None})
+    restoring(raw_daemon, filesystem, mounts=mounts)
+    filesystem.files.update({"/app/util.py": b"U = 1\n"})
+    at_checkpoint = dict(filesystem.files)
+    executor = backend(raw_daemon)
+    manifest = executor.checkpoint(tmp_path / "checkpoints")
+    # Later work: a build tree, and a file beside the mounts under /logs.
+    filesystem.files.update({"/app/build": None, "/app/build/out.o": b"obj", "/logs/extra.txt": b"x"})
+    receipt = executor.restore(manifest, tmp_path / "checkpoints")
+    assert filesystem.files == at_checkpoint
+    assert receipt.exact and "/logs" not in receipt.removed
+    assert set(receipt.removed) == {"/app/build", "/app/util.py", "/logs/extra.txt"}
 
 
 def test_a_container_that_changed_nothing_is_checkpointed_and_restored_to(raw_daemon, tmp_path):
