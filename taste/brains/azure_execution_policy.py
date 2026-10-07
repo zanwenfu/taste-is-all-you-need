@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, fields, replace
 
 from taste.agents import HOSTED_AGENTS
 from taste.brains.azure_worker_policy import AZURE_WORKER_POLICY_SCHEMA, AzureWorkerPolicy
+from taste.brains.branch_replay import BranchPolicy
 from taste.brains.records import ArtifactSpec
 from taste.brains.responses_session import ResponsesBinding
 from taste.brains.single_run import FIXED_PLAN_MODEL
@@ -31,7 +32,7 @@ POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
                      "planner_effort": "", "request_seconds": None, "planner_model": AZURE_PLANNER_MODEL,
-                     "worker_agent": "", "services": "all", "rollback": False}
+                     "worker_agent": "", "services": "all", "rollback": False, "branch": None}
 SERVICES = ("all", "none")
 
 
@@ -83,6 +84,9 @@ class AzureExecutionPolicy:
     # The coordinator may return the task's files to a checkpoint taken before
     # the first worker or after a run (taste.brains.environment_records).
     rollback: bool = False
+    # The agent run alone continues an earlier run of it from step k
+    # (taste.brains.branch_replay): the replay script, k, and what changes.
+    branch: BranchPolicy | None = None
 
     def __post_init__(self):
         if self.terminal is not None and (
@@ -103,6 +107,11 @@ class AzureExecutionPolicy:
             raise ValueError("rollback must be true or false")
         if self.rollback and (self.terminal is None or self.services != "all"):
             raise ValueError("rollback needs a task terminal and a coordinator that plans")
+        if isinstance(self.branch, Mapping):
+            object.__setattr__(self, "branch", BranchPolicy.from_dict(self.branch))
+        if self.branch is not None and (not isinstance(self.branch, BranchPolicy)
+                                        or self.services != "none" or self.terminal is None):
+            raise ValueError("a branch continues a hosted agent run alone, in the task's terminal")
         if (self.worker_model == self.planner_model) != (self.worker_deployment == self.planner_deployment):
             raise ValueError("one served model must use exactly one deployment")
         if self.worker_effort not in WORKER_EFFORTS:
@@ -152,6 +161,8 @@ class AzureExecutionPolicy:
     def to_dict(self):
         value = asdict(self)
         value.pop("terminal")
+        if self.branch is not None:
+            value["branch"] = self.branch.to_dict()
         # Written only when they differ from the original fixed choices, so
         # earlier policies keep their exact wire form and digests.
         for name, original in _ORIGINAL_CHOICES.items():
@@ -211,6 +222,7 @@ class AzureExecutionPolicy:
             **({} if self.request_seconds is None else {"request_seconds": self.request_seconds}),
             **({"worker_agent": self.worker_agent} if self.worker_agent else {}),
             **({"services": self.services} if self.services != "all" else {}),
+            **({"branch": self.branch.to_dict()} if self.branch is not None else {}),
         }
 
     def configure_prompt(self, payload):

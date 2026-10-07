@@ -431,7 +431,7 @@ class DockerTerminalBackend:
             with self._lock:
                 self._active = None
 
-    def restore(self, manifest, directory):
+    def restore(self, manifest, directory, *, any_container=False):
         """Return the task's files to a checkpoint, between commands. See ``docker_checkpoint``."""
         from taste.brains.docker_checkpoint import restore
 
@@ -441,7 +441,7 @@ class DockerTerminalBackend:
                 raise TerminalFenced("a checkpoint is restored only between commands")
             self._active, self._interrupted = wire, False
         try:
-            return restore(self, wire, manifest, directory)
+            return restore(self, wire, manifest, directory, any_container=any_container)
         finally:
             wire.cancel()
             with self._lock:
