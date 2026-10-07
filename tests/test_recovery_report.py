@@ -105,6 +105,9 @@ def test_recoveries_are_compared_paired_by_run_with_bootstrap_permutation_and_ho
     assert solved["bootstrap_95"] == [1.0, 1.0] and solved["other_better"] == 6
     [cost] = found["comparisons"]["usd"]
     assert cost["mean_difference"] == pytest.approx(-0.2) and cost["other_better"] == 6
+    # What the budget was charged (the agent's) is compared too, and the checker's is shown beside it.
+    [charged] = found["comparisons"]["agent_usd"]
+    assert charged["mean_difference"] == pytest.approx(-0.2) and found["arms"]["continue"]["check_usd_per_episode"] == 0.0
     registered = report.recovery_section(summary, [("retry", "continue"), ("continue", "retry")], 500,
                                          random.Random(0))
     assert [item["holm_p"] for item in registered["comparisons"]["solved"]] == pytest.approx([2 * 2 / 64] * 2)

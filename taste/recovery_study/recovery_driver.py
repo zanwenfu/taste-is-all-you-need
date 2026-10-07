@@ -36,12 +36,17 @@ passed to each trial through Taste's equal caps (``spend_cap_usd``,
 it; on ``not_done`` the next round continues from its submission
 (``branch_override=reject``) with the new feedback, until the checker says
 ``done``, the trial ends without submitting, or the budget cannot pay for
-another round. A plain retry stays plain: its next round is another fresh
-trial, told nothing (``retry_rounds=continue`` continues it with feedback
-instead). Spending adds up over the rounds, the checker's included. Time has
-one clock, Harbor's agent execution, for the budget (the calibration's median)
-and for every recovery and checker trial charged against it; a branch is
-charged without the time branching spent bringing its prefix back
+another round (a round needs a tenth of the budget left, ``min_round_share``).
+A plain retry stays plain: its next round is another fresh trial, told
+nothing (``retry_rounds=continue`` continues it with feedback instead).
+
+The budget is the agent's: its trials' dollars and time are charged to it,
+round after round. The checker's are added up beside it and reported, never
+charged: the same checker serves every recovery, and with a cheap agent model
+one check can cost more than a whole base run, which would leave no recovery a
+second round. Time has one clock, Harbor's agent execution, for the budget
+(the calibration's median) and for every recovery and checker trial; a branch
+is charged without the time branching spent bringing its prefix back
 (``prefix_seconds``), and both the raw and the charged seconds are kept.
 Every trial is graded by the hidden tests; the episode's outcome is its last
 trial's grade, and no grade decides anything.
@@ -95,7 +100,8 @@ DEFAULTS = {
     "repeats": 3,
     "check_attempts": 2,
     "prefix_allowance": 300.0,  # seconds a branch's deadline adds for bringing its prefix back
-    "min_round_usd": 0.01,
+    "min_round_usd": 0.0,       # dollars a round needs left, at least; and at least this share of the budget:
+    "min_round_share": 0.1,
     "min_round_seconds": 0.0,   # 0: the trial's reply reserve and plan time, and a minute of work
     "retry_rounds": "retry",    # rounds after a plain retry: fresh trials told nothing, or "continue" with feedback
 }
@@ -164,6 +170,8 @@ class RecoveryDriver(Driver):
             raise ValueError("unknown recoveries or rewind sources: " + ", ".join(sorted(unknown)))
         if settings["repeats"] < 1 or settings["check_attempts"] < 1:
             raise ValueError("repeats and check_attempts must be positive")
+        if not 0 <= settings["min_round_share"] < 1:
+            raise ValueError("min_round_share must be at least 0 and below 1")
 
     def use(self, oracle=None, reader=None):
         """The map's results (``MapDriver.summary``) and the trajectory reader's readings."""
@@ -359,13 +367,14 @@ class RecoveryDriver(Driver):
                 "seconds": total["agent_seconds"] + total["check_seconds"], "tokens": tokens, **total}
 
     def remaining(self, run, episode):
+        """What the budget has left for the agent: the checker's spending is kept beside it, not charged."""
         spent = self.spent(episode)
-        return run["budget"]["usd"] - spent["usd"], run["budget"]["seconds"] - spent["seconds"]
+        return run["budget"]["usd"] - spent["agent_usd"], run["budget"]["seconds"] - spent["agent_seconds"]
 
     def _room(self, run, episode, settings):
         usd, seconds = self.remaining(run, episode)
-        return (usd > self.settings["min_round_usd"]
-                and seconds >= round_seconds(settings, self.settings["min_round_seconds"]))
+        least = max(self.settings["min_round_usd"], self.settings["min_round_share"] * run["budget"]["usd"])
+        return usd > least and seconds >= round_seconds(settings, self.settings["min_round_seconds"])
 
     def _advance_episode(self, run_id, run, name, arm, index, episode):
         while episode["rounds"] and not episode["end"]:

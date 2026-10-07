@@ -60,7 +60,9 @@ _SPEC.loader.exec_module(_study)
 VIEWS = ("retry", "retry_feedback", "rewind_oracle", "rewind_reader", "rewind_rules", "continue", "continue_bare")
 # A deployed harness cannot rerun to find r*: the selector chooses among the others.
 SELECTABLE = ("retry", "retry_feedback", "rewind_reader", "rewind_rules", "continue", "continue_bare")
-MEASURES = ("solved", "usd", "tokens", "seconds", "rounds")
+# usd and seconds are everything an episode spent, the checker's included;
+# agent_usd and agent_seconds are what its budget was charged (the agent's).
+MEASURES = ("solved", "usd", "agent_usd", "tokens", "seconds", "agent_seconds", "rounds")
 METHODS = ("reader", "visible_tests", "before_large_edit", "start", "rules", "oracle_highest_v", "oracle_latest")
 FEATURES = ("run_length", "checker_confidence", "visible_tests_passed")
 
@@ -174,10 +176,9 @@ def views(run):
 
 def per_run(episodes):
     def mean(key):
-        return statistics.fmean(float(episode[key] or 0) for episode in episodes)
+        return statistics.fmean(float(episode.get(key) or 0) for episode in episodes)
     return {"solved": statistics.fmean(1.0 if episode["solved"] else 0.0 for episode in episodes),
-            "usd": mean("usd"), "tokens": mean("tokens"), "seconds": mean("seconds"), "rounds": mean("rounds"),
-            "episodes": len(episodes)}
+            **{key: mean(key) for key in MEASURES if key != "solved"}, "episodes": len(episodes)}
 
 
 def recovery_table(summary):
@@ -220,6 +221,9 @@ def recovery_section(summary, comparisons, resamples, rng):
                       "usd_per_episode": round(statistics.fmean(e["usd"] for e in episodes), 6) if episodes else None,
                       "usd_per_solved": round(math.fsum(e["usd"] for e in episodes) / solved, 6) if solved else None,
                       "seconds_per_episode": round(statistics.fmean(e["seconds"] for e in episodes), 1) if episodes else None,
+                      **{f"{key}_per_episode": round(statistics.fmean(float(e.get(key) or 0) for e in episodes), 6)
+                         if episodes else None
+                         for key in ("agent_usd", "check_usd", "agent_seconds", "check_seconds")},
                       "tokens_per_episode": round(statistics.fmean(e["tokens"] for e in episodes), 1) if episodes else None,
                       "rounds_per_episode": round(statistics.fmean(e["rounds"] for e in episodes), 3) if episodes else None,
                       "ends": dict(sorted(Counter(e["end"] for e in episodes).items()))}
@@ -371,14 +375,18 @@ def markdown(result):
                   f"On the recovery trials it checked, its verdict against the hidden tests' grade: "
                   f"{json.dumps(checker['rounds'])}.", "",
                   "## Recoveries, paired by failed run", "",
-                  "| Recovery | Runs | Episodes | Solved share | Bootstrap 95% | $/episode | $/solved | s/episode | "
-                  "Tokens/episode | Rounds | Ends |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                  "Dollars and seconds are everything an episode spent; its budget was charged only the "
+                  "agent's (agent $, agent s), and the checker's are beside them.", "",
+                  "| Recovery | Runs | Episodes | Solved share | Bootstrap 95% | $/episode | agent $ | checker $ | "
+                  "$/solved | s/episode | agent s | Tokens/episode | Rounds | Ends |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         for view, arm in result["recoveries"]["arms"].items():
             low, high = arm["solved_share_bootstrap_95"]
             lines.append(f"| {view} | {arm['runs']} | {arm['episodes']} | {_f(arm['solved_share'])} | "
-                         f"[{_f(low)}, {_f(high)}] | {_f(arm['usd_per_episode'], 4)} | {_f(arm['usd_per_solved'], 4)} | "
-                         f"{_f(arm['seconds_per_episode'], 0)} | {_f(arm['tokens_per_episode'], 0)} | "
+                         f"[{_f(low)}, {_f(high)}] | {_f(arm['usd_per_episode'], 4)} | "
+                         f"{_f(arm['agent_usd_per_episode'], 4)} | {_f(arm['check_usd_per_episode'], 4)} | "
+                         f"{_f(arm['usd_per_solved'], 4)} | {_f(arm['seconds_per_episode'], 0)} | "
+                         f"{_f(arm['agent_seconds_per_episode'], 0)} | {_f(arm['tokens_per_episode'], 0)} | "
                          f"{_f(arm['rounds_per_episode'], 2)} | {json.dumps(arm['ends'])} |")
         for measure, items in result["recoveries"]["comparisons"].items():
             lines += ["", f"{measure}: other minus base, over the runs both have; Holm over these comparisons.", "",

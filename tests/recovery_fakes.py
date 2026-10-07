@@ -198,8 +198,8 @@ def branches(success, *, state=None, unfaithful_from=None):
 
 
 def recoveries(verdict=lambda spec: "not_done", reward=lambda spec: 0.0, status=lambda spec: "Submitted",
-               faithful=lambda spec: True, prefix=None):
-    """Recovery outcomes. A checker trial hands back ``verdict(spec)`` and costs $0.05 and 50 s; a trial
+               faithful=lambda spec: True, prefix=None, check_usd=0.05):
+    """Recovery outcomes. A checker trial hands back ``verdict(spec)`` and costs ``check_usd`` ($0.05) and 50 s; a trial
     that saves a final state costs nothing and lists the changed paths; an agent trial submits
     (``status``), costs $0.20 and 150 s and is graded ``reward``. With ``prefix``, a branch trial and a
     checker trial record that many of their seconds as bringing their prefix back
@@ -208,7 +208,7 @@ def recoveries(verdict=lambda spec: "not_done", reward=lambda spec: 0.0, status=
 
     def outcome(spec, task, settings, harbor):
         if settings.get("agent") == "checker":
-            return {"reward": 1.0, "handed_back": submission(verdict(spec)), "cost": 0.05, "seconds": 50.0,
+            return {"reward": 1.0, "handed_back": submission(verdict(spec)), "cost": check_usd, "seconds": 50.0,
                     "branch": {"faithful": faithful(spec), **_prefix(prefix.get("checker"))}}
         if settings.get("branch_live") == "off":
             return {"reward": 0.0, "cost": 0.0, "seconds": 30.0,

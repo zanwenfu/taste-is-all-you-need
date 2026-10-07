@@ -123,8 +123,9 @@ def test_rounds_continue_until_the_budget_cannot_pay_for_another_and_spending_ad
     for arm in ("retry", "continue"):
         for episode in summary["arms"][arm]["episodes"]:
             assert (episode["end"], episode["rounds"]) == ("budget", 3)
-            # Three trials at $0.20 and 150 s, two checks at $0.05 and 50 s; rebuilding a
-            # final state for a check is not charged.
+            # Three trials at $0.20 and 150 s leave 150 s of the agent's 600, less than a round
+            # needs; two checks at $0.05 and 50 s are kept beside the budget, not charged to it.
+            # Rebuilding a final state for a check is not counted at all.
             assert episode["usd"] == pytest.approx(0.7) and episode["seconds"] == pytest.approx(550.0)
             assert episode["agent_usd"] == pytest.approx(0.6) and episode["check_usd"] == pytest.approx(0.1)
             # No trial recorded a prefix, so what is charged is what Harbor measured.
@@ -132,11 +133,12 @@ def test_rounds_continue_until_the_budget_cannot_pay_for_another_and_spending_ad
             assert [item["verdict"] for item in episode["verdicts"]] == ["not_done", "not_done"]
             assert episode["tokens"] == 3 * 5 * 1100
     onward, again = rounds_of(driver, "continue"), rounds_of(driver, "retry")
-    # Rounds two and three get what is left, plus the handoff, and for a branch the prefix's allowance.
+    # Rounds two and three get what the agent has left, plus the handoff, and for a branch the
+    # prefix's allowance.
     assert sorted((s["spend_cap_usd"], s["agent_timeout_sec"]) for s in onward) == (
-        [("0.2", "650")] * 2 + [("0.45", "850")] * 2)
+        [("0.3", "750")] * 2 + [("0.5", "900")] * 2)
     assert sorted((s["spend_cap_usd"], s["agent_timeout_sec"]) for s in again) == (
-        [("0.2", "350")] * 2 + [("0.45", "550")] * 2)
+        [("0.3", "450")] * 2 + [("0.5", "600")] * 2)
     saved = {spec.name for spec in specs_of(driver, "final_state")}
     assert all(s["branch_override"] == "reject" and s["branch_mode"] == "restore" and s["branch_checkpoint"] in saved
                for s in onward)
@@ -153,15 +155,28 @@ def test_a_branch_is_charged_its_agent_time_less_its_prefix_and_both_are_kept(tm
     harbor = FakeHarbor(trials, recoveries(prefix={"agent": 40.0, "checker": 10.0}))
     driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, harbor)
     for episode in driver.summary()[run_id]["arms"]["continue"]["episodes"]:
-        # Three branches of 150 s with 40 s of prefix each, two checks of 50 s with 10 s each: the
-        # dollars run out first, after the third round.
-        assert (episode["end"], episode["rounds"], episode["usd"]) == ("budget", 3, pytest.approx(0.7))
-        assert episode["seconds"] == pytest.approx(410.0) and episode["raw_seconds"] == pytest.approx(550.0)
-        assert episode["prefix_seconds"] == pytest.approx(140.0)
-        assert (episode["agent_seconds"], episode["check_seconds"]) == (pytest.approx(330.0), pytest.approx(80.0))
-    # The next round's deadline is what is left by the charged time, plus the handoff and the allowance.
+        # Branches of 150 s with 40 s of prefix each are charged 110 s: after three, the agent
+        # still has $0.10 and 270 s, so a fourth round runs, and then the dollars are spent.
+        # Three checks of 50 s with 10 s of prefix each are kept beside the budget.
+        assert (episode["end"], episode["rounds"], episode["usd"]) == ("budget", 4, pytest.approx(0.95))
+        assert episode["seconds"] == pytest.approx(560.0) and episode["raw_seconds"] == pytest.approx(750.0)
+        assert episode["prefix_seconds"] == pytest.approx(190.0)
+        assert (episode["agent_seconds"], episode["check_seconds"]) == (pytest.approx(440.0), pytest.approx(120.0))
+    # The next round's deadline is what the agent's charged time left, plus the handoff and the allowance.
     assert sorted((s["spend_cap_usd"], s["agent_timeout_sec"]) for s in rounds_of(driver, "continue")) == (
-        [("0.2", "750")] * 2 + [("0.45", "900")] * 2)
+        [("0.1", "720")] * 2 + [("0.3", "830")] * 2 + [("0.5", "940")] * 2)
+
+
+def test_a_check_that_costs_more_than_a_base_run_still_leaves_the_agent_its_rounds(tmp_path):
+    # A cheap agent model: a whole base run costs less than one check by a strong checker.
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue"])
+    harbor = FakeHarbor(trials, recoveries(check_usd=1.5))
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, harbor)
+    for episode in driver.summary()[run_id]["arms"]["continue"]["episodes"]:
+        assert (episode["end"], episode["rounds"]) == ("budget", 3)
+        assert episode["agent_usd"] == pytest.approx(0.6) and episode["check_usd"] == pytest.approx(3.0)
+    # A round starts only with a tenth of the budget left (or --min-round-usd, if more).
+    assert recovery_driver.DEFAULTS["min_round_share"] == 0.1 and recovery_driver.DEFAULTS["min_round_usd"] == 0.0
 
 
 def test_the_checkers_done_ends_an_episode_whose_last_trial_is_its_outcome(tmp_path):
