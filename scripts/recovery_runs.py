@@ -20,7 +20,8 @@ median_agent_seconds in the calibration report (``scripts/calibration_report.py
 --json``), which also says which tasks are kept; without one, the medians of
 the --calibration jobs' runs. After each round a checker trial checks again
 and, until it accepts or the budget is spent, the next round continues from
-the submission.
+the submission with the new feedback; a plain retry's next round is another
+fresh trial told nothing, unless --retry-rounds continue.
 
 The reader file is JSON: {"<run>": <reading>} or a list of readings with a
 "run", a reading being ``read_trajectory``'s {"step", "reason", "confidence"};
@@ -40,7 +41,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from taste.recovery_study import state
-from taste.recovery_study.driver import finish, pairs
+from taste.recovery_study.driver import finish, pairs, progress
 from taste.recovery_study.map_driver import MapDriver
 from taste.recovery_study.recovery_driver import RECOVERIES, SOURCES, RecoveryDriver, readings
 
@@ -112,8 +113,7 @@ def main(argv=None):
     if arguments.json:
         arguments.json.write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")
     print(table(summary), end="")
-    print(f"\n{len(driver.new)} new jobs" + (f", written to {arguments.launcher}" if arguments.launcher else "")
-          + f"; {sum(1 for job in driver.jobs.values() if not job['complete'])} not finished.")
+    print("\n" + progress(driver, arguments.launcher))
     if not arguments.launcher:
         for spec in driver.new:
             print(spec.shell())

@@ -61,6 +61,12 @@ def specs_of(driver, purpose):
     return [JobSpec.from_dict(job["spec"]) for job in driver.jobs.values() if job["purpose"] == purpose]
 
 
+def rounds_of(driver, arm):
+    """The settings of an arm's later rounds."""
+    return [JobSpec.from_dict(job["spec"]).settings() for job in driver.jobs.values()
+            if job["purpose"] == "round" and job["arm"] == arm]
+
+
 def test_the_checker_checks_a_saved_copy_of_the_final_state_then_each_recovery_starts(tmp_path):
     jobs_dir, trials, given, run_id = study(
         tmp_path, recoveries=["retry", "retry_feedback", "rewind", "continue", "continue_bare"])
@@ -123,16 +129,20 @@ def test_rounds_continue_until_the_budget_cannot_pay_for_another_and_spending_ad
             assert episode["agent_usd"] == pytest.approx(0.6) and episode["check_usd"] == pytest.approx(0.1)
             assert [item["verdict"] for item in episode["verdicts"]] == ["not_done", "not_done"]
             assert episode["tokens"] == 3 * 5 * 1100
-    rounds = [spec.settings() for spec in specs_of(driver, "round")]
-    caps = sorted((s["spend_cap_usd"], s["agent_timeout_sec"]) for s in rounds)
-    # Rounds two and three: what is left, plus the handoff and the prefix's allowance.
-    assert caps == [("0.2", "650")] * 4 + [("0.45", "850")] * 4
+    onward, again = rounds_of(driver, "continue"), rounds_of(driver, "retry")
+    # Rounds two and three get what is left, plus the handoff, and for a branch the prefix's allowance.
+    assert sorted((s["spend_cap_usd"], s["agent_timeout_sec"]) for s in onward) == (
+        [("0.2", "650")] * 2 + [("0.45", "850")] * 2)
+    assert sorted((s["spend_cap_usd"], s["agent_timeout_sec"]) for s in again) == (
+        [("0.2", "350")] * 2 + [("0.45", "550")] * 2)
     saved = {spec.name for spec in specs_of(driver, "final_state")}
     assert all(s["branch_override"] == "reject" and s["branch_mode"] == "restore" and s["branch_checkpoint"] in saved
-               for s in rounds)
-    assert all(Path(s["branch_note"]).read_text().startswith("Submission rejected by a reviewer:") for s in rounds)
+               for s in onward)
+    assert all(Path(s["branch_note"]).read_text().startswith("Submission rejected by a reviewer:") for s in onward)
     # Later rounds continue from the trial before, not from the base run.
-    assert all(s["branch"] != driver.runs[run_id]["script"] for s in rounds)
+    assert all(s["branch"] != driver.runs[run_id]["script"] for s in onward)
+    # A plain retry stays plain: each round is a fresh trial, told nothing.
+    assert all("branch" not in s and "task_suffix" not in s for s in again)
     assert summary["check_usd"] == pytest.approx(0.05)
 
 
@@ -210,11 +220,18 @@ def test_in_rebuild_mode_the_checker_trial_rebuilds_the_final_state_itself(tmp_p
     assert all(spec.settings()["branch_mode"] == "rebuild" for spec in specs_of(driver, "first") + specs_of(driver, "round"))
 
 
-def test_plain_retry_can_keep_retrying_without_feedback(tmp_path):
-    jobs_dir, trials, given, _ = study(tmp_path, recoveries=["retry"], retry_rounds="retry")
+def test_plain_retry_is_told_nothing_in_later_rounds_unless_asked_to_continue(tmp_path):
+    jobs_dir, trials, given, _ = study(tmp_path, recoveries=["retry"])
     driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, recoveries()))
-    rounds = [spec.settings() for spec in specs_of(driver, "round")]
+    assert driver.settings["retry_rounds"] == "retry"
+    rounds = rounds_of(driver, "retry")
     assert rounds and all("branch" not in s and "task_suffix" not in s for s in rounds)
+    other = tmp_path / "other"
+    jobs_dir, trials, given, _ = study(other, recoveries=["retry"], retry_rounds="continue")
+    driver, _ = drive(other / "rec.json", given, jobs_dir, FakeHarbor(trials, recoveries()))
+    rounds = rounds_of(driver, "retry")
+    assert rounds and all(s["branch_override"] == "reject" for s in rounds)
+    assert all(Path(s["branch_note"]).read_text() == "Submission rejected by a reviewer: " + FEEDBACK for s in rounds)
 
 
 def test_budgets_and_kept_tasks_come_from_the_calibration_report(tmp_path):

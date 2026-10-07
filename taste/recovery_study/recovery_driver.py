@@ -36,7 +36,9 @@ passed to each trial through Taste's equal caps (``spend_cap_usd``,
 it; on ``not_done`` the next round continues from its submission
 (``branch_override=reject``) with the new feedback, until the checker says
 ``done``, the trial ends without submitting, or the budget cannot pay for
-another round. Spending adds up over the rounds, the checker's included. A
+another round. A plain retry stays plain: its next round is another fresh
+trial, told nothing (``retry_rounds=continue`` continues it with feedback
+instead). Spending adds up over the rounds, the checker's included. A
 branch is charged without the time spent bringing its prefix back when the
 trial records that time. Every trial is graded by the hidden tests; the
 episode's outcome is its last trial's grade, and no grade decides anything.
@@ -92,7 +94,7 @@ DEFAULTS = {
     "prefix_allowance": 300.0,  # seconds a branch's deadline adds for bringing its prefix back
     "min_round_usd": 0.01,
     "min_round_seconds": 0.0,   # 0: the trial's reply reserve and plan time, and a minute of work
-    "retry_rounds": "continue", # rounds after a plain retry: "continue" with feedback, or "retry" without
+    "retry_rounds": "retry",    # rounds after a plain retry: fresh trials told nothing, or "continue" with feedback
 }
 
 

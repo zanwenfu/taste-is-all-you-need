@@ -367,8 +367,9 @@ def markdown(result):
         lines.append("")
     if "recoveries" in result:
         checker = result["checker"]
-        lines += ["## The checker", "", f"Initial verdicts on failed runs: {json.dumps(checker['initial'])}. "
-                  f"In later rounds, verdict against the hidden tests: {json.dumps(checker['rounds'])}.", "",
+        lines += ["## The checker", "", f"Its verdicts on the failed base runs: {json.dumps(checker['initial'])}. "
+                  f"On the recovery trials it checked, its verdict against the hidden tests' grade: "
+                  f"{json.dumps(checker['rounds'])}.", "",
                   "## Recoveries, paired by failed run", "",
                   "| Recovery | Runs | Episodes | Solved share | Bootstrap 95% | $/episode | $/solved | s/episode | "
                   "Tokens/episode | Rounds | Ends |",

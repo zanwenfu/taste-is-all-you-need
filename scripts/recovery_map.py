@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from taste.recovery_study import state
-from taste.recovery_study.driver import finish, pairs
+from taste.recovery_study.driver import finish, pairs, progress
 from taste.recovery_study.map_driver import MapDriver
 
 OPTIONS = {"prefix": str, "model": str, "k": int, "extra": int, "mode": str, "checkpoint_attempts": int,
@@ -87,8 +87,7 @@ def main(argv=None):
     if arguments.json:
         arguments.json.write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")
     print(table(summary), end="")
-    print(f"\n{len(driver.new)} new jobs" + (f", written to {arguments.launcher}" if arguments.launcher else "")
-          + f"; {sum(1 for job in driver.jobs.values() if not job['complete'])} not finished.")
+    print("\n" + progress(driver, arguments.launcher))
     if not arguments.launcher:
         for spec in driver.new:
             print(spec.shell())

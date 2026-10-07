@@ -247,3 +247,10 @@ def finish(driver, launcher=None, max_active=4, title=""):
     if driver.new:
         return STARTED
     return RUNNING if any(not job["complete"] for job in driver.jobs.values()) else FINISHED
+
+
+def progress(driver, launcher=None):
+    """One line on how the study stands, for the command line."""
+    unfinished = sum(1 for job in driver.jobs.values() if not job["complete"])
+    where = f"; {launcher} starts those not started yet" if launcher and unfinished else ""
+    return f"{len(driver.new)} new jobs, {unfinished} not finished{where}."

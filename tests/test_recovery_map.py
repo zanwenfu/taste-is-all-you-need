@@ -177,8 +177,11 @@ def test_the_command_line_writes_a_launcher_and_says_how_the_study_stands(tmp_pa
                "--mode", "rebuild", "--prefix", "pilot", "--launcher", str(launcher), "--json", str(summary)]
     assert cli.main(options) == STARTED
     assert "start pilot-" in launcher.read_text() and "run-harbor.sh" in launcher.read_text()
+    first = [line for line in launcher.read_text().splitlines() if line.startswith("start ")]
+    # Nothing new while the job runs; the launcher still lists it, to start it if it never started.
     assert cli.main(["--state", str(state), "--launcher", str(launcher)]) == RUNNING
-    assert "\nstart " not in launcher.read_text()
+    assert [line for line in launcher.read_text().splitlines() if line.startswith("start ")] == first
+    assert len(first) == 1
     harbor = FakeHarbor(trials, branches(lambda k, i: k <= 11 and i % 2 == 0))
     for _ in range(10):
         stored = json.loads(state.read_text())
