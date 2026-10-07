@@ -231,8 +231,9 @@ class TasteAgent(BaseAgent):
         while they are read. A failure is recorded; the trial is graded all the same.
         """
         settings, saves = self.settings, []
-        if branch is not None and settings.branch_checkpoint and settings.branch_mode == "rebuild":
-            saves.append((summary["branch"], "checkpoint", lambda: branch_trial.save_checkpoint(
+        if (branch is not None and branch.replay and settings.branch_checkpoint
+                and settings.branch_mode == "rebuild" and settings.branch_live == "off"):
+            saves.append((summary["branch"], "saved_checkpoint", lambda: branch_trial.save_checkpoint(
                 backend, self._checkpoint(settings.branch_checkpoint), branch, settings.branch_step,
                 summary["branch"].get("account"), token)))
         if settings.final_checkpoint:
@@ -243,12 +244,11 @@ class TasteAgent(BaseAgent):
                 where[key] = await asyncio.to_thread(save)
             except Exception as failure:
                 where[key] = {"saved": False, "failed": type(failure).__name__}
-        if branch is not None and "changed_paths" not in summary["branch"]:
-            # What the files of step k hold as changed, for a checker of them.
-            saved = summary["branch"].get("checkpoint") or {}
-            if "changed_paths" in saved:
-                summary["branch"].update(changed_paths=saved["changed_paths"],
-                                         changed_paths_more=saved["changed_paths_more"])
+        saved = (summary.get("branch") or {}).get("saved_checkpoint") or {}
+        if saved.get("saved"):
+            # The checkpoint this trial saved, as it was named, and what it holds as changed.
+            summary["branch"].update(checkpoint=settings.branch_checkpoint, changed_paths=saved["changed_paths"],
+                                     changed_paths_more=saved["changed_paths_more"])
 
     def _checkpoint(self, value):
         return branch_trial.checkpoint_directory(value, self.checkpoints_root)
@@ -288,7 +288,8 @@ class TasteAgent(BaseAgent):
             # the time bringing back step k took.
             account = branch_trial.replay_outcome(nested)
             branch = summary["branch"]
-            branch.update(account=account, **branch_trial.outcome(
+            # checkpoint names the one this trial saves, if it does (after this record).
+            branch.update(account=account, checkpoint=None, **branch_trial.outcome(
                 account, restore_seconds=getattr(self, "_restore_seconds", 0.0)))
             restored = branch.get("restore") or {}
             if "changed_paths" in restored:

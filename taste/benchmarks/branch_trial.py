@@ -11,8 +11,9 @@ refuses the trial if the files do not then match it.
 The context is replayed when the trial's agent is the one the record is of
 (``branch_replay=auto``, the default; ``on`` or ``off`` to say so). A replayed
 agent is given the task its record was given, so a suffix an earlier trial
-added is carried over and never added twice. An agent given only the files,
-a checker say, starts fresh with the trial's own task text.
+added is carried over and never added twice, and ``branch_live`` says whether
+it goes on live after its prefix. An agent given only the files, a checker
+say, always runs, from the start, with the trial's own task text.
 
 Checkpoints are saved two ways, each only into a directory that holds none:
 
@@ -87,12 +88,8 @@ def load_inputs(settings):
     if replay and not same:
         raise ValueError(f"the record is of {recorded or 'an unnamed agent'}, not {settings.agent}: its "
                          "context cannot be replayed into another agent (branch_replay=off gives it the files)")
-    if replay and (settings.task_text or settings.task_suffix):
-        raise ValueError("a replayed agent is given its record's task: task_text and task_suffix are for "
-                         "fresh trials and for an agent given only the files")
-    if not replay and settings.branch_live == "off":
-        raise ValueError("an agent given only the files would be stopped before it starts: branch_live=off "
-                         "is for a replayed agent")
+    if not replay and settings.branch_mode == "rebuild" and settings.branch_checkpoint:
+        raise ValueError("an agent given only the files changes them: its trial saves no checkpoint of step k")
     check_branch(script, settings.branch_step, mode=settings.branch_mode, override=settings.branch_override,
                  note=note, replay=replay)
     return BranchInputs(raw, script, note, replay)
@@ -102,15 +99,16 @@ def branch_instruction(inputs, instruction):
     """The task text a branch trial gives its agent.
 
     A replayed agent gets its record's task: the benchmark's instruction, with
-    any suffix an earlier trial added after it. Anything else is not this
-    task's record and is refused. An agent given only the files gets the
-    trial's own instruction.
+    any suffix an earlier trial added after it. The trial's own text (with a
+    task_suffix, if it was given one) must be that task or its start, so the
+    suffix comes once; anything else is not this task's record and is refused.
+    An agent given only the files gets the trial's own text.
     """
     if inputs is None or not inputs.replay:
         return instruction
     recorded = inputs.script.task
     if recorded != instruction and not recorded.startswith(instruction.rstrip("\n") + "\n\n"):
-        raise ValueError("the replay script's task is not this task's instruction, with or without a suffix")
+        raise ValueError("the replay script's task is not this task's text, with or without its suffix")
     return recorded
 
 

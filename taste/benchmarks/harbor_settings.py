@@ -85,11 +85,13 @@ class TrialSettings:
     # output; "reject", at the submission step, shows that text with exit 1
     # instead. branch_tolerance rebuilt commands may diverge from the record.
     # The agent's context is replayed when the trial's agent is the one the
-    # record is of (branch_replay=auto; on or off to say so). Otherwise only
-    # the files of step k come back and the trial's own agent starts fresh
-    # with its own task text, as a checker given a run's final files does
-    # (step k the run's last, its files rebuilt or restored). A checkpoint is
-    # a directory path or an ID under the checkpoints root.
+    # record is of (branch_replay=auto; on or off to say so), and it is given
+    # its record's task (a task_suffix given again must be the record's own).
+    # Otherwise only the files of step k come back and the trial's own agent
+    # runs from the start with its own task text, whatever branch_live says,
+    # as a checker given a run's final files does (step k the run's last, its
+    # files rebuilt or restored). A checkpoint is a directory path or an ID
+    # under the checkpoints root.
     branch: str = ""
     branch_step: int = 0
     branch_mode: str = "rebuild"
@@ -218,12 +220,9 @@ class TrialSettings:
         if self.branch_override and self.branch_replay == "off":
             raise ValueError("an override changes what the replayed agent sees: it needs branch_replay=on")
         if self.branch_mode == "restore" and not self.branch_checkpoint:
-            raise ValueError("branch_mode=restore needs branch_checkpoint=<directory>")
+            raise ValueError("branch_mode=restore needs branch_checkpoint=<directory or ID>")
         if self.branch_mode == "rebuild" and self.branch_checkpoint and self.branch_live != "off":
             raise ValueError("a rebuild saves its checkpoint of step k only with branch_live=off")
-        if (self.task_text or self.task_suffix) and self.branch_replay == "on":
-            raise ValueError("a replayed agent is given its record's task; task_text and task_suffix are for "
-                             "fresh trials and for an agent given only the files")
 
     @property
     def models(self):
@@ -271,10 +270,12 @@ class TrialSettings:
         """The worker's branch: the replay script as the worker reads it (in the trial) and its digest.
 
         ``replay`` is the decision ``branch_trial.load_inputs`` made from the
-        record: whether the agent's context is replayed or only the files return.
+        record: whether the agent's context is replayed or only the files
+        return. branch_live is the replayed agent's: an agent given only the
+        files always runs.
         """
         return BranchPolicy(script=str(script), script_sha256=script_sha256, step=self.branch_step,
-                            mode=self.branch_mode, live=self.branch_live == "on",
+                            mode=self.branch_mode, live=self.branch_live == "on" or not replay,
                             override=self.branch_override, note=note, tolerance=self.branch_tolerance,
                             replay=replay)
 

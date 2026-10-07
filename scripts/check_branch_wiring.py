@@ -169,10 +169,12 @@ async def check(image, token, directory):
         terminals.append(divergent)
         refused = await rebuild(ReplayScript.from_dict(changed), STEP, divergent.execute)
 
-        # A checker's trial: another agent, so only the files come back, the
-        # run's final files restored for its script's last step.
+        # A checker's trial, as the recovery driver asks for one: another
+        # agent, so only the files come back (branch_live is the replayed
+        # agent's), the run's final files restored for its script's last step.
         checking = TrialSettings.from_options({**options, "agent": "checker", "branch_step": str(len(RUN)),
-                                               "branch_mode": "restore", "branch_checkpoint": str(directory / "final")})
+                                               "branch_mode": "restore", "branch_live": "off",
+                                               "branch_checkpoint": str(directory / "final")})
         checked = branch_trial.load_inputs(checking)
         checker = Terminal(container(image, token), token, directory, "checker")
         terminals.append(checker)

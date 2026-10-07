@@ -21,6 +21,7 @@ import pytest
 from taste.agents.trajectory_reader import steps_from_trajectory
 from taste.benchmarks.goal_trajectory import _hosted_calls
 from taste.benchmarks.replay_export import encode_script, export_script
+from taste.benchmarks.replay_export import main as export_main
 from taste.benchmarks.worker_trajectory import hosted_trajectory
 from taste.brains.azure_worker_entrypoint import execute_worker, run_directory
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
@@ -182,6 +183,11 @@ def test_the_command_line_finds_a_trials_records_from_harbors_trial(base, tmp_pa
         key: value for key, value in base.script.items() if key != "source"}
     summary = json.loads(capsys.readouterr().out)
     assert summary["steps"] == 3 and summary["rebuildable"] and summary["outputs_exact"] == 3
+    assert summary["sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
+    # The module's own command line, with the flags a driver's template may spell.
+    again = tmp_path / "again.json"
+    assert export_main(["--record", str(trial), "--out", str(again)]) == 0
+    assert again.read_bytes() == out.read_bytes()
     with pytest.raises(ValueError, match="worker runs"):
         cli.main([str(trial), "-o", str(out), "--run", "another-run"])
 

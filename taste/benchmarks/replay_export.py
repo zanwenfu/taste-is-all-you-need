@@ -238,15 +238,19 @@ def encode_script(script):
 def main(argv=None):
     """python3 -m taste.benchmarks.replay_export RECORD -o SCRIPT (scripts/replay_script.py says more)."""
     parser = argparse.ArgumentParser(description="Write the replay script of a finished trial's hosted agent")
-    parser.add_argument("record", type=Path, help="a trial's directory, Harbor's trial directory or a journal")
+    parser.add_argument("record", type=Path, nargs="?",
+                        help="a trial's directory, Harbor's trial directory or a journal (or --record)")
+    parser.add_argument("--record", type=Path, dest="named_record", help=argparse.SUPPRESS)
     parser.add_argument("-o", "--output", "--out", type=Path, required=True, help="where to write the script")
     parser.add_argument("--trials", default="/var/lib/taste-trials", help="Taste's trial directories")
     parser.add_argument("--run", help="the worker run's ID, when the trial holds more than one")
     parser.add_argument("--ledger", type=Path, help="the trial's terminal ledger, with a journal")
     parser.add_argument("--parent", type=Path, help="the script a branch trial branched, with a journal")
     arguments = parser.parse_args(argv)
-    journal, ledger, parent, trial = trial_files(arguments.record, trials_root=arguments.trials,
-                                                 run_id=arguments.run)
+    record = arguments.record or arguments.named_record
+    if record is None or (arguments.record and arguments.named_record):
+        parser.error("name one record")
+    journal, ledger, parent, trial = trial_files(record, trials_root=arguments.trials, run_id=arguments.run)
     script = export_script(journal, ledger=arguments.ledger or ledger, parent=arguments.parent or parent,
                            trial=trial)
     raw = encode_script(script)

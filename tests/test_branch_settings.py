@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,7 +21,9 @@ from taste.brains.docker_checkpoint import CheckpointManifest
 from taste.brains.worker_admission import EntrypointInputError
 from tests.test_azure_worker_policy import assignment
 from tests.test_branch_replay import BASE, OUTPUTS, TASK, Agent, Live, Recorder
+from tests.test_harbor_agent import harbor_agent as _harbor_agent
 
+harbor_agent = _harbor_agent
 ENDPOINT = "https://test-resource.openai.azure.com/openai/v1/"
 ALONE = {"model": "gpt-5.6-luna", "agent": "mini-swe-agent", "services": "none"}
 
@@ -97,7 +101,6 @@ def test_a_branch_policy_is_refused_when_it_cannot_be_served():
     ({"branch": "/s", "branch_replay": "maybe"}, "auto, on or off"),
     ({"branch": "/s", "branch_replay": "off", "branch_override": "reject", "branch_note": "/n"}, "branch_replay=on"),
     ({"branch_replay": "off"}, "needs branch="),
-    ({"branch": "/s", "branch_replay": "on", "task_text": "/t"}, "fresh trials"),
 ])
 def test_branch_settings_are_admitted_not_guessed(options, match):
     with pytest.raises(ValueError, match=match):
@@ -130,12 +133,16 @@ def test_the_record_decides_whether_the_context_is_replayed(tmp_path):
     assert branch_trial.disclosure(checker, files)["replay"] == "off"
     with pytest.raises(ValueError, match="cannot be replayed into another agent"):
         branch_trial.load_inputs(replace(checker, branch_replay="on", task_text=""))
-    with pytest.raises(ValueError, match="stopped before it starts"):
-        branch_trial.load_inputs(replace(checker, branch_live="off"))
     assert branch_trial.load_inputs(replace(same, branch_replay="off")).replay is False
-    # The recorded agent, replayed, is given its record's task: never a suffix on top of it.
-    with pytest.raises(ValueError, match="record's task"):
-        branch_trial.load_inputs(replace(same, task_suffix="/root/suffix.txt"))
+    # branch_live is the replayed agent's: an agent given only the files runs all the same.
+    quiet = replace(checker, branch_live="off")
+    assert branch_trial.load_inputs(quiet).replay is False
+    assert quiet.branch_policy("/t/branch-script.json", "b" * 64, replay=False).live is True
+    assert same.branch_policy("/t/branch-script.json", "b" * 64).live is True
+    assert replace(same, branch_live="off").branch_policy("/t/branch-script.json", "b" * 64).live is False
+    # Its files are changed by its own agent: its trial is no checkpoint of step k.
+    with pytest.raises(ValueError, match="saves no checkpoint"):
+        branch_trial.load_inputs(replace(quiet, branch_checkpoint="ckpt-1"))
 
 
 def test_a_replayed_branch_is_given_its_records_task_once(tmp_path):
@@ -145,7 +152,12 @@ def test_a_replayed_branch_is_given_its_records_task_once(tmp_path):
     assert branch_trial.branch_instruction(inputs, TASK) == TASK
     suffixed = replace(inputs, script=replace(inputs.script, task=TASK + "\n\nA previous attempt was rejected."))
     assert branch_trial.branch_instruction(suffixed, TASK + "\n") == TASK + "\n\nA previous attempt was rejected."
-    with pytest.raises(ValueError, match="not this task's instruction"):
+    # The same suffix given again (as a driver copies it from the trial it branches) comes once.
+    again = TASK + "\n\nA previous attempt was rejected."
+    assert branch_trial.branch_instruction(suffixed, again) == again
+    with pytest.raises(ValueError, match="not this task's text"):
+        branch_trial.branch_instruction(suffixed, TASK + "\n\nAnother reviewer said something else.")
+    with pytest.raises(ValueError, match="not this task's text"):
         branch_trial.branch_instruction(inputs, "Make the lexer tests pass.")
     files = replace(inputs, replay=False)
     assert branch_trial.branch_instruction(files, "Review the parser change.") == "Review the parser change."
@@ -314,6 +326,47 @@ def test_the_replay_outcome_is_read_from_the_settled_trajectory():
     nested = {"subagent_trajectories": [{"extra": {}}, {"extra": {"branch": {"faithful": True, "step": 2}}}]}
     assert branch_trial.replay_outcome(nested) == {"faithful": True, "step": 2}
     assert branch_trial.replay_outcome(None) is None
+
+
+def test_a_branch_trials_metadata_says_what_a_driver_reads(harbor_agent, tmp_path):
+    """agent_result.metadata.taste.branch: faithful, unfaithful_at, the checkpoint ID saved, its changed
+    paths and the seconds spent bringing step k back, beside the worker's whole account."""
+    path = _script(tmp_path)
+    (tmp_path / "logs").mkdir()
+    agent = harbor_agent.TasteAgent(tmp_path / "logs", model_name="azure/gpt-5.6-luna", agent="mini-swe-agent",
+                                    services="none", branch=str(path), branch_step="2", branch_live="off",
+                                    branch_checkpoint="ckpt-7", worker_python="/usr/bin/python3",
+                                    checkpoints_root=str(tmp_path / "checkpoints"))
+    inputs = branch_trial.load_inputs(agent.settings)
+    account = {"faithful": True, "unfaithful": None, "replayed_steps": 2, "went_live": False,
+               "rebuild": {"commands": 2, "divergent": 0, "faithful": True, "seconds": 12.5, "divergences": []}}
+    nested = {"schema_version": "ATIF-v1.7", "session_id": "goal", "agent": {"name": "taste", "version": "1"},
+              "steps": [{"step_id": 1, "source": "user", "message": TASK}], "extra": {},
+              "subagent_trajectories": [{"agent": {"name": "mini-swe-agent"}, "steps": [],
+                                         "extra": {"branch": account}}]}
+    trajectory = tmp_path / "trajectory.json"
+    trajectory.write_text(json.dumps(nested))
+    agent.owner = SimpleNamespace(audit_flags=(), outcome=None, trajectory_path=trajectory, root=tmp_path,
+                                  sealed=True)
+    summary = {"trial": "t0ken", "configuration": {}, "branch": branch_trial.disclosure(agent.settings, inputs)}
+    agent._record("goal", TASK, None, SimpleNamespace(metadata={"taste": summary}), started=0.0)
+    assert summary["branch"]["checkpoint"] is None
+    manifest = CheckpointManifest("c" * 64, "sha256:" + "d" * 64, "e" * 64 + ".tar", "e" * 64, 10,
+                                  (("/app/parser.py", "changed"),), ("/app/parser.py",), ("/app/old.py",),
+                                  (), (), 1.0)
+
+    class Backend:
+        def checkpoint(self, target):
+            (target / manifest.tar).write_bytes(b"tar")
+            return manifest
+
+    asyncio.run(agent._save_checkpoints(Backend(), inputs, summary, "t0ken"))
+    branch = summary["branch"]
+    assert (branch["faithful"], branch["unfaithful_at"], branch["prefix_seconds"]) == (True, None, 12.5)
+    assert branch["checkpoint"] == "ckpt-7" and branch["account"] == account
+    assert branch["changed_paths"] == ["/app/parser.py", "/app/old.py (deleted)"]
+    assert branch["saved_checkpoint"]["directory"] == str(tmp_path / "checkpoints" / "ckpt-7")
+    assert (tmp_path / "checkpoints" / "ckpt-7" / branch_trial.MANIFEST).is_file()
 
 
 def test_a_script_records_its_schema_and_submission():
