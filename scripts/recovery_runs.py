@@ -46,7 +46,7 @@ from taste.recovery_study.map_driver import MapDriver
 from taste.recovery_study.recovery_driver import RECOVERIES, SOURCES, RecoveryDriver, readings
 
 OPTIONS = {"prefix": str, "model": str, "mode": str, "calibration_report": str, "checker_model": str,
-           "checker_effort": str, "oracle": str, "repeats": int, "check_attempts": int, "prefix_allowance": float,
+           "checker_effort": str, "oracle": str, "repeats": int, "budget_runs": float, "check_attempts": int, "prefix_allowance": float,
            "min_round_usd": float, "min_round_share": float, "min_round_seconds": float, "retry_rounds": str, "jobs_dir": str,
            "trials_root": str, "work_dir": str, "tasks_dir": str, "run_harbor": str, "export_template": str,
            "concurrent": int, "min_steps": int, "large_edit_lines": int, "attempts_factor": int}

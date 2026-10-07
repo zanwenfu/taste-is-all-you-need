@@ -31,8 +31,9 @@ def study(tmp_path, **settings):
     jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
     [run_id] = base_jobs(jobs_dir, trials, [agent_steps(6, tests_pass_at=(3,))],
                          calibration=[(1.0, 0.5, 300.0), (0.0, 0.7, 600.0), (0.0, 0.9, 900.0)])
+    # One base run's budget, so the arithmetic below is in base runs.
     given = {"jobs_dir": str(jobs_dir), "trials_root": str(trials), "run_harbor": "/opt/taste/run-harbor.sh",
-             "repeats": 2, "rewind_sources": ["rules"], **settings}
+             "repeats": 2, "rewind_sources": ["rules"], "budget_runs": 1.0, **settings}
     return jobs_dir, trials, given, run_id
 
 
@@ -73,7 +74,8 @@ def test_the_checker_checks_a_saved_copy_of_the_final_state_then_each_recovery_s
     path, harbor = tmp_path / "rec.json", FakeHarbor(trials, recoveries())
     driver, [saved] = step(path, given, jobs_dir)
     run = driver.runs[run_id]
-    assert run["budget"] == {"usd": 0.7, "seconds": 600.0, "runs": 3, "source": "calibration runs"}
+    assert run["budget"] == {"usd": 0.7, "seconds": 600.0, "runs": 3, "base_runs": 1.0,
+                             "source": "calibration runs"}
     assert run["rules"]["rules"] == 3
     # First the final state is rebuilt from the run's record and saved, the agent not run on.
     assert saved.settings() == {"agent": "mini-swe-agent", "services": "none", "reply_reserve_seconds": "10",
@@ -278,11 +280,25 @@ def test_budgets_and_kept_tasks_come_from_the_calibration_report(tmp_path):
         run = driver.runs[run_id]
         assert run.get("skipped") == expected
         if kept:
-            assert run["budget"] == {"usd": 0.4, "seconds": 420.0, "runs": 2, "source": "calibration report"}
+            assert run["budget"] == {"usd": 0.4, "seconds": 420.0, "runs": 2, "base_runs": 1.0,
+                                     "source": "calibration report"}
     report.write_text(json.dumps({"per_task": []}))
     driver = RecoveryDriver.open(tmp_path / "rec-none.json", {**given, "calibration_report": str(report)})
     driver.add_sources([jobs_dir / "base"])
     assert driver.runs[run_id]["skipped"] == "the task is not in the calibration report"
+
+
+def test_by_default_a_recovery_has_two_base_runs_so_a_plain_retry_can_finish_one(tmp_path):
+    # At one median run, about half of fresh runs would be stopped by the time cap before they submit.
+    jobs_dir, _, given, run_id = study(tmp_path)
+    del given["budget_runs"]
+    driver = RecoveryDriver.open(tmp_path / "rec.json", given)
+    driver.add_sources([jobs_dir / "base"], [jobs_dir / "calibration"])
+    assert recovery_driver.DEFAULTS["budget_runs"] == 2.0
+    assert driver.runs[run_id]["budget"] == {"usd": 1.4, "seconds": 1200.0, "runs": 3, "base_runs": 2.0,
+                                             "source": "calibration runs"}
+    with pytest.raises(ValueError, match="budget_runs"):
+        RecoveryDriver.open(tmp_path / "bad.json", {**given, "budget_runs": 0.5})
 
 
 def test_settings_that_could_build_no_job_are_refused(tmp_path):

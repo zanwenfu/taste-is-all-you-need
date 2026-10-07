@@ -29,8 +29,9 @@ copy is made first by a trial that rebuilds the final state and saves it
 (for work outside a git repository), the checker restores it, and the next
 round continues from it. In ``rebuild`` mode the checker trial rebuilds it.
 
-Every recovery gets the same budget, one base run of the task: the median
-dollars and agent time of its calibration runs (``scripts/calibration_report.py``),
+Every recovery gets the same budget, ``budget_runs`` base runs of the task (two
+by default): the median dollars and agent time of its calibration runs
+(``scripts/calibration_report.py``), times that,
 passed to each trial through Taste's equal caps (``spend_cap_usd``,
 ``agent_timeout_sec``). After a recovery trial submits, a checker trial checks
 it; on ``not_done`` the next round continues from its submission
@@ -98,6 +99,9 @@ DEFAULTS = {
     "rewind_sources": list(SOURCES),
     "oracle": "highest_v",      # or "latest": which of the map's r* the oracle rewinds to
     "repeats": 3,
+    # A recovery's budget in base runs of its task (the median dollars and agent time, times this).
+    # Two: at one median run the time cap would stop about half of plain retries before they submit.
+    "budget_runs": 2.0,
     "check_attempts": 2,
     "prefix_allowance": 300.0,  # seconds a branch's deadline adds for bringing its prefix back
     "min_round_usd": 0.0,       # dollars a round needs left, at least; and at least this share of the budget:
@@ -172,6 +176,8 @@ class RecoveryDriver(Driver):
             raise ValueError("repeats and check_attempts must be positive")
         if not 0 <= settings["min_round_share"] < 1:
             raise ValueError("min_round_share must be at least 0 and below 1")
+        if not settings["budget_runs"] >= 1:
+            raise ValueError("budget_runs must be at least 1: a recovery can afford one base run")
 
     def use(self, oracle=None, reader=None):
         """The map's results (``MapDriver.summary``) and the trajectory reader's readings."""
@@ -199,7 +205,8 @@ class RecoveryDriver(Driver):
             run.update(budget=found, check={**new_check(), "reply": None}, sources={}, arms={})
 
     def _budget(self, run):
-        """One base run's dollars and agent time for the run's task, or why there is none."""
+        """``budget_runs`` base runs' dollars and agent time for the run's task, or why there is none."""
+        scale = float(self.settings["budget_runs"])
         if self.settings["calibration_report"]:
             task = self.calibration().get(run["task"])
             if task is None:
@@ -207,13 +214,14 @@ class RecoveryDriver(Driver):
             if not task["kept"]:
                 return "the calibration did not keep the task"
             if task["usd"] and task["seconds"]:
-                return {"usd": float(task["usd"]), "seconds": float(task["seconds"]), "runs": task["runs"],
-                        "source": "calibration report"}
+                return {"usd": round(scale * float(task["usd"]), 8), "seconds": round(scale * float(task["seconds"]), 3),
+                        "runs": task["runs"], "base_runs": scale, "source": "calibration report"}
         calibrated = self.fresh(run["task"], ("calibration",))
         found = records.budget(calibrated) or records.budget(self.fresh(run["task"], ("base",)))
         if found is None:
             return "no runs of the task give its budget"
-        return {**found, "source": "calibration runs" if calibrated else "base runs"}
+        return {**found, "usd": round(scale * found["usd"], 8), "seconds": round(scale * found["seconds"], 3),
+                "base_runs": scale, "source": "calibration runs" if calibrated else "base runs"}
 
     # Deciding --------------------------------------------------------------
 
