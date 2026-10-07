@@ -328,6 +328,9 @@ def before_last_large_edit(steps: Sequence[Step], *, min_lines: int = 20) -> int
 def steps_from_trajectory(trajectory: Mapping) -> list[Step]:
     """The steps of a hosted agent's run, from its ATIF record.
 
+    That record is the worker's ``trajectory.worker.json``, and a trial's
+    settled ``controller/trajectory.json`` holds it among its
+    ``subagent_trajectories``, under the agent's name (``mini-swe-agent``).
     One step per model reply the agent received, in order; a reply the run's
     end cut off (the agent never saw it) is not a step. A step's command is
     every command its reply ran, as the agent wrote them, and its output what

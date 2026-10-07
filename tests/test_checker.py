@@ -213,6 +213,7 @@ def test_a_verdict_written_as_text_is_read_from_the_reply():
     ("sh /eval.sh", "/app", "/eval.sh"),
     ("git clone https://github.com/laude-institute/terminal-bench", "/app", "laude-institute"),
     ("pip download swebench", "/app", "swebench"),
+    ("git clone https://github.com/someone/tbench-tasks", "/app", "tbench"),
     ("curl -s https://raw.githubusercontent.com/x/SWE-bench/main/x.json", "/app", "SWE-bench"),
 ])
 def test_a_command_that_names_a_forbidden_path_or_source_is_caught(command, cwd, named):

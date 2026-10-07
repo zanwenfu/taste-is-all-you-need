@@ -74,9 +74,10 @@ BARE_FEEDBACK = "A reviewer rejected the submission; keep working."
 # with /eval.sh. The others are the same things by other names.
 FORBIDDEN_PATHS = ("/tests", "/solution", "/solutions", "/oracle", "/grader", "/graders", "/grading",
                    "/logs/verifier", "/eval.sh")
-# Where benchmarks publish their tasks, tests and solutions.
-FORBIDDEN_WORDS = ("terminal-bench", "terminal_bench", "terminalbench", "swe-bench", "swe_bench", "swebench",
-                   "laude-institute", "harbor-framework")
+# Where benchmarks publish their tasks, tests and solutions; matched as whole
+# words, so "testbench" is not "tbench".
+FORBIDDEN_WORDS = ("terminal-bench", "terminal_bench", "terminalbench", "tbench", "t-bench", "swe-bench",
+                   "swe_bench", "swebench", "laude-institute", "harbor-framework")
 
 # What the model's verdict may hold. Evidence is for the coding agent to read,
 # so it is short; and the whole submission stays within the hosted worker's
@@ -126,7 +127,8 @@ How to check:
 1. See what changed: git status and git diff in a git repository; otherwise the changed paths if \
 you are given them, the files the task names, or those the agent says it changed.
 2. Run the repository's existing tests that cover the change.
-3. Write small tests of your own, from the task text alone, for what it asks, and run them.
+3. Write small tests of your own for what the task asks, taking the expected results from the task \
+text, never from the agent's code, and run them.
 4. Run what the task names (a command, a script, a program, an output file) and compare what \
 happens with what the task asks.
 
@@ -222,10 +224,11 @@ SUBMIT_TOOL = {
     },
 }
 TOOLS = (BASH_TOOL, SUBMIT_TOOL)
-# Everything that shapes what the model is told, so a change shows in a trial's record.
+# Everything that shapes what the model is told, and what its commands may
+# name, so that a change shows in a trial's record.
 PROMPTS_SHA256 = hashlib.sha256(json.dumps(
-    [SYSTEM_TEMPLATE, TASK_TEMPLATE, CHANGED_TEMPLATE, LAST_STEP, NO_ACTION, CUT_OFF, REFUSED, TOOLS],
-    sort_keys=True).encode()).hexdigest()
+    [SYSTEM_TEMPLATE, TASK_TEMPLATE, CHANGED_TEMPLATE, LAST_STEP, NO_ACTION, CUT_OFF, REFUSED, TOOLS,
+     FORBIDDEN_PATHS, FORBIDDEN_WORDS], sort_keys=True).encode()).hexdigest()
 
 
 def system_prompt(cwd: str, settings: CheckerSettings) -> str:
