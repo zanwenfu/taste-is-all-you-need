@@ -84,6 +84,9 @@ class TrialSettings:
     # what step k showed: "append" adds the text in branch_note after its
     # output; "reject", at the submission step, shows that text with exit 1
     # instead. branch_tolerance rebuilt commands may diverge from the record.
+    # branch_replay=off brings back only the files of step k: the trial's own
+    # agent starts fresh with its own task text, as a checker given a run's
+    # final files does (step k the run's last, its files rebuilt or restored).
     branch: str = ""
     branch_step: int = 0
     branch_mode: str = "rebuild"
@@ -92,10 +95,16 @@ class TrialSettings:
     branch_note: str = ""
     branch_override: str = ""
     branch_tolerance: int = 0
-    # For a fresh trial: the task's text replaced by this file's, and this
-    # file's text added after it (after a blank line).
+    branch_replay: str = "on"
+    # For a fresh trial (or one given only a run's files): the task's text
+    # replaced by this file's, and this file's text added after it (after a
+    # blank line).
     task_text: str = ""
     task_suffix: str = ""
+    # A directory where the container's files are saved when the trial ends,
+    # before its verifier runs: the run's final state, which a checker trial
+    # restores (branch_mode=restore, branch_step = the run's last step).
+    final_checkpoint: str = ""
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
     # little: 47 to 70 reasoning tokens on one small puzzle from low to high,
@@ -194,18 +203,23 @@ class TrialSettings:
             raise ValueError("branch_mode must be rebuild or restore")
         if self.branch_live not in ("on", "off"):
             raise ValueError("branch_live must be on or off")
+        if self.branch_replay not in ("on", "off"):
+            raise ValueError("branch_replay must be on or off")
         if self.branch_override not in ("", *OVERRIDES):
             raise ValueError("branch_override must be append or reject")
         if bool(self.branch_override) != bool(self.branch_note):
             raise ValueError("branch_override and branch_note go together")
         if self.branch_override and self.branch_live == "off":
             raise ValueError("an override changes what the agent sees next: it needs branch_live=on")
+        if self.branch_override and self.branch_replay == "off":
+            raise ValueError("an override changes what the replayed agent sees: it needs branch_replay=on")
         if self.branch_mode == "restore" and not self.branch_checkpoint:
             raise ValueError("branch_mode=restore needs branch_checkpoint=<directory>")
         if self.branch_mode == "rebuild" and self.branch_checkpoint and self.branch_live != "off":
             raise ValueError("a rebuild saves its checkpoint of step k only with branch_live=off")
-        if self.task_text or self.task_suffix:
-            raise ValueError("a branch replays the recorded task; task_text and task_suffix are for fresh trials")
+        if (self.task_text or self.task_suffix) and self.branch_replay == "on":
+            raise ValueError("a branch replays the recorded task; task_text and task_suffix are for fresh "
+                             "trials, or with branch_replay=off")
 
     @property
     def models(self):
@@ -253,7 +267,8 @@ class TrialSettings:
         """The worker's branch: the replay script as the worker reads it (in the trial) and its digest."""
         return BranchPolicy(script=str(script), script_sha256=script_sha256, step=self.branch_step,
                             mode=self.branch_mode, live=self.branch_live == "on",
-                            override=self.branch_override, note=note, tolerance=self.branch_tolerance)
+                            override=self.branch_override, note=note, tolerance=self.branch_tolerance,
+                            replay=self.branch_replay == "on")
 
     def policy(self, endpoint, deadline_unix, *, owner_token, container_id, workdir, branch=None):
         coordinator, planner, worker_name, worker = self.models
@@ -303,11 +318,13 @@ class TrialSettings:
                 **({"rollback": self.rollback} if self.rollback != "off" else {}),
                 **({"branch": {"script": self.branch, "step": self.branch_step, "mode": self.branch_mode,
                                "live": self.branch_live, "tolerance": self.branch_tolerance,
+                               **({"replay": "off"} if self.branch_replay == "off" else {}),
                                **({"checkpoint": self.branch_checkpoint} if self.branch_checkpoint else {}),
                                **({"override": self.branch_override, "note": self.branch_note}
                                   if self.branch_override else {})}} if self.branch else {}),
                 **({"task_text": self.task_text} if self.task_text else {}),
                 **({"task_suffix": self.task_suffix} if self.task_suffix else {}),
+                **({"final_checkpoint": self.final_checkpoint} if self.final_checkpoint else {}),
                 "coordinator_effort": self.planner_effort or "provider default",
                 "monitor_effort": "low",
                 "spend_cap_usd": self.spend_cap_usd, "admission_budgets_usd": {

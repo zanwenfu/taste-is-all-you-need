@@ -58,10 +58,11 @@ def test_the_worker_admits_its_branch_from_the_assignment():
     policy = AzureWorkerPolicy.from_assignment(assignment(**raw))
     assert policy.branch == fork(live=False) and not policy.supervised
     assert AzureWorkerPolicy.from_assignment(assignment(worker_agent="mini-swe-agent")).branch is None
+    without_replay = {key: value for key, value in raw["branch"].items() if key != "replay"}
     for damage in ({**raw, "services": "all"}, {"worker_agent": "mini-swe-agent", "branch": raw["branch"]},
                    {**raw, "branch": {**raw["branch"], "step": -1}},
                    {**raw, "branch": {**raw["branch"], "override": ""}},
-                   {**raw, "branch": {**raw["branch"], "extra": 1}}):
+                   {**raw, "branch": {**raw["branch"], "extra": 1}}, {**raw, "branch": without_replay}):
         with pytest.raises(EntrypointInputError):
             AzureWorkerPolicy.from_assignment(assignment(**damage))
 
@@ -71,7 +72,9 @@ def test_a_branch_policy_is_refused_when_it_cannot_be_served():
                            ({"mode": "copy"}, "rebuild or restore"), ({"override": "append"}, "needs a note"),
                            ({"note": "text"}, "needs a note"), ({"override": "edit", "note": "x"}, "append or reject"),
                            ({"override": "append", "note": "x", "live": False}, "branch_live=on"),
-                           ({"tolerance": -1}, "nonnegative"), ({"live": "yes"}, "true or false")]:
+                           ({"override": "append", "note": "x", "replay": False}, "branch_replay=on"),
+                           ({"tolerance": -1}, "nonnegative"), ({"live": "yes"}, "true or false"),
+                           ({"replay": "no"}, "true or false")]:
         with pytest.raises(ValueError, match=match):
             fork(**changes)
     supervised = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent"})
@@ -91,10 +94,28 @@ def test_a_branch_policy_is_refused_when_it_cannot_be_served():
     ({"branch": "/s", "branch_mode": "restore"}, "branch_checkpoint"),
     ({"branch": "/s", "branch_checkpoint": "/c"}, "branch_live=off"),
     ({"branch": "/s", "branch_step": "-1"}, "nonnegative"),
+    ({"branch": "/s", "branch_replay": "maybe"}, "on or off"),
+    ({"branch": "/s", "branch_replay": "off", "branch_override": "reject", "branch_note": "/n"}, "branch_replay=on"),
+    ({"branch_replay": "off"}, "needs branch="),
 ])
 def test_branch_settings_are_admitted_not_guessed(options, match):
     with pytest.raises(ValueError, match=match):
         TrialSettings.from_options({**ALONE, **options})
+
+
+def test_a_checker_is_given_a_runs_final_files_and_its_own_task():
+    """The checker trial: another agent, the run's last step's files, no replay, a task text of its own."""
+    settings = TrialSettings.from_options({**ALONE, "agent": "checker", "branch": "/root/s.json",
+                                           "branch_step": "9", "branch_replay": "off",
+                                           "task_text": "/root/checker-task.txt"})
+    branch = settings.branch_policy("/var/lib/taste-trials/t/branch-script.json", "b" * 64)
+    assert branch == fork(step=9, replay=False) and branch.to_dict()["replay"] is False
+    policy = policy_for(settings, branch)
+    assert policy.worker_agent == "checker" and policy.worker_resources()["branch"]["replay"] is False
+    disclosed = settings.disclosure()
+    assert disclosed["branch"]["replay"] == "off" and disclosed["task_text"] == "/root/checker-task.txt"
+    final = TrialSettings.from_options({**ALONE, "final_checkpoint": "/root/final/t"})
+    assert final.disclosure()["final_checkpoint"] == "/root/final/t"
 
 
 def test_a_fresh_trial_can_be_given_another_task_text_or_more_of_it(tmp_path):
@@ -185,6 +206,51 @@ def test_a_rebuild_with_live_off_saves_its_checkpoint_once_and_only_when_faithfu
     assert again["saved"] is False and backend.taken == 1
     with pytest.raises(ValueError, match="manifest"):
         CheckpointManifest.from_dict({**manifest.to_dict(), "tar": "../elsewhere.tar"})
+
+
+def test_a_trials_final_files_are_restored_for_the_last_step_of_its_own_script(tmp_path):
+    """A checker of a run: the files the run's trial left, put back for its replay script's last step."""
+    from taste.brains.docker_checkpoint import RestoreReceipt
+
+    recorder = Recorder(Live(BASE, OUTPUTS))
+    Agent().run(recorder)
+    value = recorder.script().to_dict()
+    value["source"] = {**value["source"], "trial": "f00d", "dropped_steps": 0}
+    path = tmp_path / "script.json"
+    path.write_text(json.dumps(value))
+    directory = tmp_path / "final"
+    manifest = CheckpointManifest("c" * 64, "sha256:" + "d" * 64, "e" * 64 + ".tar", "e" * 64, 10,
+                                  (("/app/x", "added"),), ("/app/x",), (), (), (), 1.0)
+
+    class Backend:
+        restored = None
+
+        def checkpoint(self, target):
+            (target / manifest.tar).write_bytes(b"tar")
+            return manifest
+
+        def restore(self, saved, target, *, any_container=False):
+            self.restored = (saved, target, any_container)
+            return RestoreReceipt(saved.tar_sha256, (), (), (), (), 0.1)
+
+    backend = Backend()
+    saved = branch_trial.save_final_checkpoint(backend, directory, "f00d")
+    assert saved["saved"] and json.loads((directory / branch_trial.IDENTITY).read_text())["final"] is True
+    settings = TrialSettings.from_options({**ALONE, "agent": "checker", "branch": str(path), "branch_step": "3",
+                                           "branch_replay": "off", "branch_mode": "restore",
+                                           "branch_checkpoint": str(directory)})
+    inputs = branch_trial.load_inputs(settings)
+    assert branch_trial.restore_checkpoint(backend, settings, inputs)["exact"] is True
+    assert backend.restored == (manifest, directory, True)
+    # Not for another step of that run, nor for another trial's script.
+    identity = json.loads((directory / branch_trial.IDENTITY).read_text())
+    assert not branch_trial.names_branch(identity, inputs, 2)
+    other = branch_trial.BranchInputs(inputs.raw, replace(inputs.script, source={**inputs.script.source,
+                                                                                 "trial": "beef"}), "")
+    assert not branch_trial.names_branch(identity, other, 3)
+    cut = branch_trial.BranchInputs(inputs.raw, replace(inputs.script, source={**inputs.script.source,
+                                                                               "dropped_steps": 1}), "")
+    assert not branch_trial.names_branch(identity, cut, 3)
 
 
 def test_the_replay_outcome_is_read_from_the_settled_trajectory():

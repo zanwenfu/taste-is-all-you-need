@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from taste.agents.trajectory_reader import steps_from_trajectory
 from taste.benchmarks.goal_trajectory import _hosted_calls
 from taste.benchmarks.replay_export import encode_script, export_script
 from taste.benchmarks.worker_trajectory import hosted_trajectory
@@ -97,14 +98,18 @@ def other(tmp_path):
     value.store.close()
 
 
-def run_agent(worker, sdk_transport, directory, replies, outputs, **policy):
+def run_agent(worker, sdk_transport, directory, replies, outputs, task=None, **policy):
     sent, calls, _ = install(sdk_transport, worker_reply=lambda number, _: replies[number])
     # One test's wire keeps every request sent in it: this run's come after the ones before.
     start = len(sent)
     seen = {}
 
     async def scenario():
-        hosted(worker, services="none", **policy)
+        assignment = hosted(worker, services="none", **policy)
+        if task is not None:
+            contract = replace(assignment.contract, task=task)
+            worker.assignment = replace(assignment, contract=contract, contract_digest=contract_digest(contract))
+            install_assignment(worker, worker.assignment)
         async with terminal(worker, directory) as t:
             scripted(t.env, outputs)
             seen["code"] = await execute_worker(worker.config, store=worker.store, environ=worker.environ)
@@ -128,12 +133,13 @@ def base(worker, sdk_transport, tmp_path):
 
 
 def branch(other, sdk_transport, tmp_path, script, step, *, replies=None, outputs=OUTPUTS, where="branch",
-           **options):
+           task=None, **options):
     path = tmp_path / f"script-{where}-{step}.json"
     raw = encode_script(script)
     path.write_bytes(raw)
     fork = BranchPolicy(str(path), hashlib.sha256(raw).hexdigest(), step, **options)
-    run = run_agent(other, sdk_transport, tmp_path / where, replies or {}, outputs, branch=fork.to_dict())
+    run = run_agent(other, sdk_transport, tmp_path / where, replies or {}, outputs, task=task,
+                    branch=fork.to_dict())
     run.path = path
     return run
 
@@ -253,6 +259,36 @@ def test_a_second_round_branches_the_first_rounds_record(base, other, sdk_transp
     assert record["steps"][2]["runs"][0]["printed"]["returncode"] == 0
     context = json.dumps(second.requests[0]["input"])
     assert "tabs are still dropped" in context and "test_tabs.py still fails" in context
+
+
+def test_steps_are_the_trajectory_readers_steps(base, other, sdk_transport, tmp_path):
+    """Step k is the same step to the map, the reader and a branch: the readers' steps are the script's."""
+    run = branch(other, sdk_transport, tmp_path, base.script, 3, override="reject", note=REJECTION,
+                 replies={1: [bash("make test", "c4")], 2: [bash(f"echo {SENTINEL}", "c5")]})
+    again = export_script(run.journal, ledger=run.ledger, parent=run.path, trial="branch")
+    for trace, script in ((base.trace, base.script), (run.trace, again)):
+        read = steps_from_trajectory(trace)
+        assert [step.number for step in read] == [step["step"] for step in script["steps"]]
+        assert [step.command for step in read] == ["\n".join(item["command"] for item in step["runs"])
+                                                   for step in script["steps"]]
+        assert [step.returncode for step in read] == [step["runs"][-1]["returncode"] for step in script["steps"]]
+
+
+def test_with_the_replay_off_another_agent_starts_fresh_on_the_last_steps_files(
+        base, other, sdk_transport, tmp_path):
+    """A checker's trial: the run's final files rebuilt, then its own agent with its own task."""
+    task = "Review whether the parser tests pass now. Do not change any file."
+    run = branch(other, sdk_transport, tmp_path, base.script, 3, replay=False, task=task,
+                 replies={1: [bash("make test", "c1")], 2: [bash(f"echo {SENTINEL}", "c2")]})
+    assert run.code == WorkerExitCode.COMPLETED and run.calls == 2
+    # The three recorded commands rebuilt the files; nothing of the run's context was replayed.
+    executed = [item["runs"][0]["executed"] for item in base.script["steps"]]
+    assert run.commands[:3] == executed and len(run.commands) == 5
+    first = run.requests[0]["input"]
+    assert len(first) == 2 and first[1]["content"].startswith("Please solve this issue: " + task)
+    account = run.trace["extra"]["branch"]
+    assert account["replay"] is False and account["replayed_steps"] == 0 and account["faithful"]
+    assert account["rebuild"]["commands"] == 3 and account["context"] == "unchecked"
 
 
 def test_append_shows_the_note_after_step_ks_output(base, other, sdk_transport, tmp_path):

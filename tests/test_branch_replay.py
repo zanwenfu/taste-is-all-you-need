@@ -245,6 +245,18 @@ def test_a_branch_from_the_start_checks_the_first_request_and_goes_live(recorded
     assert events == [("live", {"live": True, "context": "matched"})]
 
 
+def test_another_agent_given_only_the_files_starts_fresh_and_unchecked(recorded):
+    """The replay off: a checker, say, with its own task, given the files of the last step."""
+    script, _ = recorded
+    host, live, events = branch(script, 0, context=False, replies=[reply(f"echo {SENTINEL}")])
+    status, messages = Agent(task="Check whether the parser change is done.").run(host)
+    assert status == "Submitted" and len(messages) == 5 and len(live.asked) == 1
+    assert events == [("live", {"live": True, "context": "unchecked"})]
+    with pytest.raises(ValueError, match="needs the replay"):
+        check_branch(script, 3, mode="rebuild", override="reject", note=NOTE, replay=False)
+    check_branch(script, 3, mode="rebuild", replay=False)
+
+
 def test_the_script_says_which_branches_it_can_serve(recorded):
     script, _ = recorded
     check_branch(script, 3, mode="rebuild", override="reject", note=NOTE)

@@ -119,7 +119,8 @@ def branch_script(branch):
         raise ContractMismatch("the branch's replay script differs from the one admitted")
     try:
         script = ReplayScript.from_bytes(raw)
-        check_branch(script, branch.step, mode=branch.mode, override=branch.override, note=branch.note)
+        check_branch(script, branch.step, mode=branch.mode, override=branch.override, note=branch.note,
+                     replay=branch.replay)
     except ValueError as exc:
         raise ContractMismatch(f"the branch cannot be served: {exc}") from exc
     return script
@@ -420,22 +421,26 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         return True
 
     async def _branch(self, live):
-        """Bring back step k: the files (a rebuild; a restore came before this run) and the agent's context."""
+        """Bring back step k: the files (a rebuild; a restore came before this run) and the agent's context.
+
+        With the replay off, the files alone: the agent starts fresh with its
+        own task, and is stopped at its first call if they could not be brought back.
+        """
         fork, script = self.fork, self.script
         faithful = True
-        if script.task != self.task:
+        if fork.replay and script.task != self.task:
             # The task is in the agent's first request, which could not match.
             faithful = self._unfaithful(0, "task", {"note": "the agent is given another task than the record's"})
         elif fork.mode == "rebuild" and fork.step:
             faithful = await self._rebuild()
-        if fork.step == 0:
+        if fork.step == 0 or not fork.replay:
             self._append("prefix", steps=0)
 
         def record(kind, payload):
             live._call(lambda: self._noted(kind, payload))
 
-        return ReplayHost(live, script, fork.step, record=record, live_after=fork.live,
-                          override=fork.override, note=fork.note, faithful=faithful)
+        return ReplayHost(live, script, fork.step if fork.replay else 0, record=record, live_after=fork.live,
+                          override=fork.override, note=fork.note, faithful=faithful, context=fork.replay)
 
     # -- the run --------------------------------------------------------------
 
@@ -544,7 +549,8 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         if self.fork is not None:
             replay = self.host if isinstance(self.host, ReplayHost) else None
             extra["branch"] = {"step": self.fork.step, "mode": self.fork.mode, "live": self.fork.live,
-                               "override": self.fork.override, "script_sha256": self.fork.script_sha256,
+                               "replay": self.fork.replay, "override": self.fork.override,
+                               "script_sha256": self.fork.script_sha256,
                                "replayed_steps": 0 if replay is None else replay.replayed,
                                "faithful": replay is not None and replay.faithful and replay.prefix_complete}
         return extra

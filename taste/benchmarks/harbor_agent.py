@@ -27,7 +27,10 @@ A trial can instead continue an earlier trial's agent from step k
 ``branch_trial``): the replay script is copied into the trial for its worker,
 the files of step k are rebuilt by the worker or restored here before the goal
 starts, and a rebuild with live off can leave a checkpoint of them for later
-branches. A fresh trial can be given another task text, or more of it.
+branches. With ``branch_replay=off`` only the files come back, and the trial's
+own agent starts fresh: a checker given a run's final files. Any trial can
+leave its final files (``final_checkpoint``) for such a checker to restore. A
+fresh trial can be given another task text, or more of it.
 
 This module is the only one that imports Harbor. Trial settings live in
 ``harbor_settings``; they are the run's disclosed configuration.
@@ -197,9 +200,8 @@ class TasteAgent(BaseAgent):
             # before the verifier reads it.
             try:
                 self._record(goal.goal_id, instruction, outcome, context, started)
-                if (outcome is not None and branch is not None and settings.branch_checkpoint
-                        and settings.branch_mode == "rebuild" and self.owner.sealed):
-                    await self._save_checkpoint(backend, branch, summary, token)
+                if outcome is not None and self.owner.sealed:
+                    await self._save_checkpoints(backend, branch, summary, token)
             finally:
                 if self.owner.sealed:
                     try:
@@ -210,18 +212,26 @@ class TasteAgent(BaseAgent):
                         # is no reason to keep the trial from its verifier.
                         context.metadata["taste"]["release_failed"] = type(failure).__name__
 
-    async def _save_checkpoint(self, backend, branch, summary, token):
-        """After a rebuild with live off, the files of step k, for later branches to restore.
+    async def _save_checkpoints(self, backend, branch, summary, token):
+        """The files the verifier is about to grade, saved where the settings ask.
 
-        The container is sealed: no command can run while they are read. A
-        failure is recorded; the trial is graded all the same.
+        After a rebuild with live off, the files of step k, for later branches
+        to restore (branch_checkpoint); after any trial, its final files, for a
+        checker (final_checkpoint). The container is sealed: no command can run
+        while they are read. A failure is recorded; the trial is graded all the same.
         """
-        try:
-            summary["branch"]["checkpoint"] = await asyncio.to_thread(
-                branch_trial.save_checkpoint, backend, self.settings, branch,
-                summary["branch"].get("replay"), token)
-        except Exception as failure:
-            summary["branch"]["checkpoint"] = {"saved": False, "failed": type(failure).__name__}
+        settings, saves = self.settings, []
+        if branch is not None and settings.branch_checkpoint and settings.branch_mode == "rebuild":
+            saves.append((summary["branch"], "checkpoint", lambda: branch_trial.save_checkpoint(
+                backend, settings, branch, summary["branch"].get("replay"), token)))
+        if settings.final_checkpoint:
+            saves.append((summary, "final_checkpoint", lambda: branch_trial.save_final_checkpoint(
+                backend, settings.final_checkpoint, token)))
+        for where, key, save in saves:
+            try:
+                where[key] = await asyncio.to_thread(save)
+            except Exception as failure:
+                where[key] = {"saved": False, "failed": type(failure).__name__}
 
     def _record(self, goal_id, instruction, outcome, context, started):
         owner, flags = self.owner, list(self.owner.audit_flags)

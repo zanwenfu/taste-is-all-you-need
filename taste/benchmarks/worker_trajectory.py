@@ -215,7 +215,7 @@ def hosted_trajectory(rows, *, run_id):
                 raise ResponsesAuditError("hosted trajectory names two branches")
             branch = {key: event[key] for key in ("script_sha256", "step", "mode", "live", "tolerance",
                                                   "source", "task_matches", "agent_matches")}
-            branch["override"] = event.get("override", "")
+            branch.update(override=event.get("override", ""), replay=event.get("replay", True))
         elif kind == "hosted_rebuild_command":
             rebuilding[event["effect_id"]] = event
         elif kind == "hosted_rebuild_output":

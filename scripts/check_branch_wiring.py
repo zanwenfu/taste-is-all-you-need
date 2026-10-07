@@ -16,8 +16,11 @@ its files are saved as a branch checkpoint (taste.benchmarks.branch_trial),
 as a rebuild with live off saves them; a third container, never touched by
 a command, gets them back by restore and must match too. A fourth rebuilds
 from a record with one exit code changed and must be found unfaithful at that
-command. The containers are removed afterwards, and --cleanup-only removes
-anything left with the same owner token.
+command. Last, the checker's way: the first container's final files are
+saved as a trial leaves them (final_checkpoint), and a fifth container gets
+them back for the script's last step with the replay off, and must match the
+first container's final files. The containers are removed afterwards, and
+--cleanup-only removes anything left with the same owner token.
 """
 
 from __future__ import annotations
@@ -134,6 +137,10 @@ async def check(image, token, directory):
             results.append(await recorded.run(shell(command)))
             if number == STEP:
                 at_step = (await recorded.run(FINGERPRINT))[0]
+        final_files = (await recorded.run(FINGERPRINT))[0]
+        # The run's trial leaves its final files, as with final_checkpoint.
+        final = await asyncio.to_thread(branch_trial.save_final_checkpoint, recorded.backend,
+                                        directory / "final", "branch-check")
         script = script_of(results)
         path = directory / "script.json"
         path.write_bytes(encode_script(script.to_dict()))
@@ -162,6 +169,16 @@ async def check(image, token, directory):
         terminals.append(divergent)
         refused = await rebuild(ReplayScript.from_dict(changed), STEP, divergent.execute)
 
+        # A checker's trial: the run's final files restored for its script's last step, no replay.
+        checking = TrialSettings.from_options({**options, "agent": "checker", "branch_step": str(len(RUN)),
+                                               "branch_replay": "off", "branch_mode": "restore",
+                                               "branch_checkpoint": str(directory / "final")})
+        checker = Terminal(container(image, token), token, directory, "checker")
+        terminals.append(checker)
+        final_receipt = await asyncio.to_thread(branch_trial.restore_checkpoint, checker.backend, checking,
+                                                branch_trial.load_inputs(checking))
+        checker_files = (await checker.run(FINGERPRINT))[0]
+
         checks = {
             "the recorded run failed where it should and submitted": (
                 results[3][1] == 3 and script.steps[-1].submission and not script.steps[STEP - 1].submission),
@@ -174,9 +191,13 @@ async def check(image, token, directory):
             "restored files are those of step k": restored_files == at_step,
             "a changed exit code is unfaithful at its command": (
                 not refused["faithful"] and refused["commands"] == 2 and refused["rows"][-1]["divergent"]),
+            "the run's final files were saved": final.get("saved") is True,
+            "a checker's container gets the final files back exactly": final_receipt.get("exact") is True,
+            "the checker's files are the run's final files": checker_files == final_files,
         }
         return {"checks": checks, "rebuild": account, "checkpoint": saved, "restore": receipt,
-                "divergent": refused, "fingerprint": at_step}
+                "divergent": refused, "fingerprint": at_step, "final_checkpoint": final,
+                "final_restore": final_receipt}
     finally:
         for terminal in terminals:
             terminal.close()

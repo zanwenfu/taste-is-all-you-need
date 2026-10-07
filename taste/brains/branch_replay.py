@@ -5,7 +5,11 @@ trial) holds a run's steps in order. Step i is the agent's i-th model call and
 the commands it ran before its next one: the request's digest, the reply as
 the provider gave it, and for each command the text the agent wrote, the exact
 text the task container ran, its directory, time limit, output, exit code and
-whether it timed out.
+whether it timed out. Steps are numbered as the study numbers them everywhere,
+and as ``taste.agents.trajectory_reader.steps_from_trajectory`` reads them from
+a trial's record: one per model reply the agent received, in order, replayed
+ones included; a reply the run's end cut off and a call given up as lost are
+not steps. "Step k" is the same step to the map, the reader and a branch.
 
 A branch from step k brings back the state at step k, then lets the agent go on:
 
@@ -21,6 +25,10 @@ A branch from step k brings back the state at step k, then lets the agent go on:
   agent is stopped there.
 - Then, live: the agent's next model call is a fresh sample. With live off it
   is stopped instead, so that the task's verifier grades the files of step k.
+
+With the replay off, only the files of step k are brought back, and the
+trial's own agent starts fresh with its own task: a checker given a run's
+final files, without the coding agent's context.
 
 A change at step k: ``append`` shows the agent step k's output followed by a
 note; ``reject``, at the submission step, shows it a rejection text with exit
@@ -349,7 +357,7 @@ class ReplayScript:
         return detail
 
 
-def check_branch(script, step, *, mode, override="", note=""):
+def check_branch(script, step, *, mode, override="", note="", replay=True):
     """Refuse a branch this script cannot serve, saying why; nothing otherwise."""
     if type(step) is not int or not 0 <= step <= len(script.steps):
         raise ValueError(f"branch step must be between 0 and {len(script.steps)}, the steps this record holds")
@@ -358,6 +366,8 @@ def check_branch(script, step, *, mode, override="", note=""):
     if mode == "rebuild" and any(run.executed is None for item in script.steps[:step] for run in item.runs):
         raise ValueError("this script lacks the exact commands the container ran (the trial's terminal "
                          "ledger), which a rebuild runs again")
+    if override and not replay:
+        raise ValueError("an override changes what the replayed agent sees: it needs the replay")
     if override:
         if override not in OVERRIDES:
             raise ValueError("branch override must be append or reject")
@@ -384,6 +394,9 @@ class BranchPolicy:
     override: str = ""
     note: str = ""
     tolerance: int = 0
+    # False: only the files of step k are brought back; the trial's own agent
+    # (a checker given a run's final files, say) starts fresh with its own task.
+    replay: bool = True
 
     def __post_init__(self):
         if not isinstance(self.script, str) or not isabs(self.script) or "\x00" in self.script:
@@ -406,17 +419,21 @@ class BranchPolicy:
             raise ValueError("an override changes what the agent sees next: it needs branch_live=on")
         if type(self.tolerance) is not int or self.tolerance < 0:
             raise ValueError("branch tolerance must be a nonnegative integer")
+        if type(self.replay) is not bool:
+            raise ValueError("branch replay must be true or false")
+        if self.override and not self.replay:
+            raise ValueError("an override changes what the replayed agent sees: it needs branch_replay=on")
 
     def to_dict(self):
         value = {"script": self.script, "script_sha256": self.script_sha256, "step": self.step,
-                 "mode": self.mode, "live": self.live, "tolerance": self.tolerance}
+                 "mode": self.mode, "live": self.live, "tolerance": self.tolerance, "replay": self.replay}
         if self.override:
             value.update(override=self.override, note=self.note)
         return value
 
     @classmethod
     def from_dict(cls, value):
-        required = {"script", "script_sha256", "step", "mode", "live", "tolerance"}
+        required = {"script", "script_sha256", "step", "mode", "live", "tolerance", "replay"}
         if not isinstance(value, Mapping) or not required <= set(value) <= {*required, "override", "note"}:
             raise ValueError("invalid branch policy fields")
         if "override" in value and not value.get("override"):
@@ -452,15 +469,17 @@ class ReplayHost:
     ``record(kind, payload)`` puts each replayed step on the run's record; it
     may raise ``HostedStop`` to end the run. ``faithful=False`` says the files
     were not brought back: the context is still replayed, but the agent is
-    stopped at its first call after it.
+    stopped at its first call after it. ``context=False`` leaves the first live
+    request unchecked against the record's next one, as for another agent
+    given only the files of step k.
     """
 
     def __init__(self, live, script, step, *, record, live_after=True, override="", note="",
-                 faithful=True):
+                 faithful=True, context=True):
         self.live, self.script, self.step = live, script, step
         self.record = record
         self.live_after, self.override, self.note = live_after, override, note
-        self.faithful = faithful
+        self.faithful, self.context = faithful, context
         self.replayed = 0
         self._runs = []
         self._done = step == 0
@@ -494,7 +513,7 @@ class ReplayHost:
         if not self.faithful:
             raise HostedStop("branch_unfaithful")
         context = "unchecked"
-        if sha is not None and not self.override and self.step < len(self.script.steps):
+        if sha is not None and self.context and not self.override and self.step < len(self.script.steps):
             # Nothing was changed at step k: the next request must be the recorded one.
             expected = self.script.steps[self.step].request_sha
             context = "matched" if sha == expected else "differs"
