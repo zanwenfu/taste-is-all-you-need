@@ -18,9 +18,10 @@ AZURE_PLANNER_MODEL = "gpt-6-astra-2026-09-03"
 AZURE_WORKER_MODEL = "gpt-6-sol-2026-09-22"
 AZURE_MONITOR_MODEL = AZURE_WORKER_MODEL
 AZURE_LUNA_MODEL = "gpt-5.6-luna-2026-07-09"
+AZURE_LUNA6_MODEL = "gpt-6-luna-2026-09-22"
 # Dated served models with a verified Global Standard price. A role may be
 # assigned any of them; nothing outside this set can be routed or priced.
-AZURE_MODELS = frozenset({AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL, AZURE_LUNA_MODEL})
+AZURE_MODELS = frozenset({AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL, AZURE_LUNA_MODEL, AZURE_LUNA6_MODEL})
 _MODELS = AZURE_MODELS
 
 

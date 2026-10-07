@@ -56,6 +56,7 @@ def test_every_request_has_a_time_ceiling_which_the_run_discloses():
 
 
 @pytest.mark.parametrize("name,served", [("gpt-5.6-luna", "gpt-5.6-luna-2026-07-09"),
+                                         ("gpt-6-luna", "gpt-6-luna-2026-09-22"),
                                          ("gpt-6-sol", AZURE_WORKER_MODEL)])
 def test_any_admitted_model_can_run_every_role_including_the_coordinator(name, served):
     settings = TrialSettings.from_options({"model": "azure/" + name})
@@ -183,7 +184,7 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
 
 
 @pytest.mark.parametrize("options,match", [
-    ({"model": "gpt-6-luna"}, "model must be one of"),
+    ({"model": "gpt-6-luna-dz"}, "model must be one of"),
     ({"model": "gpt-6.1-sol"}, "model must be one of"),
     ({"agent": "claude-code"}, "agent must be one of"),
     ({"agent": "mini-swe-agent", "services": "some"}, "services must be all or none"),

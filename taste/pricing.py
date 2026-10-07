@@ -139,6 +139,15 @@ _OPENAI = {
         Rates(0.20, 1.20, 0.02, 0.25), Rates(0.40, 1.80, 0.04, 0.50),
         window=1_050_000, as_of="2026-10-04",
     ),
+    # The Azure deployment's version, Global Standard, checked 2026-10-07
+    # against Azure's retail price list (meters "6-luna ... Std Gl") and the
+    # same Microsoft post as Astra and Sol. Neither states Luna's window; its
+    # long-context meters show it exceeds 272K, and it is taken as the GPT-6
+    # family's.
+    "gpt-6-luna-2026-09-22": _tiered(
+        Rates(0.10, 0.50, 0.01, 0.125), Rates(0.20, 0.75, 0.02, 0.25),
+        window=1_050_000, as_of="2026-10-07",
+    ),
 }
 
 # The planner of an agent run alone is a fixed rule (taste.brains.single_run),

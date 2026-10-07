@@ -27,12 +27,17 @@ from taste.brains.single_run import FIXED_PLAN_MODEL
 from taste.brains.terminal_broker import TerminalBinding
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
 from taste.pricing import max_call_cost_usd, table_sha
-from taste.providers.azure_openai import AZURE_LUNA_MODEL, AZURE_PLANNER_MODEL, AZURE_WORKER_MODEL
+from taste.providers.azure_openai import (
+    AZURE_LUNA6_MODEL,
+    AZURE_LUNA_MODEL,
+    AZURE_PLANNER_MODEL,
+    AZURE_WORKER_MODEL,
+)
 
 # Names a benchmark command line uses, and the dated served model behind each.
 # Any of them may run every role; the trial's model is the coordinator's.
 SERVED_MODELS = {"gpt-6-astra": AZURE_PLANNER_MODEL, "gpt-6-sol": AZURE_WORKER_MODEL,
-                 "gpt-5.6-luna": AZURE_LUNA_MODEL}
+                 "gpt-5.6-luna": AZURE_LUNA_MODEL, "gpt-6-luna": AZURE_LUNA6_MODEL}
 CRITERION = ("The developer's most recent request in the task is addressed in the task "
              "environment, and the final reply says accurately what was done, what was "
              "verified and what was not.")
