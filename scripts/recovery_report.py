@@ -276,8 +276,10 @@ def checker_section(summary):
     initial = [run["verdict"] for run in summary.values() if run.get("verdict")]
     confusion = Counter()
     for run in summary.values():
-        for episodes in views(run).values() if run.get("status") == "rejected" else ():
-            for episode in episodes:
+        # Each arm's episodes once: a rewind arm two sources chose is one set of trials.
+        arms = run.get("arms", {}).values() if run.get("status") == "rejected" else ()
+        for arm in arms:
+            for episode in (episode for episode in arm["episodes"] if episode):
                 for item in episode["verdicts"]:
                     confusion[f"{item['verdict']}_{'solved' if item['solved'] else 'unsolved'}"] += 1
     confidences = [item.get("confidence") for item in initial if isinstance(item.get("confidence"), (int, float))]

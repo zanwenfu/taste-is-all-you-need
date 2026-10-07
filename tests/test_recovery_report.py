@@ -190,3 +190,11 @@ def test_an_episode_that_solved_then_broke_its_fix_counts_as_solved_at_some_roun
     assert found["arms"]["continue"]["ever_solved_share"] == 1.0 and found["arms"]["retry"]["ever_solved_share"] == 0.0
     [ever] = found["comparisons"]["ever_solved"]
     assert (ever["other"], ever["base"], ever["mean_difference"]) == ("continue", "retry", 1.0)
+
+
+def test_the_checkers_verdicts_are_counted_once_per_episode_though_two_sources_chose_its_step():
+    run = rejected({"rewind@3": episodes(True, 0.4), "retry": episodes(False, 0.5)},
+                   sources={"oracle": 3, "rules": 3, "reader": 5})
+    found = report.checker_section({"r1": run})
+    # Two rewind episodes (shared by the oracle and the rules) and two retry episodes: four verdicts.
+    assert found["rounds"] == {"done_solved": 2, "done_unsolved": 2, "not_done_solved": 0, "not_done_unsolved": 0}
