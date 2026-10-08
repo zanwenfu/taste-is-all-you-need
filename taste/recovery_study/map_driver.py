@@ -72,7 +72,7 @@ class MapDriver(Driver):
 
     def _checkpoint(self, entry):
         """The checkpoint of a probe's step that is ready; or (None, failed)."""
-        for name in entry["checkpoints"]:
+        for name in self.counted(entry["checkpoints"]):
             job = self.jobs[name]
             # A trial names the checkpoint it saved; one whose save failed names none.
             if job["complete"] and any(summary["exception"] is None and summary["faithful"] is not False

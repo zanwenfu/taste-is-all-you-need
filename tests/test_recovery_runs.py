@@ -412,3 +412,22 @@ def test_a_final_state_whose_save_failed_is_not_checked_and_is_saved_again(tmp_p
     driver, [again] = step(path, given, jobs_dir)
     assert failed == [saved.name]
     assert driver.jobs[again.name]["purpose"] == "final_state" and again.name != saved.name
+
+
+def test_a_voided_final_state_and_the_check_it_spoiled_are_made_again(tmp_path):
+    jobs_dir, trials, given, _ = study(tmp_path, check_attempts=1)
+    path, harbor = tmp_path / "rec.json", FakeHarbor(trials, recoveries())
+    _, [saved] = step(path, given, jobs_dir)
+    harbor.run([saved])
+    _, [check] = step(path, given, jobs_dir)
+    harbor.run([check])
+    driver = RecoveryDriver.open(path, given)
+    driver.refresh()
+    for name in (saved.name, check.name):
+        driver.void(name, "the final state did not restore exactly")
+    driver.save()
+    driver, [again] = step(path, given, jobs_dir)
+    assert driver.jobs[again.name]["purpose"] == "final_state" and again.name.endswith("-s2")
+    harbor.run([again])
+    driver, [check] = step(path, given, jobs_dir)
+    assert driver.jobs[check.name]["purpose"] == "check" and check.settings()["branch_checkpoint"] == again.name

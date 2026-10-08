@@ -140,11 +140,22 @@ class Driver:
         found = records.job_trials(directory, self.settings["trials_root"]) if directory.is_dir() else []
         job.update(complete=True, results=found, finished=state.now(), closed=True)
 
+    def void(self, name, reason):
+        """Take a finished job as never run, for ``reason``: a fault of the infrastructure found after
+        it ran (a checkpoint that does not restore exactly, or was never saved) spoiled its trials
+        before the agent ran. It is no attempt and its trials are no results; it stays on record."""
+        job = self.jobs[name]
+        if not job["complete"]:
+            raise RuntimeError(f"job {name} has not finished")
+        job.update(void=reason, voided=state.now())
+
     def pending(self, names):
         return any(not self.jobs[name]["complete"] for name in names)
 
     def counted(self, names):
-        """The jobs of ``names`` that count as attempts: all but the first few Harbor ended before any trial."""
+        """The jobs of ``names`` that count as attempts: not the voided, nor the first few Harbor ended
+        before any trial."""
+        names = [name for name in names if not self.jobs[name].get("void")]
         empty = [name for name in names if self.jobs[name].get("crashed") and not self.jobs[name]["results"]]
         return [name for name in names if name not in empty[:FORGIVEN_CRASHES]]
 
@@ -153,7 +164,7 @@ class Driver:
 
     def results(self, names):
         """(job, summary) for every finished trial of these jobs, in the order they were started."""
-        return [(name, summary) for name in names if self.jobs[name]["complete"]
+        return [(name, summary) for name in names if self.jobs[name]["complete"] and not self.jobs[name].get("void")
                 for summary in self.jobs[name]["results"]]
 
     def trial(self, reference):

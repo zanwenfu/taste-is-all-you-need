@@ -300,7 +300,7 @@ class RecoveryDriver(Driver):
 
     def final_state(self, check):
         """The saved copy of a checked trial's final state: (checkpoint, changed paths), or None."""
-        for name in check["checkpoints"]:
+        for name in self.counted(check["checkpoints"]):
             job = self.jobs[name]
             for summary in job["results"] if job["complete"] else ():
                 if summary["exception"] is None and summary["faithful"] is not False \

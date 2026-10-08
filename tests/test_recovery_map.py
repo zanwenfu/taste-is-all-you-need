@@ -277,3 +277,28 @@ def test_a_checkpoint_whose_save_failed_is_not_restored_from_and_is_made_again(t
     assert failed[0].endswith("-s10-c1")
     assert [(s.name.rsplit("-", 2)[1:], s.settings()["branch_live"]) for s in specs] == [(["s10", "c2"], "off")]
     assert not any(job.get("checkpoint") == failed[0] for job in driver.jobs.values() if job["purpose"] == "probe")
+
+
+def test_a_voided_checkpoint_and_the_probe_it_spoiled_are_made_again(tmp_path):
+    # Found after the fact: a checkpoint that did not restore exactly, so its branches failed before
+    # the agent ran. Both are voided with the reason; neither is an attempt, and both are made again.
+    jobs_dir, trials, given = study(tmp_path, mode="restore")
+    harbor, path = FakeHarbor(trials, branches(lambda k, i: k <= 11 and i % 2 == 0)), tmp_path / "map.json"
+    _, specs = step(path, given, jobs_dir)
+    harbor.run(specs)
+    driver, [probe] = step(path, given, jobs_dir)
+    harbor.run([probe])
+    spoiled = driver.jobs[probe.name]["checkpoint"]
+    driver = MapDriver.open(path, given)
+    driver.refresh()
+    for name in (spoiled, probe.name):
+        driver.void(name, "the checkpoint did not restore exactly")
+    driver.save()
+    driver, specs = step(path, given, jobs_dir)
+    assert [(s.name.rsplit("-", 2)[1:], s.settings()["branch_live"]) for s in specs] == [(["s10", "c2"], "off")]
+    harbor.run(specs)
+    driver, specs = step(path, given, jobs_dir)
+    [again] = [s for s in specs if s.settings()["branch_step"] == "10"]
+    assert again.attempts == 8 and again.settings()["branch_checkpoint"].endswith("-s10-c2")
+    assert driver.jobs[spoiled]["void"] == "the checkpoint did not restore exactly"
+    assert driver.results([probe.name]) == []
