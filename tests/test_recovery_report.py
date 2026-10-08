@@ -157,6 +157,21 @@ def test_the_selector_learns_which_recovery_suits_which_runs_under_cross_validat
                                    random.Random(0))["note"] == "too few runs or recoveries"
 
 
+def test_a_run_missing_a_recovery_is_left_out_of_the_selector_not_the_recovery_from_every_run():
+    summary = {}
+    for length in [*range(1, 11), *range(21, 31)]:
+        short = length <= 10
+        summary[f"r{length}"] = rejected({"retry": episodes(short, 0.5), "continue": episodes(not short, 0.3)},
+                                         features={"run_length": length, "visible_tests_passed": False})
+    summary["r99"] = rejected({"retry": episodes(True, 0.5)}, features={"run_length": 3, "visible_tests_passed": False})
+    found = report.selector_section(summary, report.FEATURES, 5, 2, 2, 0, 500, random.Random(0))
+    assert found["arms"] == ["retry", "continue"] and found["runs"] == 20 and found["runs_dropped"] == ["r99"]
+    assert found["solved_share"]["selector"] == 1.0
+    assert "1 left out for a missing recovery" in report.markdown({"recoveries": report.recovery_section(
+        summary, None, 200, random.Random(0)), "checker": report.checker_section(summary),
+        "gaming": report.gaming_section(summary), "selector": found})
+
+
 def test_a_tree_keeps_a_split_only_when_it_helps():
     rows = [{"features": {"x": x}, "outcomes": {"a": 1.0, "b": 0.0}, "costs": {"a": 1.0, "b": 1.0}} for x in range(10)]
     assert selector.fit(rows, ["a", "b"], ["x"], depth=2, min_leaf=2) == selector.Leaf("a", 10)

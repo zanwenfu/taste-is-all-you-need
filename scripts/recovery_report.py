@@ -297,9 +297,13 @@ def checker_section(summary):
 
 def selector_section(summary, features, folds, depth, min_leaf, seed, resamples, rng):
     table = recovery_table(summary)
-    arms = [view for view in SELECTABLE if table and all(view in found for found in table.values())]
+    # Every recovery the study ran, on the runs that have them all: a run missing one (its episodes
+    # all failed to start) is left out, rather than that recovery from every run.
+    arms = [view for view in SELECTABLE if any(view in found for found in table.values())]
+    complete = {run_id: found for run_id, found in table.items() if all(arm in found for arm in arms)}
+    dropped = sorted(set(table) - set(complete))
     rows, names = [], []
-    for run_id, found in sorted(table.items()):
+    for run_id, found in sorted(complete.items()):
         run = summary[run_id]
         observed = {**run["features"], "checker_confidence": (run["verdict"] or {}).get("confidence")}
         rows.append({"features": observed, "outcomes": {arm: found[arm]["solved"] for arm in arms},
@@ -308,7 +312,8 @@ def selector_section(summary, features, folds, depth, min_leaf, seed, resamples,
     usable = [name for name in features if rows and all(isinstance(row["features"].get(name), (int, float, bool))
                                                          for row in rows)]
     if len(rows) < 2 or len(arms) < 2:
-        return {"runs": len(rows), "arms": arms, "features": usable, "note": "too few runs or recoveries"}
+        return {"runs": len(rows), "runs_dropped": dropped, "arms": arms, "features": usable,
+                "note": "too few runs or recoveries"}
     chosen = selector.cross_validate(rows, arms, usable, folds=folds, depth=depth, min_leaf=min_leaf, seed=seed)
     fixed = selector.cross_validate(rows, arms, usable, folds=folds, depth=0, min_leaf=min_leaf, seed=seed)
     scored = {"selector": [row["outcomes"][arm] for row, arm in zip(rows, chosen, strict=True)],
@@ -324,7 +329,7 @@ def selector_section(summary, features, folds, depth, min_leaf, seed, resamples,
                          "bootstrap_95": [rounded(low), rounded(high)],
                          "permutation_p": _study.permutation_p(differences, resamples, rng)}
     tree = selector.fit(rows, arms, usable, depth=depth, min_leaf=min_leaf)
-    return {"runs": len(rows), "arms": arms, "features": usable, "folds": folds, "depth": depth,
+    return {"runs": len(rows), "runs_dropped": dropped, "arms": arms, "features": usable, "folds": folds, "depth": depth,
             "min_leaf": min_leaf, "solved_share": {name: round(statistics.fmean(values), 6)
                                                    for name, values in scored.items()},
             "selector_usd_per_run": round(statistics.fmean(costs), 6),
@@ -429,7 +434,8 @@ def markdown(result):
         if "note" in chosen:
             lines.append(f"Not fitted: {chosen['note']} ({chosen['runs']} runs).")
         else:
-            lines += [f"{chosen['runs']} runs, recoveries {', '.join(chosen['arms'])}; features "
+            lines += [f"{chosen['runs']} runs ({len(chosen['runs_dropped'])} left out for a missing recovery), "
+                      f"recoveries {', '.join(chosen['arms'])}; features "
                       f"{', '.join(chosen['features']) or '(none)'}; {chosen['folds']}-fold cross-validation, "
                       f"depth {chosen['depth']}, at least {chosen['min_leaf']} runs a leaf.", "",
                       "| Policy | Solved share |", "| --- | --- |"]
