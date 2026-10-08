@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from taste.brains.docker_terminal import DockerTerminalBackend
+from taste.brains.docker_terminal import DockerTerminalBackend, DockerTransportError
 from taste.brains.terminal_broker import TerminalConflict, TerminalFenced
 from tests.test_docker_terminal import CONTAINER, TOKEN, backend
 from tests.test_docker_terminal import daemon as _daemon
@@ -58,6 +58,9 @@ def serve(daemon, *, mounts=("/logs",)):
     prefix = f"/containers/{CONTAINER}/archive?path="
 
     def override(handler, path):
+        if path in (f"/containers/{CONTAINER}/pause", f"/containers/{CONTAINER}/unpause"):
+            daemon.reply(handler, None, status=204)
+            return True
         if path == f"/containers/{CONTAINER}/changes":
             daemon.reply(handler, CHANGES)
             return True
@@ -116,6 +119,32 @@ def test_a_checkpoint_over_its_cap_is_partial_and_says_what_it_left(daemon, tmp_
     assert manifest.over_cap == ("/app/pkg", "/etc/app.conf")
 
 
+def test_the_container_is_paused_while_its_files_are_read(daemon, tmp_path):
+    # A process the task left running cannot change files between their listing and their copy.
+    serve(daemon)
+    backend(daemon).checkpoint(tmp_path / "checkpoints")
+    paths = [path for _, path, _ in daemon.calls]
+    reads = [index for index, path in enumerate(paths) if path.endswith("/changes") or "/archive?" in path]
+    assert paths.index(f"/containers/{CONTAINER}/pause") < min(reads)
+    assert max(reads) < paths.index(f"/containers/{CONTAINER}/unpause") == len(paths) - 1
+
+
+def test_a_container_paused_for_a_checkpoint_is_resumed_when_a_read_fails(daemon, tmp_path):
+    serve(daemon)
+    served = daemon.override
+
+    def failing(handler, path):
+        if "/archive?" in path:
+            daemon.reply(handler, {}, status=500)
+            return True
+        return served(handler, path)
+
+    daemon.override = failing
+    with pytest.raises(DockerTransportError):
+        backend(daemon).checkpoint(tmp_path / "checkpoints")
+    assert daemon.calls[-1][1] == f"/containers/{CONTAINER}/unpause"
+
+
 def test_no_checkpoint_is_taken_while_a_command_runs(daemon, tmp_path):
     serve(daemon)
     executor = backend(daemon)
@@ -127,6 +156,9 @@ def test_no_checkpoint_is_taken_while_a_command_runs(daemon, tmp_path):
 # -- restore: a fake daemon over a small filesystem ------------------------------------------
 
 HELPER = "e" * 64
+
+
+SOCKET = "socket"  # a socket: Docker lists it as changed, and its archives leave it out
 
 
 class Filesystem:
@@ -160,6 +192,8 @@ class Filesystem:
         parent = posixpath.dirname(path)
         with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
             for name in sorted(item for item in tree if item == path or item.startswith(path + "/")):
+                if tree[name] is SOCKET:
+                    continue
                 info = tarfile.TarInfo(name[len(parent):].lstrip("/"))
                 if tree[name] is None:
                     info.type, info.mode = tarfile.DIRTYPE, 0o755
@@ -209,6 +243,11 @@ def restoring(daemon, filesystem, mounts=()):
 
     def override(handler, path):
         method = handler.command
+        if path in (f"/containers/{CONTAINER}/pause", f"/containers/{CONTAINER}/unpause"):
+            daemon.paused = path.endswith("/pause")
+            send(handler, 204)
+            return True
+        assert not (daemon.paused and method in ("PUT", "POST", "DELETE")), "the container was written while paused"
         for owner, tree in ((CONTAINER, filesystem.files), (HELPER, filesystem.image)):
             prefix = f"/containers/{owner}/archive?path="
             if path.startswith(prefix):
@@ -249,7 +288,7 @@ def restoring(daemon, filesystem, mounts=()):
             return False
         return True
 
-    daemon.helpers = []
+    daemon.helpers, daemon.paused = [], False
     daemon.override = override
 
 
@@ -340,6 +379,38 @@ def test_a_restore_returns_the_container_to_its_checkpoint(raw_daemon, tmp_path)
     assert receipt.deleted == ("/etc/hosts.allow",)
     # The image's originals came from a helper container, created and then removed.
     assert raw_daemon.helpers == ["created", "removed"]
+
+
+def test_a_file_with_a_long_path_comes_back_at_that_path(raw_daemon, tmp_path):
+    # Its name is longer than a tar header holds: the archive names it in a PAX header,
+    # and the checkpoint renames it from the copied directory's parent to the root.
+    filesystem = Filesystem(IMAGE)
+    restoring(raw_daemon, filesystem)
+    long = "/app/pkg/" + "n" * 120 + ".py"
+    filesystem.files.update({"/app/pkg": None, long: b"N = 1\n", "/app/pkg/" + "l" * 90: None,
+                             "/app/pkg/" + "l" * 90 + "/" + "m" * 30 + ".py": b"M = 1\n"})
+    at_checkpoint = dict(filesystem.files)
+    executor = backend(raw_daemon)
+    manifest = executor.checkpoint(tmp_path / "checkpoints")
+    del filesystem.files[long]
+    receipt = executor.restore(manifest, tmp_path / "checkpoints")
+    assert receipt.exact and filesystem.files == at_checkpoint
+
+
+def test_a_socket_its_archive_leaves_out_is_left_out_of_the_checkpoint(raw_daemon, tmp_path):
+    # As an X server's socket: Docker lists it, but cannot copy it; a restore cannot bring
+    # it back, so it is no difference, as running processes are not.
+    filesystem = Filesystem(IMAGE)
+    restoring(raw_daemon, filesystem)
+    filesystem.files.update({"/app/.X11-unix": None, "/app/.X11-unix/X99": SOCKET, "/app/util.py": b"U = 1\n"})
+    executor = backend(raw_daemon)
+    manifest = executor.checkpoint(tmp_path / "checkpoints")
+    assert "/app/.X11-unix/X99" in manifest.left_out
+    assert "/app/.X11-unix/X99" not in dict(manifest.changes) and ("/app/.X11-unix", "added") in manifest.changes
+    filesystem.files["/app/util.py"] = b"broken"
+    receipt = executor.restore(manifest, tmp_path / "checkpoints")
+    assert receipt.exact and filesystem.files["/app/util.py"] == b"U = 1\n"
+    assert "/app/.X11-unix" in filesystem.files and "/app/.X11-unix/X99" not in filesystem.files
 
 
 def test_a_restore_leaves_a_harness_mount_and_its_directory_in_place(raw_daemon, tmp_path):

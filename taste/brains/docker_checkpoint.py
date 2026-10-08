@@ -11,7 +11,10 @@ left out and listed. The tar is stored under its own SHA-256, so the same
 files are stored once.
 
 Nothing runs inside the container. The caller holds the terminal between
-commands: a checkpoint of files a command is still writing would be torn.
+commands: a checkpoint of files a command is still writing would be torn. The
+container is paused while its changes are listed and copied, so a process the
+task left running cannot change them between the two. What Docker lists but
+its archives do not carry (a socket) is left out and listed.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ SCHEMA = "taste.checkpoint/1"
 CHECKPOINT_BYTES = 512 * 1024 * 1024
 CHECKPOINT_SECONDS = 600
 CHANGES_BYTES = 64 * 1024 * 1024
+PAUSE_SECONDS = 30  # to resume a container paused for a checkpoint, whatever time the checkpoint had left
 KINDS = {0: "changed", 1: "added", 2: "deleted"}
 NOT_THE_TASKS = ("/proc", "/sys", "/dev", "/run")
 # A summary names at most this many paths of each list, each cut to PATH_CHARS.
@@ -176,11 +180,30 @@ def _archive(wire, container, path, deadline):
         yield stat, response
 
 
+@contextlib.contextmanager
+def _paused(backend, wire, deadline):
+    """The container paused, and resumed after, through a wire of its own if this one was cut."""
+    from taste.brains.docker_terminal import _Wire
+
+    path = f"/containers/{backend.environment_id}"
+    wire.control("POST", path + "/pause", deadline, statuses=(204,))
+    try:
+        yield
+    finally:
+        _Wire(backend.binding.socket_path).control("POST", path + "/unpause", time.monotonic() + PAUSE_SECONDS,
+                                                   statuses=(204,))
+
+
 def take(backend, wire, directory, *, cap_bytes=CHECKPOINT_BYTES) -> CheckpointManifest:
     """Copy out what the container changed against its image; the caller holds the terminal."""
-    container = backend.environment_id
     deadline = time.monotonic() + min(CHECKPOINT_SECONDS, backend.binding.deadline_unix - time.time())
     info = backend._inspect(wire, deadline)
+    with _paused(backend, wire, deadline):
+        return _take(backend, wire, info, Path(directory), cap_bytes, deadline)
+
+
+def _take(backend, wire, info, directory, cap_bytes, deadline):
+    container = backend.environment_id
     mounts = tuple(item["Destination"] for item in info.get("Mounts") or ()
                    if isinstance(item, dict) and isinstance(item.get("Destination"), str))
     entries = _changes(wire, container, deadline)
@@ -193,9 +216,8 @@ def take(backend, wire, directory, *, cap_bytes=CHECKPOINT_BYTES) -> CheckpointM
     parents = {posixpath.dirname(path) for path, _ in kept}
     changed = {path for path, kind in kept
                if kind == 0 and path not in parents and not _under_added(path, added)}
-    directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    copied, over_cap, total = [], [], 0
+    copied, over_cap, total, carried = [], [], 0, set()
     handle, temporary = tempfile.mkstemp(prefix=".checkpoint-", suffix=".tar", dir=directory)
     try:
         with os.fdopen(handle, "wb") as raw, tarfile.open(fileobj=raw, mode="w|", format=tarfile.PAX_FORMAT) as out:
@@ -210,10 +232,15 @@ def take(backend, wire, directory, *, cap_bytes=CHECKPOINT_BYTES) -> CheckpointM
                     with tarfile.open(fileobj=response, mode="r|") as source:
                         for member in source:
                             body = source.extractfile(member) if member.isfile() else None
+                            # A long name is in a PAX header, which a writer takes over the
+                            # member's own: drop it, or the member keeps its old place.
+                            member.pax_headers.pop("path", None)
                             member.name = posixpath.join(parent, member.name) if parent else member.name
                             if member.islnk():
+                                member.pax_headers.pop("linkpath", None)
                                 member.linkname = posixpath.join(parent, member.linkname) if parent else member.linkname
                             out.addfile(member, body)
+                            carried.add("/" + member.name.rstrip("/"))
                             total += member.size
                 copied.append(path)
         digest = hashlib.sha256()
@@ -230,10 +257,13 @@ def take(backend, wire, directory, *, cap_bytes=CHECKPOINT_BYTES) -> CheckpointM
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary)
         raise
+    # Added paths the copies did not carry: what an archive cannot hold, as a socket.
+    uncarried = {path for path, kind in kept if kind == 1 and path not in carried and not _inside(path, over_cap)}
+    kept = [(path, kind) for path, kind in kept if path not in uncarried]
     return CheckpointManifest(
         environment_id=container, image=str(info.get("Image") or ""), tar=name, tar_sha256=name[:-4],
         tar_bytes=size, changes=tuple((path, KINDS[kind]) for path, kind in kept), copied=tuple(copied),
-        deleted=tuple(path for path, kind in kept if kind == 2), left_out=tuple(left_out),
+        deleted=tuple(path for path, kind in kept if kind == 2), left_out=tuple(sorted({*left_out, *uncarried})),
         over_cap=tuple(over_cap), taken_at=time.time())
 
 
