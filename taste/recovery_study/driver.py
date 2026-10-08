@@ -19,6 +19,11 @@ from pathlib import Path
 
 from taste.recovery_study import jobs, records, rules, state
 
+# Jobs of one item (a probe, a check, a round) that Harbor ended before any trial, as when its
+# network check timed out on a busy Docker, that do not count as the item's attempts; past this
+# many they do, so a job that can never start does not come back for ever.
+FORGIVEN_CRASHES = 3
+
 # A driver's exit status: new jobs were written; none, but some are running;
 # every run is finished.
 STARTED, RUNNING, FINISHED = 0, 2, 3
@@ -138,8 +143,13 @@ class Driver:
     def pending(self, names):
         return any(not self.jobs[name]["complete"] for name in names)
 
+    def counted(self, names):
+        """The jobs of ``names`` that count as attempts: all but the first few Harbor ended before any trial."""
+        empty = [name for name in names if self.jobs[name].get("crashed") and not self.jobs[name]["results"]]
+        return [name for name in names if name not in empty[:FORGIVEN_CRASHES]]
+
     def attempts(self, names):
-        return sum(self.jobs[name]["spec"]["attempts"] for name in names)
+        return sum(self.jobs[name]["spec"]["attempts"] for name in self.counted(names))
 
     def results(self, names):
         """(job, summary) for every finished trial of these jobs, in the order they were started."""

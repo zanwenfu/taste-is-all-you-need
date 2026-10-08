@@ -10,7 +10,7 @@ import pytest
 
 from taste.agents.checker import BARE_FEEDBACK, parse_submission
 from taste.recovery_study import recovery_driver
-from taste.recovery_study.driver import FINISHED, STARTED
+from taste.recovery_study.driver import FINISHED, FORGIVEN_CRASHES, STARTED
 from taste.recovery_study.jobs import JobSpec
 from taste.recovery_study.recovery_driver import RecoveryDriver, note, readings, round_seconds
 from tests.recovery_fakes import FakeHarbor, agent_steps, base_jobs, recoveries, submission
@@ -366,3 +366,49 @@ def test_the_command_line_runs_the_driver_with_the_map_and_the_reader(tmp_path, 
     assert "rewind@4" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         cli.main([*options, "--recoveries", "retry,undo"])
+
+
+def test_jobs_harbor_ended_before_any_trial_are_not_attempts_and_the_episodes_go_on(tmp_path):
+    # Harbor's network check failed on a busy Docker and the job ended before its trials: neither
+    # an arm's first trials nor a later round's are lost to it; the job is started again.
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["retry_feedback"])
+    path, harbor = tmp_path / "rec.json", FakeHarbor(trials, recoveries())
+    crashes = {"first": 0, "round": 0}
+    for _ in range(60):
+        driver = RecoveryDriver.open(path, given)
+        driver.use()
+        driver.add_sources([jobs_dir / "base"], [jobs_dir / "calibration"])
+        driver.refresh(unit_active=lambda name: False)
+        specs = driver.advance()
+        driver.save()
+        if not specs:
+            break
+        for spec in specs:
+            purpose = driver.jobs[spec.name]["purpose"]
+            if crashes.get(purpose, FORGIVEN_CRASHES) < FORGIVEN_CRASHES:
+                crashes[purpose] += 1
+                (jobs_dir / spec.name).mkdir(parents=True)
+            else:
+                harbor.run([spec])
+    assert crashes == {"first": FORGIVEN_CRASHES, "round": FORGIVEN_CRASHES}
+    ends = [episode["end"] for episode in driver.runs[run_id]["arms"]["retry_feedback"]["episodes"]]
+    assert ends == ["budget", "budget"]
+
+
+def test_a_final_state_whose_save_failed_is_not_checked_and_is_saved_again(tmp_path):
+    jobs_dir, trials, given, _ = study(tmp_path)
+    made, failed = recoveries(), []
+
+    def outcome(spec, task, settings, harbor):
+        found = made(spec, task, settings, harbor)
+        if settings.get("branch_live") == "off" and not failed:
+            failed.append(spec.name)
+            found["branch"] = {"faithful": True, "changed_paths": ["src/app.py"]}  # no checkpoint was saved
+        return found
+
+    path, harbor = tmp_path / "rec.json", FakeHarbor(trials, outcome)
+    _, [saved] = step(path, given, jobs_dir)
+    harbor.run([saved])
+    driver, [again] = step(path, given, jobs_dir)
+    assert failed == [saved.name]
+    assert driver.jobs[again.name]["purpose"] == "final_state" and again.name != saved.name

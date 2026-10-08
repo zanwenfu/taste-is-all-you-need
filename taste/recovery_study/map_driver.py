@@ -74,11 +74,12 @@ class MapDriver(Driver):
         """The checkpoint of a probe's step that is ready; or (None, failed)."""
         for name in entry["checkpoints"]:
             job = self.jobs[name]
+            # A trial names the checkpoint it saved; one whose save failed names none.
             if job["complete"] and any(summary["exception"] is None and summary["faithful"] is not False
-                                       and summary["checkpoint"] in (None, job["checkpoint"])
+                                       and summary["checkpoint"] == job["checkpoint"]
                                        for summary in job["results"]):
                 return job["checkpoint"], False
-        finished = [name for name in entry["checkpoints"] if self.jobs[name]["complete"]]
+        finished = [name for name in self.counted(entry["checkpoints"]) if self.jobs[name]["complete"]]
         return None, len(finished) >= self.settings["checkpoint_attempts"]
 
     def probes(self, run):
@@ -148,7 +149,7 @@ class MapDriver(Driver):
         values, entry = self.settings, self._entry(run, step)
         ready, failed = self._checkpoint(entry)
         if ready or failed or self.pending(entry["checkpoints"]) \
-                or len(entry["checkpoints"]) >= values["checkpoint_attempts"]:
+                or len(self.counted(entry["checkpoints"])) >= values["checkpoint_attempts"]:
             return
         name = jobs.job_name(values["prefix"], run["key"], f"s{step}", f"c{len(entry['checkpoints']) + 1}")
         settings = {**run["settings"], **values["ak"],

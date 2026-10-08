@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from taste.recovery_study.driver import FINISHED, RUNNING, STARTED
+from taste.recovery_study.driver import FINISHED, FORGIVEN_CRASHES, RUNNING, STARTED
 from taste.recovery_study.jobs import JobSpec, run_key
 from taste.recovery_study.map_driver import MapDriver
 from tests.recovery_fakes import BASE_SETTINGS, FakeHarbor, agent_steps, base_jobs, branches, trial
@@ -230,3 +230,50 @@ def test_a_job_whose_harbor_stopped_without_closing_it_is_taken_as_finished(tmp_
     assert driver.refresh(unit_active=lambda name: False) == 1
     assert driver.jobs[spec.name]["complete"] and driver.jobs[spec.name]["crashed"]
     assert driver.jobs[spec.name]["results"] == []
+
+
+def crashed(path, given, jobs_dir, name):
+    """Harbor ended job ``name`` before any trial (its network check failed); the driver's next run."""
+    (jobs_dir / name).mkdir(parents=True)
+    driver = MapDriver.open(path, given)
+    driver.add_sources([jobs_dir / "base"], [jobs_dir / "calibration"])
+    driver.refresh(unit_active=lambda job: False)
+    specs = driver.advance()
+    driver.save()
+    return specs
+
+
+def test_a_job_harbor_ended_before_any_trial_is_not_an_attempt_until_it_keeps_happening(tmp_path):
+    # A busy Docker fails Harbor's network check and the job ends before its trials: the probe is
+    # started again in full. Past a few such crashes they count, so a job that can never start ends.
+    jobs_dir, _, given = study(tmp_path)
+    path = tmp_path / "map.json"
+    _, [spec] = step(path, given, jobs_dir)
+    started = [spec]
+    for _ in range(FORGIVEN_CRASHES + 1):
+        [spec] = crashed(path, given, jobs_dir, started[-1].name)
+        started.append(spec)
+    assert [(s.settings()["branch_step"], s.attempts) for s in started] == [("10", 8)] * (FORGIVEN_CRASHES + 2)
+    # The probe's attempts are twice its eight: one counted crash leaves room for one more job, then none.
+    assert not any(s.settings()["branch_step"] == "10" for s in crashed(path, given, jobs_dir, started[-1].name))
+
+
+def test_a_checkpoint_whose_save_failed_is_not_restored_from_and_is_made_again(tmp_path):
+    # The rebuild was faithful but saving its files failed: no checkpoint of that name exists.
+    jobs_dir, trials, given = study(tmp_path, mode="restore")
+    made, failed = branches(lambda k, i: True), []
+
+    def outcome(spec, task, settings, harbor):
+        found = made(spec, task, settings, harbor)
+        if settings.get("branch_live") == "off" and not failed:
+            failed.append(spec.name)
+            found["branch"] = {"faithful": True}
+        return found
+
+    harbor, path = FakeHarbor(trials, outcome), tmp_path / "map.json"
+    _, specs = step(path, given, jobs_dir)
+    harbor.run(specs)
+    driver, specs = step(path, given, jobs_dir)
+    assert failed[0].endswith("-s10-c1")
+    assert [(s.name.rsplit("-", 2)[1:], s.settings()["branch_live"]) for s in specs] == [(["s10", "c2"], "off")]
+    assert not any(job.get("checkpoint") == failed[0] for job in driver.jobs.values() if job["purpose"] == "probe")

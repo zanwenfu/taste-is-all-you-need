@@ -304,7 +304,7 @@ class RecoveryDriver(Driver):
             job = self.jobs[name]
             for summary in job["results"] if job["complete"] else ():
                 if summary["exception"] is None and summary["faithful"] is not False \
-                        and summary["checkpoint"] in (None, name):
+                        and summary["checkpoint"] == name:  # one whose save failed names none
                     return name, summary["changed_paths"]
         return None
 
@@ -320,14 +320,15 @@ class RecoveryDriver(Driver):
             return list(found[0])
         if self.pending(check["jobs"]) or self.pending(check["checkpoints"]):
             return None
-        if len(check["jobs"]) >= values["check_attempts"]:
+        if len(self.counted(check["jobs"])) >= values["check_attempts"]:
             return False
         view = records.agent_view(records.settled(source["token"], values["trials_root"]))
         if view is None or not view["task"].strip():
             return False
         script, export = self.script(source["token"])
         state = self.final_state(check)
-        if values["mode"] == "restore" and state is None and len(check["checkpoints"]) < values["check_attempts"]:
+        if values["mode"] == "restore" and state is None \
+                and len(self.counted(check["checkpoints"])) < values["check_attempts"]:
             name = jobs.job_name(values["prefix"], run["key"], *label, f"s{len(check['checkpoints']) + 1}")
             settings = {**jobs.inherited(source["settings"], drop=jobs.CAPS), **values["ak"],
                         **jobs.branch(script, source["steps"], mode="rebuild", checkpoint=name, live=False)}
@@ -395,7 +396,7 @@ class RecoveryDriver(Driver):
                 if found:
                     current["agent"] = list(found[0])
                     continue
-                if len(current["agent_jobs"]) >= 2:
+                if len(self.counted(current["agent_jobs"])) >= 2:
                     episode["end"] = "agent_failed"
                     episode["rounds"].pop()
                     return
