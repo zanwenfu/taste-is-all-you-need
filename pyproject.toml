@@ -51,6 +51,8 @@ dev = [
     # mini-swe-agent's own model class, run beside Taste's in a comparison test.
     "tenacity>=8,<10",
 ]
+# The recovery study's figures (scripts/recovery_figures.py).
+figures = ["matplotlib>=3.8,<4"]
 # Everything the multi-process runtime can use: both worker harnesses.
 all = ["openai>=3.0,<4", "claude-agent-sdk==0.2.152"]
 
