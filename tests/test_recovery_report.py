@@ -21,12 +21,12 @@ report = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(report)
 
 
-def mapped(status, steps, decisive, probes, *, rules=None, rewind=None, monotone=True, drops=()):
+def mapped(status, steps, decisive, probes, *, rules=None, rewind=None, monotone=True, drops=(), scanned=False):
     curve = [point(step, s, n) for step, (s, n) in sorted(probes.items())]
     winnable = [p for p in curve if p["step"] >= 1 and p["successes"]]
     return {"task": "t", "base": {}, "status": status, "steps": steps, "decisive_step": decisive,
             "decisive_fraction": None if decisive is None else decisive / steps, "curve": curve,
-            "recoverable": bool(winnable), "monotone": monotone, "earlier_drops": list(drops),
+            "recoverable": bool(winnable), "monotone": monotone, "earlier_drops": list(drops), "scanned": scanned,
             "rewind": rewind or {"highest_v": 0, "latest": 0}, "state_rewards": {},
             "rules": rules or {"visible_tests": None, "before_large_edit": None, "start": 0, "rules": 0},
             "spend": {"usd": 1.0, "trials": 10}}
@@ -37,7 +37,8 @@ def test_the_map_section_counts_decisive_steps_recoverable_runs_and_drops():
         "r1": mapped("done", 20, 12, {0: (1, 2), 10: (4, 8), 11: (8, 16), 12: (0, 16)}),
         "r2": mapped("done", 10, 10, {0: (1, 3), 5: (2, 8), 9: (1, 16)}),
         "r3": mapped("done", 16, 1, {0: (1, 2), 1: (0, 16)}),
-        "r4": mapped("censored", 30, None, {0: (1, 2), 7: (3, 8)}, monotone=False, drops=[{"after": 3, "by": 5}]),
+        "r4": mapped("censored", 30, None, {0: (1, 2), 7: (3, 8)}, monotone=False, drops=[{"after": 3, "by": 5}],
+                     scanned=True),
         "r5": {"task": "t", "base": {}, "status": "skipped", "skipped": "1 steps"},
     }
     found = report.map_section(summary)
@@ -52,6 +53,19 @@ def test_the_map_section_counts_decisive_steps_recoverable_runs_and_drops():
                                                 "wilson_95": [round(low, 6), round(high, 6)]}
     assert found["winnable_until_submission"]["count"] == 1
     assert (found["non_monotone"], found["with_earlier_drops"], found["spend_usd"]) == (1, 1, 4.0)
+    assert found["scanned"] == 1
+    assert found["per_run"]["r1"] == {"status": "done", "steps": 20, "decisive_step": 12, "decisive_fraction": 0.6}
+    assert "r5" not in found["per_run"]
+
+
+def test_without_a_full_scan_the_map_does_not_claim_its_curves_are_monotone():
+    # A binary search never probes above a lost step, so it cannot see a curve recover after a drop.
+    summary = {"r1": mapped("done", 20, 12, {0: (1, 2), 10: (4, 8), 12: (0, 16)}),
+               "r2": mapped("done", 10, 10, {0: (1, 3), 9: (1, 16)})}
+    found = report.map_section(summary)
+    assert (found["scanned"], found["non_monotone"], found["with_earlier_drops"]) == (0, None, None)
+    text = report.markdown({"map": found})
+    assert "not tested: no run had a full scan" in text and "Curves that recover after a drop" not in text
 
 
 def test_rewind_choices_are_scored_by_their_distance_from_the_decisive_step_and_v_there():
@@ -170,6 +184,7 @@ def test_the_report_runs_on_the_drivers_state_files(tmp_path, capsys):
                         str(reader), "--resamples", "200", "--json", str(out)]) == 0
     result = json.loads(out.read_text())
     assert result["map"]["statuses"] == {"done": 1} and result["choices"]["reader"]["runs"] == 1
+    assert (result["map"]["scanned"], result["map"]["non_monotone"]) == (0, None)
     assert result["choices"]["reader"]["choices"][0]["distance"] == 1
     assert set(result["recoveries"]["arms"]) == {"retry", "rewind_oracle", "rewind_rules", "continue"}
     assert result["selector"]["note"] == "too few runs or recoveries"

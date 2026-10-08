@@ -99,6 +99,9 @@ def map_section(summary):
     runs = {run_id: run for run_id, run in summary.items() if run["status"] != "skipped"}
     final = {run_id: run for run_id, run in runs.items() if run["status"] in FINAL}
     done = {run_id: run for run_id, run in runs.items() if run["status"] == "done"}
+    # A binary search never probes above a lost step, so only a full scan can show a curve that
+    # recovers after a drop, or a drop before the last winnable step: None when no run had one.
+    scanned = [run for run in final.values() if run.get("scanned")]
     fractions = [run["decisive_fraction"] for run in done.values()]
     histogram = Counter(min(9, int(fraction * 10)) for fraction in fractions)
     return {
@@ -110,12 +113,15 @@ def map_section(summary):
                                       for tenth in range(10)},
         "recoverable_after_start": rate(run["recoverable"] for run in final.values()),
         "winnable_until_submission": rate(run["decisive_step"] == run["steps"] for run in done.values()),
-        "non_monotone": sum(1 for run in final.values() if not run["monotone"]),
-        "with_earlier_drops": sum(1 for run in final.values() if run["earlier_drops"]),
+        "scanned": len(scanned),
+        "non_monotone": sum(1 for run in scanned if not run["monotone"]) if scanned else None,
+        "with_earlier_drops": sum(1 for run in scanned if run["earlier_drops"]) if scanned else None,
         "passed_then_failed": sum(1 for run in runs.values() if 1.0 in run.get("state_rewards", {}).values()),
         "spend_usd": round(math.fsum(run["spend"]["usd"] for run in runs.values()), 6),
         "trials": sum(run["spend"]["trials"] for run in runs.values()),
         "curves": {run_id: run["curve"] for run_id, run in runs.items()},
+        "per_run": {run_id: {key: run[key] for key in ("status", "steps", "decisive_step", "decisive_fraction")}
+                    for run_id, run in runs.items()},
     }
 
 
@@ -365,9 +371,11 @@ def markdown(result):
                   f"- Decisive step d: median {_f(step.get('median'), 1)} (quartiles {_f(step.get('q1'), 1)} to "
                   f"{_f(step.get('q3'), 1)}, n = {step['n']}); as a share of the run: median "
                   f"{_f(share.get('median'))} (quartiles {_f(share.get('q1'))} to {_f(share.get('q3'))}).",
-                  f"- Curves that recover after a drop: {found['non_monotone']}; runs with an earlier drop: "
-                  f"{found['with_earlier_drops']}; runs whose state passed the hidden tests at some probed step: "
-                  f"{found['passed_then_failed']}.", "",
+                  (f"- Of {found['scanned']} runs with a full scan, curves that recover after a drop: "
+                   f"{found['non_monotone']}; with an earlier drop: {found['with_earlier_drops']}."
+                   if found["scanned"] else "- Monotonicity not tested: no run had a full scan, and a binary "
+                   "search alone cannot see a curve recover after a drop."),
+                  f"- Runs whose state passed the hidden tests at some probed step: {found['passed_then_failed']}.", "",
                   "| d / T | " + " | ".join(found["decisive_fraction_deciles"]) + " |",
                   "| --- | " + " | ".join("---" for _ in found["decisive_fraction_deciles"]) + " |",
                   "| runs | " + " | ".join(str(v) for v in found["decisive_fraction_deciles"].values()) + " |", ""]

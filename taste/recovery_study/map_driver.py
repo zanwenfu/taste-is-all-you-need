@@ -185,6 +185,7 @@ class MapDriver(Driver):
             trials = [summary for _, summary in self.results(names)]
             out[run_id] = {
                 **base, **found, "rules": run["rules"], "features": run["features"], "checkpoints": checkpoints,
+                "scanned": bool(run["scan"]),
                 "state_rewards": {str(step): reward for step, reward in sorted(states.items())},
                 "spend": {"usd": round(math.fsum(t["cost_usd"] or 0.0 for t in trials), 6),
                           "seconds": round(math.fsum(t["seconds"] or 0.0 for t in trials), 1),
