@@ -41,11 +41,13 @@ the former.
 Rebuild fidelity rule. A rebuilt command diverges from the record when its
 exit code differs, when one timed out and the other did not, or when the
 similarity of their outputs is below OUTPUT_FLOOR. A command the record shows
-cut off by its time limit is matched by its output alone: whether it is cut
-off again, and its exit code, depend on the host's speed, not on the files. A
-command the record shows finishing is given REBUILD_TIME_FACTOR times its
-limit to finish again (within the terminal's maximum); one cut off keeps its
-own limit, so that its effects are cut off as they were. Similarity is the Dice
+cut off by its time limit is not compared: where a limit cuts a command
+depends on the host's speed, so neither its exit code nor its output says
+anything about the files (its similarity is still recorded), and the commands
+after it, compared as usual, show whether the files differ. A command the
+record shows finishing is given REBUILD_TIME_FACTOR times its limit to finish
+again (within the terminal's maximum); one cut off keeps its own limit, so
+that its effects are cut off as they were. Similarity is the Dice
 coefficient of the two outputs' line multisets, 2|A&B| / (|A| + |B|), after
 each line is normalized (runs of seven or more hexadecimal digits become '#',
 runs of digits become '0', whitespace is collapsed, empty lines are dropped);
@@ -160,8 +162,8 @@ def compare(run, output, returncode, timed_out):
     recorded = run.printed or {"output": run.output, "returncode": run.returncode, "timed_out": run.timed_out}
     score = round(similarity(recorded["output"], output), 4)
     if recorded["timed_out"]:
-        # Cut off when recorded: matched by its output alone (see the fidelity rule).
-        divergent = score < OUTPUT_FLOOR
+        # Cut off when recorded: not compared (see the fidelity rule).
+        divergent = False
     else:
         divergent = returncode != recorded["returncode"] or bool(timed_out) or score < OUTPUT_FLOOR
     return {"returncode": returncode, "recorded_returncode": recorded["returncode"],
