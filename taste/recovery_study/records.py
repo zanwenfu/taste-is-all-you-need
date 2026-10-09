@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 from taste.agents.checker import VERDICTS, parse_submission
+from taste.agents.protocols import MINI_SENTINEL, protocol
 from taste.agents.trajectory_reader import final_message, steps_from_trajectory
 from taste.recovery_study.commands import diff_paths, gaming_flags, written_paths
 
@@ -48,7 +49,7 @@ UNFAITHFUL_FLAG = "branch_unfaithful"
 FLAT_RECORD = Path("agent") / "trajectory.json"
 # Taste's own runs in a settled record ("taste-azure-worker": a run that never reached the agent).
 TASTE_ROLES = frozenset({"taste-coordinator", "taste-monitor", "taste-azure-worker"})
-SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+SENTINEL = MINI_SENTINEL
 
 
 def number(raw):
@@ -110,9 +111,7 @@ def agent_view(nested):
     ending = (run.get("extra") or {}).get("exit") or {}
     submission = ""
     if taken and ending.get("exit_status") == "Submitted":
-        lines = taken[-1].output.lstrip().splitlines(keepends=True)
-        if lines and lines[0].strip() == SENTINEL:
-            submission = "".join(lines[1:])
+        submission = protocol((run.get("agent") or {}).get("name")).submission_text(taken[-1].output)
     return {"task": task, "steps": taken, "final_message": final_message(run), "submission": submission,
             "exit_status": ending.get("exit_status"), "stopped_by": ending.get("stopped_by") or ""}
 

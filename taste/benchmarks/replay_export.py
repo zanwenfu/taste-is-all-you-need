@@ -7,10 +7,12 @@ for a trial that was itself a branch, the replay script it branched, which
 its owner left in the trial's directory. No model is asked and nothing runs.
 
 A step is one model reply the agent received and the commands it ran before
-its next call. A reply the run's end cut off, which the agent never received,
+its next call; the commands it ran before its first call are the script's
+setup. A reply the run's end cut off, which the agent never received,
 and a call given up as lost, which it asked again, are not steps. The script
 ends before the first step with a command that has no whole result (one the
-run's end cut off); ``source.dropped_steps`` counts what was left out.
+run's end cut off), and has no steps if a setup command has none;
+``source.dropped_steps`` counts what was left out.
 
 A command's output is the ledger's (standard output, then standard error, as
 the agent was given them), exact when its length is the one recorded in
@@ -18,9 +20,10 @@ memory. Without a ledger it is memory's copy, exact only when nothing was cut
 from it, and the script has no exact command texts: a branch from it can
 restore a checkpoint but not rebuild.
 
-A branch trial's own record is exported as its steps were seen: steps 1..k
-from the script it branched, with step k's output as changed there, then the
-steps it took live. A branch that was unfaithful is refused.
+A branch trial's own record is exported as its steps were seen: the setup and
+steps 1..k from the script it branched, with step k's output as changed there
+(without the commands a rejection kept the agent from), then the steps it took
+live. A branch that was unfaithful is refused.
 """
 
 from __future__ import annotations
@@ -126,6 +129,7 @@ def export_script(journal, *, ledger=None, parent=None, trial=None):
     commands = read_ledger(ledger)
     binding, task, branch, parent_script, ended = None, None, None, None, None
     steps, requests, open_runs, broken = [], {}, {}, set()
+    setup, setup_left = [], []
     previous, effort, tools = [], None, None
     for event in events:
         kind = event["kind"]
@@ -135,6 +139,8 @@ def export_script(journal, *, ledger=None, parent=None, trial=None):
             task = event["content"]
         elif kind == "hosted_branch":
             branch, parent_script = event, _parent_script(parent, event)
+            if event["step"] and event.get("replay", True):
+                setup_left = [run.to_dict() for run in parent_script.setup]
         elif kind == "hosted_unfaithful":
             raise ValueError(f"this run was a branch that did not match its record (step {event['step']}, "
                              f"{event['reason']}): it is not a run of the agent")
@@ -147,11 +153,17 @@ def export_script(journal, *, ledger=None, parent=None, trial=None):
                           "_left": [run.to_dict() for run in source.runs]})
             previous = parent_script.message_shas(event["step"])
         elif kind == "hosted_replay_output":
-            current = steps[-1]
-            seen = _seen(current["_left"].pop(0), event["override"], branch.get("note", ""))
+            if event["step"] == 0:
+                current, left = setup, setup_left
+            else:
+                current, left = steps[-1]["runs"], steps[-1]["_left"]
+            seen = _seen(left.pop(0), event["override"], branch.get("note", ""))
             if text_sha(seen["output"]) != event["output_sha256"]:
                 raise ValueError("a replayed output differs from what the branch showed")
-            current["runs"].append(seen)
+            current.append(seen)
+        elif kind == "hosted_prefix" and event.get("dropped") and steps:
+            # A rejection kept the agent from the rest of step k's recorded commands: never seen.
+            steps[-1]["_left"] = []
         elif kind == "hosted_request":
             requests[event["id"]] = event["request_sha"]
         elif kind == "hosted_lost":
@@ -176,8 +188,7 @@ def export_script(journal, *, ledger=None, parent=None, trial=None):
                           "reply": reply_to_dict(reply_from_completion(json.loads(result), event["cost_usd"])),
                           "text": list(event["text"]), "calls": list(event["calls"]), "runs": [], "replayed": False})
         elif kind == "hosted_command":
-            if not steps:
-                raise ValueError("a command was recorded before any model reply")
+            # Before any reply: the setup's (index -1).
             open_runs[event["effect_id"]] = (len(steps) - 1, event)
         elif kind == "hosted_output":
             index, command = open_runs.pop(event["effect_id"], (None, None))
@@ -186,12 +197,15 @@ def export_script(journal, *, ledger=None, parent=None, trial=None):
             if event["terminated"] not in _COMPLETE:
                 broken.add(index)
                 continue
-            steps[index]["runs"].append(_recorded_run(command, event, commands))
+            (setup if index < 0 else steps[index]["runs"]).append(_recorded_run(command, event, commands))
         elif kind == "hosted_exit":
             ended = {key: event[key] for key in ("exit_status", "stopped_by", "submission")}
     broken.update(index for index, _ in open_runs.values())
     broken.update(index for index, item in enumerate(steps) if item.pop("_left", None))
-    kept = min(broken, default=len(steps))
+    if setup_left:
+        broken.add(-1)
+    # A setup without a whole result leaves no step to branch from.
+    kept = 0 if -1 in broken else min(broken, default=len(steps))
     source = {"trial": trial, "run_id": binding["run_id"], "agent": binding["agent"], "model": binding["model"],
               "workdir": binding["workdir"], "dropped_steps": len(steps) - kept,
               "effort": effort if effort is not None else (parent_script.source.get("effort") if parent_script else None),
@@ -201,7 +215,7 @@ def export_script(journal, *, ledger=None, parent=None, trial=None):
                   "script_sha256": branch["script_sha256"], "step": branch["step"],
                   "override": branch.get("override", ""), "trial": parent_script.source.get("trial"),
                   "run_id": parent_script.source.get("run_id")}}
-    script = ReplayScript.from_dict({"schema": SCRIPT_SCHEMA, "source": source, "task": task,
+    script = ReplayScript.from_dict({"schema": SCRIPT_SCHEMA, "source": source, "task": task, "setup": setup,
                                      "steps": steps[:kept], "exit": ended})
     return script.to_dict()
 

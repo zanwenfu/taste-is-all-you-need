@@ -239,13 +239,17 @@ def hosted_trajectory(rows, *, run_id):
             if calls:
                 current["tool_calls"] = calls
         elif kind == "hosted_replay_output":
+            replayed_result = {"content": event["output"], "extra": {
+                "command": event["command"], "returncode": event["returncode"],
+                "timed_out": event["timed_out"], "output_chars": event["output_chars"],
+                "replayed": True, "override": event["override"], "timestamp": row["at"]}}
+            if event["step"] == 0 and current is None:
+                # The agent's setup, answered from the record before its first call.
+                step(row, "system", "command run before any model reply", observation={"results": [replayed_result]})
+                continue
             if current is None or not current["extra"].get("replayed"):
                 raise ResponsesAuditError("replayed output has no replayed reply")
-            current.setdefault("observation", {"results": []})["results"].append({
-                "content": event["output"], "extra": {
-                    "command": event["command"], "returncode": event["returncode"],
-                    "timed_out": event["timed_out"], "output_chars": event["output_chars"],
-                    "replayed": True, "override": event["override"], "timestamp": row["at"]}})
+            current.setdefault("observation", {"results": []})["results"].append(replayed_result)
         elif kind == "hosted_prefix":
             prefix = True
         elif kind == "hosted_live":

@@ -149,3 +149,17 @@ def _nested(steps):
             {"content": output, "extra": {"command": command, "returncode": code}}]}}
         for command, code, output, message in steps]
     return {"subagent_trajectories": [{"agent": {"name": "mini-swe-agent"}, "steps": run}]}
+
+
+def test_a_swe_agent_runs_submission_is_the_patch_between_its_markers():
+    patch = "diff --git a/src/app.py b/src/app.py\n+fix\n"
+    marker = "<<SWE_AGENT_SUBMISSION>>"
+    run = [{"source": "user", "message": "task"},
+           {"source": "agent", "message": "Submitting.", "observation": {"results": [
+               {"content": f"{marker}\n{patch}{marker}", "extra": {"command": "submit", "returncode": 0}},
+               {"content": "", "extra": {"command": "_state_anthropic", "returncode": 0}},
+               {"content": patch, "extra": {"command": "# swe-rex: read_file /root/model.patch",
+                                            "returncode": 0}}]}}]
+    nested = {"subagent_trajectories": [{"agent": {"name": "swe-agent"}, "steps": run,
+                                         "extra": {"exit": {"exit_status": "Submitted", "stopped_by": ""}}}]}
+    assert records.agent_view(nested)["submission"] == patch

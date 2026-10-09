@@ -184,7 +184,7 @@ async def check(image, token, directory):
 
         checks = {
             "the recorded run failed where it should and submitted": (
-                results[3][1] == 3 and script.steps[-1].submission and not script.steps[STEP - 1].submission),
+                results[3][1] == 3 and script.submission(len(RUN)) and not script.submission(STEP)),
             "the rebuild matches the record": account["faithful"] and account["divergent"] == 0
             and account["commands"] == STEP,
             "timings in outputs do not count": min(row["similarity"] for row in account["rows"]) == 1.0,

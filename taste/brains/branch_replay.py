@@ -30,10 +30,20 @@ With the replay off, only the files of step k are brought back, and the
 trial's own agent starts fresh with its own task: a checker given a run's
 final files, without the coding agent's context.
 
+Commands an agent runs before its first model call (SWE-agent starts its
+shell session, sets variables and installs its tools) are the script's
+setup: a rebuild runs them first, and a branch answers them from the record
+before step 1, as it answers the steps.
+
 A change at step k: ``append`` shows the agent step k's output followed by a
 note; ``reject``, at the submission step, shows it a rejection text with exit
 code 1 instead, so that the agent's submission protocol does not end its run
-and it works on in place. A branch's own record exports as the run the agent
+and it works on in place. Which of step k's commands is changed is the
+agent's (``taste.agents.protocols``): mini-swe-agent's one command, and
+SWE-agent's action, not its state reads after it. A rejection keeps the
+agent from what its submission would have run next (SWE-agent reads its
+patch); those recorded commands are left out when it asks its model again,
+and the record says how many. A branch's own record exports as the run the agent
 had, so it can be branched again (another round); a changed step keeps what
 the container printed beside what the agent was shown, and a rebuild checks
 the former.
@@ -73,6 +83,7 @@ from dataclasses import dataclass, replace
 from posixpath import isabs
 
 from taste.agents import HostedStop, ModelReply, ShellResult
+from taste.agents.protocols import MINI_SENTINEL, protocol
 from taste.providers._openai import _NATIVE
 
 SCRIPT_SCHEMA = "taste.branch/ReplayScript/1"
@@ -80,7 +91,7 @@ MODES = ("rebuild", "restore")
 OVERRIDES = ("append", "reject")
 # mini-swe-agent's submission protocol (TasteEnvironment._check_finished): the
 # output's first line is this, and the command exited 0.
-SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+SENTINEL = MINI_SENTINEL
 REJECT_EXIT = 1
 OUTPUT_FLOOR = 0.5
 # How much longer than its recorded limit a rebuilt command that the record
@@ -314,9 +325,6 @@ class RecordedStep:
                 "calls": [dict(item) for item in self.calls], "runs": [run.to_dict() for run in self.runs],
                 "replayed": self.replayed}
 
-    @property
-    def submission(self):
-        return bool(self.runs) and submitted(self.runs[-1].output, self.runs[-1].returncode)
 
 
 @dataclass(frozen=True)
@@ -327,20 +335,25 @@ class ReplayScript:
     steps: tuple[RecordedStep, ...]
     source: Mapping
     exit: Mapping | None
+    # The commands the agent ran before its first model call.
+    setup: tuple[RecordedRun, ...] = ()
 
     @classmethod
     def from_dict(cls, value):
         if not isinstance(value, Mapping) or value.get("schema") != SCRIPT_SCHEMA:
             raise _problem("not a replay script of schema " + SCRIPT_SCHEMA)
-        steps = value.get("steps")
+        steps, setup = value.get("steps"), value.get("setup", [])
         if not isinstance(steps, list) or not isinstance(value.get("source"), Mapping):
             raise _problem("it needs its steps and its source")
+        if not isinstance(setup, list):
+            raise _problem("its setup must be a list of runs")
         ended = value.get("exit")
         if ended is not None and not isinstance(ended, Mapping):
             raise _problem("its exit must be an object or null")
         return cls(_text(value.get("task"), "the task"),
                    tuple(RecordedStep.from_dict(item, number) for number, item in enumerate(steps, 1)),
-                   dict(value["source"]), None if ended is None else dict(ended))
+                   dict(value["source"]), None if ended is None else dict(ended),
+                   tuple(RecordedRun.from_dict(item) for item in setup))
 
     @classmethod
     def from_bytes(cls, raw):
@@ -353,10 +366,27 @@ class ReplayScript:
         return cls.from_dict(value)
 
     def to_dict(self):
-        submission = next((step.number for step in self.steps if step.submission), None)
-        return {"schema": SCRIPT_SCHEMA, "source": dict(self.source), "task": self.task,
-                "steps": [step.to_dict() for step in self.steps], "submission_step": submission,
-                "exit": None if self.exit is None else dict(self.exit)}
+        submission = next((step.number for step in self.steps if self.submission(step.number)), None)
+        value = {"schema": SCRIPT_SCHEMA, "source": dict(self.source), "task": self.task,
+                 "steps": [step.to_dict() for step in self.steps], "submission_step": submission,
+                 "exit": None if self.exit is None else dict(self.exit)}
+        if self.setup:
+            value["setup"] = [run.to_dict() for run in self.setup]
+        return value
+
+    @property
+    def protocol(self):
+        """The recorded agent's submission protocol (``taste.agents.protocols``)."""
+        return protocol((self.source.get("agent") or {}).get("name"))
+
+    def submission(self, number):
+        """Whether step ``number`` ended the run as its submission."""
+        return self.protocol.submission_index(self.steps[number - 1].runs) is not None
+
+    def override_index(self, number, override):
+        """Which of step ``number``'s commands an override changes; None if it can change none."""
+        runs = self.steps[number - 1].runs
+        return self.protocol.submission_index(runs) if override == "reject" else self.protocol.note_index(runs)
 
     def message_shas(self, number):
         """The digests of the messages of step ``number``'s request, as recorded."""
@@ -388,7 +418,8 @@ def check_branch(script, step, *, mode, override="", note="", replay=True):
         raise ValueError(f"branch step must be between 0 and {len(script.steps)}, the steps this record holds")
     if mode not in MODES:
         raise ValueError("branch mode must be rebuild or restore")
-    if mode == "rebuild" and any(run.executed is None for item in script.steps[:step] for run in item.runs):
+    commands = [*(script.setup if step else ()), *(run for item in script.steps[:step] for run in item.runs)]
+    if mode == "rebuild" and any(run.executed is None for run in commands):
         raise ValueError("this script lacks the exact commands the container ran (the trial's terminal "
                          "ledger), which a rebuild runs again")
     if override and not replay:
@@ -398,12 +429,11 @@ def check_branch(script, step, *, mode, override="", note="", replay=True):
             raise ValueError("branch override must be append or reject")
         if not note:
             raise ValueError("a branch override needs its note")
-        if step == 0 or not script.steps[step - 1].runs:
+        if step == 0 or script.protocol.note_index(script.steps[step - 1].runs) is None:
             raise ValueError("an override changes the output of step k's command, and this step ran none")
-        last = script.steps[step - 1]
-        if override == "reject" and not last.submission:
+        if override == "reject" and not script.submission(step):
             raise ValueError("reject replaces a submission, and step k is not one")
-        if override == "append" and last.submission:
+        if override == "append" and script.submission(step):
             raise ValueError("step k is the submission: a note after it would not be read; use reject")
 
 
@@ -467,24 +497,26 @@ class BranchPolicy:
 
 
 async def rebuild(script, step, execute, *, tolerance=0, on_row=None):
-    """Run the recorded commands of steps 1..``step`` again, in order; return the account.
+    """Run the recorded commands of steps 1..``step`` again, in order, the setup first; return the account.
 
     ``execute(number, run)`` runs one recorded command and returns its
-    ``(output, returncode, timed_out)``. Each result is compared with the
-    record (``compare``); the rebuild stops once more commands diverged than
-    ``tolerance`` allows. ``on_row`` sees each comparison as it is made.
+    ``(output, returncode, timed_out)``; the setup's commands are step 0's.
+    Each result is compared with the record (``compare``); the rebuild stops
+    once more commands diverged than ``tolerance`` allows. ``on_row`` sees
+    each comparison as it is made.
     """
     rows, divergent = [], 0
-    for item in script.steps[:step]:
-        for index, run in enumerate(item.runs):
-            output, returncode, timed_out = await execute(item.number, run)
-            row = {"step": item.number, "run": index, **compare(run, output, returncode, timed_out)}
-            rows.append(row)
-            if on_row is not None:
-                on_row(row, output)
-            divergent += row["divergent"]
-            if divergent > tolerance:
-                return {"commands": len(rows), "divergent": divergent, "faithful": False, "rows": rows}
+    commands = [(0, index, run) for index, run in enumerate(script.setup if step else ())]
+    commands += [(item.number, index, run) for item in script.steps[:step] for index, run in enumerate(item.runs)]
+    for number, index, run in commands:
+        output, returncode, timed_out = await execute(number, run)
+        row = {"step": number, "run": index, **compare(run, output, returncode, timed_out)}
+        rows.append(row)
+        if on_row is not None:
+            on_row(row, output)
+        divergent += row["divergent"]
+        if divergent > tolerance:
+            return {"commands": len(rows), "divergent": divergent, "faithful": False, "rows": rows}
     return {"commands": len(rows), "divergent": divergent, "faithful": True, "rows": rows}
 
 
@@ -506,7 +538,11 @@ class ReplayHost:
         self.live_after, self.override, self.note = live_after, override, note
         self.faithful, self.context = faithful, context
         self.replayed = 0
-        self._runs = []
+        # The recorded commands still to come before the agent's next call: the setup's, then each step's.
+        self._runs = list(script.setup) if step else []
+        self._position = 0  # of the next one, in its step
+        self._target = None  # which of step k's commands the override changes
+        self._rejected = False
         self._done = step == 0
         self._handed_over = False
 
@@ -527,9 +563,9 @@ class ReplayHost:
         self.record("unfaithful", {"step": number, "reason": what, "detail": detail})
         raise HostedStop("branch_unfaithful")
 
-    def _prefix_done(self):
+    def _prefix_done(self, dropped=0):
         self._done = True
-        self.record("prefix", {"steps": self.step})
+        self.record("prefix", {"steps": self.step, **({"dropped": dropped} if dropped else {})})
 
     def _hand_over(self, sha=None):
         """The first call after the prefix: check it, then let the agent go on live or stop it."""
@@ -552,6 +588,10 @@ class ReplayHost:
 
     def ask(self, *, messages, tools, effort):
         sha = request_sha(messages, tools, effort)
+        if not self._done and self._runs and self._rejected:
+            # The rejection kept the agent from what its submission would have run next.
+            dropped, self._runs = len(self._runs), []
+            self._prefix_done(dropped)
         if self._done:
             self._hand_over(sha)
             return self.live.ask(messages=messages, tools=tools, effort=effort)
@@ -563,7 +603,9 @@ class ReplayHost:
         if sha != step.request_sha:
             self._diverged(number, "request", self.script.diagnose(number, messages, tools, effort))
         self.replayed = number
-        self._runs = list(step.runs)
+        self._runs, self._position = list(step.runs), 0
+        if number == self.step and self.override:
+            self._target = self.script.override_index(number, self.override)
         self.record("replay", {"step": number, "request_sha": sha, "text": list(step.text),
                                "calls": [dict(call) for call in step.calls], "model": step.reply.model,
                                "recorded_cost_usd": step.reply.cost_usd})
@@ -578,24 +620,26 @@ class ReplayHost:
             return self.live.run(command, cwd=cwd, timeout_seconds=timeout_seconds, shown=shown)
         if not self._runs:
             self._diverged(self.replayed, "command", {"note": "the agent ran a command the record does not have"})
-        expected = self._runs.pop(0)
+        expected, index = self._runs.pop(0), self._position
+        self._position += 1
         same = (command == expected.executed if expected.executed is not None
                 else (shown if shown is not None else command) == expected.command)
         if not same or cwd != expected.cwd:
             self._diverged(self.replayed, "command", {
                 "command_matches": same, "cwd_matches": cwd == expected.cwd})
         output, returncode, timed_out = expected.output, expected.returncode, expected.timed_out
-        last = not self._runs and self.replayed == self.step
-        override = self.override if last else ""
+        at_step = self.step and self.replayed == self.step
+        override = self.override if at_step and index == self._target else ""
         if override == "append":
             output = with_note(output, self.note)
         elif override == "reject":
             output, returncode, timed_out = self.note, REJECT_EXIT, False
+            self._rejected = True
         self.record("replay_output", {"step": self.replayed, "command": _cut(expected.command),
                                       "cwd": expected.cwd, "returncode": returncode, "timed_out": timed_out,
                                       "override": override, "output": _cut(output, 16_000),
                                       "output_chars": len(output), "output_sha256": text_sha(output)})
-        if last:
+        if at_step and not self._runs:
             self._prefix_done()
         return ShellResult(output, returncode, timed_out=timed_out)
 
