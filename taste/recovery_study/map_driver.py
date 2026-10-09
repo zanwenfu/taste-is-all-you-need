@@ -33,7 +33,7 @@ import hashlib
 import math
 
 from taste.recovery_study import jobs, records, search
-from taste.recovery_study.driver import COMMON, Driver
+from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver
 
 DEFAULTS = {
     **COMMON,
@@ -106,14 +106,20 @@ class MapDriver(Driver):
     # What the probes found ------------------------------------------------
 
     def _checkpoint(self, entry):
-        """The checkpoint of a probe's step that is ready; or (None, failed)."""
+        """The checkpoint of a probe's step that is ready; "" when it came out partial (over the size
+        cap, it cannot be restored: the step's branches rebuild their prefix); or (None, failed)."""
+        partial = False
         for name in self.counted(entry["checkpoints"]):
             job = self.jobs[name]
             # A trial names the checkpoint it saved; one whose save failed names none.
-            if job["complete"] and any(summary["exception"] is None and summary["faithful"] is not False
-                                       and summary["checkpoint"] == job["checkpoint"]
-                                       for summary in job["results"]):
+            saved = [summary for summary in (job["results"] if job["complete"] else ())
+                     if summary["exception"] is None and summary["faithful"] is not False
+                     and summary["checkpoint"] == job["checkpoint"]]
+            if any(not summary.get("checkpoint_partial") for summary in saved):
                 return job["checkpoint"], False
+            partial = partial or bool(saved)
+        if partial:
+            return "", False
         finished = [name for name in self.counted(entry["checkpoints"]) if self.jobs[name]["complete"]]
         return None, len(finished) >= self.settings["checkpoint_attempts"]
 
@@ -177,13 +183,14 @@ class MapDriver(Driver):
                     **jobs.branch(run["script"], step, mode="restore" if checkpoint else "rebuild",
                                   checkpoint=checkpoint, live=True)}
         self.emit(self.harbor_job(name, run, settings, count, prepare=[self.script(run["base"]["token"])[1]]),
-                  run=run_id, step=step, purpose="probe", checkpoint=checkpoint)
+                  run=run_id, step=step, purpose="probe", checkpoint=checkpoint or None,
+                  **({"rebuilt_because": PARTIAL_CHECKPOINT} if checkpoint == "" else {}))
         entry["jobs"].append(name)
 
     def _make_checkpoint(self, run_id, run, step):
         values, entry = self.settings, self._entry(run, step)
         ready, failed = self._checkpoint(entry)
-        if ready or failed or self.pending(entry["checkpoints"]) \
+        if ready is not None or failed or self.pending(entry["checkpoints"]) \
                 or len(self.counted(entry["checkpoints"])) >= values["checkpoint_attempts"]:
             return
         name = jobs.job_name(values["prefix"], run["key"], f"s{step}", f"c{len(entry['checkpoints']) + 1}")

@@ -24,6 +24,10 @@ from taste.recovery_study import jobs, records, rules, state
 # many they do, so a job that can never start does not come back for ever.
 FORGIVEN_CRASHES = 3
 
+# Why a branch or a check rebuilds a state a checkpoint was made of: over the size cap the
+# checkpoint is partial, and Taste refuses to restore it (it lacks paths it would delete).
+PARTIAL_CHECKPOINT = "the checkpoint of this state is partial (over the size cap), so it is rebuilt from the record"
+
 # A driver's exit status: new jobs were written; none, but some are running;
 # every run is finished.
 STARTED, RUNNING, FINISHED = 0, 2, 3

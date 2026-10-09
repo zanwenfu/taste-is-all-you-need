@@ -431,3 +431,29 @@ def test_a_voided_final_state_and_the_check_it_spoiled_are_made_again(tmp_path):
     harbor.run([again])
     driver, [check] = step(path, given, jobs_dir)
     assert driver.jobs[check.name]["purpose"] == "check" and check.settings()["branch_checkpoint"] == again.name
+
+
+def test_a_final_state_saved_partial_is_checked_and_continued_by_rebuilding_it(tmp_path):
+    # Over the size cap, the saved final state cannot be restored: the checker's trial and the
+    # continue arm rebuild it from the record instead of failing on a restore.
+    jobs_dir, trials, given, _ = study(tmp_path, recoveries=["continue"])
+    made = recoveries()
+
+    def outcome(spec, task, settings, harbor):
+        found = made(spec, task, settings, harbor)
+        if settings.get("branch_live") == "off":
+            found["branch"]["saved_checkpoint"] = {"saved": True, "partial": True}
+        return found
+
+    path, harbor = tmp_path / "rec.json", FakeHarbor(trials, outcome)
+    _, [saved] = step(path, given, jobs_dir)
+    harbor.run([saved])
+    driver, [check] = step(path, given, jobs_dir)
+    settings = check.settings()
+    assert driver.jobs[check.name]["purpose"] == "check" and settings["branch_mode"] == "rebuild"
+    assert "branch_checkpoint" not in settings and "partial" in driver.jobs[check.name]["rebuilt_because"]
+    harbor.run([check])
+    driver, [first] = step(path, given, jobs_dir)
+    settings = first.settings()
+    assert driver.jobs[first.name]["recovery"] == "continue" and settings["branch_mode"] == "rebuild"
+    assert "branch_checkpoint" not in settings and settings["branch_override"] == "reject"

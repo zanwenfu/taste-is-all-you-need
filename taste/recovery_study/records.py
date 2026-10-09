@@ -42,6 +42,7 @@ from taste.recovery_study.commands import diff_paths, gaming_flags, written_path
 
 # A: {"faithful": bool, "unfaithful_at": step, "checkpoint": the id it saved,
 # "changed_paths": the paths its checkpoint's manifest lists,
+# "saved_checkpoint": the save's account ({"saved", "partial", ...}),
 # "prefix_seconds": the time spent bringing the prefix back}.
 BRANCH = "branch"
 # An audit flag, starting with this, that also marks a branch unfaithful.
@@ -176,6 +177,7 @@ def trial(trial_dir, trials_root):
     seconds, prefix = agent_seconds(result), number(branch.get("prefix_seconds"))
     graded = reward(result)
     changed = branch.get("changed_paths")
+    saved = branch.get("saved_checkpoint") if isinstance(branch.get("saved_checkpoint"), dict) else {}
     return {
         "trial": result.get("trial_name") or trial_dir.name,
         "task": Path(task_path).name if task_path else str(result.get("task_name", "")).rsplit("/", 1)[-1],
@@ -190,6 +192,8 @@ def trial(trial_dir, trials_root):
         "seconds": seconds, "prefix_seconds": prefix, "charged_seconds": charged(seconds, prefix),
         "faithful": faithful, "unfaithful_at": branch.get("unfaithful_at"), "checkpoint": branch.get("checkpoint"),
         "changed_paths": [str(path) for path in changed] if isinstance(changed, list) else None,
+        # A checkpoint over the size cap is partial: it lacks paths a restore would need.
+        "checkpoint_partial": bool(saved.get("partial")) if saved.get("saved") else None,
         "exit_status": view.get("exit_status"), "steps": len(view["steps"]) if view else None,
         # False: a settled record with no step of the agent. Taste never started
         # it; a reward Harbor gave its untouched container is not the agent's.

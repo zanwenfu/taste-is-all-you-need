@@ -302,3 +302,29 @@ def test_a_voided_checkpoint_and_the_probe_it_spoiled_are_made_again(tmp_path):
     assert again.attempts == 8 and again.settings()["branch_checkpoint"].endswith("-s10-c2")
     assert driver.jobs[spoiled]["void"] == "the checkpoint did not restore exactly"
     assert driver.results([probe.name]) == []
+
+
+def test_a_step_whose_checkpoint_came_out_partial_is_branched_by_rebuilding(tmp_path):
+    # Over the size cap, a checkpoint lacks paths a restore needs, and every restore from it would
+    # fail before the agent ran: the step's branches rebuild their prefix themselves instead.
+    jobs_dir, trials, given = study(tmp_path, mode="restore")
+    made = branches(lambda k, i: True)
+
+    def outcome(spec, task, settings, harbor):
+        found = made(spec, task, settings, harbor)
+        if settings.get("branch_live") == "off" and settings["branch_step"] == "10":
+            found["branch"]["saved_checkpoint"] = {"saved": True, "partial": True}
+        return found
+
+    harbor, path = FakeHarbor(trials, outcome), tmp_path / "map.json"
+    _, specs = step(path, given, jobs_dir)
+    harbor.run(specs)
+    driver, specs = step(path, given, jobs_dir)
+    [probe] = [s for s in specs if s.settings()["branch_step"] == "10"]
+    settings = probe.settings()
+    assert (settings["branch_mode"], settings["branch_live"], probe.attempts) == ("rebuild", "on", 8)
+    assert "branch_checkpoint" not in settings
+    assert "partial" in driver.jobs[probe.name]["rebuilt_because"]
+    # No other checkpoint of the step is made, and the map lends none for it to a rewind.
+    assert not any(s.settings()["branch_live"] == "off" for s in specs if s.settings()["branch_step"] == "10")
+    assert "10" not in next(iter(driver.summary().values()))["checkpoints"]

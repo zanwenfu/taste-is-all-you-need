@@ -75,7 +75,7 @@ from taste.agents.checker import BARE_FEEDBACK, checker_task, feedback
 from taste.agents.trajectory_reader import rewind_point
 from taste.recovery_study import jobs, records, search, state
 from taste.recovery_study.commands import gaming_flags
-from taste.recovery_study.driver import COMMON, Driver
+from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver
 
 RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare")
 SOURCES = ("oracle", "reader", "rules")
@@ -329,14 +329,19 @@ class RecoveryDriver(Driver):
     # Checks ----------------------------------------------------------------
 
     def final_state(self, check):
-        """The saved copy of a checked trial's final state: (checkpoint, changed paths), or None."""
+        """The saved copy of a checked trial's final state: (checkpoint, changed paths); ("", changed
+        paths) when it came out partial (over the size cap it cannot be restored, so it is rebuilt
+        from the record); or None."""
+        partial = None
         for name in self.counted(check["checkpoints"]):
             job = self.jobs[name]
             for summary in job["results"] if job["complete"] else ():
                 if summary["exception"] is None and summary["faithful"] is not False \
                         and summary["checkpoint"] == name:  # one whose save failed names none
-                    return name, summary["changed_paths"]
-        return None
+                    if not summary.get("checkpoint_partial"):
+                        return name, summary["changed_paths"]
+                    partial = partial or ("", summary["changed_paths"])
+        return partial
 
     def _check(self, run_id, run, check, source, label, **meta):
         """Advance one check of a trial's final state: [job, trial] of its verdict, None while it is
@@ -374,7 +379,7 @@ class RecoveryDriver(Driver):
                             checkpoint=checkpoint, live=False)
         settings = {**jobs.checker_trial(path, files, effort=values["checker_effort"]), **values["checker_ak"]}
         self.emit(self.harbor_job(name, run, settings, 1, model=values["checker_model"], prepare=[export]),
-                  run=run_id, purpose="check", **meta)
+                  run=run_id, purpose="check", **meta, **_rebuilt(checkpoint))
         check["jobs"].append(name)
         return None
 
@@ -473,7 +478,7 @@ class RecoveryDriver(Driver):
         values, reply = self.settings, run["check"]["reply"]
         recovery, step = arm["recovery"], arm["step"]
         base = {**run["settings"], **values["ak"]}
-        prepare, settings = [], dict(base)
+        prepare, settings, checkpoint = [], dict(base), None
         if recovery == "retry_feedback" or (recovery == "rewind" and step == 0):
             settings.update(jobs.task_suffix(self._note(job, note(recovery, reply))))
         elif recovery != "retry":
@@ -489,7 +494,7 @@ class RecoveryDriver(Driver):
                                         note=self._note(job, note(recovery, reply))))
         settings.update(self._caps(run["budget"]["usd"], run["budget"]["seconds"], base, branch=bool(prepare)))
         self.emit(self.harbor_job(job, run, settings, attempts, prepare=prepare),
-                  run=run_id, arm=name, purpose="first", recovery=recovery, step=step)
+                  run=run_id, arm=name, purpose="first", recovery=recovery, step=step, **_rebuilt(checkpoint))
 
     def _emit_round(self, run_id, run, name, arm, index, episode):
         """A later round: on from the last trial's submission, with its checker's feedback."""
@@ -502,7 +507,7 @@ class RecoveryDriver(Driver):
                             f"a{len(current['agent_jobs']) + 1}")
         if arm["recovery"] == "retry" and values["retry_rounds"] == "retry":
             base = {**run["settings"], **values["ak"]}
-            settings, prepare = {**base, **self._caps(usd, seconds, base, branch=False)}, []
+            settings, prepare, checkpoint = {**base, **self._caps(usd, seconds, base, branch=False)}, [], None
         else:
             base = {**jobs.inherited(agent["settings"], drop=jobs.CAPS), **values["ak"]}
             script, export = self.script(agent["token"])
@@ -514,7 +519,7 @@ class RecoveryDriver(Driver):
                         **self._caps(usd, seconds, base, branch=True)}
             prepare = [export]
         self.emit(self.harbor_job(job, run, settings, 1, prepare=prepare), run=run_id, arm=name,
-                  purpose="round", episode=index, round=len(episode["rounds"]))
+                  purpose="round", episode=index, round=len(episode["rounds"]), **_rebuilt(checkpoint))
         current["agent_jobs"].append(job)
 
     # Reporting -------------------------------------------------------------
@@ -558,3 +563,8 @@ class RecoveryDriver(Driver):
 
 def _slug(arm):
     return SLUG.get(arm, arm.replace("rewind@", "rw"))
+
+
+def _rebuilt(checkpoint):
+    """A job's note on why it rebuilds a final state that was saved: "" is a partial checkpoint."""
+    return {"rebuilt_because": PARTIAL_CHECKPOINT} if checkpoint == "" else {}

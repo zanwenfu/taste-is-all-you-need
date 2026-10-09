@@ -169,3 +169,16 @@ def test_a_swe_agent_runs_submission_is_the_patch_between_its_markers():
     nested = {"subagent_trajectories": [{"agent": {"name": "swe-agent"}, "steps": run,
                                          "extra": {"exit": {"exit_status": "Submitted", "stopped_by": ""}}}]}
     assert records.agent_view(nested)["submission"] == patch
+
+
+def test_a_record_says_whether_the_checkpoint_its_trial_saved_is_partial(tmp_path):
+    # Over the size cap a checkpoint lacks paths a restore would need: Taste refuses to restore it.
+    jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
+    saved = {"saved": True, "partial": True, "bytes": 536870912}
+    over = trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials,
+                 branch={"faithful": True, "checkpoint": "cp-1", "saved_checkpoint": saved})
+    whole = trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials,
+                  branch={"faithful": True, "checkpoint": "cp-2", "saved_checkpoint": {**saved, "partial": False}})
+    unsaved = trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials, branch={"faithful": True})
+    found = [records.trial(jobs_dir / "j" / name, trials)["checkpoint_partial"] for name in (over, whole, unsaved)]
+    assert found == [True, False, None]
