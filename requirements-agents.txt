@@ -5,3 +5,11 @@
 #   pip install -e '.[agents]'
 #   pip install --no-deps --require-hashes -r requirements-agents.txt
 mini-swe-agent==2.4.6 --hash=sha256:a35463c553ac825c7773b03cfa69cd44958e3af20155dcc5711fdf9e4c67cd54
+# SWE-agent 1.1.0 as Scale runs SWE-Bench Pro with it (scaleapi/SWE-agent, branch
+# scale-customizations, commit 1ac1581), the SWE-ReX version that commit pins, and the
+# LiteLLM its model module imports (Taste's model class replaces LiteLLM's; 1.83.0
+# imports beside openai 3). Its configuration and tool bundles are Taste's copies,
+# taste/agents/swe_agent_files.
+sweagent @ https://github.com/scaleapi/SWE-agent/archive/1ac158175178c9c40ed903fb59cc7aa3c87c75ae.tar.gz --hash=sha256:d2ca038da54e3276a03b35e4903aafdf601a8e275bb6968639c5f5c636deb410
+swe-rex==1.2.0 --hash=sha256:76c8d1222be005fdb24c2cb6fdf2251580ae010084dd7af51e27586f9a24ef98
+litellm==1.83.0 --hash=sha256:88c536d339248f3987571493015784671ba3f193a328e1ea6780dbebaa2094a8

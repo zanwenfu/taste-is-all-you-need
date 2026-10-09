@@ -61,7 +61,7 @@ result metadata (`agent_result.metadata.taste.configuration`).
 | --- | --- | --- |
 | `-m azure/<model>` | `gpt-6-astra` | The trial's model, which the coordinator runs on and every other role too unless `worker_model` names another: `gpt-6-astra`, `gpt-6-sol` or `gpt-5.6-luna`. |
 | `worker_model` | the trial's model | Served model for workers and monitors, one of the same three. |
-| `agent` | empty | An agent written by others that every worker runs unchanged: `mini-swe-agent`. Empty runs Taste's own worker. See below. |
+| `agent` | empty | An agent written by others that every worker runs unchanged: `mini-swe-agent` or `swe-agent`. Empty runs Taste's own worker. See below. |
 | `services` | `all` | `none` runs that agent alone: a fixed rule plans (the task verbatim, one assignment), no monitor judges it and nothing certifies it, one generation. The baseline arm, through the same machinery; the agent may spend the trial's whole cap. |
 | `alone` | `once` | With `services=none`: `continue` runs the agent again, given the task as given each time, in the environment the last run left, until `max_generations` or the task's time runs out. The control for a gain that comes from more attempts rather than from supervision. |
 | `rollback` | `off` | With `services=all`: `on` has the controller checkpoint the container's files before the first worker and after runs end, shows the coordinator those checkpoints, and restores the one a plan names (`rollback_to`) before that plan acts. Files only: running processes are not restored. |
@@ -101,7 +101,20 @@ terminal broker, and both are recorded for the worker's monitor. A monitor
 that judges the agent wrong or lost stops it at its next call. Its exit, final
 message, submission and command record become the assignment's report.
 
-mini-swe-agent is installed in the worker environment without its own
+With `--ak agent=swe-agent` every worker is SWE-agent 1.1.0 with the
+configuration SWE-Bench Pro's leaderboard is run with (Scale's `tool_use`:
+its bash tool, the `str_replace_editor` and `submit` bundles, function
+calling) and its own loop, environment class and templates
+(`taste/agents/swe_agent.py`). Taste supplies its model transport and, in
+place of SWE-ReX's server in the container, a runtime whose every operation
+is one command through the terminal broker; the bash session SWE-ReX keeps
+is carried from command to command in files under `/root/.taste-swe-agent`
+(variables, functions, aliases, directory), starting as SWE-ReX's does from an
+empty environment. The task image needs bash, base64 and python3 (SWE-agent's
+editor and state command are Python). `scripts/check_swe_agent.py` runs it in
+a real task container with a scripted model and branches the run.
+
+Both agents are installed in the worker environment without their own
 dependencies, which would replace the `openai` package this project needs:
 
     pip install -e '.[agents]'
@@ -116,7 +129,10 @@ plan's calls are recorded like any plan, at no cost, as `taste-fixed-plan`.
 Differences from running it outside Taste, disclosed with results: each reply's
 output tokens are capped (a budget needs a ceiling per call), its template
 values leave out the host's environment variables, and output beyond the
-terminal broker's retention limit is cut.
+terminal broker's retention limit is cut. SWE-agent's further differences are
+listed in its module's docstring (shell options and background jobs do not
+carry over between commands; no network for its editor bundle's install; the
+repository is not reset to a base commit).
 
 ## What a trial leaves
 

@@ -480,6 +480,10 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
                          if part.get("type") == "output_text"]
                 if any(texts):
                     return "\n".join(text for text in texts if text)
+            elif (message.get("role") == "assistant" and isinstance(message.get("content"), str)
+                  and message["content"].strip()):
+                # A chat-style history, as SWE-agent keeps it.
+                return message["content"]
         return ""
 
     def _report_text(self, exit_status, stopped_by, final_text, submission):

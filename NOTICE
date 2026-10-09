@@ -11,6 +11,13 @@ Karthik R Narasimhan, used under the MIT License. That license is reproduced
 in LICENSES/SWE-bench-MIT.txt. Each file's docstring records the upstream
 commit it was taken from.
 
+taste/agents/swe_agent_files contains SWE-agent's configuration and tool
+bundles (https://github.com/SWE-agent/SWE-agent, as Scale ships it at
+https://github.com/scaleapi/SWE-agent, commit 1ac1581; tools/registry/lib from
+its parent commit 8ea180b), Copyright (c) 2024 John Yang, Carlos E. Jimenez,
+Alexander Wettig, Shunyu Yao, Karthik Narasimhan and Ofir Press, used under
+the MIT License. That license is reproduced in LICENSES/SWE-agent-MIT.txt.
+
 docs/banner/fonts contains the Geist and Geist Mono typefaces
 (https://github.com/vercel/geist-font), Copyright (c) 2023 Vercel, in
 collaboration with basement.studio, used under the SIL Open Font License,

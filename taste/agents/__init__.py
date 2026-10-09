@@ -76,6 +76,7 @@ class Host(Protocol):
 # checker is the recovery study's reviewer, written here and hosted the same
 # way; it is run alone (services none) on a copy of an agent's final files.
 HOSTED_AGENTS = {"mini-swe-agent": ("taste.agents.mini_swe_agent", "MiniSweAgent"),
+                 "swe-agent": ("taste.agents.swe_agent", "SweAgent"),
                  "checker": ("taste.agents.checker", "Checker")}
 
 

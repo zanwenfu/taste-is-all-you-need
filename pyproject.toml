@@ -43,8 +43,12 @@ openai = ["openai>=3.0,<4"]
 # without it -- tests/test_package_isolation.py holds that boundary.
 brains = ["claude-agent-sdk==0.2.152"]
 # What hosted agents' own modules import (taste.agents). The agents themselves
-# are installed without dependencies from requirements-agents.txt.
-agents = ["jinja2>=3.1,<4", "platformdirs>=4,<5", "pyyaml>=6,<7"]
+# are installed without dependencies from requirements-agents.txt. The second
+# line is what SWE-agent's modules and LiteLLM (which they import, and which
+# would replace openai if installed with its own dependencies) need at import.
+agents = ["jinja2>=3.1,<4", "platformdirs>=4,<5", "pyyaml>=6,<7",
+          "simple-parsing>=0.1.6,<0.2", "tenacity>=8,<10", "unidiff>=0.7,<2", "tiktoken>=0.7,<1",
+          "tokenizers>=0.20,<1", "fastuuid>=0.12,<1", "aiohttp>=3.10,<4", "ghapi>=1,<3", "numpy>=1.26,<3"]
 dev = [
     "pytest>=8.0", "pytest-xdist>=3,<4",
     "ruff>=0.5",
@@ -74,9 +78,15 @@ license-files = ["LICENSE", "NOTICE", "LICENSES/*"]
 include = ["taste*"]
 exclude = ["tests*", "examples*"]
 
+[tool.setuptools.package-data]
+# SWE-agent's configuration and tool bundles, uploaded into the task container as they are.
+"taste.agents" = ["swe_agent_files/**/*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# SWE-agent's configuration and tool bundles, byte for byte as upstream ships them.
+extend-exclude = ["taste/agents/swe_agent_files"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
