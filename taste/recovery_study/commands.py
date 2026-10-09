@@ -13,6 +13,8 @@ import re
 import shlex
 from pathlib import PurePosixPath
 
+from taste.agents.protocols import EDITOR_WRITES, editor_call
+
 _HEREDOC = re.compile(r"(?<!<)<<-?(?!<)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "\n"})
 _REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>"})
@@ -113,6 +115,11 @@ def diff_paths(text):
 
 def written_paths(command):
     """Files a command writes, outside scratch directories, as far as its text shows."""
+    call = editor_call(command or "")
+    if call is not None:
+        # SWE-agent's editor writes the file it names, unless it only views it.
+        subcommand, path, _ = call
+        return [path] if subcommand in EDITOR_WRITES and not path.startswith(_SCRATCH) else []
     shell, bodies = split_heredocs(command or "")
     paths = set()
     for tokens in _segments(shell):

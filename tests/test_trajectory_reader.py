@@ -194,6 +194,14 @@ def heredoc(target, lines, *, opener="cat <<'EOF' > {target}"):
     ("echo done > /dev/null", 0),
     ("python -m pytest -q 2>&1 | tail -5", 0),
     ("cat count.py && grep -n strip count.py", 0),
+    # SWE-agent's editor, as its function-calling parser writes a call: each value shell-quoted.
+    ("str_replace_editor create /app/new.py --file_text 'a = 1\nb = 2\nc = 3\n'", 3),
+    ("str_replace_editor str_replace /app/count.py --old_str 'x = 1' --new_str 'x = 2\ny = 3'", 3),
+    ("str_replace_editor str_replace /app/count.py --old_str 'it'\"'\"'s' --new_str ''", 1),
+    ("str_replace_editor insert /app/count.py --insert_line 4 --new_str 'z = 0'", 1),
+    ("str_replace_editor undo_edit /app/count.py", 1),
+    ("str_replace_editor view /app/count.py --view_range 1 20", 0),
+    ("str_replace_editor create /tmp/scratch.py --file_text 'print(1)'", 0),
 ])
 def test_an_edit_is_measured_by_the_lines_it_writes(command, lines):
     assert edit_lines(command) == lines
@@ -260,3 +268,24 @@ def test_the_steps_of_a_hosted_run_are_read_from_its_record():
         Step(4, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", 0)]
     assert final_message(trajectory) == "The fix is in count.py."
     assert final_message({"steps": []}) == ""
+
+
+def test_swe_agents_own_commands_are_not_part_of_its_steps():
+    # After each action SWE-agent runs its tool bundles' state command and reads the state file
+    # through its runtime; the model never chose those. A step is the action, its output and its exit.
+    events = [{"kind": "hosted_binding", "binding": {"run_id": "run-1", "model": "gpt-6-luna-2026-09-22",
+                                                      "agent": {"name": "swe-agent", "version": "1.1.0"}}},
+              {"kind": "hosted_task", "content": "Count the non-blank lines."},
+              *_completion(1, "Look.", ["str_replace_editor view /app/count.py"]),
+              *_ran("e1", "str_replace_editor view /app/count.py", 0, "1\tx = 1\n"),
+              *_ran("e2", "_state_anthropic", 0, ""),
+              *_ran("e3", "# swe-rex: read /root/state.json", 0, '{"working_dir": "/app"}'),
+              *_completion(2, "Run the tests.", ["python -m pytest -q"]),
+              *_ran("e4", "python -m pytest -q", 1, "1 failed in 0.1s\n"),
+              *_ran("e5", "_state_anthropic", 0, ""),
+              *_ran("e6", "# swe-rex: read /root/state.json", 0, "{}"),
+              {"kind": "hosted_exit", "exit_status": "exit_cost", "stopped_by": "", "submission": ""}]
+    trajectory = hosted_trajectory(_rows(events), run_id="run-1")
+    assert steps_from_trajectory(trajectory) == [
+        Step(1, "str_replace_editor view /app/count.py", "1\tx = 1\n", 0),
+        Step(2, "python -m pytest -q", "1 failed in 0.1s\n", 1)]

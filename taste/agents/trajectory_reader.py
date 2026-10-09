@@ -35,6 +35,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from taste.agents.checker import feedback, json_object, parse_submission
+from taste.agents.protocols import EDITOR_WRITES, editor_call, protocol
 
 READER_SYSTEM = ("You read the record of a coding agent's run that failed, and find the first step "
                  "where it went wrong.")
@@ -280,6 +281,24 @@ def _into_file(line):
     return False
 
 
+def _editor_lines(subcommand, path, options):
+    """SWE-agent's editor: a file created counts its lines, a replacement the lines it removes and
+    adds (as a patch is counted), an insertion its lines, an undo one; a view, or a scratch file, none."""
+    if subcommand not in EDITOR_WRITES or path.startswith(("/dev/", "/tmp/", "/proc/")):
+        return 0
+
+    def count(name):
+        return len(options.get(name, "").splitlines())
+
+    if subcommand == "create":
+        return max(1, count("file_text"))
+    if subcommand == "str_replace":
+        return max(1, count("old_str") + count("new_str"))
+    if subcommand == "insert":
+        return max(1, count("new_str"))
+    return 1
+
+
 def edit_lines(command: str) -> int:
     """About how many lines a command writes into files; 0 for one that edits nothing.
 
@@ -288,8 +307,12 @@ def edit_lines(command: str) -> int:
     lines; a heredoc script that writes files (``python - <<EOF`` with
     ``open(..., "w")``) its lines; an in-place ``sed`` or ``perl``, or an
     ``echo``/``printf`` into a file, one line for each. Writes into /tmp, /dev
-    and /proc are scratch, not edits.
+    and /proc are scratch, not edits. A call of SWE-agent's editor is counted as
+    ``_editor_lines`` says.
     """
+    call = editor_call(command)
+    if call is not None:
+        return _editor_lines(*call)
     lines, total, index = command.split("\n"), 0, 0
     while index < len(lines):
         line = lines[index]
@@ -335,15 +358,20 @@ def steps_from_trajectory(trajectory: Mapping) -> list[Step]:
     end cut off (the agent never saw it) is not a step. A step's command is
     every command its reply ran, as the agent wrote them, and its output what
     they printed as recorded (long outputs are recorded cut in the middle).
+    Commands an agent ran for itself rather than as its model's action
+    (SWE-agent's state command and its runtime's file reads) are not part of a
+    step: its exit code is its action's.
     """
-    steps = []
+    agent, steps = protocol((trajectory.get("agent") or {}).get("name")), []
     for item in trajectory.get("steps") or ():
         extra = item.get("extra") or {}
         if item.get("source") != "agent" or extra.get("cut_off"):
             continue
-        results = (item.get("observation") or {}).get("results") or []
+        recorded = (item.get("observation") or {}).get("results") or []
+        results = [result for result in recorded
+                   if not agent.internal(str((result.get("extra") or {}).get("command", "")))]
         commands = [str((result.get("extra") or {}).get("command", "")) for result in results]
-        if not results:
+        if not recorded:
             commands = [_call_command(call) for call in item.get("tool_calls") or ()]
         codes = [(result.get("extra") or {}).get("returncode") for result in results]
         steps.append(Step(len(steps) + 1, "\n".join(command for command in commands if command),

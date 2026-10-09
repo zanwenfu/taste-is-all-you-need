@@ -21,6 +21,7 @@ from before a second agent was hosted are all of it.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Sequence
 from typing import Any
 
@@ -34,10 +35,45 @@ SWE_AGENT_RUNTIME = "# swe-rex: "
 # The state commands of the configuration Taste hosts (Scale's ``tool_use``):
 # run after every action, never chosen by the model.
 SWE_AGENT_STATE_COMMANDS = frozenset({"_state_anthropic"})
+# Its editor tool, and the subcommands that write the file they name.
+SWE_AGENT_EDITOR = "str_replace_editor"
+EDITOR_WRITES = frozenset({"create", "str_replace", "insert", "undo_edit"})
+_EDITOR_VALUES = {"--file_text": 1, "--old_str": 1, "--new_str": 1, "--insert_line": 1, "--view_range": 2}
+
+
+def editor_call(command):
+    """SWE-agent's editor call as (subcommand, path, {option: value}); None for any other command.
+
+    Its function-calling parser writes a call as ``str_replace_editor <command> <path>
+    [--file_text v] [--old_str v] [--new_str v] [--insert_line n] [--view_range a b]``, each
+    string value shell-quoted (``sweagent.tools.parsing``, ``_should_quote``).
+    """
+    text = str(command).strip()
+    if not text.startswith(SWE_AGENT_EDITOR + " "):
+        return None
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        return None
+    if len(words) < 3 or words[0] != SWE_AGENT_EDITOR:
+        return None
+    options, index = {}, 3
+    while index < len(words):
+        count = _EDITOR_VALUES.get(words[index])
+        if count is None or index + count >= len(words):
+            return None
+        options[words[index][2:]] = " ".join(words[index + 1:index + 1 + count])
+        index += 1 + count
+    return words[1], words[2], options
 
 
 class MiniSweAgentProtocol:
     name = "mini-swe-agent"
+
+    @staticmethod
+    def internal(command: str) -> bool:
+        """Every command mini-swe-agent runs is an action its model chose."""
+        return False
 
     @staticmethod
     def submitted(output: str, returncode: int) -> bool:

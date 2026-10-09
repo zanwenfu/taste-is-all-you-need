@@ -20,6 +20,12 @@ from tests.recovery_fakes import SENTINEL, agent_steps, finish, submission, tria
     ("python - <<'EOF'\nwith open('setup.cfg', 'w') as f:\n    f.write('x')\nEOF", ["setup.cfg"]),
     ("git apply <<'EOF'\n--- a/src/m.py\n+++ b/src/m.py\n@@ -1 +1 @@\n-a\n+b\nEOF", ["src/m.py"]),
     ("timeout 60 grep -rn pytest . | head", []),
+    # SWE-agent's editor writes the path it names, unless it only views it.
+    ("str_replace_editor str_replace /app/src/app.py --old_str 'a' --new_str 'b'", ["/app/src/app.py"]),
+    ("str_replace_editor create /app/tests/test_new.py --file_text 'def test_x():\n    pass\n'",
+     ["/app/tests/test_new.py"]),
+    ("str_replace_editor view /app/src/app.py", []),
+    ("str_replace_editor create /tmp/reproduce.py --file_text 'print(1)'", []),
 ])
 def test_written_paths_follow_the_shell(command, written):
     assert commands.written_paths(command) == written
