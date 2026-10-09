@@ -1,0 +1,2407 @@
+{
+ "schema": "taste.recovery/BaseImages/1",
+ "dataset": "swebench_multilingual@1.0",
+ "source": "Docker Hub API, tag latest: the amd64 digest and compressed size, read 2026-10-09; no image pulled",
+ "tasks": [
+  {
+   "task": "apache__druid-13704",
+   "language": "java",
+   "repo": "apache/druid",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_druid-13704:latest",
+   "compressed_bytes": 898300775,
+   "digest": "sha256:eefba445fb52e9975889fce04ae88b6f14ae45053b68af3bdf816e3d4a0da785"
+  },
+  {
+   "task": "apache__druid-14092",
+   "language": "java",
+   "repo": "apache/druid",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_druid-14092:latest",
+   "compressed_bytes": 905706000,
+   "digest": "sha256:1139588264d2ab7d9c4f61d4f9ef46b2dd04f265173350e4bca990c9e2cb7458"
+  },
+  {
+   "task": "apache__druid-14136",
+   "language": "java",
+   "repo": "apache/druid",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_druid-14136:latest",
+   "compressed_bytes": 893851200,
+   "digest": "sha256:eb6e37a41153a386671af515ca9fdb93c8f7f08c39a0de5b275fc75cb1f3a071"
+  },
+  {
+   "task": "apache__druid-15402",
+   "language": "java",
+   "repo": "apache/druid",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_druid-15402:latest",
+   "compressed_bytes": 929560735,
+   "digest": "sha256:e26c5a38bf9fe905475cdb40829a36b8bb83ab84b65376d0c645fa66f2c5875f"
+  },
+  {
+   "task": "apache__druid-16875",
+   "language": "java",
+   "repo": "apache/druid",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_druid-16875:latest",
+   "compressed_bytes": 995286420,
+   "digest": "sha256:49afd86464f0a63dd6d099c0e1120625bea9d1997eca54f310be3a70d90051d6"
+  },
+  {
+   "task": "apache__lucene-11760",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-11760:latest",
+   "compressed_bytes": 811518687,
+   "digest": "sha256:dd8132e1ab651435be4d3053dfc7805c1182fb73d695fa3fde920997ff723460"
+  },
+  {
+   "task": "apache__lucene-12022",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-12022:latest",
+   "compressed_bytes": 813933759,
+   "digest": "sha256:780ebedec759e0904ecc1bc5023ec289f2d0ab1bc9c8ef987f25f87eb24377e2"
+  },
+  {
+   "task": "apache__lucene-12196",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-12196:latest",
+   "compressed_bytes": 815013350,
+   "digest": "sha256:076572487ebcf3f0dfbedc84ee564e53e6004642b48bab051ef65af5d4584829"
+  },
+  {
+   "task": "apache__lucene-12212",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-12212:latest",
+   "compressed_bytes": 815293722,
+   "digest": "sha256:31fc4a0539ff26b547e0eaaca67346f93cff0b957c5a5c684a95cc70cce0df79"
+  },
+  {
+   "task": "apache__lucene-12626",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-12626:latest",
+   "compressed_bytes": 831173511,
+   "digest": "sha256:43ed66eae1e45165cd16e1a0c0752ffe88399874ab25fd9664d1343a3468bbe8"
+  },
+  {
+   "task": "apache__lucene-13170",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-13170:latest",
+   "compressed_bytes": 835031584,
+   "digest": "sha256:d0974c2921244fc63692dca57d6b01eae8f6bd3f5f68ddd3cac264d67d4118f4"
+  },
+  {
+   "task": "apache__lucene-13301",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-13301:latest",
+   "compressed_bytes": 835587271,
+   "digest": "sha256:ffac04cd087ced68b455f99dfcef8d66a4763bcd131e1c847a1fb38d67c3f5fc"
+  },
+  {
+   "task": "apache__lucene-13494",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-13494:latest",
+   "compressed_bytes": 836452511,
+   "digest": "sha256:f465535713afaef9d8293ad91571aa047d958d4180b8eeaf1c8bcacc53a1da69"
+  },
+  {
+   "task": "apache__lucene-13704",
+   "language": "java",
+   "repo": "apache/lucene",
+   "base_image": "swebench/sweb.eval.x86_64.apache_1776_lucene-13704:latest",
+   "compressed_bytes": 837479030,
+   "digest": "sha256:27ea9587d8d41e47bbd40d47dc37fdfd2b5dd99e957c1712a6959c0ed1770e5f"
+  },
+  {
+   "task": "astral-sh__ruff-15309",
+   "language": "rust",
+   "repo": "astral-sh/ruff",
+   "base_image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15309:latest",
+   "compressed_bytes": 1545721075,
+   "digest": "sha256:b4fbca8d23d6bd92c4dd00b58becf7bc92da2db0d99bd883c403e92a93a8d4bb"
+  },
+  {
+   "task": "astral-sh__ruff-15330",
+   "language": "rust",
+   "repo": "astral-sh/ruff",
+   "base_image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15330:latest",
+   "compressed_bytes": 1385384769,
+   "digest": "sha256:1cf5af54c195dc004bbaec39fa81cc0a7474162781c6f1b94a56c3241ac27ecf"
+  },
+  {
+   "task": "astral-sh__ruff-15356",
+   "language": "rust",
+   "repo": "astral-sh/ruff",
+   "base_image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15356:latest",
+   "compressed_bytes": 1385778071,
+   "digest": "sha256:caf491bb0c29dffe79c6d9804058d457a3885d5d1d466695868fdc6ac636abe3"
+  },
+  {
+   "task": "astral-sh__ruff-15394",
+   "language": "rust",
+   "repo": "astral-sh/ruff",
+   "base_image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15394:latest",
+   "compressed_bytes": 1385908519,
+   "digest": "sha256:8371a7b8e793f67310a9a499e745770e493337788be9ae3e00d4a4a80a78e84f"
+  },
+  {
+   "task": "astral-sh__ruff-15443",
+   "language": "rust",
+   "repo": "astral-sh/ruff",
+   "base_image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15443:latest",
+   "compressed_bytes": 1394908105,
+   "digest": "sha256:a75fb55ef1a7f5a4c7f65742369beb14942a7c7d6da5c40b4624d7aa0dc64a13"
+  },
+  {
+   "task": "astral-sh__ruff-15543",
+   "language": "rust",
+   "repo": "astral-sh/ruff",
+   "base_image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15543:latest",
+   "compressed_bytes": 1401746340,
+   "digest": "sha256:f3e56ab68d329bef1893433599f2017b1fa60b326f4933bb9ec78fcfccd24e29"
+  },
+  {
+   "task": "astral-sh__ruff-15626",
+   "language": "rust",
+   "repo": "astral-sh/ruff",
+   "base_image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15626:latest",
+   "compressed_bytes": 1399349930,
+   "digest": "sha256:1343b06ea5db0fbca0cb83f802a56c95b90637f0155a370bffb1e1da8308337b"
+  },
+  {
+   "task": "axios__axios-4731",
+   "language": "javascript",
+   "repo": "axios/axios",
+   "base_image": "swebench/sweb.eval.x86_64.axios_1776_axios-4731:latest",
+   "compressed_bytes": 691519444,
+   "digest": "sha256:609f1462dc51df012c46d68269d18b16dc8c9670a67667df17e162b0e7ef90e8"
+  },
+  {
+   "task": "axios__axios-4738",
+   "language": "javascript",
+   "repo": "axios/axios",
+   "base_image": "swebench/sweb.eval.x86_64.axios_1776_axios-4738:latest",
+   "compressed_bytes": 691573263,
+   "digest": "sha256:a2557e15af289209adf8c6840dd9dfc626be1a41d1ea2d159de1ad309834d3ae"
+  },
+  {
+   "task": "axios__axios-5085",
+   "language": "javascript",
+   "repo": "axios/axios",
+   "base_image": "swebench/sweb.eval.x86_64.axios_1776_axios-5085:latest",
+   "compressed_bytes": 692753706,
+   "digest": "sha256:924c1bac3251b62b23a0db0692f7ed0759b1397e164982eedf12096a11393927"
+  },
+  {
+   "task": "axios__axios-5316",
+   "language": "javascript",
+   "repo": "axios/axios",
+   "base_image": "swebench/sweb.eval.x86_64.axios_1776_axios-5316:latest",
+   "compressed_bytes": 713925619,
+   "digest": "sha256:b686aa31f73b27c131cbd59532cde0b86294652db438b50f2b4691734bbdfd19"
+  },
+  {
+   "task": "axios__axios-5892",
+   "language": "javascript",
+   "repo": "axios/axios",
+   "base_image": "swebench/sweb.eval.x86_64.axios_1776_axios-5892:latest",
+   "compressed_bytes": 714660084,
+   "digest": "sha256:3a267f9eab0d18bc7f652ac743719e027c223d1d56f458ae8b2a0464032e755d"
+  },
+  {
+   "task": "axios__axios-6539",
+   "language": "javascript",
+   "repo": "axios/axios",
+   "base_image": "swebench/sweb.eval.x86_64.axios_1776_axios-6539:latest",
+   "compressed_bytes": 718088381,
+   "digest": "sha256:7eeac86bc2b3dec0f8a1b7478cf71540e41b9e9c2b8a7fe28b48bafd9a34df35"
+  },
+  {
+   "task": "babel__babel-13928",
+   "language": "javascript",
+   "repo": "babel/babel",
+   "base_image": "swebench/sweb.eval.x86_64.babel_1776_babel-13928:latest",
+   "compressed_bytes": 833100581,
+   "digest": "sha256:9f10696f8a0d86b4156d8a6ef05b3b81e62662cce52a9aad3fd79728ae9a5419"
+  },
+  {
+   "task": "babel__babel-14532",
+   "language": "javascript",
+   "repo": "babel/babel",
+   "base_image": "swebench/sweb.eval.x86_64.babel_1776_babel-14532:latest",
+   "compressed_bytes": 839809103,
+   "digest": "sha256:852ad3bc58fac44002ee218671c9966e4c2cf7bde6cc9a05e8d43fac828a9cbb"
+  },
+  {
+   "task": "babel__babel-15445",
+   "language": "javascript",
+   "repo": "babel/babel",
+   "base_image": "swebench/sweb.eval.x86_64.babel_1776_babel-15445:latest",
+   "compressed_bytes": 827846184,
+   "digest": "sha256:03a0711e7e975b6d99bc552bed379ef50a085893215faf60206b6cf0763bfdea"
+  },
+  {
+   "task": "babel__babel-15649",
+   "language": "javascript",
+   "repo": "babel/babel",
+   "base_image": "swebench/sweb.eval.x86_64.babel_1776_babel-15649:latest",
+   "compressed_bytes": 797508690,
+   "digest": "sha256:01006ad5ec0b3280dd17a5f86e7eed432aff3617297ea7ed5b008ebfe36a72c9"
+  },
+  {
+   "task": "babel__babel-16130",
+   "language": "javascript",
+   "repo": "babel/babel",
+   "base_image": "swebench/sweb.eval.x86_64.babel_1776_babel-16130:latest",
+   "compressed_bytes": 775289345,
+   "digest": "sha256:247da92f06e7438c0d191c39e23ecf1bccfe13906805a529d977f290755d8d1a"
+  },
+  {
+   "task": "briannesbitt__carbon-2665",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-2665:latest",
+   "compressed_bytes": 266227163,
+   "digest": "sha256:f81d87a1658fad879b0b2cde58279c5236b03e305d22e0194564ca412c810abc"
+  },
+  {
+   "task": "briannesbitt__carbon-2752",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-2752:latest",
+   "compressed_bytes": 266334502,
+   "digest": "sha256:202c3a55594fb4dcdd42612e95fa313880fa6452e737252956af70ddae309a56"
+  },
+  {
+   "task": "briannesbitt__carbon-2762",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-2762:latest",
+   "compressed_bytes": 266377471,
+   "digest": "sha256:482030db5361fcd6d178bb8b61c9315a5d3313b02e4eee7c96ed10fb79082c13"
+  },
+  {
+   "task": "briannesbitt__carbon-2813",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-2813:latest",
+   "compressed_bytes": 288962444,
+   "digest": "sha256:a8cdcf7350ecbd31d2a37e9680c5882e9ba969db75b67ab138648087564572dc"
+  },
+  {
+   "task": "briannesbitt__carbon-2981",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-2981:latest",
+   "compressed_bytes": 268023213,
+   "digest": "sha256:7b24e104f01a740c50bcf81a77f6ff309f49f0ad879c5b17b42ed91845af5e56"
+  },
+  {
+   "task": "briannesbitt__carbon-3005",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-3005:latest",
+   "compressed_bytes": 268106241,
+   "digest": "sha256:e9fd8435d25cf8cc3e0366777a15002a79b66794e46d7cb155eab525304900e0"
+  },
+  {
+   "task": "briannesbitt__carbon-3041",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-3041:latest",
+   "compressed_bytes": 268168891,
+   "digest": "sha256:fe85ba37a8472cc8c22640a1c1c19f66241318b332b70d0afcc94ba0b191c03f"
+  },
+  {
+   "task": "briannesbitt__carbon-3073",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-3073:latest",
+   "compressed_bytes": 268251898,
+   "digest": "sha256:8df9dc30988c924a934fca2ee435352e4d5ecb520a185b9779a7592a3c5b1707"
+  },
+  {
+   "task": "briannesbitt__carbon-3098",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-3098:latest",
+   "compressed_bytes": 268282398,
+   "digest": "sha256:e6fe0527aa1d3a23ce44913d681af705bce8afb2d44081cde659e35561bd4752"
+  },
+  {
+   "task": "briannesbitt__carbon-3103",
+   "language": "php",
+   "repo": "briannesbitt/carbon",
+   "base_image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-3103:latest",
+   "compressed_bytes": 268286006,
+   "digest": "sha256:c2d61a0284e0485f0793da954e9f2a19c7069ca626e85404665e873fbfec301e"
+  },
+  {
+   "task": "burntsushi__ripgrep-2209",
+   "language": "rust",
+   "repo": "burntsushi/ripgrep",
+   "base_image": "swebench/sweb.eval.x86_64.burntsushi_1776_ripgrep-2209:latest",
+   "compressed_bytes": 687721665,
+   "digest": "sha256:5a9279a59180a05b7bab991ed493dce805b1029b3b260e8e961b5808ad99e210"
+  },
+  {
+   "task": "burntsushi__ripgrep-2576",
+   "language": "rust",
+   "repo": "burntsushi/ripgrep",
+   "base_image": "swebench/sweb.eval.x86_64.burntsushi_1776_ripgrep-2576:latest",
+   "compressed_bytes": 692779099,
+   "digest": "sha256:f20f28d35f4a3cf44261af63f706d2f180ad07812cc2cdd9bc5a0a1c7b1d3f3e"
+  },
+  {
+   "task": "caddyserver__caddy-4774",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-4774:latest",
+   "compressed_bytes": 535901205,
+   "digest": "sha256:f1559c2f158f4f967531a1b57ed2a845c40a3d8ddb820b9e5bd56947c096d244"
+  },
+  {
+   "task": "caddyserver__caddy-4943",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-4943:latest",
+   "compressed_bytes": 345454710,
+   "digest": "sha256:95052a4f6dc902426026e80a69c2a184e3edca8116aaf99eaef2b69b1e4ee189"
+  },
+  {
+   "task": "caddyserver__caddy-5404",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-5404:latest",
+   "compressed_bytes": 325171317,
+   "digest": "sha256:9611179e38a99f86862f29127f40a564e472e94f81e9b76e6384a363333ada81"
+  },
+  {
+   "task": "caddyserver__caddy-5626",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-5626:latest",
+   "compressed_bytes": 510036882,
+   "digest": "sha256:c7911da1d344ac03e941e7847547604f19c097d86b4f402d6c03cf31b602956b"
+  },
+  {
+   "task": "caddyserver__caddy-5761",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-5761:latest",
+   "compressed_bytes": 304684767,
+   "digest": "sha256:13fa8cf82256279de60fdd5c8ad121ee65d3e833b649eafa8149c2df2ea7ee93"
+  },
+  {
+   "task": "caddyserver__caddy-5870",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-5870:latest",
+   "compressed_bytes": 304349358,
+   "digest": "sha256:c270cbe9eff9774cf125b8dc3a792bc1cfb65ed90d17858f2dfc799b4a8b1014"
+  },
+  {
+   "task": "caddyserver__caddy-5995",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-5995:latest",
+   "compressed_bytes": 495821121,
+   "digest": "sha256:27efcf350038653acd2c7e23f9d0f8d69ef4e2a01ad3ee45f7cd6faa3adf0018"
+  },
+  {
+   "task": "caddyserver__caddy-6051",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-6051:latest",
+   "compressed_bytes": 305223908,
+   "digest": "sha256:2362eb45346e69c2f129dac4641676e046e8b7e71754a24bd35a54096ec60067"
+  },
+  {
+   "task": "caddyserver__caddy-6115",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-6115:latest",
+   "compressed_bytes": 459771097,
+   "digest": "sha256:034bfac9df0f1b253cdf31a8f37cf18b7cbd4cda0c652bae313feab7ecb72917"
+  },
+  {
+   "task": "caddyserver__caddy-6288",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-6288:latest",
+   "compressed_bytes": 500438392,
+   "digest": "sha256:811c53288176d3f8ed43c4706a93adea94457af95a7307de19ea8cc40b906d57"
+  },
+  {
+   "task": "caddyserver__caddy-6345",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-6345:latest",
+   "compressed_bytes": 503768936,
+   "digest": "sha256:5e0a75313a48aeb38fe6bf758db9341e5513898d5fdbd7be2dc6bf261d3667ed"
+  },
+  {
+   "task": "caddyserver__caddy-6350",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-6350:latest",
+   "compressed_bytes": 503830692,
+   "digest": "sha256:e9c3e50a9255339e699499d9fac78b9dfa8cb0b8d758c66defba0b96422d6618"
+  },
+  {
+   "task": "caddyserver__caddy-6370",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-6370:latest",
+   "compressed_bytes": 313983688,
+   "digest": "sha256:8ea70b00bb8d9ce3ed540f3eedd8f21b73b7ae72f884a9cafee44008255419fa"
+  },
+  {
+   "task": "caddyserver__caddy-6411",
+   "language": "go",
+   "repo": "caddyserver/caddy",
+   "base_image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-6411:latest",
+   "compressed_bytes": 480385011,
+   "digest": "sha256:9360ff9b9d316cc69699d8e648fcac073da00f73f7b85837289d85316c925252"
+  },
+  {
+   "task": "facebook__docusaurus-10130",
+   "language": "javascript",
+   "repo": "facebook/docusaurus",
+   "base_image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-10130:latest",
+   "compressed_bytes": 1885173705,
+   "digest": "sha256:e6174c1366d0a83b1d5498cf0c4c4d0e2affd3521cfc39b4572b26f6470d7bdb"
+  },
+  {
+   "task": "facebook__docusaurus-10309",
+   "language": "javascript",
+   "repo": "facebook/docusaurus",
+   "base_image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-10309:latest",
+   "compressed_bytes": 1860804781,
+   "digest": "sha256:03e192a9aeb8e9256a5134b559db6dcdbea6ca95a0cfbcbb6d0e6d54e94126c5"
+  },
+  {
+   "task": "facebook__docusaurus-8927",
+   "language": "javascript",
+   "repo": "facebook/docusaurus",
+   "base_image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-8927:latest",
+   "compressed_bytes": 1848926048,
+   "digest": "sha256:f5842e0ac69c2810b8f214e158300aa594512e6c9c404c91f3b1ced0bc51aff4"
+  },
+  {
+   "task": "facebook__docusaurus-9183",
+   "language": "javascript",
+   "repo": "facebook/docusaurus",
+   "base_image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-9183:latest",
+   "compressed_bytes": 1928015659,
+   "digest": "sha256:ea9211f31b1f9d0e6808c8eaa98992b2d92d2aa4bcda930d7c34f83970fd91c5"
+  },
+  {
+   "task": "facebook__docusaurus-9897",
+   "language": "javascript",
+   "repo": "facebook/docusaurus",
+   "base_image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-9897:latest",
+   "compressed_bytes": 1861302685,
+   "digest": "sha256:ad7e0cb15cc8717f7a0cecf28ea0775d208fa4d8083076dc69df8cfaa7eb7f1b"
+  },
+  {
+   "task": "faker-ruby__faker-2705",
+   "language": "ruby",
+   "repo": "faker-ruby/faker",
+   "base_image": "swebench/sweb.eval.x86_64.faker-ruby_1776_faker-2705:latest",
+   "compressed_bytes": 438499464,
+   "digest": "sha256:c93a59c80a00c8c7278dbd9fff35da9df84f04da3b39e903629f9bba2b8a29bc"
+  },
+  {
+   "task": "faker-ruby__faker-2970",
+   "language": "ruby",
+   "repo": "faker-ruby/faker",
+   "base_image": "swebench/sweb.eval.x86_64.faker-ruby_1776_faker-2970:latest",
+   "compressed_bytes": 439385905,
+   "digest": "sha256:68c75227cb16598d8033d058e714a68ee3faa18871301515d4f559548f22afcf"
+  },
+  {
+   "task": "fastlane__fastlane-19207",
+   "language": "ruby",
+   "repo": "fastlane/fastlane",
+   "base_image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-19207:latest",
+   "compressed_bytes": 561702148,
+   "digest": "sha256:04ac2fec0ea613a01dbcf7643ad1b95f694dad206e84c05c06f4746f32dbc465"
+  },
+  {
+   "task": "fastlane__fastlane-19304",
+   "language": "ruby",
+   "repo": "fastlane/fastlane",
+   "base_image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-19304:latest",
+   "compressed_bytes": 561824601,
+   "digest": "sha256:5d02079028f69d8f3a3b14a128ae13dbad7cde7a14f8b42a96f8fa9388ff455d"
+  },
+  {
+   "task": "fastlane__fastlane-19765",
+   "language": "ruby",
+   "repo": "fastlane/fastlane",
+   "base_image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-19765:latest",
+   "compressed_bytes": 561914738,
+   "digest": "sha256:5f58fc5830618fdd4d64e2211f6a9ee790d991cdf07e6f9fd16f87d1d4eda9a5"
+  },
+  {
+   "task": "fastlane__fastlane-20642",
+   "language": "ruby",
+   "repo": "fastlane/fastlane",
+   "base_image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-20642:latest",
+   "compressed_bytes": 562760365,
+   "digest": "sha256:14a0fcd31b563684e78f42207ba53aa5e05f2e8563c951318e2a053b55f88eae"
+  },
+  {
+   "task": "fastlane__fastlane-20958",
+   "language": "ruby",
+   "repo": "fastlane/fastlane",
+   "base_image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-20958:latest",
+   "compressed_bytes": 562917194,
+   "digest": "sha256:d8ffd09cefeb6b0323f35709200b6d98226667792283b64d69bd0caa803f6eea"
+  },
+  {
+   "task": "fastlane__fastlane-20975",
+   "language": "ruby",
+   "repo": "fastlane/fastlane",
+   "base_image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-20975:latest",
+   "compressed_bytes": 564243677,
+   "digest": "sha256:3cb24c31a1c29605f06d370727756d75bd4a1ce7a7dd8a33949f2fc4c434f29e"
+  },
+  {
+   "task": "fastlane__fastlane-21857",
+   "language": "ruby",
+   "repo": "fastlane/fastlane",
+   "base_image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-21857:latest",
+   "compressed_bytes": 564897391,
+   "digest": "sha256:c0491292b48bdaca3bf2e136d101bef5ff38723acf64806707c362390160ca21"
+  },
+  {
+   "task": "fluent__fluentd-3328",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3328:latest",
+   "compressed_bytes": 448669498,
+   "digest": "sha256:af63b1ee32779e31411cafe5ff067516099b4be0ce8488e678c7413dafc2f744"
+  },
+  {
+   "task": "fluent__fluentd-3466",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3466:latest",
+   "compressed_bytes": 448898128,
+   "digest": "sha256:67a93ac2d9c3e26b486f1c37d497649ce10b9088786e53d74563ca0ae96d2abe"
+  },
+  {
+   "task": "fluent__fluentd-3608",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3608:latest",
+   "compressed_bytes": 446532421,
+   "digest": "sha256:a27417880652ecbd9bbddce468e975f53968bc25d406258dec5a271c8d0ae033"
+  },
+  {
+   "task": "fluent__fluentd-3616",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3616:latest",
+   "compressed_bytes": 446534352,
+   "digest": "sha256:6c68f9c237000946a3ccaf1b62588d7e0850ac9546b95fab2acfc64f2545a34e"
+  },
+  {
+   "task": "fluent__fluentd-3631",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3631:latest",
+   "compressed_bytes": 446538663,
+   "digest": "sha256:87dce58e60380dcb9ad41bc14d42785332c505793411df31c882ed98614bff39"
+  },
+  {
+   "task": "fluent__fluentd-3640",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3640:latest",
+   "compressed_bytes": 446551268,
+   "digest": "sha256:ca02ef2aa73754f4b26838e704261d47397bb1dacb3020cbe3061c7153b82b75"
+  },
+  {
+   "task": "fluent__fluentd-3641",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3641:latest",
+   "compressed_bytes": 446548010,
+   "digest": "sha256:2221de48dd60ff4d3ecbbb71be21c09e19d065b55ffab6d151ca3d9f6e5ab3a7"
+  },
+  {
+   "task": "fluent__fluentd-3917",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3917:latest",
+   "compressed_bytes": 446738389,
+   "digest": "sha256:9ff8c6afb7fa899fbd5548bef38efc236d8fc77ae0627c443ee8799b404adfd7"
+  },
+  {
+   "task": "fluent__fluentd-4030",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-4030:latest",
+   "compressed_bytes": 446788115,
+   "digest": "sha256:40e866ecc87fedf027412730481e61354ded9546da9e2129fd9976756adabc85"
+  },
+  {
+   "task": "fluent__fluentd-4311",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-4311:latest",
+   "compressed_bytes": 446989014,
+   "digest": "sha256:ef754a857bb73a155455fc8c4468b9c1ff287ab858544ecd518b39e6f21492e2"
+  },
+  {
+   "task": "fluent__fluentd-4598",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-4598:latest",
+   "compressed_bytes": 448750694,
+   "digest": "sha256:bfec2146fb930bf88f29b3c053365b9a48045628ba58173fc4f95c4c1b179331"
+  },
+  {
+   "task": "fluent__fluentd-4655",
+   "language": "ruby",
+   "repo": "fluent/fluentd",
+   "base_image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-4655:latest",
+   "compressed_bytes": 448819926,
+   "digest": "sha256:c183de0a128a1ef58ca9157d71df80e9511dbcbdbc71b053422bcf09f9327f9b"
+  },
+  {
+   "task": "fmtlib__fmt-1683",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-1683:latest",
+   "compressed_bytes": 208343502,
+   "digest": "sha256:e231b3a73440dac9374d25d20f728615a9e7b8e69addf5a46b22690299bc33a5"
+  },
+  {
+   "task": "fmtlib__fmt-2310",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-2310:latest",
+   "compressed_bytes": 210235606,
+   "digest": "sha256:a271867bbdb7e20e1ab48e1537051a5286c9b3401d360ef8263c477ce9960c5e"
+  },
+  {
+   "task": "fmtlib__fmt-2317",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-2317:latest",
+   "compressed_bytes": 210270878,
+   "digest": "sha256:6a158d2a535bd0ae2b59e4d94aa5f7f78adba7344761a6f3e8ca6c3eae65a946"
+  },
+  {
+   "task": "fmtlib__fmt-2457",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-2457:latest",
+   "compressed_bytes": 209686799,
+   "digest": "sha256:f99da0830c4bf9f68e3e00d84a75e57ed6133053728a707f1cae2eebafee53d3"
+  },
+  {
+   "task": "fmtlib__fmt-3158",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3158:latest",
+   "compressed_bytes": 210550913,
+   "digest": "sha256:da5e028a0d73ac4ffd3f52bba1e954bc9d6bac7c837aaaefff2794358c64ee0c"
+  },
+  {
+   "task": "fmtlib__fmt-3248",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3248:latest",
+   "compressed_bytes": 211281224,
+   "digest": "sha256:ceb187d8b601a9bd4f93b54b288d811a626a364fc9cbc53f5a99f9413d208e82"
+  },
+  {
+   "task": "fmtlib__fmt-3272",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3272:latest",
+   "compressed_bytes": 211084234,
+   "digest": "sha256:fef6121efa41e2c860ba48c82135956a3b0cf219f62c55d9bcb6632e2c83f032"
+  },
+  {
+   "task": "fmtlib__fmt-3729",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3729:latest",
+   "compressed_bytes": 211104223,
+   "digest": "sha256:078d3fe061c8354489c940db5f22c655e9698e99d098e333e571657dbef37c7a"
+  },
+  {
+   "task": "fmtlib__fmt-3750",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3750:latest",
+   "compressed_bytes": 211851629,
+   "digest": "sha256:a187d9415d87930d4dabddb8a6f3d96fd3301d39103b0cccf9ee87da107a9e8c"
+  },
+  {
+   "task": "fmtlib__fmt-3863",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3863:latest",
+   "compressed_bytes": 211411679,
+   "digest": "sha256:e9da930458d7785d475bb912fd3388cb14a7c1730c335cfd0a52d07d419f5d7b"
+  },
+  {
+   "task": "fmtlib__fmt-3901",
+   "language": "cpp",
+   "repo": "fmtlib/fmt",
+   "base_image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3901:latest",
+   "compressed_bytes": 212029456,
+   "digest": "sha256:c68711a5cffaa6c63dcbcab5cc71591266a1fd1ec9396a42856ec964d59fe7bb"
+  },
+  {
+   "task": "gin-gonic__gin-1805",
+   "language": "go",
+   "repo": "gin-gonic/gin",
+   "base_image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-1805:latest",
+   "compressed_bytes": 263562138,
+   "digest": "sha256:b28d26f2b6d67e2c418d33c6742b5480761848e079911e46557858887e765b41"
+  },
+  {
+   "task": "gin-gonic__gin-1957",
+   "language": "go",
+   "repo": "gin-gonic/gin",
+   "base_image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-1957:latest",
+   "compressed_bytes": 261547873,
+   "digest": "sha256:671921304db07266fdfea9a5e402048549eb2cf0c8e51191c824e1749c5a287a"
+  },
+  {
+   "task": "gin-gonic__gin-2121",
+   "language": "go",
+   "repo": "gin-gonic/gin",
+   "base_image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-2121:latest",
+   "compressed_bytes": 283677459,
+   "digest": "sha256:6a774b2e8b265c60367317112d1fcbf6c46f9c5070790cd159585c01558c4f6d"
+  },
+  {
+   "task": "gin-gonic__gin-2755",
+   "language": "go",
+   "repo": "gin-gonic/gin",
+   "base_image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-2755:latest",
+   "compressed_bytes": 291452601,
+   "digest": "sha256:c4da4a91c6336e5a7406222530615afe1268f6ff2417ed56bd0f5297a1e0f495"
+  },
+  {
+   "task": "gin-gonic__gin-3227",
+   "language": "go",
+   "repo": "gin-gonic/gin",
+   "base_image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-3227:latest",
+   "compressed_bytes": 307737614,
+   "digest": "sha256:ed0d3b3eae3657bd4d4c382fc84dd55340d9a9a37b4988e31a6d77f030aeb134"
+  },
+  {
+   "task": "gin-gonic__gin-3741",
+   "language": "go",
+   "repo": "gin-gonic/gin",
+   "base_image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-3741:latest",
+   "compressed_bytes": 360615062,
+   "digest": "sha256:c134cc213a09fd5060dd3d3a70adde0eb6607750c111f397b163a306d0ee5a1e"
+  },
+  {
+   "task": "gin-gonic__gin-3820",
+   "language": "go",
+   "repo": "gin-gonic/gin",
+   "base_image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-3820:latest",
+   "compressed_bytes": 350928450,
+   "digest": "sha256:f6d4d2003a361d4a55e51a6e67b68a91eb19ddaf9b475414e4169c77cdfe1702"
+  },
+  {
+   "task": "gin-gonic__gin-4003",
+   "language": "go",
+   "repo": "gin-gonic/gin",
+   "base_image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-4003:latest",
+   "compressed_bytes": 371093440,
+   "digest": "sha256:86684086f5762a4ee363fb2b5a9393a1b82c0223f7efca5b7a1ef2e026423ec9"
+  },
+  {
+   "task": "gohugoio__hugo-12171",
+   "language": "go",
+   "repo": "gohugoio/hugo",
+   "base_image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12171:latest",
+   "compressed_bytes": 570045274,
+   "digest": "sha256:9c2e4353ddc54fe7d7c0c02fbfd9f74ce68c368343ac267a48f2ddcc9878b7f7"
+  },
+  {
+   "task": "gohugoio__hugo-12204",
+   "language": "go",
+   "repo": "gohugoio/hugo",
+   "base_image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12204:latest",
+   "compressed_bytes": 567343527,
+   "digest": "sha256:e0eff6512180a373b9cfc653480bae47c146cd4a7229320f094c1737835c42f4"
+  },
+  {
+   "task": "gohugoio__hugo-12343",
+   "language": "go",
+   "repo": "gohugoio/hugo",
+   "base_image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12343:latest",
+   "compressed_bytes": 618144709,
+   "digest": "sha256:b583c0982adf47c79b4a12b6725513de0a6b11c8bee831afb546b43ea2e50398"
+  },
+  {
+   "task": "gohugoio__hugo-12448",
+   "language": "go",
+   "repo": "gohugoio/hugo",
+   "base_image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12448:latest",
+   "compressed_bytes": 661897142,
+   "digest": "sha256:278f9c82ea24cbd1f9a2751d6a0af20a459d7a0c6e77cecfdf481dfb676c23ed"
+  },
+  {
+   "task": "gohugoio__hugo-12562",
+   "language": "go",
+   "repo": "gohugoio/hugo",
+   "base_image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12562:latest",
+   "compressed_bytes": 694411041,
+   "digest": "sha256:ec331033d6ca6b04b1c29c76ccff5fb62b52b6f09c6ae12b8ba3ab13abbd861f"
+  },
+  {
+   "task": "gohugoio__hugo-12579",
+   "language": "go",
+   "repo": "gohugoio/hugo",
+   "base_image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12579:latest",
+   "compressed_bytes": 572436299,
+   "digest": "sha256:0f14182afc14f0a8a45a4634708db8897722bffc70995512192f36b7038c1f4c"
+  },
+  {
+   "task": "gohugoio__hugo-12768",
+   "language": "go",
+   "repo": "gohugoio/hugo",
+   "base_image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12768:latest",
+   "compressed_bytes": 622311802,
+   "digest": "sha256:5afa334e67521c5be12d38724f3806aa931865f5fca6b171fb429842cb142301"
+  },
+  {
+   "task": "google__gson-1014",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-1014:latest",
+   "compressed_bytes": 478540047,
+   "digest": "sha256:9b55799af8b572ea3ff853a5b4528e9a4b8564beeeb9bd99da5ec307ab8e2083"
+  },
+  {
+   "task": "google__gson-1093",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-1093:latest",
+   "compressed_bytes": 478576992,
+   "digest": "sha256:9b31cb0dac1f89ce4485e0b156cec60c05bef9c6c5c29f028f0cf0eca17ccdd7"
+  },
+  {
+   "task": "google__gson-1100",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-1100:latest",
+   "compressed_bytes": 478597371,
+   "digest": "sha256:0f0e627b58a780f3a069bb7475eeb5ef3031b15b60e0ef517e58aea869b890f6"
+  },
+  {
+   "task": "google__gson-2024",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-2024:latest",
+   "compressed_bytes": 490611812,
+   "digest": "sha256:df1b872da86c0271b4b16463915117bba3a13e825c1f1dbe052750a834ece287"
+  },
+  {
+   "task": "google__gson-2061",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-2061:latest",
+   "compressed_bytes": 494579982,
+   "digest": "sha256:4596b3add8f60fb69bb4b8759bc7d156f2839c4e8d5b1f2f3906433277375efc"
+  },
+  {
+   "task": "google__gson-2134",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-2134:latest",
+   "compressed_bytes": 493355904,
+   "digest": "sha256:ab17c8e0271d153d17479e40723d627136cba631d9549a9a6889f0d96214cbf6"
+  },
+  {
+   "task": "google__gson-2158",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-2158:latest",
+   "compressed_bytes": 489916533,
+   "digest": "sha256:acbf12ce514b53b421cafe55707366d592474c23903069e49329359493dff490"
+  },
+  {
+   "task": "google__gson-2311",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-2311:latest",
+   "compressed_bytes": 506766446,
+   "digest": "sha256:b7bf8f0f6f02ff1d6ba54b929b000ae8423396ed05d43a5adab3c05546abb6cd"
+  },
+  {
+   "task": "google__gson-2479",
+   "language": "java",
+   "repo": "google/gson",
+   "base_image": "swebench/sweb.eval.x86_64.google_1776_gson-2479:latest",
+   "compressed_bytes": 508865441,
+   "digest": "sha256:fc905632c9e56c19301e040e75bb3dc7f3c59909db8cf7e84a20a6aa77f38026"
+  },
+  {
+   "task": "hashicorp__terraform-34580",
+   "language": "go",
+   "repo": "hashicorp/terraform",
+   "base_image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-34580:latest",
+   "compressed_bytes": 1079038210,
+   "digest": "sha256:0180a97fd96c956ed14db41bcc9fb579236fa27b49abb17f14664fe5469b24cb"
+  },
+  {
+   "task": "hashicorp__terraform-34814",
+   "language": "go",
+   "repo": "hashicorp/terraform",
+   "base_image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-34814:latest",
+   "compressed_bytes": 468726907,
+   "digest": "sha256:7a4580ee66b4d7c72a4b9f80a45a780c0a4169435116bebff597e10328e2c123"
+  },
+  {
+   "task": "hashicorp__terraform-34900",
+   "language": "go",
+   "repo": "hashicorp/terraform",
+   "base_image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-34900:latest",
+   "compressed_bytes": 754481760,
+   "digest": "sha256:f7e3c65a9c2e3fcad17134754004f5679b1eff122fdf4dbcd6fa15e5f4fcaa5e"
+  },
+  {
+   "task": "hashicorp__terraform-35543",
+   "language": "go",
+   "repo": "hashicorp/terraform",
+   "base_image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-35543:latest",
+   "compressed_bytes": 766680434,
+   "digest": "sha256:57ddad71c2bc85a20fb9e353e0012aec6ef747fd4e1744a30f20804b70acf1b6"
+  },
+  {
+   "task": "hashicorp__terraform-35611",
+   "language": "go",
+   "repo": "hashicorp/terraform",
+   "base_image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-35611:latest",
+   "compressed_bytes": 766717973,
+   "digest": "sha256:44d15830bf89db25e8d86afad7b19333f92ac35294aef9e5948d5c02a095fd7d"
+  },
+  {
+   "task": "immutable-js__immutable-js-2005",
+   "language": "javascript",
+   "repo": "immutable-js/immutable-js",
+   "base_image": "swebench/sweb.eval.x86_64.immutable-js_1776_immutable-js-2005:latest",
+   "compressed_bytes": 1006336886,
+   "digest": "sha256:2f1811a80bd93e1dfd40883a565ccf5933e69fd6a93b88fd4fbbd9cac439647f"
+  },
+  {
+   "task": "immutable-js__immutable-js-2006",
+   "language": "javascript",
+   "repo": "immutable-js/immutable-js",
+   "base_image": "swebench/sweb.eval.x86_64.immutable-js_1776_immutable-js-2006:latest",
+   "compressed_bytes": 989843519,
+   "digest": "sha256:1ac139875abc24e7660edf19827b8071492f9f26b37f559ff6bd67566f09602a"
+  },
+  {
+   "task": "javaparser__javaparser-4538",
+   "language": "java",
+   "repo": "javaparser/javaparser",
+   "base_image": "swebench/sweb.eval.x86_64.javaparser_1776_javaparser-4538:latest",
+   "compressed_bytes": 567406452,
+   "digest": "sha256:37d85cc76ce129dba03baf573d9f47088e6d46a493d959fb35a41897484d379e"
+  },
+  {
+   "task": "javaparser__javaparser-4561",
+   "language": "java",
+   "repo": "javaparser/javaparser",
+   "base_image": "swebench/sweb.eval.x86_64.javaparser_1776_javaparser-4561:latest",
+   "compressed_bytes": 570965222,
+   "digest": "sha256:28c3f0d67c27b07cbc710221525ea8556462da5d68b8e1d22811bcb2b21d647f"
+  },
+  {
+   "task": "jekyll__jekyll-8047",
+   "language": "ruby",
+   "repo": "jekyll/jekyll",
+   "base_image": "swebench/sweb.eval.x86_64.jekyll_1776_jekyll-8047:latest",
+   "compressed_bytes": 472049417,
+   "digest": "sha256:6e6e2b562ba9eb29b90f0aed01b503a5eb6b7c8b3ecfb23713e2ad5456ac668a"
+  },
+  {
+   "task": "jekyll__jekyll-8167",
+   "language": "ruby",
+   "repo": "jekyll/jekyll",
+   "base_image": "swebench/sweb.eval.x86_64.jekyll_1776_jekyll-8167:latest",
+   "compressed_bytes": 471998132,
+   "digest": "sha256:6d7d6aa4f1e61273b280f33e929968fd5a2e269353397e580a55e3dd4b5e5bb4"
+  },
+  {
+   "task": "jekyll__jekyll-8761",
+   "language": "ruby",
+   "repo": "jekyll/jekyll",
+   "base_image": "swebench/sweb.eval.x86_64.jekyll_1776_jekyll-8761:latest",
+   "compressed_bytes": 472685112,
+   "digest": "sha256:39b839e1f5d337024af2e3775dd630a25d9abb63ff4da972535b27467bbaacd9"
+  },
+  {
+   "task": "jekyll__jekyll-8771",
+   "language": "ruby",
+   "repo": "jekyll/jekyll",
+   "base_image": "swebench/sweb.eval.x86_64.jekyll_1776_jekyll-8771:latest",
+   "compressed_bytes": 472416042,
+   "digest": "sha256:4e7b077e77d692c9651af6e40fd538d2a9a7f567070c1ecad29165e432fa269f"
+  },
+  {
+   "task": "jekyll__jekyll-9141",
+   "language": "ruby",
+   "repo": "jekyll/jekyll",
+   "base_image": "swebench/sweb.eval.x86_64.jekyll_1776_jekyll-9141:latest",
+   "compressed_bytes": 475080103,
+   "digest": "sha256:08c57bdaee8a7a38c7a7bdb96b2d18c11a80572a5e9863f68e0390bfbf9d9294"
+  },
+  {
+   "task": "jordansissel__fpm-1829",
+   "language": "ruby",
+   "repo": "jordansissel/fpm",
+   "base_image": "swebench/sweb.eval.x86_64.jordansissel_1776_fpm-1829:latest",
+   "compressed_bytes": 419925992,
+   "digest": "sha256:5071f06fe2dc359ed41dfdb05a6791384001e187809a73297fda2e11bf975890"
+  },
+  {
+   "task": "jordansissel__fpm-1850",
+   "language": "ruby",
+   "repo": "jordansissel/fpm",
+   "base_image": "swebench/sweb.eval.x86_64.jordansissel_1776_fpm-1850:latest",
+   "compressed_bytes": 423666428,
+   "digest": "sha256:22ce44f22b2b9f9718fb847ee50c0b75a0a88e7e6a05de32d2dbac0f153665d6"
+  },
+  {
+   "task": "jqlang__jq-2235",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2235:latest",
+   "compressed_bytes": 222901418,
+   "digest": "sha256:de8642fb3c448f91f5971847957a7363d845483f3100d1d10b5894dc5bdd49eb"
+  },
+  {
+   "task": "jqlang__jq-2598",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2598:latest",
+   "compressed_bytes": 222964220,
+   "digest": "sha256:96c6df5970d93e77954e5ffa21e91d18e1010489194324b8191530968449a349"
+  },
+  {
+   "task": "jqlang__jq-2650",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2650:latest",
+   "compressed_bytes": 222952514,
+   "digest": "sha256:193802c444f858487e2a2d0cd4a74b596bdc175e025b8f0ac2e650e0eb878868"
+  },
+  {
+   "task": "jqlang__jq-2658",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2658:latest",
+   "compressed_bytes": 222954476,
+   "digest": "sha256:51ce14924c142d90dbee4a01acec4ba37a3d32fec368c0463c1802e65c605caf"
+  },
+  {
+   "task": "jqlang__jq-2681",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2681:latest",
+   "compressed_bytes": 222963803,
+   "digest": "sha256:2a2af5647a991edcd2c66f8deefe5e097fae1ae1e2f32cd1488ee20953f8c570"
+  },
+  {
+   "task": "jqlang__jq-2728",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2728:latest",
+   "compressed_bytes": 223050754,
+   "digest": "sha256:4b4d58407beba3970dc4a64c4d993b0cb907db9c09c705bf83a7b133b06d5517"
+  },
+  {
+   "task": "jqlang__jq-2750",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2750:latest",
+   "compressed_bytes": 223098581,
+   "digest": "sha256:e5510a54a0cc4c7b76f239b491d158ffcce39a562d766e5b4eb3ecd87059faa9"
+  },
+  {
+   "task": "jqlang__jq-2839",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2839:latest",
+   "compressed_bytes": 223331347,
+   "digest": "sha256:8bd418e8358885b8bae3256ab09afd4c0693ff0eeddebd8910f140058c7a758a"
+  },
+  {
+   "task": "jqlang__jq-2919",
+   "language": "c",
+   "repo": "jqlang/jq",
+   "base_image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2919:latest",
+   "compressed_bytes": 223525848,
+   "digest": "sha256:54226a4e77f3c148e3e13ba4de4d05c906364e1443fd8847ebef0cc2d74448f9"
+  },
+  {
+   "task": "laravel__framework-46234",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-46234:latest",
+   "compressed_bytes": 319139491,
+   "digest": "sha256:b23328947d4b469446c7ad7d7a8287af5317161a31531a42099003435da4e8b8"
+  },
+  {
+   "task": "laravel__framework-48573",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-48573:latest",
+   "compressed_bytes": 320234286,
+   "digest": "sha256:286ec2640a60413c554c7009e41577c804810cec451967564fd8a9bfeb1108da"
+  },
+  {
+   "task": "laravel__framework-48636",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-48636:latest",
+   "compressed_bytes": 320265206,
+   "digest": "sha256:75c30cead166890b806163046e6a5ae39add3b214db808a59b46c51b5b3e02c8"
+  },
+  {
+   "task": "laravel__framework-51195",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-51195:latest",
+   "compressed_bytes": 325751666,
+   "digest": "sha256:53b2e5883b1711b9f428bd8fe01fa9626ff13c3d247721743eedd7aa80278055"
+  },
+  {
+   "task": "laravel__framework-51890",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-51890:latest",
+   "compressed_bytes": 326275401,
+   "digest": "sha256:e354fe571e6d3e9f194b8516ecdf29810140fa196f75375c947f4402883e669a"
+  },
+  {
+   "task": "laravel__framework-52451",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-52451:latest",
+   "compressed_bytes": 326907661,
+   "digest": "sha256:5971f54bde34b3f939902bf75186be2d49f33329157e18f25957438465dd2b68"
+  },
+  {
+   "task": "laravel__framework-52680",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-52680:latest",
+   "compressed_bytes": 327080833,
+   "digest": "sha256:46c0ff532d9d9db7cb9055f889defc4422a0457c70f2f2e91daa3728749ad658"
+  },
+  {
+   "task": "laravel__framework-52684",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-52684:latest",
+   "compressed_bytes": 327098360,
+   "digest": "sha256:6cebb1b4f68f68dcfdbdc24f617f1d4a786ef28b2cf88baea9f655dfbf434d02"
+  },
+  {
+   "task": "laravel__framework-52866",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-52866:latest",
+   "compressed_bytes": 327207485,
+   "digest": "sha256:2b83028df33ca68504e4d64a7bf98a3d09d0abd05c70a01a46e18cfa67217b57"
+  },
+  {
+   "task": "laravel__framework-53206",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-53206:latest",
+   "compressed_bytes": 327487870,
+   "digest": "sha256:13dc3be03d500c3b4992cb6e8beeb4e1ed94fa6061e073c23d096a648dd77bee"
+  },
+  {
+   "task": "laravel__framework-53696",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-53696:latest",
+   "compressed_bytes": 327864713,
+   "digest": "sha256:d4d8945f8545f7bc89aa58dfaf1d2181dad1f5f692bd21717cc62aebe30ff351"
+  },
+  {
+   "task": "laravel__framework-53914",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-53914:latest",
+   "compressed_bytes": 323599711,
+   "digest": "sha256:a5432319eb351cae9ab936bf7d308f2c70ad7bd5ddd86ebda3106eb02f4ab151"
+  },
+  {
+   "task": "laravel__framework-53949",
+   "language": "php",
+   "repo": "laravel/framework",
+   "base_image": "swebench/sweb.eval.x86_64.laravel_1776_framework-53949:latest",
+   "compressed_bytes": 328300613,
+   "digest": "sha256:0e95b22cf01a9f6614f5999d05b07b45ae3b50821cae4fcd7de024d84b6d40a8"
+  },
+  {
+   "task": "micropython__micropython-10095",
+   "language": "c",
+   "repo": "micropython/micropython",
+   "base_image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-10095:latest",
+   "compressed_bytes": 498741210,
+   "digest": "sha256:fa80c1103d4dc19707a2152841ecc2c869e1a2a2e10c07601a9eabca3490f644"
+  },
+  {
+   "task": "micropython__micropython-12158",
+   "language": "c",
+   "repo": "micropython/micropython",
+   "base_image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-12158:latest",
+   "compressed_bytes": 501535773,
+   "digest": "sha256:a60fac34e98dec41c2382b07776ef7797cd78de5557cfa58a0c1efdbce404339"
+  },
+  {
+   "task": "micropython__micropython-13039",
+   "language": "c",
+   "repo": "micropython/micropython",
+   "base_image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-13039:latest",
+   "compressed_bytes": 502680421,
+   "digest": "sha256:69f39269c57ecd57336b26859f999a01353b9a4ba90ccdb164d45189321cf67c"
+  },
+  {
+   "task": "micropython__micropython-13569",
+   "language": "c",
+   "repo": "micropython/micropython",
+   "base_image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-13569:latest",
+   "compressed_bytes": 504970087,
+   "digest": "sha256:8ddaaa748ac5a9fe106312f999ff1d11a57e8ad49c7616b169af1551b7053af7"
+  },
+  {
+   "task": "micropython__micropython-15898",
+   "language": "c",
+   "repo": "micropython/micropython",
+   "base_image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-15898:latest",
+   "compressed_bytes": 507114555,
+   "digest": "sha256:7afef06833468581d3d5fcbde51deab322e488f25e11ec83de9256a5ee3350e2"
+  },
+  {
+   "task": "mrdoob__three.js-25687",
+   "language": "javascript",
+   "repo": "mrdoob/three.js",
+   "base_image": "swebench/sweb.eval.x86_64.mrdoob_1776_three.js-25687:latest",
+   "compressed_bytes": 1982314814,
+   "digest": "sha256:5dd24171fb494d087c7dad19d9979737df33401893389baf340020a7b130ba9b"
+  },
+  {
+   "task": "mrdoob__three.js-26589",
+   "language": "javascript",
+   "repo": "mrdoob/three.js",
+   "base_image": "swebench/sweb.eval.x86_64.mrdoob_1776_three.js-26589:latest",
+   "compressed_bytes": 2038328273,
+   "digest": "sha256:bf82d08b164783755a634a021ccfccf668754c15908e70cd664ceca5483da750"
+  },
+  {
+   "task": "mrdoob__three.js-27395",
+   "language": "javascript",
+   "repo": "mrdoob/three.js",
+   "base_image": "swebench/sweb.eval.x86_64.mrdoob_1776_three.js-27395:latest",
+   "compressed_bytes": 2083425836,
+   "digest": "sha256:ac7d66d87f2d38b70255b656975a77d7e806a70a4a32b4fd71540edb93a22f89"
+  },
+  {
+   "task": "nlohmann__json-4237",
+   "language": "cpp",
+   "repo": "nlohmann/json",
+   "base_image": "swebench/sweb.eval.x86_64.nlohmann_1776_json-4237:latest",
+   "compressed_bytes": 372405479,
+   "digest": "sha256:60155cc8b5a48be37fa523fe6c764fe0088349e4b06c1dcdbab8b7df257e5bf3"
+  },
+  {
+   "task": "nushell__nushell-12901",
+   "language": "rust",
+   "repo": "nushell/nushell",
+   "base_image": "swebench/sweb.eval.x86_64.nushell_1776_nushell-12901:latest",
+   "compressed_bytes": 1659084618,
+   "digest": "sha256:f05f334607d3ea982999f15fbf27a26ea56903eb688a6f84e53b4821401ff322"
+  },
+  {
+   "task": "nushell__nushell-12950",
+   "language": "rust",
+   "repo": "nushell/nushell",
+   "base_image": "swebench/sweb.eval.x86_64.nushell_1776_nushell-12950:latest",
+   "compressed_bytes": 1660580705,
+   "digest": "sha256:4b8e5e9291f25ecccc988bd09ab488f29ae76c7990d3607d74a638c465d1deea"
+  },
+  {
+   "task": "nushell__nushell-13246",
+   "language": "rust",
+   "repo": "nushell/nushell",
+   "base_image": "swebench/sweb.eval.x86_64.nushell_1776_nushell-13246:latest",
+   "compressed_bytes": 2102041301,
+   "digest": "sha256:f55a663d2a56685d5df75c8f580e977fd21b459c1b60f58a5b8a9c3421635e73"
+  },
+  {
+   "task": "nushell__nushell-13605",
+   "language": "rust",
+   "repo": "nushell/nushell",
+   "base_image": "swebench/sweb.eval.x86_64.nushell_1776_nushell-13605:latest",
+   "compressed_bytes": 2501761533,
+   "digest": "sha256:71b5580d752ae08bb7aaede3013df32f5fefff56666346577f4a27575493984d"
+  },
+  {
+   "task": "nushell__nushell-13831",
+   "language": "rust",
+   "repo": "nushell/nushell",
+   "base_image": "swebench/sweb.eval.x86_64.nushell_1776_nushell-13831:latest",
+   "compressed_bytes": 2506234369,
+   "digest": "sha256:3791867d38e03ddd5da7eb13e20a79e191ccde2790e058ec9b2b3dcc79305c31"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-7523",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-7523:latest",
+   "compressed_bytes": 267995382,
+   "digest": "sha256:a9bb3fa614e93f82985485663c225e042189089593a32eb2a840775007f210f8"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-7635",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-7635:latest",
+   "compressed_bytes": 269358912,
+   "digest": "sha256:a517ab64e9f5c344e3f55ae5cc085e6c376f24bece11170d67ae3782aa258bbf"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-7663",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-7663:latest",
+   "compressed_bytes": 269466059,
+   "digest": "sha256:0b3eefd6f38d23fe229a03ba2fd5287ebdb642108c08462a32916de4f08c4992"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-7875",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-7875:latest",
+   "compressed_bytes": 270128283,
+   "digest": "sha256:ac5faf3d22072c2b2fb69045cf89b037b3e9b96956dc250d9a03db14faa72e35"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-7998",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-7998:latest",
+   "compressed_bytes": 271881306,
+   "digest": "sha256:c0171d6a23de0caa58fcac66181336558581049931ac247b2060d01d0158dc65"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-8064",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-8064:latest",
+   "compressed_bytes": 272673079,
+   "digest": "sha256:b94df2a806b3dba039f91ba57bb06f02c00f23d70f616d6fc4e1e86d1632cc21"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-8075",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-8075:latest",
+   "compressed_bytes": 272860302,
+   "digest": "sha256:95032a8f6f58963884a1e16a83b92ac7b8c8180d66f6844e88edfb851b5def30"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-8256",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-8256:latest",
+   "compressed_bytes": 273428746,
+   "digest": "sha256:eed31250c7f125b2c02bedaec3d27526779b05690c933bb576424c02d0ff295d"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-8331",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-8331:latest",
+   "compressed_bytes": 273815407,
+   "digest": "sha256:33ff206939f289c1e2b926f8d3704b07da2ebb9ba5bfcc76db94ff3734bdf1bf"
+  },
+  {
+   "task": "php-cs-fixer__php-cs-fixer-8367",
+   "language": "php",
+   "repo": "php-cs-fixer/php-cs-fixer",
+   "base_image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-8367:latest",
+   "compressed_bytes": 277763119,
+   "digest": "sha256:b5874ecf3919763c8a618331a2bd475f3655bfff0ce36ec309b24329788af267"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-3463",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3463:latest",
+   "compressed_bytes": 432263793,
+   "digest": "sha256:f67d710afeda58b2267ee5897eadd679fa3db494904f3f639cf6fde7616e4ffc"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-3469",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3469:latest",
+   "compressed_bytes": 432361702,
+   "digest": "sha256:f23c00bb6eff2cd86e4e6786f66e4a6f1e564f0de83eed591a85ee945cb73e10"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-3570",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3570:latest",
+   "compressed_bytes": 433144674,
+   "digest": "sha256:73fa8af3de05924d9e1d050db3e23794684a8da6c164e82f371cb7de8f6abb39"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-3659",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3659:latest",
+   "compressed_bytes": 433432559,
+   "digest": "sha256:2bba81d7eaed189b2bda2db8c83d1efeb8139ffda1b4b0879d1c358204f85dff"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-3903",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3903:latest",
+   "compressed_bytes": 440608373,
+   "digest": "sha256:7608e84a38b5077922034895888dd6131f32daa0eceac0362be04e2d0a6612d1"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-3940",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3940:latest",
+   "compressed_bytes": 446445340,
+   "digest": "sha256:d0196686187c16eae1b288b64d349945bcfd76cb06387c2b7fdbac9a015f17a2"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-4114",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-4114:latest",
+   "compressed_bytes": 446426466,
+   "digest": "sha256:8787ae880711f7ef58af3ccd307bb9e4efa00af7308056b225d5334aae981b1a"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-4186",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-4186:latest",
+   "compressed_bytes": 447207007,
+   "digest": "sha256:c8b5c0222d3280e9f3ac579afabbe96bb06b615f2e1a171512e3875293cea3e2"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-4214",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-4214:latest",
+   "compressed_bytes": 447382173,
+   "digest": "sha256:7d33428b7bc3c9406bc2f6c8d654f4b849655baa0b6108a9520a7cc751125537"
+  },
+  {
+   "task": "phpoffice__phpspreadsheet-4313",
+   "language": "php",
+   "repo": "phpoffice/phpspreadsheet",
+   "base_image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-4313:latest",
+   "compressed_bytes": 449171523,
+   "digest": "sha256:2604f0ce335657a1e38527920974a5af68be21fcc5a094f1248b1c0f06a829d1"
+  },
+  {
+   "task": "preactjs__preact-2757",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-2757:latest",
+   "compressed_bytes": 731720992,
+   "digest": "sha256:fe6399290bbb478b78166516532affb83dc7c4bf1e575ab606c72f9f6242c3fe"
+  },
+  {
+   "task": "preactjs__preact-2896",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-2896:latest",
+   "compressed_bytes": 727374877,
+   "digest": "sha256:aa437d0515be1e549d4cdfbb47e0ebdddc0b5143e7c91f005d87b9e7a05d4e2c"
+  },
+  {
+   "task": "preactjs__preact-2927",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-2927:latest",
+   "compressed_bytes": 726962873,
+   "digest": "sha256:2f1338cdfc8b1154be3e7a4dba66715a4181f2146bfb00275ddf8a8ff7abee60"
+  },
+  {
+   "task": "preactjs__preact-3010",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3010:latest",
+   "compressed_bytes": 727255656,
+   "digest": "sha256:0ffd05a07312d1d4b10895b433a044502b6a40cd9a7048eaa532bb4134548823"
+  },
+  {
+   "task": "preactjs__preact-3062",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3062:latest",
+   "compressed_bytes": 727161406,
+   "digest": "sha256:3e8b2195e7c18f5f49226004d4e9442fb3e8cfe8b3db155a47708e74189a8a36"
+  },
+  {
+   "task": "preactjs__preact-3345",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3345:latest",
+   "compressed_bytes": 744017656,
+   "digest": "sha256:71c7b8893b0274f4cab86827b901a5d167b8a93c130670c9ae2289e9343229de"
+  },
+  {
+   "task": "preactjs__preact-3454",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3454:latest",
+   "compressed_bytes": 746274361,
+   "digest": "sha256:297bfee272f7db07f3fd92468456a411da9b2368d091c78a5166f29051fdface"
+  },
+  {
+   "task": "preactjs__preact-3562",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3562:latest",
+   "compressed_bytes": 743140567,
+   "digest": "sha256:d007ec55602bf6a425a9063e26075fc40a9e7747e478572712b83da10131958f"
+  },
+  {
+   "task": "preactjs__preact-3567",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3567:latest",
+   "compressed_bytes": 743141008,
+   "digest": "sha256:b37a72417074d1b2f7f294aed376d00ce18b01afed83c8e0b56432b4e5c4400c"
+  },
+  {
+   "task": "preactjs__preact-3689",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3689:latest",
+   "compressed_bytes": 741014299,
+   "digest": "sha256:9c15851438f3b7121f034dae8bdb64d44d913bc30019a6f81def7cdef052a11d"
+  },
+  {
+   "task": "preactjs__preact-3739",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3739:latest",
+   "compressed_bytes": 716999503,
+   "digest": "sha256:196f3375b60e66f20774de8cc419e281dc9880a79fd8b78c468573f19d8fd693"
+  },
+  {
+   "task": "preactjs__preact-3763",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3763:latest",
+   "compressed_bytes": 717019220,
+   "digest": "sha256:3a73136cc15497a7b5fd811f60a1fe722f2b8f870fbdd3e447e0c53047b2cbcb"
+  },
+  {
+   "task": "preactjs__preact-4152",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-4152:latest",
+   "compressed_bytes": 727012078,
+   "digest": "sha256:d2a9e91630ba9e8003f1622e1861e95d4d14e289382ea985deb27bd26f012a99"
+  },
+  {
+   "task": "preactjs__preact-4182",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-4182:latest",
+   "compressed_bytes": 727059812,
+   "digest": "sha256:138f4009f1fb0da90989e876a59c23431b08fc46bd36d3944519c650bbdffcf2"
+  },
+  {
+   "task": "preactjs__preact-4245",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-4245:latest",
+   "compressed_bytes": 727214708,
+   "digest": "sha256:d15050f805c4b03f95ebbbf2a8ef1686668098e30b158b5dc91f1fd54cc98a06"
+  },
+  {
+   "task": "preactjs__preact-4316",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-4316:latest",
+   "compressed_bytes": 727282986,
+   "digest": "sha256:c392a0a12b3ca09d45ae9f340e5582d80deb12d375268873cd67db43c0ad9a70"
+  },
+  {
+   "task": "preactjs__preact-4436",
+   "language": "javascript",
+   "repo": "preactjs/preact",
+   "base_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-4436:latest",
+   "compressed_bytes": 781152211,
+   "digest": "sha256:c1cf82e682faddcca76d8d3f0bae46d5301f3c7544eb4d7b9fe24b9ee0bd0926"
+  },
+  {
+   "task": "projectlombok__lombok-2792",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-2792:latest",
+   "compressed_bytes": 642683482,
+   "digest": "sha256:2dbdac87af9932054ee3f0ebbf4d58c0ade297bc616a249c528a171f6ea5b3f1"
+  },
+  {
+   "task": "projectlombok__lombok-3009",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3009:latest",
+   "compressed_bytes": 642705415,
+   "digest": "sha256:0bc3a452874b1457e141e9c225340699060814b9cf659c953b7b725244f72b58"
+  },
+  {
+   "task": "projectlombok__lombok-3042",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3042:latest",
+   "compressed_bytes": 643004882,
+   "digest": "sha256:04c663a682d34111706d719270f3d7766c1643cc28648a582e459b69be10d7ca"
+  },
+  {
+   "task": "projectlombok__lombok-3052",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3052:latest",
+   "compressed_bytes": 643011862,
+   "digest": "sha256:b1c36b7a9fe9e38c7f2f77c2ae8a1b640b9068b5021479f36d9009bc074a3eed"
+  },
+  {
+   "task": "projectlombok__lombok-3215",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3215:latest",
+   "compressed_bytes": 643759888,
+   "digest": "sha256:45422a2fb02fb81d1ee1b7d5a9d0ff40c41d50bbbb0f4efb5744e610cfc90179"
+  },
+  {
+   "task": "projectlombok__lombok-3312",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3312:latest",
+   "compressed_bytes": 643785872,
+   "digest": "sha256:c39c8852436e1cd524733620bc27c46284d57bee104d7e182b4e376a2d4ea395"
+  },
+  {
+   "task": "projectlombok__lombok-3326",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3326:latest",
+   "compressed_bytes": 643783881,
+   "digest": "sha256:feb88e172acaea56100ff7fc5efcc9e0370636c93f449577dfe1a20171f42fb2"
+  },
+  {
+   "task": "projectlombok__lombok-3350",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3350:latest",
+   "compressed_bytes": 654377443,
+   "digest": "sha256:0ad2985cf18b048487b14bdd22cc77014aafa3eee6f78b22c19eae4681b77094"
+  },
+  {
+   "task": "projectlombok__lombok-3371",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3371:latest",
+   "compressed_bytes": 654395040,
+   "digest": "sha256:dedfbf3bb1abddb535daf92e8e341ad993b45cddbd9d829b8766d04fc00f0adf"
+  },
+  {
+   "task": "projectlombok__lombok-3422",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3422:latest",
+   "compressed_bytes": 654660432,
+   "digest": "sha256:ebb26286edc640e5d65e8908fcd8cb4174bca5a0fecf1bfcfeb64336e0e2a63f"
+  },
+  {
+   "task": "projectlombok__lombok-3479",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3479:latest",
+   "compressed_bytes": 654523379,
+   "digest": "sha256:d6cb2379c5516d59c2f37dc212b3d6b76f3557c860f962c0fe65258b8c25084c"
+  },
+  {
+   "task": "projectlombok__lombok-3486",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3486:latest",
+   "compressed_bytes": 654724276,
+   "digest": "sha256:f8ce2f033ceeef7a59262d45aa7ab95506f73b3fc9a8c2833446e76faf20e238"
+  },
+  {
+   "task": "projectlombok__lombok-3571",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3571:latest",
+   "compressed_bytes": 655905186,
+   "digest": "sha256:2de47c2380ce4fe0c73cdd1205ae55218568e96936252037050aa67f1c93bbe0"
+  },
+  {
+   "task": "projectlombok__lombok-3594",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3594:latest",
+   "compressed_bytes": 656149043,
+   "digest": "sha256:8cb50cbb2c469b9868d6e7fbe058fe737b80e7248c0fff9e71050957ef3f8647"
+  },
+  {
+   "task": "projectlombok__lombok-3602",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3602:latest",
+   "compressed_bytes": 656132595,
+   "digest": "sha256:a1ea89aa70a2baecdb3364699f89e6b7a399fbf187bedb4aece0eb650cd0da11"
+  },
+  {
+   "task": "projectlombok__lombok-3674",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3674:latest",
+   "compressed_bytes": 656350837,
+   "digest": "sha256:c097dfd4ad931a398c59b359b797b78bc549a4399a55a02452a19d551410761e"
+  },
+  {
+   "task": "projectlombok__lombok-3697",
+   "language": "java",
+   "repo": "projectlombok/lombok",
+   "base_image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3697:latest",
+   "compressed_bytes": 656368745,
+   "digest": "sha256:b184da1712e9383e75d81e11df7248137d2e282af521a77fb488f1a890bffe06"
+  },
+  {
+   "task": "prometheus__prometheus-10633",
+   "language": "go",
+   "repo": "prometheus/prometheus",
+   "base_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-10633:latest",
+   "compressed_bytes": 347390059,
+   "digest": "sha256:cf6c944bbe90545d7d68fa5092160bef2dcbd4d9ef8ecdeb9007a569c0bf1aef"
+  },
+  {
+   "task": "prometheus__prometheus-10720",
+   "language": "go",
+   "repo": "prometheus/prometheus",
+   "base_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-10720:latest",
+   "compressed_bytes": 407486812,
+   "digest": "sha256:259694c5e65d0747192b4f171dc709f2fe56ccb1dcabee289dc7f0b268c2b9e7"
+  },
+  {
+   "task": "prometheus__prometheus-11859",
+   "language": "go",
+   "repo": "prometheus/prometheus",
+   "base_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-11859:latest",
+   "compressed_bytes": 427953903,
+   "digest": "sha256:d116a9fb3c312196c594e9c987574b8ad4172733389058c9391f1a1a41bb984b"
+  },
+  {
+   "task": "prometheus__prometheus-12874",
+   "language": "go",
+   "repo": "prometheus/prometheus",
+   "base_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-12874:latest",
+   "compressed_bytes": 626903730,
+   "digest": "sha256:7a83c234590c59e073311a47bdd1900774e92d1bfde1a5d235fa79060794e749"
+  },
+  {
+   "task": "prometheus__prometheus-13845",
+   "language": "go",
+   "repo": "prometheus/prometheus",
+   "base_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-13845:latest",
+   "compressed_bytes": 542365721,
+   "digest": "sha256:57206cf8f6bfdc7fb0bcf747385a62e63177e89229d03105a70167497a9d84c4"
+  },
+  {
+   "task": "prometheus__prometheus-14861",
+   "language": "go",
+   "repo": "prometheus/prometheus",
+   "base_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-14861:latest",
+   "compressed_bytes": 633910296,
+   "digest": "sha256:1cd50b07a34cc6071ebf51319895c79d62bf91c04da5eb96095c2c217f6f2754"
+  },
+  {
+   "task": "prometheus__prometheus-15142",
+   "language": "go",
+   "repo": "prometheus/prometheus",
+   "base_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-15142:latest",
+   "compressed_bytes": 634639680,
+   "digest": "sha256:e01f07d8fb6f3383fcfff203bdd1933c80f1782980a40a407a9ab1415a53451e"
+  },
+  {
+   "task": "prometheus__prometheus-9248",
+   "language": "go",
+   "repo": "prometheus/prometheus",
+   "base_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-9248:latest",
+   "compressed_bytes": 398714995,
+   "digest": "sha256:5fd4537e3b4c4a3d6d55e6735a26b68d271ff0253b1d1932025859018c62a2cc"
+  },
+  {
+   "task": "reactivex__rxjava-7597",
+   "language": "java",
+   "repo": "reactivex/rxjava",
+   "base_image": "swebench/sweb.eval.x86_64.reactivex_1776_rxjava-7597:latest",
+   "compressed_bytes": 470306683,
+   "digest": "sha256:a7f5dcdc0d7b1e8e32fbd3f3c0487743ca84359ebee777791a1e5002541f1b57"
+  },
+  {
+   "task": "redis__redis-10068",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-10068:latest",
+   "compressed_bytes": 264012163,
+   "digest": "sha256:f4a7cd84f164f07cde8da7feacd4188035e3991749453fc3afb23def851a88c1"
+  },
+  {
+   "task": "redis__redis-10095",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-10095:latest",
+   "compressed_bytes": 264039103,
+   "digest": "sha256:0aba9e55a880830a913f25391bbcd378184f1adcb282919cff5c61c8d726e2d4"
+  },
+  {
+   "task": "redis__redis-10764",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-10764:latest",
+   "compressed_bytes": 266010218,
+   "digest": "sha256:df488c0fbb6e3014acb586e583746973e5166cbfa547de3ffe9646e8c5d59b16"
+  },
+  {
+   "task": "redis__redis-11279",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-11279:latest",
+   "compressed_bytes": 266994773,
+   "digest": "sha256:317ea1a58f60c0c83df50e94ad06f24bb289675e26a7fa5f797d76c1b9017794"
+  },
+  {
+   "task": "redis__redis-11510",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-11510:latest",
+   "compressed_bytes": 278137345,
+   "digest": "sha256:5601b2234bb2231bc77ce06a17603e1c17c33b0ee4ab9e99d0a89cfb79b39f59"
+  },
+  {
+   "task": "redis__redis-11631",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-11631:latest",
+   "compressed_bytes": 278630147,
+   "digest": "sha256:50508c5de57f998b559c7851d6ce309b13e5bb3f21c1c89bfc3fd80a487100f1"
+  },
+  {
+   "task": "redis__redis-11734",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-11734:latest",
+   "compressed_bytes": 299455794,
+   "digest": "sha256:cfb6e6109c1c69ab4ec9c8068564069a1c1b71a4505aa8f842448970cd47666c"
+  },
+  {
+   "task": "redis__redis-12272",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-12272:latest",
+   "compressed_bytes": 303377597,
+   "digest": "sha256:11379cb0e5d3dae01e4d2e8b0e539f07cfe7b07e058c1be1895527b63a88d263"
+  },
+  {
+   "task": "redis__redis-12472",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-12472:latest",
+   "compressed_bytes": 299461016,
+   "digest": "sha256:5dbcb9f1487446ad8027bf333ea898de58dfeeb5a147ad5b5a11398bc68e7add"
+  },
+  {
+   "task": "redis__redis-13115",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-13115:latest",
+   "compressed_bytes": 300946374,
+   "digest": "sha256:d95c416512263e2ca938f1106f26f9d545918e945ea3db376431b46d21cdad22"
+  },
+  {
+   "task": "redis__redis-13338",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-13338:latest",
+   "compressed_bytes": 303218832,
+   "digest": "sha256:b02debe6b3d106a692761518a0c693d9b85054c25914b1314724881699ad3fec"
+  },
+  {
+   "task": "redis__redis-9733",
+   "language": "c",
+   "repo": "redis/redis",
+   "base_image": "swebench/sweb.eval.x86_64.redis_1776_redis-9733:latest",
+   "compressed_bytes": 261649862,
+   "digest": "sha256:9d8107d66fdbde36d62b2d07735bf2048238fe9b0a431a7fd509b6a15791fe9e"
+  },
+  {
+   "task": "rubocop__rubocop-13362",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13362:latest",
+   "compressed_bytes": 457016709,
+   "digest": "sha256:15d2f1671c967cbc070541b7651a4f84bf9a5a58f4c9f1e2dfb228238295d2a3"
+  },
+  {
+   "task": "rubocop__rubocop-13375",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13375:latest",
+   "compressed_bytes": 457044594,
+   "digest": "sha256:517c3efc58d1e11c8751c21e20f5c803d5cb8a54db52c2248600057e75a4e7ce"
+  },
+  {
+   "task": "rubocop__rubocop-13393",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13393:latest",
+   "compressed_bytes": 457075943,
+   "digest": "sha256:a0ac8007a8b62d197d2554174b21d0a1e9746f62aeff5591936fe15fc5df3078"
+  },
+  {
+   "task": "rubocop__rubocop-13396",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13396:latest",
+   "compressed_bytes": 457084295,
+   "digest": "sha256:94a3fea431aa58c2720381c5d74ae50204e23e35bf3a5124a27a3878a3466b92"
+  },
+  {
+   "task": "rubocop__rubocop-13424",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13424:latest",
+   "compressed_bytes": 457168164,
+   "digest": "sha256:e066032b99176224eb2345139a4b3465f4812cc3d44a3b801eab0e12bde7eb51"
+  },
+  {
+   "task": "rubocop__rubocop-13431",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13431:latest",
+   "compressed_bytes": 457182586,
+   "digest": "sha256:b4eb3e1b423d8f7c05ed297866ca04874635d27f418760dbe2039af08f5b2791"
+  },
+  {
+   "task": "rubocop__rubocop-13479",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13479:latest",
+   "compressed_bytes": 457604623,
+   "digest": "sha256:028f71843504c69eb8dd63f0698beac631f34c45d781279618029aac437c8ca3"
+  },
+  {
+   "task": "rubocop__rubocop-13503",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13503:latest",
+   "compressed_bytes": 457677613,
+   "digest": "sha256:23dd55866af6b1e353a9f2cdb105d92abc93147f407d026e1249fd1cbeefae25"
+  },
+  {
+   "task": "rubocop__rubocop-13560",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13560:latest",
+   "compressed_bytes": 457780827,
+   "digest": "sha256:c563478dea6576d823af11c76ccc7d41c16e7b77c909c6aeddd75db6b7f985b7"
+  },
+  {
+   "task": "rubocop__rubocop-13579",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13579:latest",
+   "compressed_bytes": 457875662,
+   "digest": "sha256:e7d1901ea70dee81784acac32ffa2b13e1f01d6af7778f37c72d02bc41cd60e4"
+  },
+  {
+   "task": "rubocop__rubocop-13627",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13627:latest",
+   "compressed_bytes": 457915267,
+   "digest": "sha256:13bcfab1ed602022e8329f683f81319b5968a8f740dbce0b1feeebe876c21d77"
+  },
+  {
+   "task": "rubocop__rubocop-13653",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13653:latest",
+   "compressed_bytes": 458002271,
+   "digest": "sha256:5444b3a1fcd0eda794d1535fa0b3a6e152916b34d0297133db891f1e7cdb47b0"
+  },
+  {
+   "task": "rubocop__rubocop-13668",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13668:latest",
+   "compressed_bytes": 462098190,
+   "digest": "sha256:af19759a90f9102d7e671616dd07245261fa9c36807090045b7070e8b7cea506"
+  },
+  {
+   "task": "rubocop__rubocop-13680",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13680:latest",
+   "compressed_bytes": 462167218,
+   "digest": "sha256:84652978149e6509abcc8d549d6fb0de439389c8130568c0ff747608b9d03a26"
+  },
+  {
+   "task": "rubocop__rubocop-13687",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13687:latest",
+   "compressed_bytes": 464590526,
+   "digest": "sha256:0413e9ea43712400f080436f0e4068ed4cd1bf75ded3d0fd0afea76dfffead4e"
+  },
+  {
+   "task": "rubocop__rubocop-13705",
+   "language": "ruby",
+   "repo": "rubocop/rubocop",
+   "base_image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13705:latest",
+   "compressed_bytes": 464618590,
+   "digest": "sha256:1faeb39c55085507196654f07ddb2ffba8fa2954173709e76e0d71018263894f"
+  },
+  {
+   "task": "sharkdp__bat-1892",
+   "language": "rust",
+   "repo": "sharkdp/bat",
+   "base_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-1892:latest",
+   "compressed_bytes": 784159862,
+   "digest": "sha256:c939c980ee060fb756f24524d78b8d704eba7663926c936a67bb3ee948611c7f"
+  },
+  {
+   "task": "sharkdp__bat-2201",
+   "language": "rust",
+   "repo": "sharkdp/bat",
+   "base_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-2201:latest",
+   "compressed_bytes": 781798717,
+   "digest": "sha256:2e3af411ac9db2c4c82bcb6ae1272f0ba0450f109be207cb77f77a4407e751d2"
+  },
+  {
+   "task": "sharkdp__bat-2260",
+   "language": "rust",
+   "repo": "sharkdp/bat",
+   "base_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-2260:latest",
+   "compressed_bytes": 781806595,
+   "digest": "sha256:eab6b18d6d468b3883b3606c2b42827b8149eac0846012ef356c0300fc51af00"
+  },
+  {
+   "task": "sharkdp__bat-2393",
+   "language": "rust",
+   "repo": "sharkdp/bat",
+   "base_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-2393:latest",
+   "compressed_bytes": 798149043,
+   "digest": "sha256:eace21ac8f4d31fe4f99e647515c725b50dbda19671fc97836f08ac0d97ffb08"
+  },
+  {
+   "task": "sharkdp__bat-2650",
+   "language": "rust",
+   "repo": "sharkdp/bat",
+   "base_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-2650:latest",
+   "compressed_bytes": 825332590,
+   "digest": "sha256:5b7662f24ce54f104eabeb7e07ee5920ea50ac3ac9c946c33e008c88418f6158"
+  },
+  {
+   "task": "sharkdp__bat-2835",
+   "language": "rust",
+   "repo": "sharkdp/bat",
+   "base_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-2835:latest",
+   "compressed_bytes": 859350112,
+   "digest": "sha256:4ac4c591e350a48655351ff22347b2eb611d7e95a6a1dadad4c9c8eb82708c8c"
+  },
+  {
+   "task": "sharkdp__bat-3108",
+   "language": "rust",
+   "repo": "sharkdp/bat",
+   "base_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-3108:latest",
+   "compressed_bytes": 865831621,
+   "digest": "sha256:24f95e555a1088a274687b4f08b71af35f58da37aef4a4842c4be16359511c3c"
+  },
+  {
+   "task": "sharkdp__bat-562",
+   "language": "rust",
+   "repo": "sharkdp/bat",
+   "base_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-562:latest",
+   "compressed_bytes": 567510278,
+   "digest": "sha256:1628e0636cc3f7b883a234db0a95c8fcd065d8a8510c4f2986ee0e0dd16fbaf9"
+  },
+  {
+   "task": "tokio-rs__axum-1119",
+   "language": "rust",
+   "repo": "tokio-rs/axum",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-1119:latest",
+   "compressed_bytes": 822224114,
+   "digest": "sha256:0e1f66e8c6b3936888a078708b65cbef243b5d233c086b16a066184993dae9d8"
+  },
+  {
+   "task": "tokio-rs__axum-1730",
+   "language": "rust",
+   "repo": "tokio-rs/axum",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-1730:latest",
+   "compressed_bytes": 869505445,
+   "digest": "sha256:3cff5106e2e355dcb542b6da265bc9843abff6298a91a0dced6c9cda5cabdfc0"
+  },
+  {
+   "task": "tokio-rs__axum-1934",
+   "language": "rust",
+   "repo": "tokio-rs/axum",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-1934:latest",
+   "compressed_bytes": 864634197,
+   "digest": "sha256:169a94292e34ffb234665b050ee3f25118b7901e735dd8ac81e62609c1775547"
+  },
+  {
+   "task": "tokio-rs__axum-2096",
+   "language": "rust",
+   "repo": "tokio-rs/axum",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-2096:latest",
+   "compressed_bytes": 863020905,
+   "digest": "sha256:a18fe86f381063d07a52d6265ad58cd1fcc5124a0ff6236adffd6a24966d2595"
+  },
+  {
+   "task": "tokio-rs__axum-682",
+   "language": "rust",
+   "repo": "tokio-rs/axum",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-682:latest",
+   "compressed_bytes": 785940392,
+   "digest": "sha256:e338251f985c5f2faef5e38ac8126122cb6ece1febb31f58fc81b785a113a903"
+  },
+  {
+   "task": "tokio-rs__axum-691",
+   "language": "rust",
+   "repo": "tokio-rs/axum",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-691:latest",
+   "compressed_bytes": 785871222,
+   "digest": "sha256:fb0d9a7b868c9748fae2781323206bba09614fffe2b62a57337335d5671dbdbe"
+  },
+  {
+   "task": "tokio-rs__axum-734",
+   "language": "rust",
+   "repo": "tokio-rs/axum",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-734:latest",
+   "compressed_bytes": 788040728,
+   "digest": "sha256:4d142c8e63bebb966a162c74e0ddf3decd9db732b6e62da1bdcd34c4b018c5d9"
+  },
+  {
+   "task": "tokio-rs__tokio-4384",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-4384:latest",
+   "compressed_bytes": 571957866,
+   "digest": "sha256:7907061c06dfa67a9f1787b36af472601a365065a2b2ea1fdb2041291c7bea8a"
+  },
+  {
+   "task": "tokio-rs__tokio-4867",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-4867:latest",
+   "compressed_bytes": 741653444,
+   "digest": "sha256:56b605e0762af1f43ee3cbb8798415399c89e65cf2a8a71da3db79b617ef9e07"
+  },
+  {
+   "task": "tokio-rs__tokio-4898",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-4898:latest",
+   "compressed_bytes": 763633247,
+   "digest": "sha256:a488616f10fcc016084768f7f4e652d14a3decd81d24cb78ffbaca006a0d927f"
+  },
+  {
+   "task": "tokio-rs__tokio-6551",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-6551:latest",
+   "compressed_bytes": 788689756,
+   "digest": "sha256:04938d700f1996ddb80d5c10b6bad0696e406bbb358f8a8fca2e183ea484be72"
+  },
+  {
+   "task": "tokio-rs__tokio-6603",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-6603:latest",
+   "compressed_bytes": 754280859,
+   "digest": "sha256:a7ae228c119303e7d21ba25b1a247bfe63eb894d576d04afb687fea86dd6a549"
+  },
+  {
+   "task": "tokio-rs__tokio-6724",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-6724:latest",
+   "compressed_bytes": 743869318,
+   "digest": "sha256:ed237651a79622da338a0d13697ce9600494a2f35cc765a75c84e30155d7ac35"
+  },
+  {
+   "task": "tokio-rs__tokio-6752",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-6752:latest",
+   "compressed_bytes": 715523712,
+   "digest": "sha256:7b323a0d3d8e0d852715aa2486b4aadc1d2c964468e3ccf05d4f331cb13daa2b"
+  },
+  {
+   "task": "tokio-rs__tokio-6838",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-6838:latest",
+   "compressed_bytes": 747730800,
+   "digest": "sha256:77bae983f3a83a132e571cd57baab18f67d4d7d8461c6eda8846dbdc49743ecc"
+  },
+  {
+   "task": "tokio-rs__tokio-7139",
+   "language": "rust",
+   "repo": "tokio-rs/tokio",
+   "base_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-7139:latest",
+   "compressed_bytes": 773856880,
+   "digest": "sha256:ac9957c4c2b29ffee4ca4e59c78ee0de8278c172644986b0e28b9b3b2ec2e6a7"
+  },
+  {
+   "task": "uutils__coreutils-6377",
+   "language": "rust",
+   "repo": "uutils/coreutils",
+   "base_image": "swebench/sweb.eval.x86_64.uutils_1776_coreutils-6377:latest",
+   "compressed_bytes": 1140789779,
+   "digest": "sha256:bd0c897981cea73fada6ab3a7cbde21f2cbbed3131a27edee57582f0d19d4f48"
+  },
+  {
+   "task": "uutils__coreutils-6575",
+   "language": "rust",
+   "repo": "uutils/coreutils",
+   "base_image": "swebench/sweb.eval.x86_64.uutils_1776_coreutils-6575:latest",
+   "compressed_bytes": 1170237954,
+   "digest": "sha256:730cec55873d28fd7d55082671d771b358ee0ceda98d9ad788b204c01821f229"
+  },
+  {
+   "task": "uutils__coreutils-6682",
+   "language": "rust",
+   "repo": "uutils/coreutils",
+   "base_image": "swebench/sweb.eval.x86_64.uutils_1776_coreutils-6682:latest",
+   "compressed_bytes": 1172811457,
+   "digest": "sha256:83719962b16cc22af10b93c57b569843fa5c971717f39058aee6c23401b0eb72"
+  },
+  {
+   "task": "uutils__coreutils-6690",
+   "language": "rust",
+   "repo": "uutils/coreutils",
+   "base_image": "swebench/sweb.eval.x86_64.uutils_1776_coreutils-6690:latest",
+   "compressed_bytes": 1172867539,
+   "digest": "sha256:e7db820822cc1d1dd6a6a124e7840cef20bc143f452c240c85a54b85bdf3493e"
+  },
+  {
+   "task": "uutils__coreutils-6731",
+   "language": "rust",
+   "repo": "uutils/coreutils",
+   "base_image": "swebench/sweb.eval.x86_64.uutils_1776_coreutils-6731:latest",
+   "compressed_bytes": 1174480874,
+   "digest": "sha256:fbc25be24c59130527fcfe15d057b4f3679c2944fc8115e2b88c0752a0aaefc9"
+  },
+  {
+   "task": "valkey-io__valkey-1499",
+   "language": "c",
+   "repo": "valkey-io/valkey",
+   "base_image": "swebench/sweb.eval.x86_64.valkey-io_1776_valkey-1499:latest",
+   "compressed_bytes": 314299476,
+   "digest": "sha256:947883d2b1ebf7b7674572d6e299aceeaf82afcda3bc0e6cc6718d9b5a095d0b"
+  },
+  {
+   "task": "valkey-io__valkey-1842",
+   "language": "c",
+   "repo": "valkey-io/valkey",
+   "base_image": "swebench/sweb.eval.x86_64.valkey-io_1776_valkey-1842:latest",
+   "compressed_bytes": 315592832,
+   "digest": "sha256:26e6de5fd94e81ea06ef96dd62ffe1e699595985f644a6836a48bf060bf2601b"
+  },
+  {
+   "task": "valkey-io__valkey-790",
+   "language": "c",
+   "repo": "valkey-io/valkey",
+   "base_image": "swebench/sweb.eval.x86_64.valkey-io_1776_valkey-790:latest",
+   "compressed_bytes": 304325116,
+   "digest": "sha256:2f88a07abfa7dab92af06b5cbf317915d0531b4cd8e1855557f190eae531f85a"
+  },
+  {
+   "task": "valkey-io__valkey-928",
+   "language": "c",
+   "repo": "valkey-io/valkey",
+   "base_image": "swebench/sweb.eval.x86_64.valkey-io_1776_valkey-928:latest",
+   "compressed_bytes": 304751202,
+   "digest": "sha256:bdd79ee0154db45a79c43a100fc95c7227a4ac2fe0864ff1e3a5a9910405680c"
+  },
+  {
+   "task": "vuejs__core-11589",
+   "language": "javascript",
+   "repo": "vuejs/core",
+   "base_image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11589:latest",
+   "compressed_bytes": 1094821209,
+   "digest": "sha256:42fd109ba2a74e907977d6bbf2222566d499233c97208b7a2da8e4b68ce198f3"
+  },
+  {
+   "task": "vuejs__core-11739",
+   "language": "javascript",
+   "repo": "vuejs/core",
+   "base_image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11739:latest",
+   "compressed_bytes": 1096927916,
+   "digest": "sha256:840b9db1c1e31f95d8d34afbce1ad3587b7e7a312b1a48cc6b91288ab6e43d3d"
+  },
+  {
+   "task": "vuejs__core-11870",
+   "language": "javascript",
+   "repo": "vuejs/core",
+   "base_image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11870:latest",
+   "compressed_bytes": 1099912265,
+   "digest": "sha256:5d35bb2fdd0dbbdeafe9f2f4553407279292b4214343483e84ea07ca29f3c040"
+  },
+  {
+   "task": "vuejs__core-11899",
+   "language": "javascript",
+   "repo": "vuejs/core",
+   "base_image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11899:latest",
+   "compressed_bytes": 1108566979,
+   "digest": "sha256:a199b55342e4f19881c07b7b1b9c3e930240233948a0c3515bebd000ce117e0c"
+  },
+  {
+   "task": "vuejs__core-11915",
+   "language": "javascript",
+   "repo": "vuejs/core",
+   "base_image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11915:latest",
+   "compressed_bytes": 1108042473,
+   "digest": "sha256:4d538cf2f8081b36052959797d9a90d2795879474c81b388d0b9898aa17b8cd8"
+  }
+ ]
+}

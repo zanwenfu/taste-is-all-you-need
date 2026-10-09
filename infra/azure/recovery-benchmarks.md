@@ -190,6 +190,53 @@ would then need the same two-sided gate as SWE-Bench Pro V2 (reference patch
 solves, empty patch does not) before use. SWE-Bench Pro V2 alone supplies more
 candidates than the calibration needs, so this was not done.
 
+## SWE-bench Multilingual
+
+The second benchmark: Harbor's registry `swebench_multilingual@1.0`, 300 tasks
+from 41 repositories in eight languages (C 30, C++ 12, Go 42, Java 43,
+JavaScript/TypeScript 43, PHP 43, Ruby 44, Rust 43). Each task builds its image
+from a public base image (`swebench/sweb.eval.x86_64.<instance>`; 186 GB
+compressed in all, median 0.50 GB); `data/recovery/multilingual-base-images.json`
+pins every base image by digest. The verifier runs in the agent's container and
+the environment is that one container, so every task grades files only.
+
+As published, the tasks need three changes for the study, which
+`scripts/prepare_multilingual.py` makes and records (nothing else changes):
+
+- No phase sets a network rule, so the agent would have the internet. Prepared,
+  the agent is offline, as in SWE-Bench Pro V2.
+- The grader runs `uv run parser.py`, which installs swebench 4.1.0 and a
+  Python at grading time. Prepared, that environment is built into the image
+  and grading runs `uv run --offline`. A repository whose own tests download
+  dependencies at test time (Maven, Gradle, a crates index) keeps a public
+  grader, by name; its agent stays offline.
+- Harbor would build each task's image for every trial and remove it after. A
+  checkpoint is restored only into a container of its own image, so the image
+  is built once (`infra/azure/build-multilingual.sh`) and pinned by
+  `docker_image`; Harbor then neither rebuilds nor removes it.
+
+Every task asks for 4 CPUs; prepared, it gets one, as SWE-Bench Pro V2's do, and
+more only where its tests cannot run at one.
+
+One task of each of the 41 repositories was checked on a development VM (agent
+offline, 1 CPU). Every reference solution passed and every empty patch failed,
+with the grader offline except for six repositories whose tests download at
+test time (apache/druid, apache/lucene, google/gson, javaparser/javaparser and
+reactivex/rxjava through Maven or Gradle; tokio-rs/tokio through the crates
+index; 35 tasks). apache/druid needs 2 CPUs: at one, its Maven daemon dies
+mid-build.
+
+    sudo /root/taste-harbor-20260927/venv/bin/harbor download swebench_multilingual@1.0 -o /root/recovery-bench/swebench-multilingual
+    python3 scripts/prepare_multilingual.py --dataset /root/recovery-bench/swebench-multilingual/swebench_multilingual \
+        --out /root/recovery-bench/runs/cal-ml-w1 --tasks ml-w1.txt --cpus apache/druid=2 \
+        --verifier-public "apache/druid=its build tool downloads dependencies at test time"
+    sudo infra/azure/build-multilingual.sh /root/recovery-bench/runs/cal-ml-w1 2
+
+A task's tests can leave large build outputs in its container (Rust's `target/`,
+Go's and Gradle's caches): up to 1.6 GB after one test run, over the 512 MB a
+checkpoint holds. Such a checkpoint is partial and is never restored, so these
+states can be brought back only by rebuilding them.
+
 ## No-model checks on the measurement VM
 
 Harbor's built-in agents, `oracle` (applies the reference solution) and `nop`
