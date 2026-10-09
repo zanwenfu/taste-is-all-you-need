@@ -15,6 +15,11 @@ starts the jobs, at most --max-trials of the study's trials at once, and returns
 none is running. Then run this again. Settings given when the state file is
 first written are the study's; a later run may repeat them, not change them.
 
+With --seed-from another map's state and --scan-every N, a new state scans
+--seed-runs of that map's finished runs every N steps, with the map's settings
+and every probe and checkpoint it made, so only steps not yet probed cost
+trials; its summary says whether each curve is monotone.
+
 Per run it prints the status, the last winnable and first lost step, the
 decisive step d, the best rewind points r* (highest v, and latest winnable)
 and the spend; --json writes every run's curve with Wilson intervals.
@@ -73,11 +78,22 @@ def main(argv=None):
     parser.add_argument("--max-trials", type=int, default=MAX_TRIALS,
                         help="the launcher's limit on the study's running trials (each running job's -n)")
     parser.add_argument("--json", type=Path, help="also write every run's summary here")
+    parser.add_argument("--seed-from", type=Path,
+                        help="a full scan of another map's finished runs: its state file (with --scan-every)")
+    parser.add_argument("--seed-runs", type=int, default=20, help="how many of its finished runs to scan")
     arguments = parser.parse_args(argv)
     given = {name: getattr(arguments, name) for name in [*OPTIONS, "prefetch"]}
     given.update(ak=pairs(arguments.ak), env=pairs(arguments.env))
+    other = MapDriver.open(arguments.seed_from) if arguments.seed_from else None
+    if other is not None and not arguments.state.exists():
+        # A new scan branches as the map did: its settings, but for its own names and scan.
+        mine = ("prefix", "work_dir", "scan_every", "scan_fraction", "seed")
+        given = {**{name: value for name, value in other.settings.items() if name not in mine},
+                 **{name: value for name, value in given.items() if value is not None}}
     with state.locked(arguments.state):
         driver = MapDriver.open(arguments.state, given)
+        if other is not None:
+            driver.seed(other, arguments.seed_runs)
         for name in arguments.close:
             driver.close(name)
         driver.add_sources(arguments.base_job, arguments.calibration)

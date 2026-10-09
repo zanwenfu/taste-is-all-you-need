@@ -12,9 +12,14 @@ branch rebuilds its prefix.
 A checkpoint trial is graded too: the hidden tests' verdict on the state at
 step k ("state_reward"), which shows runs that passed and then broke.
 
+The search takes a run's curve to fall once. A full scan checks that: a state
+seeded from another map (``seed``) takes some of its finished runs, with
+their probes and checkpoints, and probes them every ``scan_every`` steps.
+
 State (``kind`` taste.recovery_map/1), beside the shared fields of ``driver``:
 
     runs.<run>.scan                 steps of the full scan, if the run is in it
+    runs.<run>.seeded_from          the map it was taken from, in a seeded scan
     runs.<run>.probes.<k>           {"target": branches wanted, "jobs": [branch jobs],
                                      "checkpoints": [checkpoint jobs]}
     jobs.<job>                      {"run", "step", "purpose": "probe" | "checkpoint",
@@ -23,6 +28,7 @@ State (``kind`` taste.recovery_map/1), beside the shared fields of ``driver``:
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import math
 
@@ -67,6 +73,35 @@ class MapDriver(Driver):
             every = values["scan_every"]
             run["scan"] = list(range(every, run["steps"], every)) if every and draw < values["scan_fraction"] else []
             run["probes"] = {}
+
+    def seed(self, other, count):
+        """Take ``count`` of another map's finished runs for a full scan; their ids (none once seeded).
+
+        The runs are those ``other`` (a MapDriver) has done, chosen by a hash salted with this
+        state's ``seed``, each with every probe and checkpoint it has, so only the scan's steps not
+        yet probed cost trials. Each is scanned every ``scan_every`` steps; the tasks' runs from
+        scratch come along for v(0). A state that has runs is not seeded again.
+        """
+        values = self.settings
+        if self.runs:
+            return []
+        if values["scan_every"] < 1:
+            raise ValueError("a seeded scan needs scan_every")
+        finished = [run_id for run_id, found in other.summary().items() if found["status"] == "done"]
+        chosen = sorted(finished, key=lambda run_id: hashlib.sha256(
+            f"{values['seed']}:{run_id}".encode()).hexdigest())[:count]
+        for run_id in chosen:
+            run = copy.deepcopy(other.runs[run_id])
+            run.update(script=self.script(run["base"]["token"])[0], seeded_from=str(other.path),
+                       scan=list(range(values["scan_every"], run["steps"], values["scan_every"])))
+            self.runs[run_id] = run
+            for entry in run["probes"].values():
+                for name in (*entry["jobs"], *entry["checkpoints"]):
+                    self.jobs[name] = {**copy.deepcopy(other.jobs[name]), "taken_from": str(other.path)}
+        tasks = {self.runs[run_id]["task"] for run_id in chosen}
+        self.data["fresh"].update({key: dict(found) for key, found in other.data["fresh"].items()
+                                   if found["task"] in tasks})
+        return chosen
 
     # What the probes found ------------------------------------------------
 

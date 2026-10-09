@@ -6,6 +6,7 @@
         [--recoveries retry,retry_feedback,rewind,continue] [--rewind-sources oracle,reader,rules] \\
         [--oracle highest_v|latest] [--repeats 3] [--prefix rec1] [--model gpt-6-luna] \\
         [--checker-model gpt-6-sol] [--checker-effort medium] [--mode restore|rebuild] \\
+        [--budget-runs 2] [--checks-from /root/study/recoveries-first.json] \\
         [--jobs-dir /root/study/jobs] [--trials /var/lib/taste-trials] \\
         [--launcher /root/study/rec-next.sh] [--max-trials 24] [--json /root/study/rec-summary.json]
 
@@ -22,6 +23,11 @@ the --calibration jobs' runs. After each round a checker trial checks again
 and, until it accepts or the budget is spent, the next round continues from
 the submission with the new feedback; a plain retry's next round is another
 fresh trial told nothing, unless --retry-rounds continue.
+
+With --checks-from another recovery state (a second budget, --budget-runs),
+each run's initial check is taken from that state, its verdict, saved final
+state and checker trial, and none is made: both budgets recover the same
+rejected runs. A run that state has not checked yet waits for it.
 
 The reader file is JSON: {"<run>": <reading>} or a list of readings with a
 "run", a reading being ``read_trajectory``'s {"step", "reason", "confidence"};
@@ -49,7 +55,7 @@ OPTIONS = {"prefix": str, "model": str, "mode": str, "calibration_report": str, 
            "checker_effort": str, "oracle": str, "repeats": int, "budget_runs": float, "check_attempts": int, "prefix_allowance": float,
            "min_round_usd": float, "min_round_share": float, "min_round_seconds": float, "retry_rounds": str, "jobs_dir": str,
            "trials_root": str, "work_dir": str, "tasks_dir": str, "run_harbor": str, "export_template": str,
-           "concurrent": int, "min_steps": int, "large_edit_lines": int, "attempts_factor": int}
+           "concurrent": int, "min_steps": int, "large_edit_lines": int, "attempts_factor": int, "checks_from": str}
 
 
 def table(summary):

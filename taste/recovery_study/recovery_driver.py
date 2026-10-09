@@ -66,13 +66,14 @@ State (``kind`` taste.recovery_runs/1), beside the shared fields of ``driver``:
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from pathlib import Path
 
 from taste.agents.checker import BARE_FEEDBACK, checker_task, feedback
 from taste.agents.trajectory_reader import rewind_point
-from taste.recovery_study import jobs, records, search
+from taste.recovery_study import jobs, records, search, state
 from taste.recovery_study.commands import gaming_flags
 from taste.recovery_study.driver import COMMON, Driver
 
@@ -108,6 +109,9 @@ DEFAULTS = {
     "min_round_share": 0.1,
     "min_round_seconds": 0.0,   # 0: the trial's reply reserve and plan time, and a minute of work
     "retry_rounds": "retry",    # rounds after a plain retry: fresh trials told nothing, or "continue" with feedback
+    # Another recovery state whose initial checks this one takes, starting none: a second budget
+    # recovers the same rejected runs from the same verdicts and saved final states.
+    "checks_from": "",
 }
 
 
@@ -158,7 +162,7 @@ class RecoveryDriver(Driver):
 
     def __init__(self, path, data):
         super().__init__(path, data)
-        self.oracle, self.reader, self._calibrated = {}, {}, None
+        self.oracle, self.reader, self._calibrated, self._checks = {}, {}, None, None
 
     @classmethod
     def validate(cls, settings):
@@ -241,6 +245,8 @@ class RecoveryDriver(Driver):
 
     def _initial_check(self, run_id, run):
         """True once the checker has rejected the base run's final state."""
+        if run["check"]["reply"] is None and self.settings["checks_from"] and not self._take_check(run_id, run):
+            return False
         check = run["check"]
         if check["reply"] is None:
             source = {"token": run["base"]["token"], "steps": run["steps"], "settings": run["settings"]}
@@ -252,6 +258,30 @@ class RecoveryDriver(Driver):
             check["verdict"], check["reply"] = found, self.trial(found)["checker"]
         run["status"] = "rejected" if check["reply"]["verdict"] == "not_done" else "accepted"
         return check["reply"]["verdict"] == "not_done"
+
+    def _take_check(self, run_id, run):
+        """Take the run's initial check from ``checks_from``, with the jobs it names, and its budget
+        scaled to this state's ``budget_runs``; False while that state has not read its verdict (the
+        run waits for it, starting nothing)."""
+        source = self.settings["checks_from"]
+        if self._checks is None:
+            self._checks = state.load(source, self.KIND) or {"runs": {}, "jobs": {}, "settings": {}}
+        theirs = self._checks["runs"].get(run_id) or {}
+        check = theirs.get("check")
+        if not check or check.get("reply") is None:
+            return False
+        for name in (*check["checkpoints"], *check["jobs"]):
+            if name not in self.jobs:
+                self.jobs[name] = {**copy.deepcopy(self._checks["jobs"][name]), "taken_from": source}
+        # Budgets in base runs of one median each: the same medians as the first state, not
+        # medians worked out again from base runs added after it set them.
+        scale = float(self.settings["budget_runs"]) / float(self._checks["settings"]["budget_runs"])
+        budget = theirs["budget"]
+        run["budget"] = {**budget, "usd": round(scale * budget["usd"], 8),
+                         "seconds": round(scale * budget["seconds"], 3), "base_runs": self.settings["budget_runs"],
+                         "source": f"{budget['source']}, as in {source}"}
+        run["check"] = copy.deepcopy(check)
+        return True
 
     def _sources(self, run_id, run):
         values, sources = self.settings, run["sources"]
