@@ -17,6 +17,16 @@ way asked for, ``repeats`` times, from the same failed run:
 - ``continue_bare`` (an ablation of continue): the same, with only the
   checker's bare rejection.
 
+Two more messages separate what the agent is told from where it restarts:
+
+- ``retry_bare``, ``rewind_bare``: only that the attempt was rejected, from
+  scratch or from the restart step (``continue_bare`` from the end);
+- ``retry_tests``, ``rewind_tests``, ``continue_tests``: the hidden tests the
+  attempt failed and their output (``taste.recovery_study.test_failures``),
+  read from its own grading. A ceiling, not a method: no harness has the
+  hidden tests. These episodes have no checker: a round ends the episode when
+  its trial passes the hidden tests, and the next round is told what failed.
+
 The feedback is the checker's own rendering of its findings
 (``taste.agents.checker.feedback``).
 
@@ -73,16 +83,29 @@ from pathlib import Path
 
 from taste.agents.checker import BARE_FEEDBACK, checker_task, feedback
 from taste.agents.trajectory_reader import rewind_point
-from taste.recovery_study import jobs, records, search, state
+from taste.recovery_study import jobs, records, search, state, test_failures
 from taste.recovery_study.commands import gaming_flags
 from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver
 
-RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare")
+RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare",
+              "retry_bare", "rewind_bare", "retry_tests", "rewind_tests", "continue_tests")
+REWINDS = ("rewind", "rewind_bare", "rewind_tests")
 SOURCES = ("oracle", "reader", "rules")
-SLUG = {"retry": "rt", "retry_feedback": "rf", "continue": "ct", "continue_bare": "cb"}
+SLUG = {"retry": "rt", "retry_feedback": "rf", "continue": "ct", "continue_bare": "cb",
+        "retry_bare": "rb", "retry_tests": "rx", "continue_tests": "cx"}
+# What each recovery tells the agent: the checker's feedback, its bare rejection, or the failed tests.
+MESSAGE = {"retry": "reviewer", "retry_feedback": "reviewer", "rewind": "reviewer", "continue": "reviewer",
+           "retry_bare": "bare", "rewind_bare": "bare", "continue_bare": "bare",
+           "retry_tests": "tests", "rewind_tests": "tests", "continue_tests": "tests"}
 NOTES = {"retry_feedback": "A previous attempt was rejected by a reviewer: {feedback}",
          "rewind": "Note: an attempt that continued from here was rejected by a reviewer: {feedback}",
          "continue": "Submission rejected by a reviewer: {feedback}"}
+BARE_NOTES = {"retry_bare": "A previous attempt was rejected by a reviewer.",
+              "rewind_bare": "Note: an attempt that continued from here was rejected by a reviewer.",
+              "continue_bare": BARE_FEEDBACK}
+TESTS_NOTES = {"retry_tests": "A previous attempt failed the project's tests.",
+               "rewind_tests": "Note: an attempt that continued from here failed the project's tests.",
+               "continue_tests": "Submission failed the project's tests."}
 # Taste's defaults (TrialSettings) for the time a trial holds back: for the
 # handoff to the verifier, for a closing reply, and the least time a plan needs.
 HANDOFF_SECONDS, REPLY_RESERVE_SECONDS, PLAN_SECONDS = 150.0, 210.0, 90.0
@@ -109,6 +132,7 @@ DEFAULTS = {
     "min_round_share": 0.1,
     "min_round_seconds": 0.0,   # 0: the trial's reply reserve and plan time, and a minute of work
     "retry_rounds": "retry",    # rounds after a plain retry: fresh trials told nothing, or "continue" with feedback
+    "tests_feedback_chars": 1200,  # the failed-tests message's length cap, about the checker feedback's median
     # Another recovery state whose initial checks this one takes, starting none: a second budget
     # recovers the same rejected runs from the same verdicts and saved final states.
     "checks_from": "",
@@ -134,9 +158,12 @@ def readings(path):
 
 
 def note(recovery, submission):
-    """What the agent is shown, after the checker's ``not_done`` submission."""
-    if recovery == "continue_bare":
-        return BARE_FEEDBACK
+    """What the agent is shown: after the checker's ``not_done`` submission, its feedback or its bare rejection;
+    for a tests recovery, ``submission`` is the failed tests' message (``test_failures.message``)."""
+    if recovery in BARE_NOTES:
+        return BARE_NOTES[recovery]
+    if recovery in TESTS_NOTES:
+        return TESTS_NOTES[recovery] + (f"\n\n{submission}" if submission else "")
     return NOTES[recovery].format(feedback=feedback(submission, "evidence"))
 
 
@@ -180,6 +207,8 @@ class RecoveryDriver(Driver):
             raise ValueError("repeats and check_attempts must be positive")
         if not 0 <= settings["min_round_share"] < 1:
             raise ValueError("min_round_share must be at least 0 and below 1")
+        if not settings["tests_feedback_chars"] >= 200:
+            raise ValueError("tests_feedback_chars must be at least 200: room for the failing tests' names")
         if not settings["budget_runs"] >= 1:
             raise ValueError("budget_runs must be at least 1: a recovery can afford one base run")
 
@@ -298,9 +327,9 @@ class RecoveryDriver(Driver):
         """(arm, recovery, step) for every recovery this run can start now."""
         arms = []
         for recovery in self.settings["recoveries"]:
-            if recovery == "rewind":
+            if recovery in REWINDS:
                 for step in sorted(set(run["sources"].values())):
-                    arms.append((f"rewind@{step}", "rewind", step))
+                    arms.append((f"{recovery}@{step}", recovery, step))
             else:
                 arms.append((recovery, recovery, run["steps"] if recovery.startswith("continue") else 0))
         return arms
@@ -441,6 +470,16 @@ class RecoveryDriver(Driver):
             if agent["exit_status"] != "Submitted":
                 episode["end"] = "no_submission"
                 return
+            if MESSAGE[arm["recovery"]] == "tests":
+                # No checker: the hidden tests decide, and the next round is told what they failed.
+                if agent["solved"]:
+                    episode["end"] = "done"
+                    return
+                if not self._room(run, episode, agent["settings"]):
+                    episode["end"] = "budget"
+                    return
+                episode["rounds"].append({"agent": None, "agent_jobs": [], "check": new_check()})
+                continue
             if not self._room(run, episode, agent["settings"]):
                 episode["end"] = "budget"
                 return
@@ -468,6 +507,11 @@ class RecoveryDriver(Driver):
     def _note(self, job, text):
         return str(jobs.write_text(self.work_dir() / "notes" / f"{job}.txt", text))
 
+    def _tests_message(self, run, where):
+        """The failed tests' message for a graded trial: ``where`` is (jobs folder, job, trial) or (job folder, trial)."""
+        found = test_failures.failures(Path(*where), Path(run["tasks_dir"]) / run["task"])
+        return test_failures.message(found, self.settings["tests_feedback_chars"])
+
     def _caps(self, usd, seconds, settings, branch):
         """Taste's equal caps for a trial with this much budget left."""
         extra = handoff_seconds(settings) + (self.settings["prefix_allowance"] if branch else 0.0)
@@ -479,19 +523,21 @@ class RecoveryDriver(Driver):
         recovery, step = arm["recovery"], arm["step"]
         base = {**run["settings"], **values["ak"]}
         prepare, settings, checkpoint = [], dict(base), None
-        if recovery == "retry_feedback" or (recovery == "rewind" and step == 0):
-            settings.update(jobs.task_suffix(self._note(job, note(recovery, reply))))
+        told = self._tests_message(run, (Path(run["job_dir"]), run["base"]["trial"])) \
+            if MESSAGE[recovery] == "tests" else reply
+        if recovery != "retry" and (recovery.startswith("retry") or (recovery in REWINDS and step == 0)):
+            settings.update(jobs.task_suffix(self._note(job, note(recovery, told))))
         elif recovery != "retry":
             script, export = self.script(run["base"]["token"])
             prepare = [export]
-            if recovery == "rewind":
+            if recovery in REWINDS:
                 override = "append"
                 checkpoint = ((self.oracle.get(run_id) or {}).get("checkpoints") or {}).get(str(step))
             else:
                 override, checkpoint = "reject", (self.final_state(run["check"]) or (None, None))[0]
             settings.update(jobs.branch(script, step, mode="restore" if checkpoint else "rebuild",
                                         checkpoint=checkpoint, live=True, override=override,
-                                        note=self._note(job, note(recovery, reply))))
+                                        note=self._note(job, note(recovery, told))))
         settings.update(self._caps(run["budget"]["usd"], run["budget"]["seconds"], base, branch=bool(prepare)))
         self.emit(self.harbor_job(job, run, settings, attempts, prepare=prepare),
                   run=run_id, arm=name, purpose="first", recovery=recovery, step=step, **_rebuilt(checkpoint))
@@ -500,7 +546,7 @@ class RecoveryDriver(Driver):
         """A later round: on from the last trial's submission, with its checker's feedback."""
         values = self.settings
         previous = episode["rounds"][-2]
-        agent, submission = self.trial(previous["agent"]), self.trial(previous["check"]["verdict"])["checker"]
+        agent = self.trial(previous["agent"])
         usd, seconds = self.remaining(run, episode)
         current = episode["rounds"][-1]
         job = jobs.job_name(values["prefix"], run["key"], _slug(name), f"e{index + 1}r{len(episode['rounds'])}",
@@ -511,8 +557,15 @@ class RecoveryDriver(Driver):
         else:
             base = {**jobs.inherited(agent["settings"], drop=jobs.CAPS), **values["ak"]}
             script, export = self.script(agent["token"])
-            checkpoint = (self.final_state(previous["check"]) or (None, None))[0]
-            text = note("continue_bare" if arm["recovery"] == "continue_bare" else "continue", submission)
+            message = MESSAGE[arm["recovery"]]
+            if message == "tests":
+                # No check saved this final state: the round rebuilds it from the record.
+                checkpoint = None
+                text = note("continue_tests", self._tests_message(run, (Path(values["jobs_dir"]), *previous["agent"])))
+            else:
+                checkpoint = (self.final_state(previous["check"]) or (None, None))[0]
+                submission = self.trial(previous["check"]["verdict"])["checker"]
+                text = note("continue_bare" if message == "bare" else "continue", submission)
             settings = {**base, **jobs.branch(script, agent["steps"], mode="restore" if checkpoint else "rebuild",
                                               checkpoint=checkpoint, live=True, override="reject",
                                               note=self._note(job, text)),
@@ -562,7 +615,10 @@ class RecoveryDriver(Driver):
 
 
 def _slug(arm):
-    return SLUG.get(arm, arm.replace("rewind@", "rw"))
+    for recovery, slug in (("rewind_bare@", "bw"), ("rewind_tests@", "xw"), ("rewind@", "rw")):
+        if arm.startswith(recovery):
+            return slug + arm[len(recovery):]
+    return SLUG.get(arm, arm)
 
 
 def _rebuilt(checkpoint):

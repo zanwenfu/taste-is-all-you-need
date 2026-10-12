@@ -57,7 +57,11 @@ _SPEC = importlib.util.spec_from_file_location("study_report", Path(__file__).re
 _study = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_study)
 
-VIEWS = ("retry", "retry_feedback", "rewind_oracle", "rewind_reader", "rewind_rules", "continue", "continue_bare")
+VIEWS = ("retry", "retry_feedback", "rewind_oracle", "rewind_reader", "rewind_rules", "continue", "continue_bare",
+         # What the agent is told, apart from where it restarts: only that it failed, or the tests it failed.
+         "retry_bare", "rewind_bare_oracle", "rewind_bare_reader", "rewind_bare_rules",
+         "retry_tests", "rewind_tests_oracle", "rewind_tests_reader", "rewind_tests_rules", "continue_tests")
+REWINDS = ("rewind", "rewind_bare", "rewind_tests")
 # A deployed harness cannot rerun to find r*: the selector chooses among the others.
 SELECTABLE = ("retry", "retry_feedback", "rewind_reader", "rewind_rules", "continue", "continue_bare")
 # usd and seconds are everything an episode spent, the checker's included;
@@ -174,10 +178,10 @@ def views(run):
     found = {}
     for name, arm in run.get("arms", {}).items():
         episodes = [episode for episode in arm["episodes"] if episode]
-        if arm["recovery"] == "rewind":
+        if arm["recovery"] in REWINDS:
             for source, step in run["sources"].items():
                 if step == arm["step"]:
-                    found[f"rewind_{source}"] = episodes
+                    found[f"{arm['recovery']}_{source}"] = episodes
         else:
             found[name] = episodes
     return {name: episodes for name, episodes in found.items() if episodes}

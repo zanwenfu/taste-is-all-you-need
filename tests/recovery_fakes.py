@@ -84,8 +84,9 @@ def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submi
 
 def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None, model="azure/gpt-6-luna",
           tasks_dir="/study/tasks", seconds=120.0, cost=0.02, exit_status="Submitted", branch=None,
-          handed_back=None, exception=None, name=None, task_text="Fix the bug.", audit_flags=()):
-    """One finished Harbor trial; with steps, its settled Taste record; with ``handed_back``, its final reply.
+          handed_back=None, exception=None, name=None, task_text="Fix the bug.", audit_flags=(), verifier=None):
+    """One finished Harbor trial; with steps, its settled Taste record; with ``handed_back``, its final reply;
+    with ``verifier`` ({file name: text}), what its grader left in its verifier folder.
 
     ``seconds`` is the agent's execution by Harbor's clock (None: it never
     ran). Taste's own count of the run's time differs from it on purpose: the
@@ -114,6 +115,9 @@ def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None
     directory = Path(jobs_dir) / job / name
     directory.mkdir(parents=True)
     (directory / "result.json").write_text(json.dumps(result))
+    for file, text in (verifier or {}).items():
+        (directory / "verifier").mkdir(exist_ok=True)
+        (directory / "verifier" / file).write_text(text)
     if handed_back is not None:
         (directory / "agent").mkdir()
         (directory / "agent" / "trajectory.json").write_text(json.dumps({"steps": [
@@ -130,7 +134,8 @@ def finish(jobs_dir, job):
     path.write_text(json.dumps({"started_at": "2026-10-07T10:00:00Z", "finished_at": "2026-10-07T11:00:00Z"}))
 
 
-def base_jobs(jobs_dir, trials_root, runs, *, calibration=(), task="task-a", model="azure/gpt-6-luna"):
+def base_jobs(jobs_dir, trials_root, runs, *, calibration=(), task="task-a", model="azure/gpt-6-luna",
+              tasks_dir="/study/tasks"):
     """A base job of failed runs (each a step list, or (steps, exit status)) and a calibration job.
 
     ``calibration`` is a list of (reward, dollars, seconds). Returns the base
@@ -140,7 +145,7 @@ def base_jobs(jobs_dir, trials_root, runs, *, calibration=(), task="task-a", mod
     for steps in runs:
         steps, status = steps if isinstance(steps, tuple) else (steps, "Submitted")
         names.append(trial(jobs_dir, "base", task, reward=0.0, trials_root=trials_root, steps=steps,
-                           settings=BASE_SETTINGS, model=model, exit_status=status))
+                           settings=BASE_SETTINGS, model=model, exit_status=status, tasks_dir=tasks_dir))
     for reward, cost, seconds in calibration:
         trial(jobs_dir, "calibration", task, reward=reward, trials_root=trials_root, steps=agent_steps(3),
               settings=BASE_SETTINGS, model=model, cost=cost, seconds=seconds)
