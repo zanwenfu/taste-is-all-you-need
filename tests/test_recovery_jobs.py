@@ -5,11 +5,15 @@ from __future__ import annotations
 import contextlib
 import os
 import shlex
+import shutil
 import subprocess
 
 import pytest
 
 from taste.recovery_study import jobs
+
+# The launch script serializes starts with util-linux's flock, as on the study's Linux hosts.
+needs_flock = pytest.mark.skipif(shutil.which("flock") is None, reason="needs util-linux flock (Linux)")
 
 
 def test_a_branch_probe_is_one_run_harbor_call_with_its_settings_in_order():
@@ -143,6 +147,7 @@ esac
     assert returned.returncode == 0 and "run the driver again" not in returned.stdout
 
 
+@needs_flock
 def test_a_job_starts_under_the_hosts_lock_only_when_it_fits(tmp_path):
     # Two launchers must not both see room and both start: the check and the start hold one lock.
     fake, marker, lock = tmp_path / "bin", tmp_path / "started", tmp_path / "launch.lock"
@@ -171,6 +176,7 @@ esac
     assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0
 
 
+@needs_flock
 def test_jobs_start_in_the_order_they_began_waiting_across_launchers(tmp_path):
     # A probe of eight waiting for room must not be overtaken by later one-trial jobs that fit.
     fake, marker, lock, queue = tmp_path / "bin", tmp_path / "started", tmp_path / "launch.lock", tmp_path / "queue"
