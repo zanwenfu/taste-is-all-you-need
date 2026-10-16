@@ -426,8 +426,11 @@ def _native(item: dict[str, Any], say) -> int:
 
 
 def _tool_result(call_id: str, output: Any) -> dict[str, Any]:
+    # An empty output stays one empty text block: GPT-6 Luna refuses a result
+    # with no content ("Invalid 'input'"), and both it and Claude take empty
+    # text (live calls, 2026-10-16).
     text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
-    return {"toolResult": {"toolUseId": call_id, "content": [{"text": text}] if text else []}}
+    return {"toolResult": {"toolUseId": call_id, "content": [{"text": text}]}}
 
 
 def _to_tool(tool: dict[str, Any]) -> dict[str, Any]:

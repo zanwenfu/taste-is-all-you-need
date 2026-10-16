@@ -208,6 +208,18 @@ def test_a_hosted_agents_responses_items_become_alternating_converse_turns(wire)
     assert completion.effective_sampling["reasoning_items_not_sent"] == 2
 
 
+def test_a_command_that_printed_nothing_is_sent_as_empty_text_not_as_no_content(wire):
+    # GPT-6 Luna refuses a tool result with no content; a command such as
+    # `cd` or `touch` prints nothing, and its step must still go through.
+    sent = wire(ok())
+    ask(LLM(azure_openai=route()), messages=[
+        {"role": "user", "content": "Please solve this issue."},
+        native({"type": "function_call", "call_id": "call_1", "name": "bash", "arguments": '{"command": "touch a"}'}),
+        native({"type": "function_call_output", "call_id": "call_1", "output": ""}),
+    ])
+    assert body(sent[0])["messages"][-1]["content"] == [{"toolResult": {"toolUseId": "call_1", "content": [{"text": ""}]}}]
+
+
 @pytest.mark.parametrize("messages,why", [
     ([{"role": "user", "content": "hi"}, {"role": "system", "content": "late"}], "no system message after"),
     ([native({"type": "function_call", "call_id": "c", "name": "bash", "arguments": "{"})], "unparseable"),
