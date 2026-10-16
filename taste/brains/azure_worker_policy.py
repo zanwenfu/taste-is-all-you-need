@@ -18,7 +18,7 @@ from taste.brains.responses_session import ResponsesBinding
 from taste.brains.worker_admission import EntrypointConfig, EntrypointInputError
 from taste.brains.worker_protocol import _assignment_monitor_budget_usd, assignment_run_id
 from taste.pricing import table_sha
-from taste.providers.azure_openai import AZURE_MODELS, AzureDeployment, AzureOpenAIConfig
+from taste.providers.azure_openai import ROUTED_MODELS, AzureDeployment, AzureOpenAIConfig
 from taste.providers.base import ProtocolFailure
 
 AZURE_WORKER_POLICY_SCHEMA = "taste.brains/AzureWorkerPolicy/1"
@@ -54,7 +54,7 @@ class AzureWorkerPolicy:
             raise EntrypointInputError("assignment requires one exact Azure worker policy")
         if raw["schema"] != AZURE_WORKER_POLICY_SCHEMA or raw["pricing_sha"] != table_sha():
             raise EntrypointInputError("Azure policy schema or admitted pricing table changed")
-        if assignment.model not in AZURE_MODELS:
+        if assignment.model not in ROUTED_MODELS:
             raise EntrypointInputError("this Azure worker policy requires a verified dated worker model")
         if "worker_effort" in raw and raw["worker_effort"] not in _EFFORTS:
             raise EntrypointInputError("Azure worker reasoning effort is not admitted")

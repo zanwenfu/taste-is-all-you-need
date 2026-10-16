@@ -150,11 +150,27 @@ _OPENAI = {
     ),
 }
 
+# Bedrock's global cross-region profiles (taste.providers.azure_openai,
+# BEDROCK_PROFILES), checked 2026-10-16 against Bedrock's own offers for this
+# account (ListFoundationModelAgreementOffers, "global_standard" dimensions).
+# GPT-6 Luna and Sol are priced there exactly as the entries above, both tiers,
+# so those entries serve both routes. The Claude models below are reachable
+# only through the Bedrock route. A cache write is 1.25x input (5-minute TTL;
+# the 1-hour TTL is never requested); a read is 0.05x on Sonnet and Opus 5.5
+# and 0.10x on Haiku 5.5. Bedrock lists no long-context tier for Sonnet and
+# Opus 5.5, and one for Haiku 5.5 whose threshold it does not state: the
+# window is held to 200K, so no admitted request can reach an unpriced tier.
+_BEDROCK = {
+    "claude-sonnet-5-5": _flat("bedrock", 2.00, 10.00, 0.10, 2.50, window=200_000, as_of="2026-10-16"),
+    "claude-opus-5-5":   _flat("bedrock", 4.00, 20.00, 0.20, 5.00, window=200_000, as_of="2026-10-16"),
+    "claude-haiku-5-5":  _flat("bedrock", 0.10,  0.50, 0.01, 0.125, window=200_000, as_of="2026-10-16"),
+}
+
 # The planner of an agent run alone is a fixed rule (taste.brains.single_run),
 # not a model: it sends nothing anywhere and costs nothing.
 _FIXED = {"taste-fixed-plan": ModelPrice("fixed", ((None, Rates(0.0, 0.0, 0.0, 0.0)),), 1_000_000, "2026-10-04")}
 
-PRICES: dict[str, ModelPrice] = {**_ANTHROPIC, **_OPENAI, **_FIXED}
+PRICES: dict[str, ModelPrice] = {**_ANTHROPIC, **_OPENAI, **_BEDROCK, **_FIXED}
 
 # Names that resolve to a different snapshot over time. A run manifest
 # recording an alias cannot say which model actually answered, so an alias is

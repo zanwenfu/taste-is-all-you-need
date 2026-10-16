@@ -13,6 +13,7 @@
 #   HARBOR_VENV    the Harbor environment (harbor 0.23.0)
 #   WORKER_PYTHON  interpreter of the worker environment, run as the worker user
 #   SECRETS        root-only file with AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY
+#                  (Amazon Bedrock: TASTE_BEDROCK_URL and AWS_BEARER_TOKEN_BEDROCK)
 #   EXTRA_PATH     further entries for PYTHONPATH (a benchmark's own agents)
 #   MODEL          the model every role uses unless --ak worker_model says otherwise
 #   TASTE_CHECKPOINTS_ROOT  where branch trials save and find checkpoints

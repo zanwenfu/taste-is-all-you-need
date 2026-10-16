@@ -70,11 +70,14 @@ fi
 if [ -f "$SECRETS" ]; then
     check "$SECRETS is root-only (mode 600)" "chown root: and chmod 600 the file" \
         test "$(stat -c '%u %a' "$SECRETS")" = "0 600"
-    for name in AZURE_OPENAI_BASE_URL AZURE_OPENAI_API_KEY; do
+    # One model route: Azure's two values, or Amazon Bedrock's.
+    if grep -q "^TASTE_BEDROCK_URL=." "$SECRETS"; then names="TASTE_BEDROCK_URL AWS_BEARER_TOKEN_BEDROCK"
+    else names="AZURE_OPENAI_BASE_URL AZURE_OPENAI_API_KEY"; fi
+    for name in $names; do
         check "$SECRETS sets $name" "add a line $name=... to the file" grep -q "^$name=." "$SECRETS"
     done
 else
-    fail "$SECRETS exists" "create it with AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY, mode 600"
+    fail "$SECRETS exists" "create it with AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY (or TASTE_BEDROCK_URL and AWS_BEARER_TOKEN_BEDROCK), mode 600"
 fi
 if [ -d "$TRIALS" ]; then
     check "$TRIALS is writable by root alone" "chown root: and chmod 755 the directory" \

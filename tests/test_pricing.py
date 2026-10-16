@@ -28,7 +28,7 @@ from taste.pricing import (
 def test_every_priced_model_declares_a_verification_date() -> None:
     for model, price in PRICES.items():
         assert price.as_of, f"{model} has no as_of date"
-        assert price.provider in {"anthropic", "openai", "fixed"}
+        assert price.provider in {"anthropic", "openai", "bedrock", "fixed"}
         # The only fixed price is the fixed plan, which sends nothing anywhere.
         assert price.provider != "fixed" or model == "taste-fixed-plan"
 

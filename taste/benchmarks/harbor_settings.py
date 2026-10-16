@@ -33,12 +33,17 @@ from taste.providers.azure_openai import (
     AZURE_LUNA_MODEL,
     AZURE_PLANNER_MODEL,
     AZURE_WORKER_MODEL,
+    BEDROCK_PROFILES,
+    route_of,
 )
 
 # Names a benchmark command line uses, and the dated served model behind each.
 # Any of them may run every role; the trial's model is the coordinator's.
 SERVED_MODELS = {"gpt-6-astra": AZURE_PLANNER_MODEL, "gpt-6-sol": AZURE_WORKER_MODEL,
-                 "gpt-5.6-luna": AZURE_LUNA_MODEL, "gpt-6-luna": AZURE_LUNA6_MODEL}
+                 "gpt-5.6-luna": AZURE_LUNA_MODEL, "gpt-6-luna": AZURE_LUNA6_MODEL,
+                 # Served only on the Bedrock route.
+                 "claude-sonnet-5-5": "claude-sonnet-5-5", "claude-opus-5-5": "claude-opus-5-5",
+                 "claude-haiku-5-5": "claude-haiku-5-5"}
 CRITERION = ("The developer's most recent request in the task is addressed in the task "
              "environment, and the final reply says accurately what was done, what was "
              "verified and what was not.")
@@ -283,12 +288,17 @@ class TrialSettings:
         coordinator, planner, worker_name, worker = self.models
         worker_cap, monitor_cap, _ = self.budgets()
         binding = TerminalBinding(owner_token, container_id, deadline_unix, self.max_commands)
+        # On Azure a deployment is named after its model; on Bedrock it is the
+        # model's one admitted inference profile.
+        bedrock = route_of(endpoint) == "bedrock"
+        default = {coordinator: BEDROCK_PROFILES.get(planner, coordinator),
+                   worker_name: BEDROCK_PROFILES.get(worker, worker_name)} if bedrock else {}
         planner_deployment = ("fixed-plan" if self.services == "none"
-                              else self.deployment or coordinator)
+                              else self.deployment or default.get(coordinator, coordinator))
         # One served model has one route: a worker on the coordinator's model
         # shares its deployment unless another is named for it.
         worker_deployment = self.worker_deployment or (
-            planner_deployment if worker_name == coordinator else worker_name)
+            planner_deployment if worker_name == coordinator else default.get(worker_name, worker_name))
         return AzureExecutionPolicy(
             endpoint=endpoint, planner_deployment=planner_deployment,
             worker_deployment=worker_deployment,
@@ -361,6 +371,26 @@ def task_instruction(settings, instruction):
     if not text.strip():
         raise ValueError("the task's text is empty")
     return text
+
+
+def model_route(environment):
+    """(endpoint, key) of the one model route the host names: Azure's or Bedrock's.
+
+    Azure: AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY. Bedrock: its
+    regional runtime endpoint in TASTE_BEDROCK_URL and its API key in
+    AWS_BEARER_TOKEN_BEDROCK. A host naming both, or neither, is refused
+    rather than choosing for it. The values are checked where the route is
+    admitted; the key is never echoed.
+    """
+    azure = environment.get("AZURE_OPENAI_BASE_URL", ""), environment.get("AZURE_OPENAI_API_KEY", "")
+    bedrock = environment.get("TASTE_BEDROCK_URL", ""), environment.get("AWS_BEARER_TOKEN_BEDROCK", "")
+    if azure[0] and bedrock[0]:
+        raise RuntimeError("the host names both an Azure and a Bedrock model route; name one")
+    endpoint, key = bedrock if bedrock[0] else azure
+    if not endpoint or not key:
+        raise RuntimeError("AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY, or TASTE_BEDROCK_URL and "
+                           "AWS_BEARER_TOKEN_BEDROCK, must be set for Harbor")
+    return endpoint.rstrip("/") + "/", key
 
 
 def agent_timeout_seconds(task_toml, override=None):

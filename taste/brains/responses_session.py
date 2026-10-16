@@ -151,6 +151,9 @@ class ResponsesSession:
         if binding.endpoint != azure.base_url or binding.deployment != deployment.deployment:
             raise ResponsesConflict("session binding differs from the Azure route")
         self.binding = binding
+        # The adapter that wrote this route's receipts: Azure's Responses one,
+        # or Bedrock's Converse one.
+        self._provider = "bedrock" if azure.route == "bedrock" else "openai"
         self.directory = Path(directory).absolute()
         self._pid = os.getpid()
         self._thread = threading.get_ident()
@@ -243,7 +246,7 @@ class ResponsesSession:
             raise ResponsesConflict("Responses receipt digest is invalid")
         try:
             completion = _completion(json.loads(result))
-            if completion.model != self.binding.model or completion.provider != "openai":
+            if completion.model != self.binding.model or completion.provider != self._provider:
                 raise ValueError("model identity changed")
             if completion.provenance.get("endpoint") != self.binding.endpoint or completion.provenance.get("deployment") != self.binding.deployment:
                 raise ValueError("route identity changed")

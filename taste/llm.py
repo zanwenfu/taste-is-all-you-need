@@ -330,7 +330,7 @@ class LLM:
             return None
         deployment = self._azure_openai.deployment_for(model)
         return {
-            "route": "azure_openai", "endpoint": self._azure_openai.base_url,
+            "route": self._azure_openai.route, "endpoint": self._azure_openai.base_url,
             "deployment": deployment.deployment,
             "deployment_type": deployment.deployment_type, "served_model": deployment.model,
         }
@@ -342,10 +342,19 @@ class LLM:
         name = _provider_for(model)
         if self._azure_openai is not None:
             self._azure_openai.deployment_for(model)
-            if name != "openai":
+            # An explicit route is served by its own adapter: Azure's by the
+            # Responses adapter, Bedrock's by the Converse one, whichever
+            # family made the model it admits.
+            bedrock = self._azure_openai.route == "bedrock"
+            if name not in (("openai", "bedrock") if bedrock else ("openai",)):
                 raise ProtocolFailure("Azure-only calls cannot use another provider")
+            name = "bedrock" if bedrock else name
         if name not in self._providers:
-            if self._azure_openai is not None:
+            if self._azure_openai is not None and name == "bedrock":
+                from taste.providers._bedrock import BedrockProvider
+
+                self._providers[name] = BedrockProvider(route=self._azure_openai)
+            elif self._azure_openai is not None:
                 from taste.providers._openai import OpenAIProvider
 
                 self._providers[name] = OpenAIProvider(azure=self._azure_openai)

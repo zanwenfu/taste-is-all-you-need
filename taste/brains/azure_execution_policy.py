@@ -19,9 +19,9 @@ from taste.brains.terminal_worker_policy import TERMINAL_POLICY_KEY, TerminalWor
 from taste.brains.worker_admission import EntrypointInputError
 from taste.pricing import max_call_cost_usd, table_sha
 from taste.providers.azure_openai import (
-    AZURE_MODELS,
     AZURE_PLANNER_MODEL,
     AZURE_WORKER_MODEL,
+    ROUTED_MODELS,
     AzureDeployment,
     AzureOpenAIConfig,
 )
@@ -93,11 +93,11 @@ class AzureExecutionPolicy:
                 not isinstance(self.terminal, TerminalWorkerPolicy)
                 or self.terminal.binding.deadline_unix != self.deadline_unix):
             raise ValueError("terminal policy must share the original Azure goal deadline")
-        if self.worker_model not in AZURE_MODELS:
+        if self.worker_model not in ROUTED_MODELS:
             raise ValueError("worker model has no verified Azure deployment and price")
         if self.services not in SERVICES:
             raise ValueError("services must be all or none")
-        if self.planner_model not in AZURE_MODELS and self.planner_model != FIXED_PLAN_MODEL:
+        if self.planner_model not in ROUTED_MODELS and self.planner_model != FIXED_PLAN_MODEL:
             raise ValueError("planner model has no verified Azure deployment and price")
         if (self.planner_model == FIXED_PLAN_MODEL) != (self.services == "none"):
             raise ValueError("the fixed plan is the planner of an agent run alone, and only that")

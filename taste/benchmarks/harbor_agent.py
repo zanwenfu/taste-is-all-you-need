@@ -22,7 +22,8 @@ retries (``--max-retries``) or records as an error, never as a score.
 
 Requirements of the machine, not of the task: Harbor runs as root on the
 Docker host (cgroup v2, systemd), an unprivileged account runs the goal's
-processes, and AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY are in Harbor's
+processes, and AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY (or, for Amazon
+Bedrock, TASTE_BEDROCK_URL and AWS_BEARER_TOKEN_BEDROCK) are in Harbor's
 environment. The key is delivered to the goal as a private credential and
 never enters the task container, a prompt or this record.
 
@@ -65,6 +66,7 @@ from taste.benchmarks.harbor_settings import (
     TrialSettings,
     agent_timeout_seconds,
     compose_project,
+    model_route,
     safe_parent,
     task_instruction,
 )
@@ -181,10 +183,7 @@ class TasteAgent(BaseAgent):
         instruction = branch_trial.branch_instruction(branch, task_instruction(settings, instruction))
         deadline, container_deadline = settings.deadlines(
             started, agent_timeout_seconds(self._task_toml, self.timeout_override))
-        endpoint = os.environ.get("AZURE_OPENAI_BASE_URL", "").rstrip("/") + "/"
-        key = os.environ.get("AZURE_OPENAI_API_KEY", "")
-        if not key or endpoint == "/":
-            raise RuntimeError("AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY must be set for Harbor")
+        endpoint, key = model_route(os.environ)
         backend = await asyncio.to_thread(
             DockerTerminalBackend.admit, self.docker_socket, self._container, token, container_deadline,
             output_limit=MAX_TERMINAL_OUTPUT_BYTES, compose_project=self._project,
