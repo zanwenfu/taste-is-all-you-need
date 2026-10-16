@@ -24,7 +24,7 @@ is never delivered, and nothing that happened is ever lost.
   <img alt="Taste architecture: a goal enters the central brain; workers run as separate processes with observe-only monitors; everything is recorded in one git repository" src="docs/img/architecture-light.svg" width="100%">
 </picture>
 
-The idea behind it: [Beyond the Harness: An Operating System for AI Agents](https://zanwenfu.com/blog/agent_harness_blog).
+The idea behind it: [An Operating System for AI Agents, with Git as Its Memory](https://zanwenfu.com/blog/agent_harness_blog).
 
 ## How a goal runs
 
@@ -295,11 +295,11 @@ is git, or use Taste, please cite the essay:
 ```bibtex
 @misc{fu2026beyond,
   author       = {Fu, Zanwen},
-  title        = {Beyond the Harness: An Operating System for {AI} Agents},
+  title        = {An Operating System for {AI} Agents, with Git as Its Memory},
   year         = {2026},
   month        = mar,
   howpublished = {\url{https://zanwenfu.com/blog/agent_harness_blog}},
-  note         = {Published March 28, 2026}
+  note         = {Published March 28, 2026, as ``Beyond the Harness: An Operating System for {AI} Agents''}
 }
 ```
 

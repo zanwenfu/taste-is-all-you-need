@@ -18,7 +18,8 @@ keywords:
   - git
 preferred-citation:
   type: blog
-  title: "Beyond the Harness: An Operating System for AI Agents"
+  title: "An Operating System for AI Agents, with Git as Its Memory"
+  notes: "Published March 28, 2026, as \"Beyond the Harness: An Operating System for AI Agents\"."
   authors:
     - family-names: Fu
       given-names: Zanwen
