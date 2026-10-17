@@ -109,6 +109,9 @@ TESTS_NOTES = {"retry_tests": "A previous attempt failed the project's tests.",
 # Taste's defaults (TrialSettings) for the time a trial holds back: for the
 # handoff to the verifier, for a closing reply, and the least time a plan needs.
 HANDOFF_SECONDS, REPLY_RESERVE_SECONDS, PLAN_SECONDS = 150.0, 210.0, 90.0
+# Why a branch rebuilds a state an earlier study saved (prior_checkpoints "rebuild").
+PRIOR_CHECKPOINT = ("the checkpoint was saved by an earlier study, on a host that kept it, and this host does not "
+                    "keep it, so the state is rebuilt from the record")
 ENDS = ("done", "budget", "no_submission", "agent_failed", "check_failed")
 
 DEFAULTS = {
@@ -136,6 +139,10 @@ DEFAULTS = {
     # Another recovery state whose initial checks this one takes, starting none: a second budget
     # recovers the same rejected runs from the same verdicts and saved final states.
     "checks_from": "",
+    # "rebuild": the checkpoints an earlier study saved (the map's, and those of checks taken with checks_from;
+    # their names are outside this state's prefix) are rebuilt from the record, as on a new host that does not
+    # keep them. This state's own checkpoints are restored either way.
+    "prior_checkpoints": "restore",
 }
 
 
@@ -197,7 +204,8 @@ class RecoveryDriver(Driver):
         if not str(settings["checker_model"]).strip():
             raise ValueError("checker_model must name a model")
         for name, allowed in (("mode", jobs.MODES), ("checker_effort", jobs.EFFORTS),
-                              ("oracle", ("highest_v", "latest")), ("retry_rounds", ("continue", "retry"))):
+                              ("oracle", ("highest_v", "latest")), ("retry_rounds", ("continue", "retry")),
+                              ("prior_checkpoints", ("restore", "rebuild"))):
             if settings[name] not in allowed:
                 raise ValueError(f"{name} must be one of: " + ", ".join(allowed))
         unknown = (set(settings["recoveries"]) - set(RECOVERIES)) | (set(settings["rewind_sources"]) - set(SOURCES))
@@ -355,6 +363,14 @@ class RecoveryDriver(Driver):
         for index, episode in enumerate(arm["episodes"]):
             self._advance_episode(run_id, run, name, arm, index, episode)
 
+    def _saved(self, checkpoint):
+        """The checkpoint to restore, or None to rebuild: with prior_checkpoints "rebuild", one an earlier study
+        saved (its name outside this state's prefix) is not on this host."""
+        values = self.settings
+        if checkpoint and values["prior_checkpoints"] == "rebuild" and not checkpoint.startswith(values["prefix"] + "-"):
+            return None
+        return checkpoint
+
     # Checks ----------------------------------------------------------------
 
     def final_state(self, check):
@@ -400,7 +416,8 @@ class RecoveryDriver(Driver):
                       purpose="final_state", **meta)
             check["checkpoints"].append(name)
             return None
-        checkpoint, paths = state or (None, None)
+        found, paths = state or (None, None)
+        checkpoint = self._saved(found)
         name = jobs.job_name(values["prefix"], run["key"], *label, f"c{len(check['jobs']) + 1}")
         text = checker_task(view["task"], view["final_message"], view["submission"], changed_paths=paths)
         path = jobs.write_text(self.work_dir() / "checker" / f"{name}.md", text)
@@ -408,7 +425,7 @@ class RecoveryDriver(Driver):
                             checkpoint=checkpoint, live=False)
         settings = {**jobs.checker_trial(path, files, effort=values["checker_effort"]), **values["checker_ak"]}
         self.emit(self.harbor_job(name, run, settings, 1, model=values["checker_model"], prepare=[export]),
-                  run=run_id, purpose="check", **meta, **_rebuilt(checkpoint))
+                  run=run_id, purpose="check", **meta, **_rebuilt(found, checkpoint))
         check["jobs"].append(name)
         return None
 
@@ -522,7 +539,7 @@ class RecoveryDriver(Driver):
         values, reply = self.settings, run["check"]["reply"]
         recovery, step = arm["recovery"], arm["step"]
         base = {**run["settings"], **values["ak"]}
-        prepare, settings, checkpoint = [], dict(base), None
+        prepare, settings, found, checkpoint = [], dict(base), None, None
         told = self._tests_message(run, (Path(run["job_dir"]), run["base"]["trial"])) \
             if MESSAGE[recovery] == "tests" else reply
         if recovery != "retry" and (recovery.startswith("retry") or (recovery in REWINDS and step == 0)):
@@ -532,15 +549,17 @@ class RecoveryDriver(Driver):
             prepare = [export]
             if recovery in REWINDS:
                 override = "append"
-                checkpoint = ((self.oracle.get(run_id) or {}).get("checkpoints") or {}).get(str(step))
+                found = ((self.oracle.get(run_id) or {}).get("checkpoints") or {}).get(str(step))
             else:
-                override, checkpoint = "reject", (self.final_state(run["check"]) or (None, None))[0]
+                override, found = "reject", (self.final_state(run["check"]) or (None, None))[0]
+            checkpoint = self._saved(found)
             settings.update(jobs.branch(script, step, mode="restore" if checkpoint else "rebuild",
                                         checkpoint=checkpoint, live=True, override=override,
                                         note=self._note(job, note(recovery, told))))
         settings.update(self._caps(run["budget"]["usd"], run["budget"]["seconds"], base, branch=bool(prepare)))
         self.emit(self.harbor_job(job, run, settings, attempts, prepare=prepare),
-                  run=run_id, arm=name, purpose="first", recovery=recovery, step=step, **_rebuilt(checkpoint))
+                  run=run_id, arm=name, purpose="first", recovery=recovery, step=step,
+                  **_rebuilt(found, checkpoint))
 
     def _emit_round(self, run_id, run, name, arm, index, episode):
         """A later round: on from the last trial's submission, with its checker's feedback."""
@@ -553,17 +572,19 @@ class RecoveryDriver(Driver):
                             f"a{len(current['agent_jobs']) + 1}")
         if arm["recovery"] == "retry" and values["retry_rounds"] == "retry":
             base = {**run["settings"], **values["ak"]}
-            settings, prepare, checkpoint = {**base, **self._caps(usd, seconds, base, branch=False)}, [], None
+            settings, prepare, found = {**base, **self._caps(usd, seconds, base, branch=False)}, [], None
+            checkpoint = None
         else:
             base = {**jobs.inherited(agent["settings"], drop=jobs.CAPS), **values["ak"]}
             script, export = self.script(agent["token"])
             message = MESSAGE[arm["recovery"]]
             if message == "tests":
                 # No check saved this final state: the round rebuilds it from the record.
-                checkpoint = None
+                found = checkpoint = None
                 text = note("continue_tests", self._tests_message(run, (Path(values["jobs_dir"]), *previous["agent"])))
             else:
-                checkpoint = (self.final_state(previous["check"]) or (None, None))[0]
+                found = (self.final_state(previous["check"]) or (None, None))[0]
+                checkpoint = self._saved(found)
                 submission = self.trial(previous["check"]["verdict"])["checker"]
                 text = note("continue_bare" if message == "bare" else "continue", submission)
             settings = {**base, **jobs.branch(script, agent["steps"], mode="restore" if checkpoint else "rebuild",
@@ -572,7 +593,7 @@ class RecoveryDriver(Driver):
                         **self._caps(usd, seconds, base, branch=True)}
             prepare = [export]
         self.emit(self.harbor_job(job, run, settings, 1, prepare=prepare), run=run_id, arm=name,
-                  purpose="round", episode=index, round=len(episode["rounds"]), **_rebuilt(checkpoint))
+                  purpose="round", episode=index, round=len(episode["rounds"]), **_rebuilt(found, checkpoint))
         current["agent_jobs"].append(job)
 
     # Reporting -------------------------------------------------------------
@@ -621,6 +642,9 @@ def _slug(arm):
     return SLUG.get(arm, arm)
 
 
-def _rebuilt(checkpoint):
-    """A job's note on why it rebuilds a final state that was saved: "" is a partial checkpoint."""
-    return {"rebuilt_because": PARTIAL_CHECKPOINT} if checkpoint == "" else {}
+def _rebuilt(found, used):
+    """A job's note on why it rebuilds a state a checkpoint was made of: ``found`` is the checkpoint ("" when it
+    came out partial), ``used`` the one restored (None: rebuilt)."""
+    if found == "":
+        return {"rebuilt_because": PARTIAL_CHECKPOINT}
+    return {"rebuilt_because": PRIOR_CHECKPOINT} if found and used is None else {}

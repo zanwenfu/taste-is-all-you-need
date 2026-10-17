@@ -245,6 +245,30 @@ def test_sources_that_choose_one_step_share_its_trials_and_the_map_lends_its_che
     assert sorted(driver.runs[run_id]["arms"]) == ["rewind@3", "rewind@4"]
 
 
+def test_checkpoints_an_earlier_study_saved_are_rebuilt_on_a_host_that_does_not_keep_them(tmp_path):
+    # A state recovering another study's runs on a new host: the map's and the earlier checks' checkpoints were
+    # saved on the old host, so its branches rebuild those states from the record; what it saves itself it restores.
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["rewind", "continue"], rewind_sources=["oracle"],
+                                            prior_checkpoints="rebuild", prefix="p1")
+    mapped = {run_id: {"status": "done", "rewind": {"highest_v": 3, "latest": 4}, "checkpoints": {"3": "map1-cp-3"}}}
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, recoveries()), oracle=mapped)
+    [rewind] = [s for s in specs_of(driver, "first") if driver.jobs[s.name]["recovery"] == "rewind"]
+    assert rewind.settings()["branch_mode"] == "rebuild" and "branch_checkpoint" not in rewind.settings()
+    assert "earlier study" in driver.jobs[rewind.name]["rebuilt_because"]
+    # Its own saved final state (named with its prefix) is restored as before.
+    [cont] = [s for s in specs_of(driver, "first") if driver.jobs[s.name]["recovery"] == "continue"]
+    assert cont.settings()["branch_mode"] == "restore" and cont.settings()["branch_checkpoint"].startswith("p1-")
+    # By default every checkpoint is restored, the map's included.
+    other = tmp_path / "other"
+    jobs_dir, trials, given, run_id = study(other, recoveries=["rewind"], rewind_sources=["oracle"])
+    mapped = {run_id: {"status": "done", "rewind": {"highest_v": 3, "latest": 4}, "checkpoints": {"3": "map1-cp-3"}}}
+    driver, _ = drive(other / "rec.json", given, jobs_dir, FakeHarbor(trials, recoveries()), oracle=mapped)
+    [first] = specs_of(driver, "first")
+    assert first.settings()["branch_mode"] == "restore" and first.settings()["branch_checkpoint"] == "map1-cp-3"
+    with pytest.raises(ValueError, match="prior_checkpoints"):
+        RecoveryDriver.open(other / "bad.json", {**given, "prior_checkpoints": "skip"})
+
+
 def test_in_rebuild_mode_the_checker_trial_rebuilds_the_final_state_itself(tmp_path):
     jobs_dir, trials, given, _ = study(tmp_path, recoveries=["continue"], mode="rebuild", repeats=1)
     driver, batches = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, recoveries()))
