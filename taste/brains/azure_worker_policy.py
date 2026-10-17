@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from taste.agents import HOSTED_AGENTS
+from taste.agents import HOSTED_AGENTS, canonical_uname
 from taste.brains.branch_replay import BranchPolicy
 from taste.brains.records import Assignment
 from taste.brains.responses_session import ResponsesBinding
@@ -31,7 +31,7 @@ _FIELDS = frozenset({
 
 _EFFORTS = ("medium", "high")  # "low" is the original choice and is not written.
 # Written only when chosen, so assignments made before them keep their form.
-_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent", "services", "branch"})
+_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent", "worker_uname", "services", "branch"})
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,8 @@ class AzureWorkerPolicy:
     supervised: bool = True
     # A branch of an earlier run of that agent alone (taste.brains.branch_replay).
     branch: BranchPolicy | None = None
+    # The machine mini-swe-agent is told it runs on (agent_uname); empty: the host's.
+    uname: str = ""
 
     @classmethod
     def from_assignment(cls, assignment: Assignment) -> AzureWorkerPolicy:
@@ -64,6 +66,14 @@ class AzureWorkerPolicy:
             raise EntrypointInputError("the assignment names no hosted agent this worker can run")
         if "services" in raw and (raw["services"] != "none" or "worker_agent" not in raw):
             raise EntrypointInputError("only a hosted agent can run without services")
+        if "worker_uname" in raw:
+            try:
+                written = canonical_uname(raw["worker_uname"])
+            except ValueError:
+                written = None
+            # Written only when set, in its one form, and only for the agent that reports its host.
+            if not raw["worker_uname"] or written != raw["worker_uname"] or raw.get("worker_agent") != "mini-swe-agent":
+                raise EntrypointInputError("the assignment's agent_uname is not admitted")
         branch = None
         if "branch" in raw:
             if raw.get("services") != "none":
@@ -109,7 +119,7 @@ class AzureWorkerPolicy:
             # Do not echo arbitrary policy values into launch diagnostics.
             raise EntrypointInputError("Azure routing or spending limits are invalid") from exc
         return cls(worker, monitor, batch, raw.get("worker_effort", "low"), raw.get("worker_agent", ""),
-                   raw.get("services") != "none", branch)
+                   raw.get("services") != "none", branch, raw.get("worker_uname", ""))
 
     def validate_launch(self, config: EntrypointConfig) -> None:
         if (config.expected_model != self.worker.model or config.monitor_model != self.monitor.model

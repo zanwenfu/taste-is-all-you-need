@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 
-from taste.agents import HOSTED_AGENTS
+from taste.agents import HOSTED_AGENTS, canonical_uname
 from taste.brains.azure_worker_policy import AZURE_WORKER_POLICY_SCHEMA, AzureWorkerPolicy
 from taste.brains.branch_replay import BranchPolicy
 from taste.brains.records import ArtifactSpec
@@ -32,7 +32,7 @@ POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
                      "planner_effort": "", "request_seconds": None, "planner_model": AZURE_PLANNER_MODEL,
-                     "worker_agent": "", "services": "all", "rollback": False, "branch": None}
+                     "worker_agent": "", "worker_uname": "", "services": "all", "rollback": False, "branch": None}
 SERVICES = ("all", "none")
 
 
@@ -78,6 +78,9 @@ class AzureExecutionPolicy:
     # An agent written by others that every worker runs, unchanged (see
     # taste.agents); empty for Taste's own worker.
     worker_agent: str = ""
+    # The machine that agent (mini-swe-agent only) is told it runs on, in its
+    # one written JSON form (taste.agents.canonical_uname); empty: the host's.
+    worker_uname: str = ""
     # "none" runs that agent alone through the same machinery: the fixed plan
     # as its planner (taste.brains.single_run), no monitor, no certification.
     services: str = "all"
@@ -120,6 +123,9 @@ class AzureExecutionPolicy:
             raise ValueError(f"no hosted agent named {self.worker_agent!r}")
         if self.worker_agent and self.terminal is None:
             raise ValueError("a hosted agent works in the task's terminal, and this goal has none")
+        if self.worker_uname and (canonical_uname(self.worker_uname) != self.worker_uname
+                                  or self.worker_agent != "mini-swe-agent"):
+            raise ValueError("agent_uname is mini-swe-agent's, in its one written form")
         if self.planner_effort not in ("", *WORKER_EFFORTS):
             raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
         for name, ceiling in (("worker_grace_seconds", 600), ("worker_wall_seconds", 604800)):
@@ -221,6 +227,7 @@ class AzureExecutionPolicy:
             **({} if self.worker_effort == "low" else {"worker_effort": self.worker_effort}),
             **({} if self.request_seconds is None else {"request_seconds": self.request_seconds}),
             **({"worker_agent": self.worker_agent} if self.worker_agent else {}),
+            **({"worker_uname": self.worker_uname} if self.worker_uname else {}),
             **({"services": self.services} if self.services != "all" else {}),
             **({"branch": self.branch.to_dict()} if self.branch is not None else {}),
         }

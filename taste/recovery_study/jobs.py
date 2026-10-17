@@ -107,6 +107,9 @@ def value(raw):
         return "on" if raw else "off"
     if isinstance(raw, float):
         return format(raw, ".6f").rstrip("0").rstrip(".") or "0"
+    if isinstance(raw, (dict, list)):
+        # A JSON --ak value Harbor parsed (as a trial's config.json keeps it): back as the JSON it reads.
+        return json.dumps(raw, sort_keys=True, separators=(",", ":"))
     return str(raw)
 
 

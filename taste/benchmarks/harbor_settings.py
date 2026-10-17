@@ -13,13 +13,15 @@ worst-case call: the role stops once its real spending passes the allowance.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from taste.agents import HOSTED_AGENTS
+from taste.agents import HOSTED_AGENTS, canonical_uname, uname_override
 from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import WORKER_EFFORTS, AzureExecutionPolicy
 from taste.brains.branch_replay import MODES, OVERRIDES, BranchPolicy
@@ -67,6 +69,11 @@ class TrialSettings:
     # An agent written by others that every worker runs unchanged (taste.agents);
     # empty for Taste's own worker.
     agent: str = ""
+    # The machine a hosted mini-swe-agent is told it runs on: a JSON object of
+    # uname's fields (system, release, version, machine; node optional), or
+    # empty for the host's own. A study shows it the host its recorded runs
+    # had, so that a branch's requests match the record's on another host.
+    agent_uname: str = ""
     # "none" runs that agent alone: the task as given, with no planner (a
     # fixed rule plans), no monitor and no certification.
     services: str = "all"
@@ -161,6 +168,9 @@ class TrialSettings:
             if name not in known:
                 raise ValueError(f"unknown trial setting {name!r}")
             kind = known[name]
+            if kind == "str" and isinstance(raw, Mapping):
+                # Harbor parses a JSON --ak value: an object comes back in its one written form.
+                raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
             try:
                 values[name] = (str(raw) if kind == "str" else int(raw) if kind == "int"
                                 else float(raw))
@@ -184,6 +194,9 @@ class TrialSettings:
             raise ValueError("worker reasoning effort must be low, medium or high")
         if self.agent and self.agent not in HOSTED_AGENTS:
             raise ValueError("agent must be one of: " + ", ".join(sorted(HOSTED_AGENTS)))
+        object.__setattr__(self, "agent_uname", canonical_uname(self.agent_uname))
+        if self.agent_uname and self.agent != "mini-swe-agent":
+            raise ValueError("agent_uname is mini-swe-agent's: the other agents do not report their host")
         if self.services not in ("all", "none"):
             raise ValueError("services must be all or none")
         if self.services == "none" and not self.agent:
@@ -311,7 +324,8 @@ class TrialSettings:
             pricing_sha=table_sha(),
             terminal=TerminalWorkerPolicy(binding, self.command_seconds, workdir),
             planner_model=planner, worker_model=worker, worker_effort=self.worker_effort,
-            worker_agent=self.agent, services=self.services, rollback=self.rollback == "on",
+            worker_agent=self.agent, worker_uname=self.agent_uname, services=self.services,
+            rollback=self.rollback == "on",
             planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
@@ -333,6 +347,7 @@ class TrialSettings:
         return {"coordinator_model": served, "worker_model": worker_served,
                 "monitor_model": worker_served, "worker_effort": self.worker_effort,
                 "worker_agent": self.agent or "taste", "services": self.services,
+                **({"agent_uname": uname_override(self.agent_uname)} if self.agent_uname else {}),
                 **({"alone": self.alone} if self.services == "none" else {}),
                 **({"rollback": self.rollback} if self.rollback != "off" else {}),
                 **({"branch": {"script": self.branch, "step": self.branch_step, "mode": self.branch_mode,

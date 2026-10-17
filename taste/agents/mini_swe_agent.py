@@ -59,7 +59,7 @@ from minisweagent.models.utils.openai_multimodal import expand_multimodal_conten
 from minisweagent.utils.serialize import recursive_merge
 from pydantic import BaseModel
 
-from taste.agents import AgentExit, ModelReply
+from taste.agents import AgentExit, ModelReply, uname_override
 from taste.providers._openai import _NATIVE
 
 NAME = "mini-swe-agent"
@@ -192,11 +192,13 @@ class TasteEnvironmentConfig(BaseModel):
 class TasteEnvironment:
     """mini-swe-agent's local environment, with the task's container as its machine."""
 
-    def __init__(self, *, host, config_class=TasteEnvironmentConfig, **kwargs):
+    def __init__(self, *, host, config_class=TasteEnvironmentConfig, uname=None, **kwargs):
         self.config = config_class(**kwargs)
         if not self.config.cwd.startswith("/"):
             raise ValueError("a hosted agent works in the task's directory, an absolute path")
         self.host = host
+        # The machine the agent is told it runs on, field by field over the host's (agent_uname).
+        self.uname = dict(uname or {})
 
     def _shell(self, command):
         exports = " ".join(f"{name}={shlex.quote(value)}" for name, value in self.config.env.items())
@@ -228,7 +230,7 @@ class TasteEnvironment:
                              "extra": {"exit_status": "Submitted", "submission": submission}})
 
     def get_template_vars(self, **kwargs):
-        return recursive_merge(self.config.model_dump(), platform.uname()._asdict(), kwargs)
+        return recursive_merge(self.config.model_dump(), {**platform.uname()._asdict(), **self.uname}, kwargs)
 
     def serialize(self):
         return {"info": {"config": {"environment": self.config.model_dump(mode="json"),
@@ -240,12 +242,15 @@ class MiniSweAgent:
 
     name = NAME
 
-    def __init__(self, *, effort, config="mini"):
+    def __init__(self, *, effort, config="mini", uname=""):
         path = Path(builtin_config_dir) / f"{config}.yaml"
         self._raw = path.read_bytes()
         loaded = yaml.safe_load(self._raw)
         self._configs = {part: dict(loaded.get(part) or {}) for part in ("agent", "model", "environment")}
         self.config_name, self.effort = config, effort
+        # agent_uname: not part of the identity, which a branch compares with its record's; it is disclosed
+        # with the trial's settings instead.
+        self.uname = uname_override(uname)
 
     def configs(self):
         return copy.deepcopy(self._configs)
@@ -258,7 +263,7 @@ class MiniSweAgent:
         configs = self.configs()
         agent = DefaultAgent(
             TasteResponsesModel(host=host, effort=self.effort, model_name=model_name, **configs["model"]),
-            TasteEnvironment(host=host, cwd=cwd, **configs["environment"]),
+            TasteEnvironment(host=host, cwd=cwd, uname=self.uname, **configs["environment"]),
             **configs["agent"],
         )
         result = agent.run(task)

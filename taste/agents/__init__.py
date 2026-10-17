@@ -18,6 +18,7 @@ happens outside the agent.
 from __future__ import annotations
 
 import importlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -80,9 +81,49 @@ HOSTED_AGENTS = {"mini-swe-agent": ("taste.agents.mini_swe_agent", "MiniSweAgent
                  "checker": ("taste.agents.checker", "Checker")}
 
 
-def hosted_agent(name: str, *, effort: str):
-    """The named agent, configured as its own project configures it, at this effort."""
+# The fields of ``platform.uname()`` mini-swe-agent writes into its task message; node is not among them, but may be
+# given so that a host's whole uname can be named.
+UNAME_FIELDS = ("system", "release", "version", "machine")
+
+
+def uname_override(value) -> dict[str, str]:
+    """``agent_uname``: the machine a hosted mini-swe-agent is told it runs on, instead of its host's.
+
+    Empty for the host's own. Otherwise one JSON object (or the object itself, as Harbor hands over a JSON
+    ``--ak`` value) with exactly the string fields system, release, version and machine, and optionally node:
+    a study shows its agent the host its recorded runs had, so a branch's requests match the record's.
+    """
+    if value in ("", None):
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            raise ValueError("agent_uname must be a JSON object of uname's fields") from None
+    if not isinstance(value, Mapping) or not set(UNAME_FIELDS) <= set(value) <= {*UNAME_FIELDS, "node"}:
+        raise ValueError("agent_uname must name exactly system, release, version and machine (and optionally node)")
+    for item in value.values():
+        if type(item) is not str or not item.strip() or any(ord(char) < 32 for char in item):
+            raise ValueError("agent_uname's fields must be nonempty one-line strings")
+    return dict(value)
+
+
+def canonical_uname(value) -> str:
+    """``agent_uname`` in its one written form (compact JSON, sorted keys), or ""."""
+    found = uname_override(value)
+    return json.dumps(found, sort_keys=True, separators=(",", ":")) if found else ""
+
+
+def hosted_agent(name: str, *, effort: str, uname: str = ""):
+    """The named agent, configured as its own project configures it, at this effort.
+
+    ``uname`` (``agent_uname``) is mini-swe-agent's alone: the other agents do not report their host, and are
+    refused one rather than silently ignoring it.
+    """
     if name not in HOSTED_AGENTS:
         raise ValueError(f"no hosted agent named {name!r}")
     module, attribute = HOSTED_AGENTS[name]
-    return getattr(importlib.import_module(module), attribute)(effort=effort)
+    if uname and name != "mini-swe-agent":
+        raise ValueError(f"agent_uname is mini-swe-agent's; {name} does not report its host")
+    options = {"uname": canonical_uname(uname)} if uname else {}
+    return getattr(importlib.import_module(module), attribute)(effort=effort, **options)
