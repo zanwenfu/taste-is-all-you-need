@@ -392,6 +392,16 @@ def test_the_command_line_runs_the_driver_with_the_map_and_the_reader(tmp_path, 
         cli.main([*options, "--recoveries", "retry,undo"])
 
 
+def test_the_command_line_sets_how_an_earlier_studys_checkpoints_are_used(tmp_path):
+    jobs_dir, trials, _, _ = study(tmp_path)
+    state = tmp_path / "rec.json"
+    options = ["--state", str(state), "--base-job", str(jobs_dir / "base"), "--calibration",
+               str(jobs_dir / "calibration"), "--jobs-dir", str(jobs_dir), "--trials", str(trials),
+               "--launcher", str(tmp_path / "next.sh"), "--prior-checkpoints", "rebuild"]
+    assert cli.main(options) == STARTED
+    assert json.loads(state.read_text())["settings"]["prior_checkpoints"] == "rebuild"
+
+
 def test_jobs_harbor_ended_before_any_trial_are_not_attempts_and_the_episodes_go_on(tmp_path):
     # Harbor's network check failed on a busy Docker and the job ended before its trials: neither
     # an arm's first trials nor a later round's are lost to it; the job is started again.
