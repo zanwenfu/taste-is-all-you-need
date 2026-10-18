@@ -543,7 +543,9 @@ class RecoveryDriver(Driver):
         told = self._tests_message(run, (Path(run["job_dir"]), run["base"]["trial"])) \
             if MESSAGE[recovery] == "tests" else reply
         if recovery != "retry" and (recovery.startswith("retry") or (recovery in REWINDS and step == 0)):
-            settings.update(jobs.task_suffix(self._note(job, note(recovery, told))))
+            # A task's text cannot hold NUL (a grader's log can), so the task shows each as \x00; a branch note
+            # delivers it as it is.
+            settings.update(jobs.task_suffix(self._note(job, note(recovery, told).replace("\x00", "\\x00"))))
         elif recovery != "retry":
             script, export = self.script(run["base"]["token"])
             prepare = [export]

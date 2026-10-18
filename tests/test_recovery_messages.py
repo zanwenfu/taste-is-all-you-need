@@ -63,8 +63,10 @@ def graded_recoveries(solved_from_round=None, **kwargs):
     return outcome
 
 
-def first_round(tmp_path, recoveries_asked):
+def first_round(tmp_path, recoveries_asked, output=None):
     jobs_dir, trials, given, run_id = study(tmp_path, recoveries=recoveries_asked)
+    if output is not None:
+        (jobs_dir / "base" / run_id / "verifier" / "run-script-stdout.txt").write_text(output)
     path, harbor = tmp_path / "rec.json", FakeHarbor(trials, graded_recoveries())
     driver, [saved] = step(path, given, jobs_dir)
     harbor.run([saved])
@@ -95,6 +97,19 @@ def test_round_one_tells_the_agent_only_that_it_failed_or_which_tests_failed(tmp
     tests = first["cx"]
     assert (tests["branch_step"], tests["branch_override"], tests["branch_checkpoint"]) == ("6", "reject", saved.name)
     assert Path(tests["branch_note"]).read_text() == "Submission failed the project's tests.\n\n" + TOLD
+
+
+def test_a_nul_in_the_tests_output_is_written_as_an_escape_where_it_goes_in_as_the_task(tmp_path):
+    # A grader's log can hold NUL (a Redis assertion did); a task's text cannot, so a task suffix shows it as \x00.
+    # A branch note delivers it as it is.
+    output = FAILING.replace("got error", "got '0.00\x001'")
+    driver, run_id, first, saved = first_round(tmp_path, ["retry_tests", "rewind_tests"], output=output)
+    told = TOLD.replace("got error", "got '0.00\x001'")
+    task = Path(first["rx"]["task_suffix"]).read_text()
+    assert "\x00" not in task
+    assert task == "A previous attempt failed the project's tests.\n\n" + told.replace("\x00", "\\x00")
+    assert Path(first["xw3"]["branch_note"]).read_text() == (
+        "Note: an attempt that continued from here failed the project's tests.\n\n" + told)
 
 
 def test_a_tests_recovery_is_decided_by_the_hidden_tests_with_no_checker(tmp_path):
