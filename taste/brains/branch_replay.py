@@ -54,7 +54,16 @@ similarity of their outputs is below OUTPUT_FLOOR. A command the record shows
 cut off by its time limit is not compared: where a limit cuts a command
 depends on the host's speed, so neither its exit code nor its output says
 anything about the files (its similarity is still recorded), and the commands
-after it, compared as usual, show whether the files differ. A command the
+after it, compared as usual, show whether the files differ. Nor is which
+lines a cut-off directory walk printed: a command that only reads and cuts a
+walk's output to its first or last lines (``grep -r``, ``rg``, ``find`` or
+``fd``, through filters that keep the order, into ``head`` or ``tail``;
+``host_ordered``) prints the lines the host lists first, and hosts, even two
+containers of one host, list a directory in different orders. Such a command
+that would diverge only by its output is not divergent when its exit code,
+its time-out and its number of normalized lines match the record's; the row
+says ``host_ordered``, and the commands after it, compared as usual, show
+whether the files differ. A command the
 record shows finishing is given REBUILD_TIME_FACTOR times its limit to finish
 again (within the terminal's maximum); one cut off keeps its own limit, so
 that its effects are cut off as they were. Similarity is the Dice
@@ -77,6 +86,7 @@ import hashlib
 import json
 import math
 import re
+import shlex
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -168,6 +178,219 @@ def rebuild_timeout(run, limit):
     return min(float(seconds), float(limit))
 
 
+# Reading a command as the shell would (``host_ordered``). Anything it cannot read for certain makes it
+# not host-ordered, and the command is compared as every other one is.
+_PUNCTUATION = ";&|<>()\n"
+_OPERATOR = re.compile(r"&&|\|\||\|&|;;|&>>|&>|>>|>&|>\||<<<|<<-|<<|<&|[;&|<>()\n]")
+_SEPARATORS = frozenset({";", "&&", "||", "\n", "(", ")"})
+_PIPES = frozenset({"|", "|&"})
+_TO_NULL = frozenset({">", ">>", ">|", "&>", "&>>"})
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Programs that read files or their input and write only to their output, with the options ruled out below.
+_READERS = frozenset({"cd", "pwd", "ls", "cat", "head", "tail", "wc", "cut", "tr", "nl", "sort", "uniq", "grep",
+                      "egrep", "fgrep", "rg", "find", "fd", "fdfind", "sed", "git", "echo", "printf", "true"})
+_GIT_READS = frozenset({"grep", "log", "show", "diff", "ls-files", "rev-parse", "blame"})
+_FIND_WRITES = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"})
+_SED_OPTIONS = frozenset({"-n", "--quiet", "--silent", "-E", "-r", "--regexp-extended"})
+_SED_PRINT = re.compile(r"\s*(?:\d+|\$)?\s*(?:,\s*(?:\d+|\$)\s*)?p\s*")
+# grep's short options that take an argument, and the long ones that switch recursion on.
+_GREP_ARGUMENT = frozenset("ABCDdefm")
+_GREP_LONG_ARGUMENT = frozenset({"--regexp", "--file", "--max-count", "--after-context", "--before-context",
+                                 "--context", "--devices", "--binary-files", "--label", "--include", "--exclude",
+                                 "--exclude-dir", "--exclude-from", "--group-separator"})
+_GREP_RECURSIVE = frozenset({"--recursive", "--dereference-recursive", "--directories=recurse"})
+# Stages that keep the order of the lines they pass on, between a walk and the head or tail that cuts it.
+_ORDER_KEEPING = frozenset({"grep", "egrep", "fgrep", "rg", "cut", "tr", "sed", "cat", "nl", "head", "tail"})
+# mini-swe-agent's command as its environment runs it (``TasteEnvironment._shell``): variables, then the
+# command in a group with standard error folded in.
+_MINI_WRAPPER = re.compile(r"(?:export(?: [A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:@%+,=-]*)+; )?"
+                           r"\{\n(?P<command>.*)\n\} 2>&1", re.DOTALL)
+
+
+def _tokens(command):
+    """The shell's words and operators, quotes removed; a newline separates commands, and ``#`` is a word."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=_PUNCTUATION)
+    lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
+    tokens = []
+    for token in lexer:
+        if token and all(char in _PUNCTUATION for char in token):
+            operators = _OPERATOR.findall(token)
+            if "".join(operators) != token:
+                raise ValueError(f"unread operator {token!r}")
+            tokens.extend(operators)
+        else:
+            tokens.append(token)
+    return tokens
+
+
+def _operator(token):
+    return bool(token) and all(char in _PUNCTUATION for char in token)
+
+
+def _pipelines(tokens):
+    """The pipelines, each a list of simple commands' words; None for anything else (redirection into a file,
+    a heredoc, a command in the background)."""
+    pipelines, pipeline, words, index = [], [], [], 0
+    while index < len(tokens):
+        token = tokens[index]
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        if token in _SEPARATORS or token in _PIPES:
+            if words:
+                pipeline.append(words)
+                words = []
+            elif token in _PIPES:
+                return None
+            if token in _SEPARATORS and pipeline:
+                pipelines.append(pipeline)
+                pipeline = []
+        elif token in _TO_NULL:
+            if following != "/dev/null":
+                return None
+            index += 1
+        elif token in (">&", "<&"):
+            if following not in ("1", "2", "-"):
+                return None
+            index += 1
+        elif token == "<":
+            if following is None or _operator(following):
+                return None
+            index += 1
+        elif _operator(token):
+            return None
+        else:
+            words.append(token)
+        index += 1
+    if words:
+        pipeline.append(words)
+    if pipeline:
+        pipelines.append(pipeline)
+    return pipelines
+
+
+def _program(words):
+    """A simple command's program and arguments, past its variable assignments."""
+    index = 0
+    while index < len(words) and _ASSIGNMENT.match(words[index]):
+        index += 1
+    return (words[index], words[index + 1:]) if index < len(words) else ("", [])
+
+
+def _sed_reads(arguments):
+    """sed that only prints line ranges: ``sed -n '1,40p' file``."""
+    scripts, operands, given = [], [], iter(arguments)
+    for argument in given:
+        if argument == "-e":
+            scripts.append(next(given, ""))
+        elif argument in _SED_OPTIONS:
+            continue
+        elif argument.startswith("-"):
+            return False
+        else:
+            operands.append(argument)
+    if not scripts and operands:
+        scripts.append(operands.pop(0))
+    return bool(scripts) and all(_SED_PRINT.fullmatch(script) for script in scripts)
+
+
+def _reads_only(words):
+    """Whether a simple command only reads: a program of ``_READERS`` with none of its writing options."""
+    program, arguments = _program(words)
+    if not program:
+        return True
+    if program not in _READERS:
+        return False
+    if program == "sed":
+        return _sed_reads(arguments)
+    if program == "find":
+        return not _FIND_WRITES.intersection(arguments)
+    if program in ("fd", "fdfind"):
+        return not any(argument in ("-x", "-X") or argument.startswith("--exec") for argument in arguments)
+    if program == "rg":
+        return not any(argument.startswith("--pre") for argument in arguments)
+    if program == "sort":
+        return not any(argument.startswith("--output") or (argument.startswith("-") and not argument.startswith("--")
+                                                            and "o" in argument[1:]) for argument in arguments)
+    if program == "uniq":
+        # A second operand is the file uniq writes.
+        return len([argument for argument in arguments if not argument.startswith("-")]) <= 1
+    if program == "git":
+        return bool(arguments) and arguments[0] in _GIT_READS and not any(
+            argument.startswith("--output") for argument in arguments)
+    return True
+
+
+def _recursive_grep(arguments):
+    given = iter(arguments)
+    for argument in given:
+        if argument == "--":
+            return False
+        if argument in _GREP_RECURSIVE:
+            return True
+        if argument in ("-d", "--directories"):
+            if next(given, None) == "recurse":
+                return True
+        elif argument in _GREP_LONG_ARGUMENT:
+            next(given, None)  # its argument is the next word
+        elif argument.startswith("-") and not argument.startswith("--") and len(argument) > 1:
+            for position, option in enumerate(argument[1:], 1):
+                if option in "rR":
+                    return True
+                if option in _GREP_ARGUMENT:
+                    if position == len(argument) - 1:
+                        next(given, None)  # its argument is the next word
+                    break
+    return False
+
+
+def _walks(words):
+    """Whether a simple command prints files or matches in the order the host lists directories."""
+    program, arguments = _program(words)
+    if program in ("find", "fd", "fdfind"):
+        return True
+    if program == "rg":
+        return not any(argument.startswith("--sort") for argument in arguments)
+    return program in ("grep", "egrep", "fgrep") and _recursive_grep(arguments)
+
+
+def _cuts_a_walk(pipeline):
+    walking = False
+    for words in pipeline:
+        program = _program(words)[0]
+        if walking and program in ("head", "tail"):
+            return True
+        if _walks(words):
+            walking = True
+        elif program not in _ORDER_KEEPING:
+            walking = False
+    return False
+
+
+def host_ordered(command):
+    """Whether a command only reads, and cuts a directory walk's output to its first or last lines.
+
+    A walk is a recursive grep, rg (unsorted), find or fd; a cut is ``head`` or ``tail`` after it in one pipeline,
+    with only order-keeping filters between (``_ORDER_KEEPING``). Which lines such a command prints is the order the
+    host lists directories in. Every part of the command must read only (``_READERS``, with no output into a file
+    but /dev/null); anything this cannot read for certain (substitutions, heredocs, quotes left open) is not
+    host-ordered.
+    """
+    if not isinstance(command, str) or any(mark in command for mark in ("`", "$(", "<(", ">(")):
+        return False
+    try:
+        pipelines = _pipelines(_tokens(command))
+    except ValueError:
+        return False
+    if not pipelines or not all(_reads_only(words) for pipeline in pipelines for words in pipeline):
+        return False
+    return any(_cuts_a_walk(pipeline) for pipeline in pipelines)
+
+
+def _host_ordered_run(run):
+    """``host_ordered`` for a recorded command, which ran as mini-swe-agent's environment wraps it."""
+    found = _MINI_WRAPPER.fullmatch(run.executed or "")
+    return found is not None and found["command"] == run.command and host_ordered(run.command)
+
+
 def compare(run, output, returncode, timed_out):
     """One rebuilt command against what the container printed when it was recorded."""
     recorded = run.printed or {"output": run.output, "returncode": run.returncode, "timed_out": run.timed_out}
@@ -177,9 +400,15 @@ def compare(run, output, returncode, timed_out):
         divergent = False
     else:
         divergent = returncode != recorded["returncode"] or bool(timed_out) or score < OUTPUT_FLOOR
-    return {"returncode": returncode, "recorded_returncode": recorded["returncode"],
-            "timed_out": bool(timed_out), "recorded_timed_out": recorded["timed_out"],
-            "similarity": score, "divergent": divergent}
+    row = {"returncode": returncode, "recorded_returncode": recorded["returncode"],
+           "timed_out": bool(timed_out), "recorded_timed_out": recorded["timed_out"],
+           "similarity": score, "divergent": divergent}
+    if (divergent and returncode == recorded["returncode"] and not timed_out
+            and len(normalized_lines(output)) == len(normalized_lines(recorded["output"]))
+            and _host_ordered_run(run)):
+        # A cut-off walk printed the lines this host lists first (see the fidelity rule).
+        row.update(divergent=False, host_ordered=True)
+    return row
 
 
 def _problem(message):

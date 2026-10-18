@@ -14,11 +14,13 @@ from taste.brains.branch_replay import (
     REJECT_EXIT,
     SCRIPT_SCHEMA,
     SENTINEL,
+    RecordedRun,
     ReplayHost,
     ReplayScript,
     check_branch,
     compare,
     digest,
+    host_ordered,
     message_shas,
     rebuild,
     rebuild_timeout,
@@ -321,6 +323,130 @@ def test_rebuilt_outputs_are_compared_by_their_normalized_lines():
     # one it shows cut off keeps its own, so its effects are cut off as before.
     assert rebuild_timeout(run, 600) == 10.0 and rebuild_timeout(run, 8) == 8.0
     assert rebuild_timeout(cut, 600) == 5.0
+
+
+# Commands agents ran that cut a directory walk to its first lines (recorded runs of SWE-bench Pro and
+# Multilingual tasks whose rebuilds on another host printed other lines).
+CUT_WALKS = [
+    "cd /app && find src -iname '*Unverified*' -o -iname '*DeviceMeta*'; rg \"New login|UnverifiedSession|unverified"
+    " session\" src -n | head -100; rg \"interface ExtendedDevice|type ExtendedDevice|IMyDevice\" src -n | head -100",
+    "cd /app && grep -R \"BOOLEAN_FLAG_TYPE\\|VARIANT_FLAG_TYPE\\|NextPageToken\" -n internal | head -80; grep -R"
+    " \"type Store interface\\|type Store.*interface\" -n internal",
+    "cd /app && grep -R -nE 'DecodeHooks|decode hook|mapstructure' --include='*.go' . | head -100",
+    "cd /app && cat go.mod | grep -E 'otel|zap|grpc' | head -30; grep -R 'type .*Request\\|CreateFlag\\|UpdateFlag' -n"
+    " rpc internal/server/middleware/grpc | head -60",
+    "cd /app && rg -n \"cloudsql.*CA|CA.*cloudsql|missing.*CA|CACert\" api lib | head -30; grep -n 'sqladmin' go.mod",
+    "cd /app && grep -RInE \"041|languages\" openlibrary | grep -Ei 'marc|import|language' | head -120; find . -iname"
+    " '*marc*' -o -iname '*import*test*' | head -100",
+    "grep -RniE 'EVALSHA|FCALL|MONITOR' src/server.c src/script* src 2>/dev/null | head -120",
+    "find . -maxdepth 3 -type d | head; grep -R -n -E 'client_ip|remote_ip' caddyconfig/httpcaddyfile | head -80",
+    "find test/transform -type f -name '*.java' | grep -i builder | head",
+    "ls -la && grep -RIn \"replace\" crates | head -n 80",
+    "cd /app && sed -n '230,275p' internal/cmd/grpc.go; grep -R \"List(ctx.*Namespace\" -n internal | head -50",
+    "grep -rl TODO . | tail -5",
+    "cd /app && rg --files | head -40",
+    "fd -e py src | head",
+    "LC_ALL=C grep -r -n x . 2>&1 | head -n 20 || true",
+]
+NOT_CUT_WALKS = [
+    # The order is the files', or nothing cuts the walk.
+    "grep -n x a.py b.py | head", "cat a.py | head -20", "ls -R | head", "git grep -n x | head",
+    "grep -R x . | sort | head", "rg x | sort -u | head -5", "rg --sort path x | head", "rg x | wc -l | head",
+    "grep -R x .", "find . -name '*.py'", "grep -e -r a.py | head", "grep --regexp -r a.py | head",
+    # It writes, or runs something that could.
+    "grep -R x . > hits.txt; head hits.txt", "grep -R x . | tee hits.txt | head", "grep -R x . >> log | head",
+    "sed -i 's/a/b/' f; grep -R x . | head", "find . -name '*.pyc' -delete | head", "find . -exec rm {} + | head",
+    "find . -type f | xargs grep x | head", "grep -R x . | head; rm -rf build", "rg --pre ./run x | head",
+    "fd -x rm | head", "sort -o out f; grep -R x . | head", "uniq a b; grep -R x . | head",
+    "git checkout -- a.py; grep -R x . | head", "python - <<'PY'\nprint(1)\nPY\ngrep -R x . | head",
+    "echo $(rm x); grep -R x . | head", "echo `rm x`; grep -R x . | head", "grep -R x <(cat f) | head",
+    "grep -R x . | head &", "sed -n 's/a/b/w out' f; grep -R x . | head", "awk 'NR<5' f; grep -R x . | head",
+    # A newline or a comment does not hide a second command.
+    "grep -R x . | head\nrm -rf y", "grep -R x . | head # top hits\nrm -rf y", "grep -R x . | head;\nmake",
+    # Quotes left open, or operators read as words, are not read as a walk.
+    "grep -R 'x . | head", "grep -R '|' . | head", 1, None,
+]
+
+
+def test_a_command_is_host_ordered_when_it_only_reads_and_cuts_a_directory_walk():
+    for command in CUT_WALKS:
+        assert host_ordered(command), command
+    for command in NOT_CUT_WALKS:
+        assert not host_ordered(command), command
+
+
+def recorded_run(command, output, *, returncode=0, executed=None, timed_out=False):
+    return RecordedRun(command, wrap(command) if executed is None else executed, "/app", 30.0, output, returncode,
+                       timed_out, True)
+
+
+def test_a_cut_off_walk_that_printed_other_lines_is_not_divergent_when_its_count_matches():
+    command = "cd /app && grep -rn TODO src | head -n 3"
+    run = recorded_run(command, "src/a.py:1:TODO a\nsrc/b.py:2:TODO b\nsrc/c.py:3:TODO c\n")
+    other = "src/d.py:4:TODO d\nsrc/e.py:5:TODO e\nsrc/a.py:1:TODO a\n"
+    row = compare(run, other, 0, False)
+    assert row["similarity"] < OUTPUT_FLOOR and row["divergent"] is False and row["host_ordered"] is True
+    # The same command in mini-swe-agent's environment, its variables exported first.
+    exported = replace(run, executed="export PAGER=cat MANPAGER=cat LESS=-R PIP_PROGRESS_BAR=off TQDM_DISABLE=1; "
+                                     + wrap(command))
+    assert compare(exported, other, 0, False)["host_ordered"] is True
+    # Fewer lines, another exit code or a time-out is a difference in the files, as before.
+    assert compare(run, "src/d.py:4:TODO d\nsrc/a.py:1:TODO a\n", 0, False)["divergent"] is True
+    assert compare(run, other, 1, False)["divergent"] is True
+    assert compare(run, other, 0, True)["divergent"] is True
+    # A command that is not a cut-off walk, or that ran as something more than the agent's command, is compared
+    # as every command is.
+    plain = recorded_run("cat notes.txt | head -n 3", run.output)
+    assert compare(plain, other, 0, False)["divergent"] is True
+    wrapped = replace(run, executed="rm -rf /app/build; " + wrap(command))
+    assert compare(wrapped, other, 0, False)["divergent"] is True
+    # Rows of commands that match, or that differ for another reason, are the rows the rule gave before.
+    same = compare(run, run.output, 0, False)
+    assert same == {"returncode": 0, "recorded_returncode": 0, "timed_out": False, "recorded_timed_out": False,
+                    "similarity": 1.0, "divergent": False}
+    assert "host_ordered" not in compare(run, other, 1, False)
+
+
+def test_the_rule_for_cut_off_walks_only_lets_through_what_diverged_by_its_lines_alone():
+    # Against the rule as it was: no row it found faithful is divergent now, and a row it found divergent is
+    # faithful now only when it says host_ordered.
+    outputs = ["", "a.py:1:x\n", "a.py:1:x\nb.py:2:x\n", "b.py:2:x\nc.py:3:x\n", "c.py:3:x\nd.py:4:x\n",
+               "Binary file e matches\n"]
+    commands = ["grep -rn x . | head -2", "grep -n x a.py | head -2", "grep -rn x . > out", "find . | head -2"]
+    for command in commands:
+        for recorded_output in outputs:
+            for recorded_code in (0, 1):
+                run = recorded_run(command, recorded_output, returncode=recorded_code)
+                for output in outputs:
+                    for code in (0, 1):
+                        for timed_out in (False, True):
+                            row = compare(run, output, code, timed_out)
+                            before = code != recorded_code or timed_out or row["similarity"] < OUTPUT_FLOOR
+                            assert row["divergent"] <= before
+                            assert (row["divergent"] != before) == bool(row.get("host_ordered"))
+
+
+def test_a_rebuild_goes_on_past_a_cut_off_walk_and_still_stops_at_a_difference():
+    command = "grep -rn TODO src | head -n 2"
+    steps = [{"step": 1, "request_sha": "0" * 64, "messages": {"base": 0, "added": []},
+              "reply": reply_to_dict(reply(command)), "text": [], "calls": [],
+              "runs": [recorded_run(command, "src/a.py:1:TODO a\nsrc/b.py:2:TODO b\n").to_dict()]},
+             {"step": 2, "request_sha": "1" * 64, "messages": {"base": 0, "added": []},
+              "reply": reply_to_dict(reply("make test")), "text": [], "calls": [],
+              "runs": [recorded_run("make test", "1 failed\n", returncode=1).to_dict()]}]
+    script = ReplayScript.from_dict({"schema": SCRIPT_SCHEMA, "task": TASK, "source": {}, "exit": None,
+                                     "steps": steps})
+
+    def execute_with(tests):
+        async def execute(number, run):
+            return ("src/c.py:3:TODO c\nsrc/d.py:4:TODO d\n", 0, False) if number == 1 else tests
+        return execute
+
+    account = asyncio.run(rebuild(script, 2, execute_with(("1 failed\n", 1, False))))
+    assert account["faithful"] and account["commands"] == 2 and account["divergent"] == 0
+    assert account["rows"][0]["host_ordered"] is True and "host_ordered" not in account["rows"][1]
+    account = asyncio.run(rebuild(script, 2, execute_with(("4 passed\n", 0, False))))
+    assert not account["faithful"] and account["commands"] == 2 and account["rows"][-1]["divergent"]
 
 
 def test_a_rebuild_stops_once_more_commands_diverge_than_it_tolerates(recorded):

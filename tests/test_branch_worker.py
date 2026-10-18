@@ -23,9 +23,10 @@ from taste.benchmarks.goal_trajectory import _hosted_calls
 from taste.benchmarks.replay_export import encode_script, export_script
 from taste.benchmarks.replay_export import main as export_main
 from taste.benchmarks.worker_trajectory import hosted_trajectory
+from taste.brains import branch_replay
 from taste.brains.azure_worker_entrypoint import execute_worker, run_directory
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
-from taste.brains.branch_replay import REJECT_EXIT, BranchPolicy
+from taste.brains.branch_replay import OUTPUT_FLOOR, REJECT_EXIT, BranchPolicy
 from taste.brains.contract import CONTRACT_PATH, Contract
 from taste.brains.records import ArtifactRef, ArtifactSpec, Assignment, contract_digest
 from taste.brains.responses_session import ResponsesSession
@@ -34,6 +35,7 @@ from taste.brains.worker_admission import EntrypointConfig, WorkerExitCode
 from taste.brains.worker_protocol import ASSIGNMENT_PATH, assignment_run_id
 from taste.memstore import Store
 from taste.providers.azure_openai import AZURE_MONITOR_MODEL, AZURE_WORKER_MODEL
+from taste.recovery_study import host_order
 from tests.test_azure_openai import sdk_transport as _sdk_transport
 from tests.test_azure_terminal_worker import terminal
 from tests.test_azure_worker_policy import assignment as policy_assignment
@@ -338,6 +340,80 @@ def test_a_rebuild_that_diverges_is_unfaithful_and_never_goes_live(base, other, 
     [divergence] = account["rebuild"]["divergences"]
     assert (divergence["returncode"], divergence["recorded_returncode"]) == (0, 1)
     assert run.trace["extra"]["exit"]["stopped_by"] == "branch_unfaithful"
+
+
+def test_a_cut_off_walk_that_lists_other_lines_rebuilds_and_the_record_says_so(worker, other, sdk_transport,
+                                                                                tmp_path):
+    # Which lines `grep -r ... | head` keeps is the order the host lists directories: another host's three
+    # lines are not a difference in the files, and the record keeps the row. Fewer lines are.
+    walk = "grep -rn TODO src | head -n 3"
+    replies = {1: [message("Find the TODOs."), bash(walk, "c1")], 2: [bash("make test", "c2")],
+               3: [bash(f"echo {SENTINEL}", "c3")]}
+    outputs = {walk: TerminalResult(0, b"src/a.py:1:TODO a\nsrc/b.py:2:TODO b\nsrc/c.py:3:TODO c\n", b""),
+               "make test": OUTPUTS["make test"], SENTINEL: OUTPUTS[SENTINEL]}
+    recorded = run_agent(worker, sdk_transport, tmp_path, replies, outputs)
+    assert recorded.code == WorkerExitCode.COMPLETED
+    script = export_script(recorded.journal, ledger=recorded.ledger, trial="walk")
+    assert script["steps"][0]["runs"][0]["command"] == walk
+    other_lines = {**outputs, walk: TerminalResult(0, b"src/d.py:4:TODO d\nsrc/e.py:5:TODO e\nsrc/a.py:1:TODO a\n",
+                                                   b"")}
+    run = branch(other, sdk_transport, tmp_path, script, 2, outputs=other_lines, replies={1: replies[3]})
+    assert run.code == WorkerExitCode.COMPLETED and run.calls == 1
+    account = run.trace["extra"]["branch"]
+    assert account["faithful"] and account["went_live"] and account["rebuild"]["divergences"] == []
+    [row] = account["rebuild"]["host_ordered"]
+    assert row["step"] == 1 and row["similarity"] < OUTPUT_FLOOR and row["divergent"] is False
+    fewer = {**outputs, walk: TerminalResult(0, b"src/d.py:4:TODO d\nsrc/a.py:1:TODO a\n", b"")}
+    third = open_worker(tmp_path / "fewer")
+    try:
+        run = branch(third, sdk_transport, tmp_path, script, 2, outputs=fewer, replies={1: replies[3]},
+                     where="fewer")
+    finally:
+        third.store.close()
+    assert run.calls == 0 and run.code == WorkerExitCode.INCOMPLETE
+    account = run.trace["extra"]["branch"]
+    assert not account["faithful"] and account["unfaithful"]["reason"] == "rebuild"
+    assert [row["step"] for row in account["rebuild"]["divergences"]] == [1] and "host_ordered" not in account["rebuild"]
+
+
+def test_a_trial_the_walk_stopped_before_the_rule_let_it_through_is_found_from_its_own_record(
+        worker, other, sdk_transport, tmp_path, monkeypatch):
+    # Rebuilt under the rule as it was (no cut-off walk let through), the walk stops the branch. From the trial's
+    # replay script, terminal ledger and settled record, host_order finds it was stopped only by the walk; a trial
+    # whose walk printed fewer lines was stopped by a difference in the files.
+    walk = "grep -rn TODO src | head -n 3"
+    replies = {1: [message("Find the TODOs."), bash(walk, "c1")], 2: [bash("make test", "c2")],
+               3: [bash(f"echo {SENTINEL}", "c3")]}
+    outputs = {walk: TerminalResult(0, b"src/a.py:1:TODO a\nsrc/b.py:2:TODO b\nsrc/c.py:3:TODO c\n", b""),
+               "make test": OUTPUTS["make test"], SENTINEL: OUTPUTS[SENTINEL]}
+    recorded = run_agent(worker, sdk_transport, tmp_path, replies, outputs)
+    script = export_script(recorded.journal, ledger=recorded.ledger, trial="walk")
+    monkeypatch.setattr(branch_replay, "_host_ordered_run", lambda run: False)
+    trials, summaries = tmp_path / "trials", {}
+    lines = {"other": b"src/d.py:4:TODO d\nsrc/e.py:5:TODO e\nsrc/a.py:1:TODO a\n",
+             "fewer": b"src/d.py:4:TODO d\nsrc/a.py:1:TODO a\n"}
+    for where, printed in lines.items():
+        # Each branch needs a worker of its own; ``other`` is the one in the "branch" folder.
+        host = other if where == "other" else open_worker(tmp_path / where)
+        try:
+            run = branch(host, sdk_transport, tmp_path, script, 2, outputs={**outputs, walk: TerminalResult(
+                0, printed, b"")}, replies={1: replies[3]}, where="branch" if host is other else where)
+        finally:
+            if host is not other:
+                host.store.close()
+        assert run.calls == 0 and not run.trace["extra"]["branch"]["faithful"]
+        root = trials / f"tok-{where}"
+        (root / "controller" / "terminal").mkdir(parents=True)
+        shutil.copy(run.path, root / "branch-script.json")
+        shutil.copy(run.ledger, root / "controller" / "terminal" / "terminal.sqlite3")
+        (root / "controller" / "trajectory.json").write_text(json.dumps({"subagent_trajectories": [run.trace]}))
+        summaries[where] = {"faithful": False, "token": f"tok-{where}"}
+    monkeypatch.undo()
+    assert host_order.spoiled(summaries["other"], trials) is True
+    assert host_order.spoiled(summaries["fewer"], trials) is False
+    assert host_order.spoiled({**summaries["other"], "faithful": None}, trials) is False
+    (trials / "tok-other" / "controller" / "terminal" / "terminal.sqlite3").unlink()
+    assert host_order.spoiled(summaries["other"], trials) is False
 
 
 def test_another_task_is_unfaithful_before_anything_runs(base, other, sdk_transport, tmp_path):

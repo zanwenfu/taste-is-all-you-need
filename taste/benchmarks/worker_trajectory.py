@@ -127,9 +127,12 @@ def worker_trajectory(rows, *, run_id):
 def _branch_account(branch, rebuilt, rebuilds, replayed, prefix, live, unfaithful):
     """What serving a branch of an earlier run came to (taste.brains.branch_replay)."""
     rebuild_ok = branch["mode"] != "rebuild" or branch["step"] == 0 or bool(rebuilt and rebuilt["faithful"])
+    ordered = [row for row in rebuilds if row.get("host_ordered")][:20]
     return {**branch, "replayed_steps": replayed, "prefix_complete": prefix,
             "rebuild": None if rebuilt is None else {
-                **rebuilt, "divergences": [row for row in rebuilds if row.get("divergent")][:20]},
+                **rebuilt, "divergences": [row for row in rebuilds if row.get("divergent")][:20],
+                # Cut-off directory walks that printed other lines than the record's (branch_replay's rule).
+                **({"host_ordered": ordered} if ordered else {})},
             "went_live": bool(live and live["live"]), "context": None if live is None else live["context"],
             "unfaithful": unfaithful, "faithful": prefix and unfaithful is None and rebuild_ok}
 
@@ -223,7 +226,7 @@ def hosted_trajectory(rows, *, run_id):
                 raise ResponsesAuditError("rebuilt output has no recorded command")
             rebuilds.append({key: event[key] for key in (
                 "step", "returncode", "recorded_returncode", "timed_out", "recorded_timed_out", "similarity",
-                "divergent", "terminated") if key in event})
+                "divergent", "host_ordered", "terminated") if key in event})
         elif kind == "hosted_rebuilt":
             rebuilt = {key: event[key] for key in ("commands", "divergent", "faithful", "seconds")}
         elif kind == "hosted_replay":
