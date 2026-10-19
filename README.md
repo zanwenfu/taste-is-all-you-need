@@ -303,8 +303,7 @@ is git, or use Taste, please cite the essay:
 }
 ```
 
-The essay was published on 28 March 2026, and the Internet Archive captured it
-on 31 March 2026 ([archived copy](https://web.archive.org/web/20260331102524/https://zanwenfu.com/blog/agent_harness_blog)).
+The essay was published on 28 March 2026. The Internet Archive first captured it on 31 March 2026, and again on [7 April 2026](https://web.archive.org/web/20260407071535/https://zanwenfu.com/blog/agent_harness_blog).
 
 To cite the software itself:
 
