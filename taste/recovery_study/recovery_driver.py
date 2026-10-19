@@ -36,7 +36,10 @@ the test in its repository and finds nothing):
   output under a larger cap. Both are decided by the hidden tests, as above;
 - ``continue_both``: the reviewer's feedback, then what the hidden tests said
   of the same submission (the tests message, or that every required test
-  passes). Decided by the checker, as ``continue``.
+  passes). Decided by the checker, as ``continue``;
+- ``continue_tests_hidden``: the tests message as it is, with one sentence
+  saying the tests are hidden (added only at grading, so they may be missing or
+  different in the agent's copy): the framing alone. Decided by the hidden tests.
 
 The feedback is the checker's own rendering of its findings
 (``taste.agents.checker.feedback``).
@@ -100,17 +103,18 @@ from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver
 
 RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare",
               "retry_bare", "rewind_bare", "retry_tests", "rewind_tests", "continue_tests",
-              "continue_tests_code", "continue_tests_full", "continue_both")
+              "continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden")
 REWINDS = ("rewind", "rewind_bare", "rewind_tests")
 SOURCES = ("oracle", "reader", "rules")
 SLUG = {"retry": "rt", "retry_feedback": "rf", "continue": "ct", "continue_bare": "cb",
         "retry_bare": "rb", "retry_tests": "rx", "continue_tests": "cx",
-        "continue_tests_code": "cc", "continue_tests_full": "cf", "continue_both": "cr"}
+        "continue_tests_code": "cc", "continue_tests_full": "cf", "continue_both": "cr", "continue_tests_hidden": "ch"}
 # What each recovery tells the agent: the checker's feedback, its bare rejection, the failed tests, or both.
 MESSAGE = {"retry": "reviewer", "retry_feedback": "reviewer", "rewind": "reviewer", "continue": "reviewer",
            "retry_bare": "bare", "rewind_bare": "bare", "continue_bare": "bare",
            "retry_tests": "tests", "rewind_tests": "tests", "continue_tests": "tests",
-           "continue_tests_code": "tests", "continue_tests_full": "tests", "continue_both": "both"}
+           "continue_tests_code": "tests", "continue_tests_full": "tests", "continue_both": "both",
+           "continue_tests_hidden": "tests"}
 # The form of a tests message: the excerpt, or with the failing tests' code, or the wide excerpt.
 TESTS_FORM = {"continue_tests_code": "code", "continue_tests_full": "full"}
 NOTES = {"retry_feedback": "A previous attempt was rejected by a reviewer: {feedback}",
@@ -125,6 +129,10 @@ TESTS_NOTES = {"retry_tests": "A previous attempt failed the project's tests.",
                "continue_tests": "Submission failed the project's tests.",
                "continue_tests_code": "Submission failed the project's tests.",
                "continue_tests_full": "Submission failed the project's tests."}
+# continue_tests_hidden: the tests message with one sentence on where the tests are, and nothing else.
+HIDDEN_HEAD = ("Submission failed the project's tests. These tests are hidden: they are added only when a submission "
+               "is graded, so they may be missing or different in your copy of the project.")
+TESTS_NOTES["continue_tests_hidden"] = HIDDEN_HEAD
 # continue_both: what the hidden tests said of the submission the reviewer rejected.
 BOTH_TESTS, BOTH_PASSED = "The project's tests: {tests}", "The project's tests: every required test passes."
 # Taste's defaults (TrialSettings) for the time a trial holds back: for the
@@ -626,10 +634,10 @@ class RecoveryDriver(Driver):
             message = MESSAGE[recovery]
             if message == "tests":
                 # No check saved this final state: the round rebuilds it from the record. Later rounds go on from
-                # the submission, so they are told as continue_tests is, in the arm's own form.
+                # the submission, so they are told as continue_tests is (a continue arm in its own form).
                 found = checkpoint = None
                 form = TESTS_FORM.get(recovery, "excerpt")
-                text = note(recovery if recovery in TESTS_FORM else "continue_tests",
+                text = note(recovery if recovery.startswith("continue") else "continue_tests",
                             self._tests_message(run, graded, form))
             else:
                 found = (self.final_state(previous["check"]) or (None, None))[0]

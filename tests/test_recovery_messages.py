@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from taste.agents.checker import BARE_FEEDBACK, parse_submission
-from taste.recovery_study.recovery_driver import BOTH_PASSED, RecoveryDriver, note
+from taste.recovery_study.recovery_driver import BOTH_PASSED, HIDDEN_HEAD, RecoveryDriver, note
 from taste.recovery_study.test_failures import CODE_HEAD
 from tests.recovery_fakes import FakeHarbor, agent_steps, base_jobs, recoveries, submission
 from tests.test_recovery_runs import FEEDBACK, drive, rounds_of, step
@@ -188,6 +188,9 @@ def test_notes_for_the_richer_forms():
     reply = parse_submission(submission("not_done"))
     assert note("continue_tests_code", "X") == "Submission failed the project's tests.\n\nX"
     assert note("continue_tests_full", "Y") == "Submission failed the project's tests.\n\nY"
+    # The hidden form: the same message, with one sentence saying the tests are not the agent's to find.
+    assert note("continue_tests_hidden", "Z") == HIDDEN_HEAD + "\n\nZ"
+    assert HIDDEN_HEAD.startswith("Submission failed the project's tests. These tests are hidden")
     told = "Submission rejected by a reviewer: " + FEEDBACK
     assert note("continue_both", reply, TOLD) == told + "\n\nThe project's tests: " + TOLD
     assert note("continue_both", reply, True) == told + "\n\n" + BOTH_PASSED
@@ -196,9 +199,9 @@ def test_notes_for_the_richer_forms():
 
 def test_round_one_of_the_richer_forms_tells_the_code_the_wide_output_or_both(tmp_path):
     driver, run_id, first, saved = first_round(
-        tmp_path, ["continue", "continue_tests", "continue_tests_code", "continue_tests_full", "continue_both"],
-        output=FAR)
-    assert sorted(first) == ["cc", "cf", "cr", "ct", "cx"]
+        tmp_path, ["continue", "continue_tests", "continue_tests_code", "continue_tests_full", "continue_both",
+                   "continue_tests_hidden"], output=FAR)
+    assert sorted(first) == ["cc", "cf", "ch", "cr", "ct", "cx"]
     # All of them go on where the agent stopped, from the saved final state.
     for settings in first.values():
         assert (settings["branch_step"], settings["branch_override"], settings["branch_checkpoint"]) == (
@@ -215,15 +218,18 @@ def test_round_one_of_the_richer_forms_tells_the_code_the_wide_output_or_both(tm
     # Both: the reviewer's feedback, then what the hidden tests said of the base run.
     both = Path(first["cr"]["branch_note"]).read_text()
     assert both == Path(first["ct"]["branch_note"]).read_text() + "\n\nThe project's tests: " + plain.split("\n\n", 1)[1]
+    # Hidden: exactly the plain message, with the one sentence added to its first line.
+    hidden = Path(first["ch"]["branch_note"]).read_text()
+    assert hidden == HIDDEN_HEAD + "\n\n" + plain.split("\n\n", 1)[1]
 
 
 def test_the_richer_tests_forms_are_decided_by_the_hidden_tests_and_keep_their_form(tmp_path):
-    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue_tests_code", "continue_tests_full"],
-                                            budget_runs=2.0)
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue_tests_code", "continue_tests_full",
+                                                                  "continue_tests_hidden"], budget_runs=2.0)
     driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries(solved_from_round=2)))
     assert not [job for job in driver.jobs.values() if job["purpose"] == "check" and job.get("arm")]
     summary = driver.summary()[run_id]["arms"]
-    for arm in ("continue_tests_code", "continue_tests_full"):
+    for arm in ("continue_tests_code", "continue_tests_full", "continue_tests_hidden"):
         assert [(e["end"], e["rounds"], e["solved"]) for e in summary[arm]["episodes"]] == [("done", 2, True)] * 2
     code = rounds_of(driver, "continue_tests_code")
     assert code and all(Path(s["branch_note"]).read_text() == "Submission failed the project's tests.\n\n" + TOLD
@@ -231,6 +237,8 @@ def test_the_richer_tests_forms_are_decided_by_the_hidden_tests_and_keep_their_f
     wide = rounds_of(driver, "continue_tests_full")
     assert wide and all(Path(s["branch_note"]).read_text().startswith(
         "Submission failed the project's tests.\n\nThese required tests did not pass: TestParse.") for s in wide)
+    hidden = rounds_of(driver, "continue_tests_hidden")
+    assert hidden and all(Path(s["branch_note"]).read_text() == HIDDEN_HEAD + "\n\n" + TOLD for s in hidden)
 
 
 def test_continue_both_is_decided_by_the_checker_and_tells_what_the_tests_said(tmp_path):
@@ -261,5 +269,5 @@ def test_the_richer_forms_caps_are_settings_with_a_floor(tmp_path):
 
 
 def test_the_report_names_the_richer_forms():
-    for name in ("continue_tests_code", "continue_tests_full", "continue_both"):
+    for name in ("continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden"):
         assert name in report.VIEWS
