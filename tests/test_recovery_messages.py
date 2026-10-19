@@ -35,7 +35,9 @@ PARSE_SECTION = ("diff --git a/app_test.go b/app_test.go\n--- a/app_test.go\n+++
                  "+func TestParse(t *testing.T) {\n+\tif got := Parse(\"\"); len(got) != 0 {\n"
                  "+\t\tt.Fatalf(\"expected [] got %v\", got)\n+\t}\n+}\n")
 HELPER_SECTION = "diff --git a/testdata/x.txt b/testdata/x.txt\n--- a/testdata/x.txt\n+++ b/testdata/x.txt\n+data\n"
-TEST_PATCH = PARSE_SECTION + HELPER_SECTION
+# The helper first: the section naming the failing test is shown before it.
+TEST_PATCH = HELPER_SECTION + PARSE_SECTION
+CODE_SHOWN = PARSE_SECTION + HELPER_SECTION.strip()
 
 
 def study(tmp_path, **settings):
@@ -203,9 +205,9 @@ def test_round_one_of_the_richer_forms_tells_the_code_the_wide_output_or_both(tm
             "6", "reject", saved.name)
     plain = Path(first["cx"]["branch_note"]).read_text()
     assert "the assertion that matters" not in plain
-    # The code form: the same message, then the patch's section that holds the failing test (not the helper).
+    # The code form: the same message, then the test patch, the section that holds the failing test first.
     code = Path(first["cc"]["branch_note"]).read_text()
-    assert code == plain + "\n\n" + CODE_HEAD + PARSE_SECTION.strip()
+    assert code == plain + "\n\n" + CODE_HEAD + CODE_SHOWN
     # The wide form: its excerpt reaches the assertion, under the larger cap.
     wide = Path(first["cf"]["branch_note"]).read_text()
     assert wide.startswith("Submission failed the project's tests.\n\nThese required tests did not pass: TestParse.")
@@ -225,7 +227,7 @@ def test_the_richer_tests_forms_are_decided_by_the_hidden_tests_and_keep_their_f
         assert [(e["end"], e["rounds"], e["solved"]) for e in summary[arm]["episodes"]] == [("done", 2, True)] * 2
     code = rounds_of(driver, "continue_tests_code")
     assert code and all(Path(s["branch_note"]).read_text() == "Submission failed the project's tests.\n\n" + TOLD
-                        + "\n\n" + CODE_HEAD + PARSE_SECTION.strip() for s in code)
+                        + "\n\n" + CODE_HEAD + CODE_SHOWN for s in code)
     wide = rounds_of(driver, "continue_tests_full")
     assert wide and all(Path(s["branch_note"]).read_text().startswith(
         "Submission failed the project's tests.\n\nThese required tests did not pass: TestParse.") for s in wide)

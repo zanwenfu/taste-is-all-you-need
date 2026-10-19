@@ -194,22 +194,38 @@ def task_with_patch(tmp_path, patch=PATCH):
     return task
 
 
-def test_the_failing_tests_code_is_the_patch_sections_that_name_them_most_mentions_first(tmp_path):
+def test_the_failing_tests_code_is_the_test_patch_its_sections_naming_them_first_most_first(tmp_path):
     task = task_with_patch(tmp_path)
     code = test_failures.test_code(task, ["TestOne", "TestTwo", "TestThree"], cap=5000)
-    # b_test.go names two failing tests, a_test.go one; the fixture names none.
-    assert code.index("b_test.go") < code.index("a_test.go") and "c.txt" not in code
-    assert code.startswith("diff --git a/b_test.go") and code.endswith("+func TestOne(t *testing.T) {}")
+    # b_test.go names two failing tests, a_test.go one; the fixture names none and comes last.
+    assert code.index("b_test.go") < code.index("a_test.go") < code.index("c.txt")
+    assert code.startswith("diff --git a/b_test.go") and code.endswith("+fixture")
     # A tie keeps the patch's order.
     assert test_failures.test_code(task, ["TestOne", "TestTwo"], cap=5000).startswith("diff --git a/a_test.go")
-    # A test named by its parts is found by its last part.
-    assert "a_test.go" in test_failures.test_code(task, ["pkg/a_test.go::TestOne"], cap=5000)
+    # A test named by its parts is found by its last part, without its parameters, or by its file; a Java test by
+    # its method.
+    for name in ("pkg/a_test.go::TestOne", "pkg/a_test.go::TestOne[case-1]", "b_test.go | Suite | is set up",
+                 "org.example.Things#TestThree"):
+        first = "a_test.go" if "TestOne" in name else "b_test.go"
+        assert test_failures.test_code(task, [name], cap=5000).startswith(f"diff --git a/{first}"), name
     # Within the cap: whole sections while they fit, then a cut one with room left, then nothing.
     first = test_failures.test_code(task, ["TestTwo"], cap=5000)
     assert len(test_failures.test_code(task, ["TestOne", "TestTwo"], cap=len(first) + 5)) <= len(first) + 5
-    # No patch, or no section naming a failing test (it is in the agent's repository already): nothing to show.
+    # No section naming a failing test (a suite runner, a test changed in place, fixtures only): the patch in its
+    # order. No patch: nothing to show.
+    assert test_failures.test_code(task, ["TestElsewhere"], cap=5000) == PATCH.strip()
+    assert test_failures.test_code(task, [], cap=5000) == PATCH.strip()
     assert test_failures.test_code(tmp_path / "none", ["TestOne"], cap=5000) == ""
-    assert test_failures.test_code(task, ["TestElsewhere"], cap=5000) == ""
+
+
+def test_a_pro_tasks_test_patch_is_its_own_file_next_to_the_config(tmp_path):
+    # SWE-bench Pro's Harbor tasks keep the patch in tests/test_patch.patch, not in config.json.
+    task = tmp_path / "task"
+    (task / "tests").mkdir(parents=True)
+    (task / "tests" / "config.json").write_text(json.dumps({"fail_to_pass": ["a_test.go | TestOne"]}))
+    (task / "tests" / "test_patch.patch").write_text(PATCH)
+    assert test_failures.test_patch(task) == PATCH
+    assert test_failures.test_code(task, ["a_test.go | TestOne"], cap=5000).startswith("diff --git a/a_test.go")
 
 
 def test_the_code_message_follows_the_tests_message_only_when_there_is_code():

@@ -149,22 +149,38 @@ def excerpt(log, names, before=CONTEXT_BEFORE, after=CONTEXT_AFTER, most=EXCERPT
 
 
 def test_patch(task_dir):
-    """The task's hidden test changes (the patch its grader applies before running the tests); "" when not found."""
+    """The task's hidden test changes (the patch its grader applies before running the tests); "" when not found.
+
+    The SWE-bench harness's tasks hold it in their config; SWE-bench Pro's in ``tests/test_patch.patch``.
+    """
     config = _config(task_dir) or {}
-    return str(config.get("test_patch") or "")
+    return str(config.get("test_patch") or "") or _read(Path(task_dir) / "tests" / "test_patch.patch")
+
+
+def marks(name):
+    """What in a test patch shows a failing test: its name, its last part (with and without parameters), its file
+    (a first part with a dot), or a Java test's method and class."""
+    parts = PARTS.split(name)
+    last = parts[-1].strip()
+    found = {name, last, re.sub(r"\[.*\]$", "", last)}
+    if len(parts) > 1 and "." in parts[0]:
+        found.add(parts[0].strip())
+    if "#" in name:
+        owner, method = name.rsplit("#", 1)
+        found.update({method, owner.rsplit(".", 1)[-1]})
+    return [mark for mark in found if len(mark) >= 4]
 
 
 def test_code(task_dir, names, cap):
-    """The parts of the task's test patch that hold the failing tests: its file sections that name a failing test
-    (in full, or by the name's last part), those naming the most failing tests first, then in the patch's order,
-    within ``cap`` characters. "" when there is no patch or no section names one: such a failing test is one the
-    agent's repository already holds."""
+    """The failing tests' code: the task's test patch, its file sections that name a failing test first (those
+    naming the most first), then the rest (fixtures, suites, tests changed where no name shows), each in the patch's
+    order, within ``cap`` characters; "" when the task has no patch."""
     sections = [part for part in SECTION.split(test_patch(task_dir)) if part.strip()]
-    marks = [[mark for mark in {name, leaf(name)} if len(mark) >= 4] for name in names or ()]
-    scored = sorted((-sum(any(mark in section for mark in named) for named in marks), index)
+    named = [marks(name) for name in names or ()]
+    scored = sorted((-sum(any(mark in section for mark in found) for found in named), index)
                     for index, section in enumerate(sections))
-    shown, text = [sections[index] for hits, index in scored if hits < 0], ""
-    for section in shown:
+    text = ""
+    for section in (sections[index] for _, index in scored):
         part = "diff --git " + section.rstrip("\n") + "\n"
         if len(text) + len(part) <= cap:
             text += part
