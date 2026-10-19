@@ -36,7 +36,8 @@ FIGURES = ("curves", "decisive", "recoveries", "checker", "choices")
 # The report's order of the recoveries (its --json file sorts keys, so the order is not kept there).
 VIEWS = ("retry", "retry_feedback", "rewind_oracle", "rewind_reader", "rewind_rules", "continue", "continue_bare",
          "retry_bare", "rewind_bare_oracle", "rewind_bare_reader", "rewind_bare_rules",
-         "retry_tests", "rewind_tests_oracle", "rewind_tests_reader", "rewind_tests_rules", "continue_tests")
+         "retry_tests", "rewind_tests_oracle", "rewind_tests_reader", "rewind_tests_rules", "continue_tests",
+         "continue_tests_code", "continue_tests_full", "continue_both")
 METHODS = ("reader", "rules", "before_large_edit", "visible_tests", "start", "oracle_highest_v")
 LABELS = {"retry": "Plain retry", "retry_feedback": "Retry + feedback", "rewind_oracle": "Rewind to r* (oracle)",
           "rewind_reader": "Rewind (reader)", "rewind_rules": "Rewind (rules)", "continue": "Continue + feedback",
@@ -44,7 +45,9 @@ LABELS = {"retry": "Plain retry", "retry_feedback": "Retry + feedback", "rewind_
           "rewind_bare_reader": "Rewind (reader), bare", "rewind_bare_rules": "Rewind (rules), bare",
           "retry_tests": "Retry + failed tests", "rewind_tests_oracle": "Rewind to r* + failed tests",
           "rewind_tests_reader": "Rewind (reader) + failed tests", "rewind_tests_rules": "Rewind (rules) + failed tests",
-          "continue_tests": "Continue + failed tests", "reader": "Trajectory reader", "rules": "Rules",
+          "continue_tests": "Continue + failed tests", "continue_tests_code": "Continue + failed tests and their code",
+          "continue_tests_full": "Continue + failed tests, wide output",
+          "continue_both": "Continue + feedback and failed tests", "reader": "Trajectory reader", "rules": "Rules",
           "before_large_edit": "Before the last large edit", "visible_tests": "Visible tests last passed",
           "start": "Start (retry)", "oracle_highest_v": "Oracle: highest v"}
 
