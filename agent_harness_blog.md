@@ -319,7 +319,3 @@ I'm building this — a general-purpose agent harness that implements these prim
 The goal is to be for agents what React is for frontend: a declarative abstraction layer where developers describe what their agents do, and the framework handles the orchestration, state management, and operational infrastructure.
 
 If you're building agent systems and hitting the same infrastructure walls — context management that doesn't scale, coordination that breaks under parallelism, transparency that's an afterthought — I'd love to hear about it. [Email me](mailto:zanwen.fu@duke.edu) or find me on [LinkedIn](https://linkedin.com/in/zanwenfu).
-
----
-
-*Zanwen (Ryan) Fu is a Software Engineer and MS Computer Science student at Duke University, focused on building production-grade agentic AI systems. He joins Robinhood's Agentic AI team as an MLE intern in May 2026. More at [zanwenfu.com](https://zanwenfu.com).*
