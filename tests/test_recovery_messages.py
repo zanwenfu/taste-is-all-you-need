@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from taste.agents.checker import BARE_FEEDBACK, parse_submission
-from taste.recovery_study.recovery_driver import RecoveryDriver, note
+from taste.recovery_study.recovery_driver import BOTH_PASSED, RecoveryDriver, note
+from taste.recovery_study.test_failures import CODE_HEAD
 from tests.recovery_fakes import FakeHarbor, agent_steps, base_jobs, recoveries, submission
 from tests.test_recovery_runs import FEEDBACK, drive, rounds_of, step
 
@@ -29,12 +30,20 @@ def graded(passed, output=FAILING):
             "run-script-stdout.txt": output, "run-script-stderr.txt": "", "reward.txt": "0"}
 
 
+# The task's hidden test changes: a new test (TestParse, failing) and an untouched helper file.
+PARSE_SECTION = ("diff --git a/app_test.go b/app_test.go\n--- a/app_test.go\n+++ b/app_test.go\n@@ -1,3 +1,8 @@\n"
+                 "+func TestParse(t *testing.T) {\n+\tif got := Parse(\"\"); len(got) != 0 {\n"
+                 "+\t\tt.Fatalf(\"expected [] got %v\", got)\n+\t}\n+}\n")
+HELPER_SECTION = "diff --git a/testdata/x.txt b/testdata/x.txt\n--- a/testdata/x.txt\n+++ b/testdata/x.txt\n+data\n"
+TEST_PATCH = PARSE_SECTION + HELPER_SECTION
+
+
 def study(tmp_path, **settings):
     """One failed run of a task whose tests are TestLoad and TestParse; the base run failed TestParse."""
     jobs_dir, trials, tasks = tmp_path / "jobs", tmp_path / "trials", tmp_path / "tasks"
     (tasks / "task-a" / "tests").mkdir(parents=True)
     (tasks / "task-a" / "tests" / "config.json").write_text(json.dumps(
-        {"fail_to_pass": "['TestParse']", "pass_to_pass": "['TestLoad']"}))
+        {"fail_to_pass": "['TestParse']", "pass_to_pass": "['TestLoad']", "test_patch": TEST_PATCH}))
     [run_id] = base_jobs(jobs_dir, trials, [agent_steps(6, tests_pass_at=(3,))],
                          calibration=[(1.0, 0.5, 300.0), (0.0, 0.7, 600.0), (0.0, 0.9, 900.0)], tasks_dir=str(tasks))
     for file, text in graded(["TestLoad"]).items():
@@ -163,4 +172,92 @@ def test_the_report_names_each_message_and_restart_point():
     assert sorted(report.views(run)) == ["retry_tests", "rewind_bare_reader", "rewind_bare_rules", "rewind_reader",
                                          "rewind_rules", "rewind_tests_oracle"]
     for name in ("retry_bare", "retry_tests", "continue_tests", "rewind_bare_oracle", "rewind_tests_oracle"):
+        assert name in report.VIEWS
+
+
+# The richer forms of the tests message, where the agent stopped --------------------------------------------------
+
+# Output whose assertion sits more than eight lines before the failing test's name: the excerpt misses it.
+FAR = ("=== RUN   TestParse\n    app_test.go:12: the assertion that matters: expected [] got error\n"
+       + "".join(f"    log line {i}\n" for i in range(12)) + "--- FAIL: TestParse (0.00s)\nFAIL\n")
+
+
+def test_notes_for_the_richer_forms():
+    reply = parse_submission(submission("not_done"))
+    assert note("continue_tests_code", "X") == "Submission failed the project's tests.\n\nX"
+    assert note("continue_tests_full", "Y") == "Submission failed the project's tests.\n\nY"
+    told = "Submission rejected by a reviewer: " + FEEDBACK
+    assert note("continue_both", reply, TOLD) == told + "\n\nThe project's tests: " + TOLD
+    assert note("continue_both", reply, True) == told + "\n\n" + BOTH_PASSED
+    assert note("continue_both", reply, "") == told == note("continue", reply)
+
+
+def test_round_one_of_the_richer_forms_tells_the_code_the_wide_output_or_both(tmp_path):
+    driver, run_id, first, saved = first_round(
+        tmp_path, ["continue", "continue_tests", "continue_tests_code", "continue_tests_full", "continue_both"],
+        output=FAR)
+    assert sorted(first) == ["cc", "cf", "cr", "ct", "cx"]
+    # All of them go on where the agent stopped, from the saved final state.
+    for settings in first.values():
+        assert (settings["branch_step"], settings["branch_override"], settings["branch_checkpoint"]) == (
+            "6", "reject", saved.name)
+    plain = Path(first["cx"]["branch_note"]).read_text()
+    assert "the assertion that matters" not in plain
+    # The code form: the same message, then the patch's section that holds the failing test (not the helper).
+    code = Path(first["cc"]["branch_note"]).read_text()
+    assert code == plain + "\n\n" + CODE_HEAD + PARSE_SECTION.strip()
+    # The wide form: its excerpt reaches the assertion, under the larger cap.
+    wide = Path(first["cf"]["branch_note"]).read_text()
+    assert wide.startswith("Submission failed the project's tests.\n\nThese required tests did not pass: TestParse.")
+    assert "the assertion that matters" in wide and "log line 11" in wide
+    # Both: the reviewer's feedback, then what the hidden tests said of the base run.
+    both = Path(first["cr"]["branch_note"]).read_text()
+    assert both == Path(first["ct"]["branch_note"]).read_text() + "\n\nThe project's tests: " + plain.split("\n\n", 1)[1]
+
+
+def test_the_richer_tests_forms_are_decided_by_the_hidden_tests_and_keep_their_form(tmp_path):
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue_tests_code", "continue_tests_full"],
+                                            budget_runs=2.0)
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries(solved_from_round=2)))
+    assert not [job for job in driver.jobs.values() if job["purpose"] == "check" and job.get("arm")]
+    summary = driver.summary()[run_id]["arms"]
+    for arm in ("continue_tests_code", "continue_tests_full"):
+        assert [(e["end"], e["rounds"], e["solved"]) for e in summary[arm]["episodes"]] == [("done", 2, True)] * 2
+    code = rounds_of(driver, "continue_tests_code")
+    assert code and all(Path(s["branch_note"]).read_text() == "Submission failed the project's tests.\n\n" + TOLD
+                        + "\n\n" + CODE_HEAD + PARSE_SECTION.strip() for s in code)
+    wide = rounds_of(driver, "continue_tests_full")
+    assert wide and all(Path(s["branch_note"]).read_text().startswith(
+        "Submission failed the project's tests.\n\nThese required tests did not pass: TestParse.") for s in wide)
+
+
+def test_continue_both_is_decided_by_the_checker_and_tells_what_the_tests_said(tmp_path):
+    # Every recovery trial fails the hidden tests and the checker rejects it: later rounds are told both.
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue_both"], budget_runs=2.0)
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries()))
+    assert {job.get("arm") for job in driver.jobs.values() if job["purpose"] == "check"} == {None, "continue_both"}
+    later = rounds_of(driver, "continue_both")
+    assert later and all(Path(s["branch_note"]).read_text() == "Submission rejected by a reviewer: " + FEEDBACK
+                         + "\n\nThe project's tests: " + TOLD for s in later)
+    assert all(e["end"] == "budget" for e in driver.summary()[run_id]["arms"]["continue_both"]["episodes"])
+
+
+def test_continue_both_says_the_tests_pass_when_the_checker_rejects_a_passing_submission(tmp_path):
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue_both"], budget_runs=2.0)
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries(solved_from_round=1)))
+    later = rounds_of(driver, "continue_both")
+    assert later and all(Path(s["branch_note"]).read_text() == "Submission rejected by a reviewer: " + FEEDBACK
+                         + "\n\n" + BOTH_PASSED for s in later)
+
+
+def test_the_richer_forms_caps_are_settings_with_a_floor(tmp_path):
+    settings = RecoveryDriver.open(tmp_path / "a.json", {}).settings
+    assert (settings["tests_code_chars"], settings["tests_full_chars"]) == (6000, 12000)
+    for name in ("tests_code_chars", "tests_full_chars"):
+        with pytest.raises(ValueError, match=name):
+            RecoveryDriver.open(tmp_path / f"{name}.json", {name: 50})
+
+
+def test_the_report_names_the_richer_forms():
+    for name in ("continue_tests_code", "continue_tests_full", "continue_both"):
         assert name in report.VIEWS

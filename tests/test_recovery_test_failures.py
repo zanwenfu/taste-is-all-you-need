@@ -177,3 +177,54 @@ def test_the_swebench_parsers_load_alone_when_swebench_is_installed():
     log = RUST_LOG.split(">>>>> Start Test Output'")[1].split(": '>>>>> End Test Output'")[0]
     spec = test_failures.Spec(repo="sharkdp/bat", instance_id="sharkdp__bat-1892", version="1892")
     assert parsers["sharkdp/bat"](log, spec).get("ignored_suffix_arg") == "FAILED"
+
+
+# The richer forms: the failing tests' code, and a wide excerpt ---------------------------------------------------
+
+PATCH = ("diff --git a/a_test.go b/a_test.go\n--- a/a_test.go\n+++ b/a_test.go\n+func TestOne(t *testing.T) {}\n"
+         "diff --git a/b_test.go b/b_test.go\n--- a/b_test.go\n+++ b/b_test.go\n+func TestTwo(t *testing.T) {}\n"
+         "+func TestThree(t *testing.T) { TestTwo(t) }\n"
+         "diff --git a/c.txt b/c.txt\n--- a/c.txt\n+++ b/c.txt\n+fixture\n")
+
+
+def task_with_patch(tmp_path, patch=PATCH):
+    task = tmp_path / "task"
+    (task / "tests").mkdir(parents=True)
+    (task / "tests" / "config.json").write_text(json.dumps({"FAIL_TO_PASS": ["TestOne", "TestTwo"], "test_patch": patch}))
+    return task
+
+
+def test_the_failing_tests_code_is_the_patch_sections_that_name_them_most_mentions_first(tmp_path):
+    task = task_with_patch(tmp_path)
+    code = test_failures.test_code(task, ["TestOne", "TestTwo", "TestThree"], cap=5000)
+    # b_test.go names two failing tests, a_test.go one; the fixture names none.
+    assert code.index("b_test.go") < code.index("a_test.go") and "c.txt" not in code
+    assert code.startswith("diff --git a/b_test.go") and code.endswith("+func TestOne(t *testing.T) {}")
+    # A tie keeps the patch's order.
+    assert test_failures.test_code(task, ["TestOne", "TestTwo"], cap=5000).startswith("diff --git a/a_test.go")
+    # A test named by its parts is found by its last part.
+    assert "a_test.go" in test_failures.test_code(task, ["pkg/a_test.go::TestOne"], cap=5000)
+    # Within the cap: whole sections while they fit, then a cut one with room left, then nothing.
+    first = test_failures.test_code(task, ["TestTwo"], cap=5000)
+    assert len(test_failures.test_code(task, ["TestOne", "TestTwo"], cap=len(first) + 5)) <= len(first) + 5
+    # No patch, or no section naming a failing test (it is in the agent's repository already): nothing to show.
+    assert test_failures.test_code(tmp_path / "none", ["TestOne"], cap=5000) == ""
+    assert test_failures.test_code(task, ["TestElsewhere"], cap=5000) == ""
+
+
+def test_the_code_message_follows_the_tests_message_only_when_there_is_code():
+    found = {"grader": "swebench-pro", "required": 1, "failing": ["TestOne"], "excerpt": "boom"}
+    told = message(found, cap=400)
+    assert test_failures.code_message(found, "diff --git a/x b/x", cap=400) == (
+        told + "\n\n" + test_failures.CODE_HEAD + "diff --git a/x b/x")
+    assert test_failures.code_message(found, "", cap=400) == told
+
+
+def test_the_wide_excerpt_reaches_output_far_from_the_failing_tests_name(tmp_path):
+    log = ("=== RUN   TestAuditUnaryInterceptor_CreateNamespace\n    the cause, far above\n"
+           + "".join(f"    noise {i}\n" for i in range(20))
+           + "--- FAIL: TestAuditUnaryInterceptor_CreateNamespace (0.00s)\n")
+    trial, task = pro_trial(tmp_path, ["TestLoad", "TestAuditUnaryInterceptor_DeleteNamespace"], stdout=log)
+    assert "the cause, far above" not in failures(trial, task)["excerpt"]
+    wide = failures(trial, task, wide=True)
+    assert "the cause, far above" in wide["excerpt"] and wide["failing"] == ["TestAuditUnaryInterceptor_CreateNamespace"]

@@ -60,7 +60,9 @@ _SPEC.loader.exec_module(_study)
 VIEWS = ("retry", "retry_feedback", "rewind_oracle", "rewind_reader", "rewind_rules", "continue", "continue_bare",
          # What the agent is told, apart from where it restarts: only that it failed, or the tests it failed.
          "retry_bare", "rewind_bare_oracle", "rewind_bare_reader", "rewind_bare_rules",
-         "retry_tests", "rewind_tests_oracle", "rewind_tests_reader", "rewind_tests_rules", "continue_tests")
+         "retry_tests", "rewind_tests_oracle", "rewind_tests_reader", "rewind_tests_rules", "continue_tests",
+         # Richer forms of the tests message where the agent stopped: with the tests' code, wide, or with the feedback.
+         "continue_tests_code", "continue_tests_full", "continue_both")
 REWINDS = ("rewind", "rewind_bare", "rewind_tests")
 # A deployed harness cannot rerun to find r*: the selector chooses among the others.
 SELECTABLE = ("retry", "retry_feedback", "rewind_reader", "rewind_rules", "continue", "continue_bare")

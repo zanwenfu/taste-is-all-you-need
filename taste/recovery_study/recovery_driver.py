@@ -27,6 +27,17 @@ Two more messages separate what the agent is told from where it restarts:
   hidden tests. These episodes have no checker: a round ends the episode when
   its trial passes the hidden tests, and the next round is told what failed.
 
+Three more forms of the tests message, where the agent stopped, test whether
+the message's form held it back (told a hidden test's name, an agent looks for
+the test in its repository and finds nothing):
+
+- ``continue_tests_code``: the tests message, then the failing tests' own code
+  from the task's test patch; ``continue_tests_full``: a wide excerpt of their
+  output under a larger cap. Both are decided by the hidden tests, as above;
+- ``continue_both``: the reviewer's feedback, then what the hidden tests said
+  of the same submission (the tests message, or that every required test
+  passes). Decided by the checker, as ``continue``.
+
 The feedback is the checker's own rendering of its findings
 (``taste.agents.checker.feedback``).
 
@@ -88,24 +99,34 @@ from taste.recovery_study.commands import gaming_flags
 from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver
 
 RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare",
-              "retry_bare", "rewind_bare", "retry_tests", "rewind_tests", "continue_tests")
+              "retry_bare", "rewind_bare", "retry_tests", "rewind_tests", "continue_tests",
+              "continue_tests_code", "continue_tests_full", "continue_both")
 REWINDS = ("rewind", "rewind_bare", "rewind_tests")
 SOURCES = ("oracle", "reader", "rules")
 SLUG = {"retry": "rt", "retry_feedback": "rf", "continue": "ct", "continue_bare": "cb",
-        "retry_bare": "rb", "retry_tests": "rx", "continue_tests": "cx"}
-# What each recovery tells the agent: the checker's feedback, its bare rejection, or the failed tests.
+        "retry_bare": "rb", "retry_tests": "rx", "continue_tests": "cx",
+        "continue_tests_code": "cc", "continue_tests_full": "cf", "continue_both": "cr"}
+# What each recovery tells the agent: the checker's feedback, its bare rejection, the failed tests, or both.
 MESSAGE = {"retry": "reviewer", "retry_feedback": "reviewer", "rewind": "reviewer", "continue": "reviewer",
            "retry_bare": "bare", "rewind_bare": "bare", "continue_bare": "bare",
-           "retry_tests": "tests", "rewind_tests": "tests", "continue_tests": "tests"}
+           "retry_tests": "tests", "rewind_tests": "tests", "continue_tests": "tests",
+           "continue_tests_code": "tests", "continue_tests_full": "tests", "continue_both": "both"}
+# The form of a tests message: the excerpt, or with the failing tests' code, or the wide excerpt.
+TESTS_FORM = {"continue_tests_code": "code", "continue_tests_full": "full"}
 NOTES = {"retry_feedback": "A previous attempt was rejected by a reviewer: {feedback}",
          "rewind": "Note: an attempt that continued from here was rejected by a reviewer: {feedback}",
-         "continue": "Submission rejected by a reviewer: {feedback}"}
+         "continue": "Submission rejected by a reviewer: {feedback}",
+         "continue_both": "Submission rejected by a reviewer: {feedback}"}
 BARE_NOTES = {"retry_bare": "A previous attempt was rejected by a reviewer.",
               "rewind_bare": "Note: an attempt that continued from here was rejected by a reviewer.",
               "continue_bare": BARE_FEEDBACK}
 TESTS_NOTES = {"retry_tests": "A previous attempt failed the project's tests.",
                "rewind_tests": "Note: an attempt that continued from here failed the project's tests.",
-               "continue_tests": "Submission failed the project's tests."}
+               "continue_tests": "Submission failed the project's tests.",
+               "continue_tests_code": "Submission failed the project's tests.",
+               "continue_tests_full": "Submission failed the project's tests."}
+# continue_both: what the hidden tests said of the submission the reviewer rejected.
+BOTH_TESTS, BOTH_PASSED = "The project's tests: {tests}", "The project's tests: every required test passes."
 # Taste's defaults (TrialSettings) for the time a trial holds back: for the
 # handoff to the verifier, for a closing reply, and the least time a plan needs.
 HANDOFF_SECONDS, REPLY_RESERVE_SECONDS, PLAN_SECONDS = 150.0, 210.0, 90.0
@@ -136,6 +157,8 @@ DEFAULTS = {
     "min_round_seconds": 0.0,   # 0: the trial's reply reserve and plan time, and a minute of work
     "retry_rounds": "retry",    # rounds after a plain retry: fresh trials told nothing, or "continue" with feedback
     "tests_feedback_chars": 1200,  # the failed-tests message's length cap, about the checker feedback's median
+    "tests_code_chars": 6000,   # continue_tests_code: the cap on the failing tests' code shown after the message
+    "tests_full_chars": 12000,  # continue_tests_full: the wide excerpt's message cap
     # Another recovery state whose initial checks this one takes, starting none: a second budget
     # recovers the same rejected runs from the same verdicts and saved final states.
     "checks_from": "",
@@ -164,14 +187,19 @@ def readings(path):
     return found
 
 
-def note(recovery, submission):
+def note(recovery, submission, tests=None):
     """What the agent is shown: after the checker's ``not_done`` submission, its feedback or its bare rejection;
-    for a tests recovery, ``submission`` is the failed tests' message (``test_failures.message``)."""
+    for a tests recovery, ``submission`` is the failed tests' message (``test_failures.message``). For
+    ``continue_both``, ``tests`` is what the hidden tests said of the same submission: the failed tests' message,
+    True when every required test passed, or ""/None when the grader left nothing to tell."""
     if recovery in BARE_NOTES:
         return BARE_NOTES[recovery]
     if recovery in TESTS_NOTES:
         return TESTS_NOTES[recovery] + (f"\n\n{submission}" if submission else "")
-    return NOTES[recovery].format(feedback=feedback(submission, "evidence"))
+    told = NOTES[recovery].format(feedback=feedback(submission, "evidence"))
+    if recovery == "continue_both" and tests:
+        told += "\n\n" + (BOTH_PASSED if tests is True else BOTH_TESTS.format(tests=tests))
+    return told
 
 
 def handoff_seconds(settings):
@@ -215,8 +243,9 @@ class RecoveryDriver(Driver):
             raise ValueError("repeats and check_attempts must be positive")
         if not 0 <= settings["min_round_share"] < 1:
             raise ValueError("min_round_share must be at least 0 and below 1")
-        if not settings["tests_feedback_chars"] >= 200:
-            raise ValueError("tests_feedback_chars must be at least 200: room for the failing tests' names")
+        for name in ("tests_feedback_chars", "tests_code_chars", "tests_full_chars"):
+            if not settings[name] >= 200:
+                raise ValueError(f"{name} must be at least 200: room for the failing tests' names")
         if not settings["budget_runs"] >= 1:
             raise ValueError("budget_runs must be at least 1: a recovery can afford one base run")
 
@@ -524,10 +553,21 @@ class RecoveryDriver(Driver):
     def _note(self, job, text):
         return str(jobs.write_text(self.work_dir() / "notes" / f"{job}.txt", text))
 
-    def _tests_message(self, run, where):
-        """The failed tests' message for a graded trial: ``where`` is (jobs folder, job, trial) or (job folder, trial)."""
-        found = test_failures.failures(Path(*where), Path(run["tasks_dir"]) / run["task"])
-        return test_failures.message(found, self.settings["tests_feedback_chars"])
+    def _tests_message(self, run, where, form="excerpt"):
+        """The failed tests' message for a graded trial: ``where`` is (jobs folder, job, trial) or (job folder, trial).
+        ``form`` (``TESTS_FORM``): the excerpt; "code", followed by the failing tests' code; "full", the wide excerpt."""
+        values, task = self.settings, Path(run["tasks_dir"]) / run["task"]
+        found = test_failures.failures(Path(*where), task, wide=form == "full")
+        if form == "full":
+            return test_failures.message(found, values["tests_full_chars"])
+        if form == "code":
+            code = test_failures.test_code(task, (found or {}).get("failing") or [], values["tests_code_chars"])
+            return test_failures.code_message(found, code, values["tests_feedback_chars"])
+        return test_failures.message(found, values["tests_feedback_chars"])
+
+    def _hidden_verdict(self, run, where, solved):
+        """continue_both: what the hidden tests said of a submission: True when it passed, else their message."""
+        return True if solved else self._tests_message(run, where)
 
     def _caps(self, usd, seconds, settings, branch):
         """Taste's equal caps for a trial with this much budget left."""
@@ -540,8 +580,11 @@ class RecoveryDriver(Driver):
         recovery, step = arm["recovery"], arm["step"]
         base = {**run["settings"], **values["ak"]}
         prepare, settings, found, checkpoint = [], dict(base), None, None
-        told = self._tests_message(run, (Path(run["job_dir"]), run["base"]["trial"])) \
+        graded = (Path(run["job_dir"]), run["base"]["trial"])
+        told = self._tests_message(run, graded, TESTS_FORM.get(recovery, "excerpt")) \
             if MESSAGE[recovery] == "tests" else reply
+        # A rejected base run failed the hidden tests: that is what they say of it.
+        hidden = self._hidden_verdict(run, graded, False) if MESSAGE[recovery] == "both" else None
         if recovery != "retry" and (recovery.startswith("retry") or (recovery in REWINDS and step == 0)):
             # A task's text cannot hold NUL (a grader's log can), so the task shows each as \x00; a branch note
             # delivers it as it is.
@@ -557,7 +600,7 @@ class RecoveryDriver(Driver):
             checkpoint = self._saved(found)
             settings.update(jobs.branch(script, step, mode="restore" if checkpoint else "rebuild",
                                         checkpoint=checkpoint, live=True, override=override,
-                                        note=self._note(job, note(recovery, told))))
+                                        note=self._note(job, note(recovery, told, hidden))))
         settings.update(self._caps(run["budget"]["usd"], run["budget"]["seconds"], base, branch=bool(prepare)))
         self.emit(self.harbor_job(job, run, settings, attempts, prepare=prepare),
                   run=run_id, arm=name, purpose="first", recovery=recovery, step=step,
@@ -579,16 +622,23 @@ class RecoveryDriver(Driver):
         else:
             base = {**jobs.inherited(agent["settings"], drop=jobs.CAPS), **values["ak"]}
             script, export = self.script(agent["token"])
-            message = MESSAGE[arm["recovery"]]
+            recovery, graded = arm["recovery"], (Path(values["jobs_dir"]), *previous["agent"])
+            message = MESSAGE[recovery]
             if message == "tests":
-                # No check saved this final state: the round rebuilds it from the record.
+                # No check saved this final state: the round rebuilds it from the record. Later rounds go on from
+                # the submission, so they are told as continue_tests is, in the arm's own form.
                 found = checkpoint = None
-                text = note("continue_tests", self._tests_message(run, (Path(values["jobs_dir"]), *previous["agent"])))
+                form = TESTS_FORM.get(recovery, "excerpt")
+                text = note(recovery if recovery in TESTS_FORM else "continue_tests",
+                            self._tests_message(run, graded, form))
             else:
                 found = (self.final_state(previous["check"]) or (None, None))[0]
                 checkpoint = self._saved(found)
                 submission = self.trial(previous["check"]["verdict"])["checker"]
-                text = note("continue_bare" if message == "bare" else "continue", submission)
+                if message == "both":
+                    text = note("continue_both", submission, self._hidden_verdict(run, graded, agent["solved"]))
+                else:
+                    text = note("continue_bare" if message == "bare" else "continue", submission)
             settings = {**base, **jobs.branch(script, agent["steps"], mode="restore" if checkpoint else "rebuild",
                                               checkpoint=checkpoint, live=True, override="reject",
                                               note=self._note(job, text)),
