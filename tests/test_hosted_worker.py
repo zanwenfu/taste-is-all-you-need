@@ -250,6 +250,29 @@ def test_a_model_reply_cut_off_by_the_runs_end_is_still_recorded(worker, sdk_tra
     assert len(replies) == 2 and replies[-1].get("cut_off") is True and not replies[0].get("cut_off")
 
 
+def test_a_refused_reply_ends_the_run_and_says_so(worker, sdk_transport, tmp_path):
+    """Asked again, a model that refused refuses again, each time paid for: the run ends at the refusal."""
+    refusal = {"type": "message", "id": "msg_no", "role": "assistant", "status": "completed",
+               "content": [{"type": "refusal", "refusal": "I can't help with that."}]}
+    replies = {1: [message("Let me run the tests."), bash("make test", "c1")], 2: [refusal]}
+    _, calls, _ = install(sdk_transport, worker_reply=lambda number, _: replies[number])
+
+    async def scenario():
+        hosted(worker)
+        async with terminal(worker, tmp_path) as t:
+            scripted(t.env, {"make test": TerminalResult(1, b"FAILED test_parse\n", b"")})
+            await execute_worker(worker.config, store=worker.store, environ=worker.environ)
+            result = report(worker)
+            trace = json.loads((run_directory(worker.store, result.run_id) / "worker/trajectory.worker.json").read_text())
+            assert trace["extra"]["exit"]["stopped_by"] == "refusal"
+            assert calls["worker"] == 2
+    asyncio.run(scenario())
+    events = _hosted_events(worker)
+    assert _unsettled(events) == ([], [])
+    # The refusal is on record with its stop, so a study can count it.
+    assert [e["stop_reason"] for e in events if e["kind"] == "hosted_completion"] == ["tool_use", "refusal"]
+
+
 def test_a_hosted_agent_needs_the_task_terminal_and_one_report(worker, sdk_transport):
     install(sdk_transport)
     hosted(worker)

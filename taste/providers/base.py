@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 StopReason = Literal[
-    "end_turn", "tool_use", "max_tokens", "refusal", "content_filter", "interrupted", "other"
+    "end_turn", "tool_use", "max_tokens", "refusal", "content_filter", "context_window", "interrupted", "other"
 ]
 
 

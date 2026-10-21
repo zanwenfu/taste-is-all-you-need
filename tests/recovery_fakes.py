@@ -55,8 +55,9 @@ def submission(verdict, *, confidence=0.8, cost=0.05):
 
 
 def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submitted", cost=0.02,
-           tokens=(1000, 100), cache=(0, 0, 0)):
-    """The settled record of a trial: a fixed plan and one hosted agent run with these steps."""
+           tokens=(1000, 100), cache=(0, 0, 0), stopped_by="", stops=None):
+    """The settled record of a trial: a fixed plan and one hosted agent run with these steps; ``stops``, each
+    step's model stop reason (default tool_use)."""
     run = [{"step_id": 1, "source": "user", "message": task}]
     for index, (command, code, output, message) in enumerate(steps, start=1):
         call = f"call_{index}"
@@ -64,6 +65,7 @@ def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submi
                     "tool_calls": [{"tool_call_id": call, "function_name": "bash", "arguments": {"command": command}}],
                     "observation": {"results": [{"source_call_id": call, "content": output,
                                                  "extra": {"command": command, "returncode": code}}]},
+                    "extra": {"stop_reason": (stops or {}).get(index, "tool_use")},
                     "metrics": {"prompt_tokens": tokens[0], "completion_tokens": tokens[1], "cached_tokens": cache[0],
                                 "cost_usd": cost / max(1, len(steps)),
                                 "extra": {"cache_write_tokens": cache[1], "reasoning_tokens": cache[2]}}})
@@ -74,7 +76,7 @@ def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submi
                    "steps": [{"step_id": 1, "source": "system", "message": "fixed plan",
                               "metrics": {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}}]},
                   {"agent": {"name": "mini-swe-agent"}, "steps": run,
-                   "extra": {"exit": {"exit_status": exit_status, "stopped_by": ""}}}],
+                   "extra": {"exit": {"exit_status": exit_status, "stopped_by": stopped_by}}}],
               "final_metrics": {"extra": {"known_cost_usd": cost}, "total_cost_usd": cost,
                                 "total_prompt_tokens": tokens[0] * len(steps),
                                 "total_completion_tokens": tokens[1] * len(steps)}}

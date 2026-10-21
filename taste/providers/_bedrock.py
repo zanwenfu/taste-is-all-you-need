@@ -67,6 +67,11 @@ _STOP_REASONS = {
     "stop_sequence": "end_turn",
     "guardrail_intervened": "content_filter",
     "content_filtered": "content_filter",
+    # Not in Converse's StopReason list (botocore 2023-09-30), but Claude's own.
+    "refusal": "refusal",
+    "model_context_window_exceeded": "context_window",
+    "malformed_model_output": "other",
+    "malformed_tool_use": "other",
 }
 # Claude allows four cache points in one request; this adapter writes two.
 _CACHE_POINT = {"cachePoint": {"type": "default"}}

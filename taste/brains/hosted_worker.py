@@ -62,6 +62,8 @@ PREFIX = "hosted_"
 _SCHEMA = "taste.brains/HostedAgent/1"
 # A judgement that the agent must be stopped, or that more will not help.
 STOP_SEVERITIES = frozenset({"wrong", "lost"})
+# Model stops that end the run: the conversation would only be refused, or be too long, again.
+ENDING_STOPS = frozenset({"refusal", "context_window"})
 # What one command's output keeps in memory; the agent itself saw all of it.
 OUTPUT_CHARS = 16_000
 COMMAND_CHARS = 65_536
@@ -288,6 +290,9 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
             except ValueError:
                 raise HostedStop("request_too_large") from None
             cost = self._record_completion(request_id, completion)
+            if completion.stop_reason in ENDING_STOPS:
+                # Asked again, the same conversation is refused or too long again, and each ask is paid for.
+                raise HostedStop(completion.stop_reason)
             return _reply(completion, cost)
 
     def _record_completion(self, request_id, completion, **marks):

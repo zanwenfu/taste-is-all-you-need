@@ -255,10 +255,10 @@ def test_claude_reads_the_cache_its_last_step_wrote_and_is_sent_its_effort_with_
 
 
 def test_claudes_thinking_is_left_out_of_the_reply_it_sends_back(wire):
-    sent = wire(ok({"reasoningContent": {"reasoningText": {"text": "Let me look.", "signature": "c2ln"}}},
-                   {"text": "I will list the files."},
-                   {"toolUse": {"toolUseId": "t1", "name": "bash", "input": {"command": "ls"}}},
-                   stop="tool_use"))
+    wire(ok({"reasoningContent": {"reasoningText": {"text": "Let me look.", "signature": "c2ln"}}},
+            {"text": "I will list the files."},
+            {"toolUse": {"toolUseId": "t1", "name": "bash", "input": {"command": "ls"}}},
+            stop="tool_use"))
     completion = ask(LLM(azure_openai=route()), model=SONNET)
     assert "Let me look." not in json.dumps(completion.transcript_blocks) and "c2ln" not in json.dumps(completion.transcript_blocks)
     assert [call.name for call in completion.tool_calls] == ["bash"]
@@ -300,6 +300,16 @@ def test_a_reply_cut_short_hands_over_no_tool_call(wire, stop):
     assert completion.tool_calls == () and completion.text_blocks == ("Halfway",)
     assert completion.transcript_blocks == ({"type": "text", "text": "Halfway"},)
     assert _reply(completion, 0.0).output == ()
+
+
+@pytest.mark.parametrize("stop, canonical", [
+    ("refusal", "refusal"), ("model_context_window_exceeded", "context_window"),
+    ("malformed_model_output", "other"), ("malformed_tool_use", "other")])
+def test_each_stop_bedrock_can_give_is_named_so_it_can_be_counted(wire, stop, canonical):
+    """Bedrock's StopReason enum (botocore bedrock-runtime 2023-09-30), plus Claude's own refusal."""
+    wire(ok({"text": "No."}, stop=stop))
+    completion = ask(LLM(azure_openai=route()), model=SONNET)
+    assert completion.stop_reason == canonical and completion.tool_calls == ()
 
 
 @pytest.mark.parametrize("usage", [

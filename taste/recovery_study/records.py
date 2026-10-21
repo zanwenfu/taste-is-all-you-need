@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import math
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +51,8 @@ FLAT_RECORD = Path("agent") / "trajectory.json"
 # Taste's own runs in a settled record ("taste-azure-worker": a run that never reached the agent).
 TASTE_ROLES = frozenset({"taste-coordinator", "taste-monitor", "taste-azure-worker"})
 SENTINEL = MINI_SENTINEL
+# The model stops a trial counts: a refusal, a cut-off or filtered reply, a full window, anything unnamed.
+COUNTED_STOPS = frozenset({"refusal", "max_tokens", "content_filter", "context_window", "other"})
 
 
 def number(raw):
@@ -113,8 +115,12 @@ def agent_view(nested):
     submission = ""
     if taken and ending.get("exit_status") == "Submitted":
         submission = protocol((run.get("agent") or {}).get("name")).submission_text(taken[-1].output)
+    stops = Counter(str((step.get("extra") or {}).get("stop_reason")) for step in run.get("steps") or ()
+                    if step.get("source") == "agent")
     return {"task": task, "steps": taken, "final_message": final_message(run), "submission": submission,
-            "exit_status": ending.get("exit_status"), "stopped_by": ending.get("stopped_by") or ""}
+            "exit_status": ending.get("exit_status"), "stopped_by": ending.get("stopped_by") or "",
+            # Model stops that end or cut a reply short, counted; a plain turn's (tool_use, end_turn) are not.
+            "model_stops": {stop: count for stop, count in sorted(stops.items()) if stop in COUNTED_STOPS}}
 
 
 def spend(nested, agent_result):
@@ -140,7 +146,9 @@ def token_split(nested):
         return None, None, None
     metrics = [step["metrics"] for sub in nested.get("subagent_trajectories") or ()
                for step in sub.get("steps") or () if isinstance(step.get("metrics"), dict)]
-    extra = lambda m, k: number((m.get("extra") or {}).get(k)) or 0
+
+    def extra(m, k):
+        return number((m.get("extra") or {}).get(k)) or 0
     return (sum(int(number(m.get("cached_tokens")) or 0) for m in metrics),
             sum(int(extra(m, "cache_write_tokens")) for m in metrics),
             sum(int(extra(m, "reasoning_tokens")) for m in metrics))
@@ -201,7 +209,8 @@ def trial(trial_dir, trials_root):
         "model": (config.get("agent") or {}).get("model_name"),
         "settings": dict((config.get("agent") or {}).get("kwargs") or {}),
         "cost_usd": cost, "prompt_tokens": prompt, "completion_tokens": completion,
-        # Of the prompt tokens: read from and written to the provider's cache; of the output: reasoning.
+        # Of the prompt tokens: read from and written to the provider's cache; of the output: reasoning
+        # (Bedrock's Converse reports none, for Luna or Claude: 0 there means not reported).
         "cache_read_tokens": cache_read, "cache_write_tokens": cache_write, "reasoning_tokens": reasoning,
         # Raw: the agent's execution by Harbor's clock; charged: without the prefix's time.
         "seconds": seconds, "prefix_seconds": prefix, "charged_seconds": charged(seconds, prefix),
@@ -210,6 +219,8 @@ def trial(trial_dir, trials_root):
         # A checkpoint over the size cap is partial: it lacks paths a restore would need.
         "checkpoint_partial": bool(saved.get("partial")) if saved.get("saved") else None,
         "exit_status": view.get("exit_status"), "steps": len(view["steps"]) if view else None,
+        # What ended the run early (budget, deadline, refusal, ...), "" if nothing did; None without a record.
+        "stopped_by": view.get("stopped_by"), "model_stops": view.get("model_stops"),
         # False: a settled record with no step of the agent. Taste never started
         # it; a reward Harbor gave its untouched container is not the agent's.
         "agent_started": None if nested is None else bool(view.get("steps")),

@@ -7,6 +7,7 @@ import json
 import pytest
 
 from taste.recovery_study import commands, records, rules
+from tests import recovery_fakes as fakes
 from tests.recovery_fakes import SENTINEL, agent_steps, finish, submission, trial
 
 
@@ -63,6 +64,22 @@ def test_a_trial_reads_its_reward_from_harbor_and_its_spend_and_steps_from_taste
     assert view["task"] == "Fix the bug." and view["final_message"] == "I fixed the bug and ran the tests."
     assert view["submission"].startswith("diff --git") and SENTINEL not in view["submission"]
     assert [step.number for step in view["steps"]] == [1, 2, 3, 4] and view["steps"][1].output == "3 passed in 0.12s"
+
+
+def test_a_trial_says_what_stopped_it_and_counts_the_model_stops_that_end_or_cut_a_reply(tmp_path):
+    jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
+    name = trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials, steps=agent_steps(3), exit_status="Stopped")
+    token = records.trial(jobs_dir / "j" / name, trials)["token"]
+    fakes.record(trials, token, agent_steps(3), exit_status="Stopped", stopped_by="refusal",
+                 stops={2: "max_tokens", 3: "refusal"})
+    summary = records.trial(jobs_dir / "j" / name, trials)
+    assert summary["stopped_by"] == "refusal"
+    assert summary["model_stops"] == {"max_tokens": 1, "refusal": 1}
+    plain = records.trial(jobs_dir / "j" / trial(jobs_dir, "j", "task-a", reward=1.0, trials_root=trials,
+                                                 steps=agent_steps(2)), trials)
+    assert plain["stopped_by"] == "" and plain["model_stops"] == {}
+    unsettled = records.trial(jobs_dir / "j" / trial(jobs_dir, "j", "task-a", reward=1.0, trials_root=trials), trials)
+    assert unsettled["stopped_by"] is None and unsettled["model_stops"] is None
 
 
 def test_without_a_record_harbors_figures_stand_and_an_unfaithful_branch_is_not_a_sample(tmp_path):
