@@ -55,7 +55,7 @@ def submission(verdict, *, confidence=0.8, cost=0.05):
 
 
 def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submitted", cost=0.02,
-           tokens=(1000, 100)):
+           tokens=(1000, 100), cache=(0, 0, 0)):
     """The settled record of a trial: a fixed plan and one hosted agent run with these steps."""
     run = [{"step_id": 1, "source": "user", "message": task}]
     for index, (command, code, output, message) in enumerate(steps, start=1):
@@ -64,8 +64,9 @@ def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submi
                     "tool_calls": [{"tool_call_id": call, "function_name": "bash", "arguments": {"command": command}}],
                     "observation": {"results": [{"source_call_id": call, "content": output,
                                                  "extra": {"command": command, "returncode": code}}]},
-                    "metrics": {"prompt_tokens": tokens[0], "completion_tokens": tokens[1], "cached_tokens": 0,
-                                "cost_usd": cost / max(1, len(steps))}})
+                    "metrics": {"prompt_tokens": tokens[0], "completion_tokens": tokens[1], "cached_tokens": cache[0],
+                                "cost_usd": cost / max(1, len(steps)),
+                                "extra": {"cache_write_tokens": cache[1], "reasoning_tokens": cache[2]}}})
     nested = {"schema_version": "ATIF-v1.7", "session_id": token,
               "steps": [{"step_id": 1, "source": "user", "message": task}],
               "subagent_trajectories": [
@@ -84,7 +85,8 @@ def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submi
 
 def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None, model="azure/gpt-6-luna",
           tasks_dir="/study/tasks", seconds=120.0, cost=0.02, exit_status="Submitted", branch=None,
-          handed_back=None, exception=None, name=None, task_text="Fix the bug.", audit_flags=(), verifier=None):
+          handed_back=None, exception=None, name=None, task_text="Fix the bug.", audit_flags=(), verifier=None,
+          cache=(0, 0, 0)):
     """One finished Harbor trial; with steps, its settled Taste record; with ``handed_back``, its final reply;
     with ``verifier`` ({file name: text}), what its grader left in its verifier folder.
 
@@ -102,7 +104,7 @@ def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None
     if branch is not None:
         taste["branch"] = branch
     if steps is not None:
-        record(trials_root, token, steps, task=task_text, exit_status=exit_status, cost=cost)
+        record(trials_root, token, steps, task=task_text, exit_status=exit_status, cost=cost, cache=cache)
     result = {"task_name": task, "trial_name": name,
               "config": {"task": {"path": f"{tasks_dir}/{task}"},
                          "agent": {"model_name": model, "kwargs": dict(settings or {})}},

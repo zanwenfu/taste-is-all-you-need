@@ -81,6 +81,17 @@ def test_without_a_record_harbors_figures_stand_and_an_unfaithful_branch_is_not_
     assert summary["agent_started"] is None  # no record: Harbor's figures stand
 
 
+def test_a_trial_keeps_its_cache_reads_cache_writes_and_reasoning_tokens(tmp_path):
+    """Per-step metrics carry the prompt's cache split; the state keeps the trial's sums, so a pilot can
+    check caching and cost without the machines' call logs. Harbor alone has no split: None."""
+    jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
+    name = trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials, steps=agent_steps(3), cache=(900, 80, 40))
+    summary = records.trial(jobs_dir / "j" / name, trials)
+    assert (summary["cache_read_tokens"], summary["cache_write_tokens"], summary["reasoning_tokens"]) == (2700, 240, 120)
+    bare = records.trial(jobs_dir / "j" / trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials), trials)
+    assert (bare["cache_read_tokens"], bare["cache_write_tokens"], bare["reasoning_tokens"]) == (None, None, None)
+
+
 def test_a_taste_trial_whose_record_was_never_settled_is_not_a_sample(tmp_path):
     """Graded and faithful, but Taste's record was never read (the settlement race of Phase 1, 43 of
     16,767 trials): its exit status and submission are unknown, so the driver must retry it rather

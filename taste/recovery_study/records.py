@@ -134,6 +134,18 @@ def spend(nested, agent_result):
     return round(cost, 8), totals[0], totals[1]
 
 
+def token_split(nested):
+    """(cache reads, cache writes, reasoning tokens) summed over the record's model calls; None without a record."""
+    if nested is None:
+        return None, None, None
+    metrics = [step["metrics"] for sub in nested.get("subagent_trajectories") or ()
+               for step in sub.get("steps") or () if isinstance(step.get("metrics"), dict)]
+    extra = lambda m, k: number((m.get("extra") or {}).get(k)) or 0
+    return (sum(int(number(m.get("cached_tokens")) or 0) for m in metrics),
+            sum(int(extra(m, "cache_write_tokens")) for m in metrics),
+            sum(int(extra(m, "reasoning_tokens")) for m in metrics))
+
+
 def handed_back(trial_dir):
     """The trial's last reply that is not a sidechain, from Harbor's flat record; None without one."""
     flat = read_json(Path(trial_dir) / FLAT_RECORD)
@@ -174,6 +186,7 @@ def trial(trial_dir, trials_root):
     nested = settled(taste.get("trial"), trials_root)
     view = agent_view(nested) or {}
     cost, prompt, completion = spend(nested, agent)
+    cache_read, cache_write, reasoning = token_split(nested)
     seconds, prefix = agent_seconds(result), number(branch.get("prefix_seconds"))
     graded = reward(result)
     changed = branch.get("changed_paths")
@@ -188,6 +201,8 @@ def trial(trial_dir, trials_root):
         "model": (config.get("agent") or {}).get("model_name"),
         "settings": dict((config.get("agent") or {}).get("kwargs") or {}),
         "cost_usd": cost, "prompt_tokens": prompt, "completion_tokens": completion,
+        # Of the prompt tokens: read from and written to the provider's cache; of the output: reasoning.
+        "cache_read_tokens": cache_read, "cache_write_tokens": cache_write, "reasoning_tokens": reasoning,
         # Raw: the agent's execution by Harbor's clock; charged: without the prefix's time.
         "seconds": seconds, "prefix_seconds": prefix, "charged_seconds": charged(seconds, prefix),
         "faithful": faithful, "unfaithful_at": branch.get("unfaithful_at"), "checkpoint": branch.get("checkpoint"),
