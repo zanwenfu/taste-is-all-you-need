@@ -154,7 +154,9 @@ def tool_run(run):
 
 
 def measured(messages, tools, effort, prompt_tokens):
-    """A request as its answer measured it, for bounding the next: its tools and effort, its messages, its tokens."""
+    """A request as its answer measured it, for bounding the next: its tools and effort and its messages as a
+    replay compares them (without the rewind arm's additions), and its tokens (with whatever it carried)."""
+    messages, tools = agentrewind.strip(messages, tools)
     return (digest(tools), effort), tuple(message_shas(messages)), prompt_tokens
 
 
@@ -176,13 +178,21 @@ def prompt_bound(messages, tools, effort, earlier=None):
     (``measured``), with the same tools and effort, whose messages begin this
     one's, bounds what they share by its measure; each message added since
     is bounded by its bytes, as ``request_token_bound`` bounds a request.
-    Without one, the request's bytes bound it whole.
+    Both are compared without what the rewind arm adds to every call, and
+    what it adds to this one is counted by its bytes too. Without such a
+    measure, the request's bytes bound it whole.
     """
-    if earlier is not None:
-        frame, shas, tokens = earlier
-        if frame == (digest(tools), effort) and tuple(message_shas(messages[:len(shas)])) == shas:
-            return tokens + request_token_bound(len(_json(messages[len(shas):]).encode()))
-    return request_token_bound(len(_json({"messages": messages, "tools": tools, "effort": effort}).encode()))
+    whole = request_token_bound(len(_json({"messages": messages, "tools": tools, "effort": effort}).encode()))
+    if earlier is None:
+        return whole
+    frame, shas, tokens = earlier
+    plain, kept = agentrewind.strip(messages, tools)
+    if frame != (digest(kept), effort) or len(plain) < len(shas) or tuple(message_shas(plain[:len(shas)])) != shas:
+        return whole
+    additions = len(_json(messages).encode()) - len(_json(plain).encode())
+    if tools is not None:
+        additions += len(_json(tools).encode()) - len(_json(kept).encode())
+    return min(whole, tokens + request_token_bound(len(_json(plain[len(shas):]).encode()) + additions))
 
 
 def text_sha(text):
@@ -687,8 +697,9 @@ class ReplayScript:
         if (self.source.get("tools_sha256") is not None
                 and digest(agentrewind.strip((), tools)[1]) != self.source["tools_sha256"]):
             detail["tools_differ"] = True
-        if first is not None and first < len(messages) and isinstance(messages[first], Mapping):
-            detail["role"] = messages[first].get("role")
+        compared = agentrewind.strip(messages, None)[0]
+        if first is not None and first < len(compared) and isinstance(compared[first], Mapping):
+            detail["role"] = compared[first].get("role")
         return detail
 
 
@@ -776,17 +787,17 @@ class BranchPolicy:
         if self.override:
             value.update(override=self.override, note=self.note)
         if self.rewind is not None:
-            value["rewind"] = {"notes": [dict(note) for note in self.rewind["notes"]],
-                               "restart_usd": self.rewind["restart_usd"]}
+            value["rewind"] = {**self.rewind, "notes": [dict(note) for note in self.rewind["notes"]]}
         return value
 
     def agent_rewind(self):
-        """What the rewind arm's agent is given (``MiniSweAgent(rewind=...)``): the notes, and the call they go in
-        at, a rewind's step k + 1; None outside the arm."""
+        """What the rewind arm's agent is given (``MiniSweAgent(rewind=...)``): the notes, and the call their notebook
+        goes in at: a rewind's step k + 1, or for a later round of a rewound run the call it first went in at
+        (``at_call``), where it stays; None outside the arm."""
         if self.rewind is None:
             return None
         return {"notes": [dict(note) for note in self.rewind["notes"]],
-                "at_call": self.step + 1 if self.override == "rewind" else None}
+                "at_call": self.step + 1 if self.override == "rewind" else self.rewind.get("at_call")}
 
     @classmethod
     def from_dict(cls, value):
@@ -799,8 +810,10 @@ class BranchPolicy:
 
 
 def _check_rewind(rewind):
-    if not isinstance(rewind, Mapping) or set(rewind) != {"notes", "restart_usd"}:
-        raise ValueError("the rewind arm's settings are its notes and restart_usd")
+    required, optional = {"notes", "restart_usd"}, {"restart_seconds", "spend_cap_usd", "at_call"}
+    if not isinstance(rewind, Mapping) or not required <= set(rewind) <= required | optional:
+        raise ValueError("the rewind arm's settings are its notes and restart_usd, and optionally restart_seconds, "
+                         "spend_cap_usd and at_call")
     notes = rewind["notes"]
     if not isinstance(notes, list) or not all(
             isinstance(note, Mapping) and set(note) <= {"memory_summary", "target_record_uid", "reason"}
@@ -808,9 +821,13 @@ def _check_rewind(rewind):
             and isinstance(note.get("target_record_uid", ""), str)
             and (note.get("reason") is None or isinstance(note["reason"], str)) for note in notes):
         raise ValueError("each rewind note is a non-empty memory_summary, its target and its reason")
-    usd = rewind["restart_usd"]
-    if type(usd) not in (int, float) or not math.isfinite(usd) or usd < 0:
-        raise ValueError("the rewind arm's restart_usd is a nonnegative number of dollars")
+    for name in ("restart_usd", "restart_seconds", "spend_cap_usd"):
+        value = rewind.get(name, 0.0)
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"the rewind arm's {name} is a nonnegative number")
+    at_call = rewind.get("at_call")
+    if at_call is not None and (type(at_call) is not int or at_call < 1):
+        raise ValueError("the rewind arm's at_call is the call its notebook first went in at, 1 or more")
 
 
 async def rebuild(script, step, execute, *, tolerance=0, on_row=None):
@@ -955,7 +972,9 @@ class ReplayHost:
         elif override == "reject":
             output, returncode, timed_out = self.note, REJECT_EXIT, False
             self._rejected = True
-        self.record("replay_output", {"step": self.replayed, "command": _cut(expected.command),
+        # A call of the rewind arm's tools is kept whole: a later timeline reads it back (taste.agents.agentrewind).
+        self.record("replay_output", {"step": self.replayed,
+                                      "command": expected.command if tool_run(expected) else _cut(expected.command),
                                       "cwd": expected.cwd, "returncode": returncode, "timed_out": timed_out,
                                       "override": override, "output": _cut(output, 16_000),
                                       "output_chars": len(output), "output_sha256": text_sha(output)})

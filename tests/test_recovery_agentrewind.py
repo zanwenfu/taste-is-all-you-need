@@ -24,9 +24,11 @@ def committing(target="llm-2"):
     return [*agent_steps(6), (listing, 0, "[]", "Where to go back to?"), (commit, 0, "accepted", "Back to step 2.")]
 
 
-def rewinding(commits=lambda spec: "-ar-f" in spec.name, faithful=lambda spec: True):
-    """The base run is rejected; a round that commits does so as ``committing``; every submission is accepted."""
-    base = recoveries(verdict=lambda spec: "not_done" if "-check-" in spec.name else "done")
+def rewinding(commits=lambda spec: "-ar-f" in spec.name, faithful=lambda spec: True,
+              rejects=lambda spec: "-check-" in spec.name):
+    """The base run is rejected (and what ``rejects`` names); a round that commits does so as ``committing`` and
+    saves its final files; every other submission is accepted."""
+    base = recoveries(verdict=lambda spec: "not_done" if rejects(spec) else "done")
 
     def outcome(spec, task, settings, harbor):
         if settings.get("branch_live") == "off" and "branch_checkpoint" not in settings:
@@ -37,7 +39,8 @@ def rewinding(commits=lambda spec: "-ar-f" in spec.name, faithful=lambda spec: T
             return {"reward": 0.0, "cost": 0.0, "seconds": 20.0, "branch": {"faithful": False}}
         if commits(spec):
             return {"reward": 0.0, "steps": committing(), "cost": 0.2, "seconds": 150.0, "exit_status": "Stopped",
-                    "stopped_by": "backtrack_commit", "branch": {"faithful": True}}
+                    "stopped_by": "backtrack_commit", "branch": {"faithful": True},
+                    "final": {"saved": True, "directory": "/var/lib/taste-checkpoints/x"}}
         return base(spec, task, settings, harbor)
     return outcome
 
@@ -55,8 +58,12 @@ def test_round_one_carries_on_after_the_rejection_with_the_two_tools_and_one_sen
     assert (first["branch_step"], first["branch_override"]) == ("6", "reject")
     told = Path(first["branch_note"]).read_text()
     assert told.startswith("Submission rejected by a reviewer: ") and told.endswith("\n\n" + SENTENCE)
-    # The rewind arm's tools, no notes yet, and the floor a commit needs: a round's least share of the budget.
-    assert json.loads(Path(first["branch_rewind"]).read_text()) == {"notes": [], "restart_usd": 0.07}
+    # The rewind arm's tools, no notes yet, and the floor a commit needs: a round's least share of the budget,
+    # and a round's least time (the base run's 10 s reply reserve, 90 s plan, a minute of work) beside the 300 s
+    # prefix allowance, measured against this trial's own cap.
+    assert json.loads(Path(first["branch_rewind"]).read_text()) == {
+        "notes": [], "restart_usd": 0.07, "restart_seconds": 460.0, "spend_cap_usd": 0.7}
+    assert first["final_checkpoint"].endswith("-ar-f1-final")
     episodes = driver.summary()[run_id]["arms"]["agentrewind"]["episodes"]
     assert [episode["end"] for episode in episodes] == ["done", "done"]
     assert all(episode["commits"] == 0 and episode["fork"] is None for episode in episodes)
@@ -74,12 +81,17 @@ def test_the_first_commit_forks_a_rewind_and_a_twin_that_stays_where_it_is(tmp_p
     [stayed] = settings_of(driver, "agentrewind_norestore")
     # Back to llm-2: step 1's files and messages, step 2's call made again with the notebook.
     assert (rewound["branch_step"], rewound["branch_override"], rewound["branch_mode"]) == ("1", "rewind", "rebuild")
-    # The twin: where the agent was before it began to rewind (llm-7, the listing), with the same note.
-    assert (stayed["branch_step"], stayed["branch_override"]) == ("6", "rewind")
-    for settings in (rewound, stayed):
-        assert Path(settings["branch_note"]).read_text() == agentrewind.notebook(notes)
-        assert json.loads(Path(settings["branch_rewind"]).read_text()) == {"notes": notes, "restart_usd": 0.07}
-        assert settings["branch"].endswith(".json")
+    # The twin: back to where the agent began to rewind (llm-7, the listing), the same note naming that call, the
+    # committing trial's own final files restored (nothing after step 6 changed a file), nothing rebuilt.
+    assert (stayed["branch_step"], stayed["branch_override"], stayed["branch_mode"]) == ("6", "rewind", "restore")
+    token = driver.trial(driver.runs[run_id]["arms"]["agentrewind"]["episodes"][0]["rounds"][0]["agent"])["token"]
+    assert stayed["branch_checkpoint"].endswith(f"-ar-f1-final-{token}")
+    twin_notes = [{**notes[0], "target_record_uid": "llm-7"}]
+    for settings, told in ((rewound, notes), (stayed, twin_notes)):
+        assert Path(settings["branch_note"]).read_bytes().decode() == agentrewind.notebook(told)
+        rewind = json.loads(Path(settings["branch_rewind"]).read_text())
+        assert rewind["notes"] == told and rewind["restart_usd"] == 0.07 and "at_call" not in rewind
+        assert rewind["spend_cap_usd"] == 0.5 and settings["branch"].endswith(".json")
     summary = driver.summary()[run_id]["arms"]
     [restored], [twin] = summary["agentrewind"]["episodes"], summary["agentrewind_norestore"]["episodes"]
     assert restored["end"] == twin["end"] == "done" and restored["rounds"] == twin["rounds"] == 2
@@ -106,8 +118,27 @@ def test_a_commit_with_no_round_left_grades_the_state_it_chose(tmp_path):
     driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, rewinding()))
     [graded] = settings_of(driver, "agentrewind")
     assert graded["branch_step"] == "1" and graded["branch_live"] == "off" and "branch_override" not in graded
-    assert "branch_rewind" not in graded
+    # Its replay holds calls of the two tools: its agent has them, so they replay.
+    assert json.loads(Path(graded["branch_rewind"]).read_text())["notes"][0]["memory_summary"] == NOTE
     summary = driver.summary()[run_id]["arms"]
     assert summary["agentrewind"]["episodes"][0]["end"] == "budget"
     assert summary["agentrewind_norestore"]["episodes"][0]["end"] == "budget"
     assert settings_of(driver, "agentrewind_norestore") == []
+
+
+def test_a_round_after_a_rejected_rewind_keeps_the_tools_the_sentence_and_the_notebooks_call(tmp_path):
+    """Rewound to llm-2, the round submits and is rejected: the next round carries on from that submission with
+    the two tools, the sentence, and the notebook kept where it went in (call 2), as the rewound context had it."""
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["agentrewind"], repeats=1, budget_runs=3.0)
+    harbor = FakeHarbor(trials, rewinding(rejects=lambda spec: "-check-" in spec.name or "-ar-e1r2-" in spec.name))
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, harbor)
+    rounds = settings_of(driver, "agentrewind")
+    assert [settings["branch_override"] for settings in rounds] == ["rewind", "reject"]
+    later = rounds[1]
+    told = Path(later["branch_note"]).read_text()
+    assert told.startswith("Submission rejected by a reviewer: ") and told.endswith(SENTENCE)
+    rewind = json.loads(Path(later["branch_rewind"]).read_text())
+    assert rewind["notes"] == [{"memory_summary": NOTE, "target_record_uid": "llm-2", "reason": None}]
+    assert rewind["at_call"] == 2 and later["final_checkpoint"].endswith("-final")
+    [episode] = driver.summary()[run_id]["arms"]["agentrewind"]["episodes"]
+    assert episode["end"] == "done" and episode["rounds"] == 3 and episode["commits"] == 1

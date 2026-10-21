@@ -266,7 +266,8 @@ class TasteAgent(BaseAgent):
                 summary["branch"].get("account"), token)))
         if settings.final_checkpoint:
             saves.append((summary, "final_checkpoint", lambda: branch_trial.save_final_checkpoint(
-                backend, self._checkpoint(settings.final_checkpoint), token)))
+                backend, self._checkpoint(branch_trial.final_checkpoint_name(settings.final_checkpoint, token)),
+                token)))
         for where, key, save in saves:
             try:
                 where[key] = await asyncio.to_thread(save)

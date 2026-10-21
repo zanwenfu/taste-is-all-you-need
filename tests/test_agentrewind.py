@@ -189,3 +189,31 @@ def test_the_timeline_is_the_runs_model_calls_replayed_then_live_with_what_each_
          "error": None},
         {"name": "bash", "arguments": {"command": "make test"}, "output": {"returncode": -1, "output": ""},
          "error": "timeout"})
+
+
+def test_a_runs_final_commit_and_where_it_began_to_rewind_skip_every_step_that_ran_no_container_command():
+    from taste.agents.trajectory_reader import Step as Taken
+
+    listing = agentrewind.tool_command("backtrack_candidates", {"reason": "stuck"})
+    commit = agentrewind.tool_command("backtrack_commit", {"record_uid": "llm-2", "memory_summary": "m",
+                                                           "reason": "why"})
+    plain = [Taken(1, "ls"), Taken(2, "sed -i s/a/b/ x"), Taken(3, listing), Taken(4, ""), Taken(5, commit)]
+    found = agentrewind.ended_at_commit(plain)
+    assert found == (agentrewind.Commit(2, "m", "why"), 3, False)
+    # A step with bash and a tool call ran a command: the rewind began after it.
+    mixed = [Taken(1, "ls"), Taken(2, "sed -i s/a/b/ x\n" + listing), Taken(3, commit)]
+    assert agentrewind.ended_at_commit(mixed)[1:] == (3, False)
+    # A commit that ran a command itself: the twin goes back to the commit's own call, which undoes it (flagged).
+    together = [Taken(1, "ls"), Taken(2, "make test\n" + commit)]
+    assert agentrewind.ended_at_commit(together)[1:] == (2, True)
+    assert agentrewind.ended_at_commit([Taken(1, "ls"), Taken(2, listing)]) is None
+    assert agentrewind.ended_at_commit([]) is None
+
+
+def test_a_tool_call_whose_recorded_command_was_cut_still_counts_as_a_call():
+    cut = agentrewind.tool_command("backtrack_commit", {"record_uid": "llm-1", "memory_summary": "m" * 100})[:60]
+    events = [{"kind": "hosted_replay", "step": 1, "text": ["x"], "calls": []},
+              {"kind": "hosted_replay_output", "step": 1, "command": cut, "returncode": 1, "output": "refused",
+               "timed_out": False}]
+    [step] = agentrewind.timeline(events)
+    assert step.results[0]["name"] == "unreadable tool call" and step.results[0]["arguments"] == {"command": cut}

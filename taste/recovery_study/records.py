@@ -209,6 +209,8 @@ def trial(trial_dir, trials_root):
         "token": taste.get("trial"), "settled": nested is not None,
         # The task container's image ID: the same task in another image is not the same task.
         "image_id": taste.get("image_id"),
+        # Whether the trial saved its final files (final_checkpoint), which a later branch can restore.
+        "final_saved": bool((taste.get("final_checkpoint") or {}).get("saved")),
         "model": (config.get("agent") or {}).get("model_name"),
         "settings": dict((config.get("agent") or {}).get("kwargs") or {}),
         "cost_usd": cost, "prompt_tokens": prompt, "completion_tokens": completion,
@@ -253,10 +255,10 @@ def image_changes(summaries, expected=None):
 def _rewind(view):
     ended = agentrewind.ended_at_commit(view["steps"]) if view.get("stopped_by") == "backtrack_commit" else None
     if ended is None:
-        return {"rewind_commit": None, "rewind_protocol_from": None}
-    commit, first = ended
+        return {"rewind_commit": None, "rewind_protocol_from": None, "rewind_commit_ran_command": None}
+    commit, first, ran = ended
     return {"rewind_commit": {"step": commit.step, "memory_summary": commit.memory_summary, "reason": commit.reason},
-            "rewind_protocol_from": first}
+            "rewind_protocol_from": first, "rewind_commit_ran_command": ran}
 
 
 def usable(summary):

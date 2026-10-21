@@ -352,6 +352,29 @@ def test_a_trials_final_files_are_restored_for_the_last_step_of_its_own_script(t
     cut = branch_trial.BranchInputs(inputs.raw, replace(inputs.script, source={**inputs.script.source,
                                                                                "dropped_steps": 1}), "")
     assert not branch_trial.names_branch(identity, cut, 3)
+    # An earlier step's files are the final files when every step after it ran only the rewind arm's tools,
+    # which change no file: the rewind arm's twin restores them there.
+    from taste.agents import agentrewind
+    from taste.brains.branch_replay import RecordedRun
+    listing = RecordedRun.from_dict({"command": agentrewind.tool_command("backtrack_candidates", {"reason": "r"}),
+                                     "executed": None, "cwd": "/app", "timeout_seconds": 30, "output": "[]",
+                                     "returncode": 0, "timed_out": False, "output_exact": True})
+    steps = list(inputs.script.steps)
+    tail = replace(steps[-1], number=4, runs=(listing,))
+    tools_only = branch_trial.BranchInputs(inputs.raw, replace(inputs.script, steps=(*steps, tail)), "")
+    assert branch_trial.names_branch(identity, tools_only, 3) and branch_trial.names_branch(identity, tools_only, 4)
+    assert not branch_trial.names_branch(identity, tools_only, 2)
+    # Each trial of a job keeps its own final files: an ID names one directory per trial.
+    assert branch_trial.final_checkpoint_name("rec-x-ar-f1-final", "f00d") == "rec-x-ar-f1-final-f00d"
+    assert branch_trial.final_checkpoint_name("/srv/final", "f00d") == "/srv/final"
+
+
+def test_a_note_is_read_exactly_as_it_was_written(tmp_path):
+    path = _script(tmp_path)
+    (tmp_path / "note.txt").write_bytes(b"Submission rejected by a reviewer: line one\r\nline two")
+    settings = TrialSettings.from_options({**ALONE, "branch": str(path), "branch_step": "3",
+                                           "branch_override": "reject", "branch_note": str(tmp_path / "note.txt")})
+    assert branch_trial.load_inputs(settings).note == "Submission rejected by a reviewer: line one\r\nline two"
 
 
 def test_the_replay_outcome_is_read_from_the_settled_trajectory():

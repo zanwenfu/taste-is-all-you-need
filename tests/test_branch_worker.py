@@ -319,6 +319,26 @@ def test_the_rewind_arm_lists_its_calls_commits_and_a_later_round_re_decides_the
     assert len(second.commands) == 3
 
 
+def test_a_later_round_of_the_rewind_arm_replays_a_listing_and_keeps_the_tools(base, other, sdk_transport, tmp_path):
+    """Round one lists the candidates, then repairs in place and submits; round two, after a rejection, replays
+    that listing faithfully (its agent has the tools) and has them on every live call."""
+    rewind = {"notes": [], "restart_usd": 0.0}
+    first = branch(other, sdk_transport, tmp_path, base.script, 3, override="reject", note=REJECTION, rewind=rewind,
+                   replies={1: [rewind_tool("backtrack_candidates", {"reason": "rejected"}, "t1")],
+                            2: [bash(f"echo {SENTINEL}", "c4")]})
+    assert first.code == WorkerExitCode.COMPLETED and first.calls == 2
+    record = export_script(first.journal, ledger=first.ledger, parent=first.path, trial="round-1")
+    third = open_worker(tmp_path / "round2")
+    try:
+        second = branch(third, sdk_transport, tmp_path, record, 5, override="reject", note=REJECTION, rewind=rewind,
+                        where="round2", replies={1: [bash(f"echo {SENTINEL}", "c5")]})
+    finally:
+        third.store.close()
+    assert second.code == WorkerExitCode.COMPLETED and second.calls == 1
+    assert second.trace["extra"]["branch"]["faithful"]
+    assert [tool["name"] for tool in second.requests[0]["tools"]] == ["bash", "backtrack_candidates", "backtrack_commit"]
+
+
 def test_steps_are_the_trajectory_readers_steps(base, other, sdk_transport, tmp_path):
     """Step k is the same step to the map, the reader and a branch: the readers' steps are the script's."""
     run = branch(other, sdk_transport, tmp_path, base.script, 3, override="reject", note=REJECTION,

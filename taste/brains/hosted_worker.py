@@ -399,10 +399,14 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         if rewind is None:
             output, code, commit = f"Unknown tool '{name}'.", 1, None
         else:
+            # Against this trial's own cap (the session's budget adds a worst-case call to it) and its deadline,
+            # as the driver decides whether another round starts.
             spent = math.fsum((self.session.known_cost_usd, self.session.lost_exposure_usd))
+            cap = rewind.get("spend_cap_usd", self.session.binding.budget_usd)
+            left = self.session.binding.deadline_unix - time.time()
             output, code, commit = agentrewind.answer(
                 name, arguments, agentrewind.timeline(self._events()), rewind["notes"],
-                can_restart=self.session.binding.budget_usd - spent >= rewind["restart_usd"])
+                can_restart=cap - spent > rewind["restart_usd"] and left >= rewind.get("restart_seconds", 0.0))
         self._append("output", effect_id=effect_id, returncode=code, terminated="", output=output,
                      output_chars=len(output), dropped_bytes=0)
         if commit is not None:

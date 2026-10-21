@@ -445,9 +445,11 @@ def test_a_request_is_bounded_by_its_measured_start_and_the_bytes_added_since(re
     assert prompt_bound(changed, [TOOL], "low", earlier) == prompt_bound(changed, [TOOL], "low")
     assert prompt_bound(original[:shared - 1], [TOOL], "low", earlier) == prompt_bound(original[:shared - 1],
                                                                                          [TOOL], "low")
-    # A live call's own measure bounds the next request the same way.
+    # A live call's own measure bounds the next request the same way; the bytes' bound, when it is lower.
     live = measured(original[:4], [TOOL], "low", 5_000)
-    assert prompt_bound(original, [TOOL], "low", live) == 5_000 + request_token_bound(size(original[4:]))
+    assert prompt_bound(original, [TOOL], "low", live) == min(whole, 5_000 + request_token_bound(size(original[4:])))
+    assert prompt_bound(original, [TOOL], "low", measured(original[:4], [TOOL], "low", 50)) == (
+        50 + request_token_bound(size(original[4:])))
 
 
 def test_a_recorded_step_without_a_whole_usage_gives_no_measure(recorded):
@@ -666,3 +668,33 @@ def test_the_rewind_arms_agent_is_given_its_notes_and_the_call_they_go_in_at():
                          rewind={"notes": [], "restart_usd": 0.0})
     assert first.agent_rewind() == {"notes": [], "at_call": None}
     assert BranchPolicy("/s/script.json", "a" * 64, 3, override="reject", note=NOTE).agent_rewind() is None
+    # A round after a rewound one keeps its notebook where it went in, and the floor holds seconds too.
+    later = BranchPolicy("/s/script.json", "a" * 64, 9, override="reject", note=NOTE,
+                         rewind={"notes": notes, "restart_usd": 0.0, "restart_seconds": 360.0, "at_call": 3})
+    assert later.agent_rewind() == {"notes": notes, "at_call": 3}
+    assert BranchPolicy.from_dict(later.to_dict()) == later
+    for bad in ({"at_call": 0}, {"at_call": "3"}, {"restart_seconds": -1}, {"extra": 1}):
+        with pytest.raises(ValueError):
+            BranchPolicy("/s/script.json", "a" * 64, 9, rewind={"notes": [], "restart_usd": 0.0, **bad})
+
+
+def test_the_window_bound_anchors_on_a_measure_whatever_the_rewind_arm_added():
+    """Measured or bounded, a request is compared without the arm's additions; what they add is counted by
+    its bytes, so the bound stays an upper bound and stays near the measure (a long run is not stopped early)."""
+    system = {"role": "system", "content": "You are careful."}
+    history = [system, {"role": "user", "content": "Fix it."}] + [
+        {"role": "user", "content": "output " + "x" * 3000} for _ in range(100)]
+    measure = measured(history, [TOOL], "low", 90_000)  # as the base run's call measured it, with no additions
+    added = [*history, {"role": "user", "content": "more " + "y" * 4000}]
+    notes = [{"memory_summary": "Read the parser first."}]
+    sent = [{"role": "system", "content": agentrewind.with_guidance(system["content"])}, *added[1:],
+            agentrewind.notebook_message(notes)]
+    tools = [TOOL, *agentrewind.tools()]
+    whole = request_token_bound(size({"messages": sent, "tools": tools, "effort": "low"}))
+    bound = prompt_bound(sent, tools, "low", measure)
+    extra = (size(sent) - size(agentrewind.strip(sent, tools)[0])) + (size(tools) - size([TOOL]))
+    assert bound == 90_000 + request_token_bound(size(added[len(history):]) + extra) < whole
+    assert whole > 200_000 > bound
+    # A live measure of a request with the additions anchors the next one the same way.
+    again = measured(sent, tools, "low", 95_000)
+    assert prompt_bound([*sent, {"role": "user", "content": "z"}], tools, "low", again) < 200_000

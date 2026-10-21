@@ -11,17 +11,33 @@ each candidate's rendering, with its 400-character previews and the cap of 80 ca
 What Taste supplies, disclosed with results, because the released code leaves it to a benchmark's adapter,
 which is not public:
 
-- the tools in the Responses API's flat form, beside mini-swe-agent's bash tool, on every call;
+- the tools in the Responses API's flat form, beside mini-swe-agent's bash tool, on every call of every round;
 - the guidance after the agent's system prompt, two newlines apart, on every call;
 - the notebook as a user turn after the restored messages (Bedrock's Converse takes no system message after
-  the conversation starts), built from the notes in full and rendered as upstream renders it;
-- record ids ``llm-<step>``, the study's own step numbers in the current timeline;
-- the candidate list as JSON; a candidate's tool record as the observation the agent saw, with no file
-  effects (Taste does not snapshot files per command);
+  the conversation starts), built from the notes in full and rendered as upstream renders it, and kept at
+  that place on every later call of the rewound run, later rounds included (upstream's public runner applies
+  its override to the rewound call; its private adapter is presumed to keep it, as the context it made does);
+- record ids ``llm-<step>``, the study's own step numbers in the current timeline; after a rewind the
+  re-made call takes the number of the call it replaces; there are no tool record ids, so upstream's mapping
+  of a tool id to its owning call has nothing to map;
+- the candidate list as JSON; ``created_at`` null (replayed steps keep no clock time); a candidate's tool
+  record as the command's exit code and output as recorded, with no file effects (Taste does not snapshot
+  files per command);
 - each tool's answer as the tool's output: an error with exit code 1, the agent then going on as upstream's
-  tools raise to it; an accepted commit ends the run, and the recovery driver branches from the chosen step
-  (``taste.brains.branch_replay``, override ``rewind``);
-- a commit refused when the attempt's budget left cannot start another round (the study's episode rule).
+  tools raise to it. A target that is not one of the timeline's calls is such an error, which the agent can
+  correct; upstream's commit lets it through and its runner then fails the rewind. An accepted commit ends
+  the run, and the recovery driver branches from the chosen step (``taste.brains.branch_replay``, override
+  ``rewind``);
+- a commit refused when the attempt's budget left cannot start another round (the study's episode rule), in
+  dollars against the trial's own cap and in seconds against its deadline;
+- the context-window guard (``taste.brains.branch_replay.prompt_bound``) counts the arm's additions to a
+  request by their bytes on top of the last measure, so for Claude (200K) this arm's runs end somewhat
+  earlier than the others' near the window.
+
+The recovery driver's ``agentrewind_norestore`` twin (``taste.recovery_study.recovery_driver``) is a rewind,
+the same way and with the same note, to where the agent began to rewind (the step after the last one that ran
+a container command), so its files are its final files and the rollback guidance is true of it; its note
+names that call.
 """
 
 from __future__ import annotations
@@ -123,7 +139,10 @@ def record_uid(number):
 
 
 def _result(command, returncode, output, timed_out):
-    tool = parse_tool_command(command)
+    try:
+        tool = parse_tool_command(command)
+    except ValueError:  # a tool call recorded cut: still a call of the tools, its arguments unreadable
+        tool = ("unreadable tool call", {"command": command})
     name, arguments = tool if tool is not None else ("bash", {"command": command})
     return {"name": name, "arguments": arguments, "output": {"returncode": returncode, "output": output},
             "error": "timeout" if timed_out else None}
@@ -168,16 +187,26 @@ def candidates(steps: Iterable[Step], limit=DEFAULT_CANDIDATE_LIMIT):
 
 
 def _tool_calls(step):
-    """The step's commands, each as (name, arguments) if it called one of the two tools, else None; [] for none."""
+    """The step's commands, each as (name, arguments) if it called one of the two tools, else None; [] for none.
+    A tool call's encoding holds no newline (JSON escapes them), so a step's commands split on newlines."""
     lines = [line for line in str(step.command).split("\n") if line]
     return [parse_tool_command(line) if line.startswith(TOOL_PREFIX) else None for line in lines]
 
 
+def _ran_a_command(step):
+    return any(call is None for call in _tool_calls(step))
+
+
 def ended_at_commit(steps):
     """For a run that ended at an accepted commit, from its steps (``taste.agents.trajectory_reader.Step``):
-    ``(Commit, the first step of the block of steps at its end that only called the two tools)``; None if the
-    last tool call is not a commit. That block's first step is where the agent was before it began to rewind:
-    the place a commit that restores nothing goes back to."""
+    ``(Commit, where the agent began to rewind, whether the commit's own step ran a container command)``; None
+    if the last tool call is not a commit.
+
+    Where it began to rewind is the step after the last one that ran a container command: from there on it
+    only called the two tools or ran nothing, so the files there are the run's final files. It is the call a
+    commit that restores nothing goes back to (the rewind arm's twin); when the commit's own step ran a
+    command too, it is that step, whose command going back undoes.
+    """
     steps = list(steps)
     calls = [call for call in (_tool_calls(steps[-1]) if steps else ()) if call is not None]
     if not calls or calls[-1][0] != COMMIT:
@@ -187,11 +216,12 @@ def ended_at_commit(steps):
     summary = arguments.get("memory_summary")
     if match is None or not isinstance(summary, str) or not summary.strip():
         return None
+    ran = _ran_a_command(steps[-1])
     first = len(steps)
-    while first > 1 and (found := _tool_calls(steps[first - 2])) and all(call is not None for call in found):
+    while not ran and first > 1 and not _ran_a_command(steps[first - 2]):
         first -= 1
     reason = arguments.get("reason")
-    return Commit(int(match.group(1)), summary, reason if isinstance(reason, str) and reason else None), first
+    return Commit(int(match.group(1)), summary, reason if isinstance(reason, str) and reason else None), first, ran
 
 
 @dataclass(frozen=True)

@@ -44,7 +44,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from taste.brains.branch_replay import ReplayScript, check_branch, text_sha
+from taste.brains.branch_replay import ReplayScript, check_branch, text_sha, tool_run
 
 BRANCH_SCRIPT = "branch-script.json"
 MANIFEST = "manifest.json"
@@ -82,7 +82,8 @@ def load_inputs(settings):
         return None
     raw = Path(settings.branch).read_bytes()
     script = ReplayScript.from_bytes(raw)
-    note = Path(settings.branch_note).read_text(encoding="utf-8") if settings.branch_note else ""
+    # Exactly as written: a note's line endings are part of what the agent is shown.
+    note = Path(settings.branch_note).read_bytes().decode("utf-8") if settings.branch_note else ""
     if settings.branch_note and not note.strip():
         raise ValueError("the branch note is empty")
     recorded = (script.source.get("agent") or {}).get("name")
@@ -151,11 +152,20 @@ def names_branch(identity, inputs, step):
         return False
     if identity.get("final") is True:
         # A trial's final files are those after the last step of the script
-        # exported from it, if the script holds every step the run took.
-        source = inputs.script.source
+        # exported from it, if the script holds every step the run took; and
+        # after an earlier step, when every step after it ran only the rewind
+        # arm's tools, which change no file.
+        source, steps = inputs.script.source, inputs.script.steps
         return (isinstance(identity.get("trial"), str) and identity["trial"] == source.get("trial")
-                and step == len(inputs.script.steps) and not source.get("dropped_steps"))
+                and 0 <= step <= len(steps) and not source.get("dropped_steps")
+                and all(tool_run(run) for item in steps[step:] for run in item.runs))
     return identity.get("script_sha256") == inputs.sha256 and identity.get("step") == step
+
+
+def final_checkpoint_name(value, trial):
+    """Where a trial saves its final files (``final_checkpoint``): a path as given; an ID, one per trial, so that
+    each of a job's trials keeps its own."""
+    return str(value) if "/" in str(value) else f"{value}-{trial}"
 
 
 def changed_paths(manifest):

@@ -50,9 +50,13 @@ AgentRewind's method (Zhuang et al., arXiv 2608.14380; ``taste.agents.agentrewin
   the call made again with the notebook of the episode's notes. At an episode's first commit the episode
   forks: ``agentrewind_norestore`` is its twin, whose rewinds restore nothing (they go back to where the agent
   was before it began to rewind, the same way and with the same note), from the same rounds and so with the
-  same budget left. An episode without a commit has no twin: its twin's outcome is its own. A rewind that
-  cannot be brought back faithfully ends its episode as a failure; with no round left after a commit, the
-  state the rewind chose is graded with no model call (the twin's is the committing round's own).
+  same budget left. The twin's note names the call it goes back to, so that what the rewind guidance says of
+  a rewound context is true of it, and it restores the committing trial's saved final files (nothing after
+  that call changed a file) where those were saved; a twin whose commit step itself ran a command is flagged
+  (going back undoes it). An episode without a commit has no twin: its twin's outcome is its own. Every later
+  round, after a rewind or a rejection, keeps the tools, the sentence and the notebook where it went in. A
+  rewind that cannot be brought back faithfully ends its episode as a failure; with no round left after a
+  commit, the state the rewind chose is graded with no model call (the twin's is the committing round's own).
 
 The feedback is the checker's own rendering of its findings
 (``taste.agents.checker.feedback``).
@@ -112,6 +116,7 @@ from pathlib import Path
 from taste.agents import agentrewind
 from taste.agents.checker import BARE_FEEDBACK, checker_task, feedback
 from taste.agents.trajectory_reader import rewind_point
+from taste.benchmarks import branch_trial
 from taste.recovery_study import jobs, records, search, state, test_failures
 from taste.recovery_study.commands import gaming_flags
 from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver
@@ -618,36 +623,54 @@ class RecoveryDriver(Driver):
         if commit is None:
             episode["end"] = "no_submission"
             return False
-        notes = [*episode.get("notes", ()), {"memory_summary": commit["memory_summary"],
-                                             "target_record_uid": agentrewind.record_uid(commit["step"]),
-                                             "reason": commit["reason"]}]
+        def noted(step):
+            return {"memory_summary": commit["memory_summary"], "target_record_uid": agentrewind.record_uid(step),
+                    "reason": commit["reason"]}
+
+        before = list(episode.get("notes", ()))
         if name == AGENTREWIND and episode.get("fork") is None:
             twins = run["arms"].setdefault(NORESTORE, {"recovery": NORESTORE, "step": arm["step"], "first": [],
                                                        "episodes": []})
-            twin = {**copy.deepcopy(episode), "forked_from": index}
+            twin = {**copy.deepcopy(episode), "forked_from": index, "fork": None,
+                    "undoes_a_command": bool(agent.get("rewind_commit_ran_command"))}
             twins["episodes"].append(twin)
             episode["fork"] = len(twins["episodes"]) - 1
-            self._rewind_round(run, twin, agent, agent["rewind_protocol_from"], notes, restores=False)
+            self._rewind_round(run, twin, agent, agent["rewind_protocol_from"],
+                               [*before, noted(agent["rewind_protocol_from"])], restores=False)
         target = commit["step"] if name == AGENTREWIND else agent["rewind_protocol_from"]
-        return self._rewind_round(run, episode, agent, target, notes, restores=name == AGENTREWIND)
+        return self._rewind_round(run, episode, agent, target, [*before, noted(target)],
+                                  restores=name == AGENTREWIND)
 
     def _rewind_round(self, run, episode, agent, target, notes, *, restores):
-        """Queue the round that goes back to call ``target``; with no round left, grade the state it chose."""
+        """Queue the round that goes back to call ``target``; with no round left, grade the state it chose.
+
+        A round that restores nothing goes back to where the files are the committing trial's final files:
+        it restores those when they were saved and its commit step ran no command."""
         episode["notes"] = notes
+        rewind = {"target": target, "notes": notes}
+        if not restores and agent.get("final_saved") and not agent.get("rewind_commit_ran_command") \
+                and agent["settings"].get("final_checkpoint"):
+            rewind["checkpoint"] = branch_trial.final_checkpoint_name(agent["settings"]["final_checkpoint"],
+                                                                      agent["token"])
         if self._room(run, episode, agent["settings"]):
-            episode["rounds"].append({"agent": None, "agent_jobs": [], "check": new_check(),
-                                      "rewind": {"target": target, "notes": notes}})
+            episode["note_at"] = target
+            episode["rounds"].append({"agent": None, "agent_jobs": [], "check": new_check(), "rewind": rewind})
             return True
         if restores:
-            episode["rounds"].append({"agent": None, "agent_jobs": [], "check": new_check(),
-                                      "rewind": {"target": target, "notes": notes}, "grade_only": True})
+            episode["rounds"].append({"agent": None, "agent_jobs": [], "check": new_check(), "rewind": rewind,
+                                      "grade_only": True})
             return True
         episode["end"] = "budget"  # the twin's state is the committing round's own, already graded
         return False
 
-    def _rewind_file(self, job, notes, run):
-        return str(jobs.write_text(self.work_dir() / "rewind" / f"{job}.json",
-                                   json.dumps({"notes": notes, "restart_usd": round(self.least_usd(run), 8)}, indent=1)))
+    def _rewind_file(self, job, run, notes, settings, *, cap_usd, at_call=None):
+        """The rewind arm's notes for a trial, and the floor a commit needs: in dollars against this trial's own
+        cap, and in seconds against its deadline (a round's least time beside the prefix allowance)."""
+        values = {"notes": notes, "restart_usd": round(self.least_usd(run), 8),
+                  "restart_seconds": round(round_seconds(settings, self.settings["min_round_seconds"])
+                                           + self.settings["prefix_allowance"], 3),
+                  "spend_cap_usd": round(float(cap_usd), 6), **({"at_call": at_call} if at_call else {})}
+        return str(jobs.write_text(self.work_dir() / "rewind" / f"{job}.json", json.dumps(values, indent=1)))
 
     # Recovery trials -------------------------------------------------------
 
@@ -699,10 +722,13 @@ class RecoveryDriver(Driver):
             else:
                 override, found = "reject", (self.final_state(run["check"]) or (None, None))[0]
             checkpoint = self._saved(found)
+            rewind = None
+            if recovery == AGENTREWIND:
+                rewind = self._rewind_file(job, run, [], base, cap_usd=run["budget"]["usd"])
+                settings["final_checkpoint"] = f"{job}-final"
             settings.update(jobs.branch(script, step, mode="restore" if checkpoint else "rebuild",
                                         checkpoint=checkpoint, live=True, override=override,
-                                        note=self._note(job, note(recovery, told, hidden)),
-                                        rewind=self._rewind_file(job, [], run) if recovery == AGENTREWIND else None))
+                                        note=self._note(job, note(recovery, told, hidden)), rewind=rewind))
         settings.update(self._caps(run["budget"]["usd"], run["budget"]["seconds"], base, branch=bool(prepare)))
         self.emit(self.harbor_job(job, run, settings, attempts, prepare=prepare),
                   run=run_id, arm=name, purpose="first", recovery=recovery, step=step,
@@ -721,15 +747,24 @@ class RecoveryDriver(Driver):
         if rewind is not None:
             # Back to call ``target``: the files and messages from before it, the call made again with the notebook;
             # or, with no round left, those files graded with no model call.
-            base = {**jobs.inherited(agent["settings"], drop=jobs.CAPS), **values["ak"]}
+            base = {**jobs.inherited(agent["settings"], drop=jobs.CAPS | {"final_checkpoint"}), **values["ak"]}
             script, export = self.script(agent["token"])
+            # A grading with no model call spends no budget: its time is the budget's whole, so that bringing the
+            # chosen state back is not cut short.
+            seconds = max(seconds, run["budget"]["seconds"]) if current.get("grade_only") else max(seconds, 1.0)
+            caps = self._caps(max(usd, 0.01), seconds, base, branch=True)
+            # The tools are on even with no live call: the replayed steps may call them.
+            notes = self._rewind_file(job, run, rewind["notes"], base, cap_usd=caps[jobs.SETTING["spend_cap"]])
+            checkpoint = self._saved(rewind.get("checkpoint"))
+            where = {"mode": "restore" if checkpoint else "rebuild", "checkpoint": checkpoint}
             if current.get("grade_only"):
-                files = jobs.branch(script, rewind["target"] - 1, live=False)
+                files = jobs.branch(script, rewind["target"] - 1, live=False, rewind=notes, **where)
             else:
                 files = jobs.branch(script, rewind["target"] - 1, live=True, override="rewind",
-                                    note=self._note(job, agentrewind.notebook(rewind["notes"])),
-                                    rewind=self._rewind_file(job, rewind["notes"], run))
-            settings = {**base, **files, **self._caps(max(usd, 0.01), max(seconds, 1.0), base, branch=True)}
+                                    note=self._note(job, agentrewind.notebook(rewind["notes"])), rewind=notes,
+                                    **where)
+                files["final_checkpoint"] = f"{job}-final"
+            settings = {**base, **files, **caps}
             self.emit(self.harbor_job(job, run, settings, 1, prepare=[export]), run=run_id, arm=name,
                       purpose="round", episode=index, round=len(episode["rounds"]), rewind_target=rewind["target"])
             current["agent_jobs"].append(job)
@@ -756,12 +791,21 @@ class RecoveryDriver(Driver):
                 submission = self.trial(previous["check"]["verdict"])["checker"]
                 if message == "both":
                     text = note("continue_both", submission, self._hidden_verdict(run, graded, agent["solved"]))
+                elif recovery in (AGENTREWIND, NORESTORE):
+                    text = note(AGENTREWIND, submission)
                 else:
                     text = note("continue_bare" if message == "bare" else "continue", submission)
+            caps = self._caps(usd, seconds, base, branch=True)
+            rewind = None
+            if recovery in (AGENTREWIND, NORESTORE):
+                # The tools, the sentence, and the notebook where the last rewind put it, on every later round.
+                base = {key: raw for key, raw in base.items() if key != "final_checkpoint"}
+                rewind = self._rewind_file(job, run, episode.get("notes", []), base,
+                                           cap_usd=caps[jobs.SETTING["spend_cap"]], at_call=episode.get("note_at"))
+                base["final_checkpoint"] = f"{job}-final"
             settings = {**base, **jobs.branch(script, agent["steps"], mode="restore" if checkpoint else "rebuild",
                                               checkpoint=checkpoint, live=True, override="reject",
-                                              note=self._note(job, text)),
-                        **self._caps(usd, seconds, base, branch=True)}
+                                              note=self._note(job, text), rewind=rewind), **caps}
             prepare = [export]
         self.emit(self.harbor_job(job, run, settings, 1, prepare=prepare), run=run_id, arm=name,
                   purpose="round", episode=index, round=len(episode["rounds"]), **_rebuilt(found, checkpoint))
