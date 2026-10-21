@@ -750,7 +750,7 @@ class BranchPolicy:
         if type(self.live) is not bool:
             raise ValueError("branch live must be true or false")
         if self.override not in ("", *OVERRIDES):
-            raise ValueError("branch override must be append or reject")
+            raise ValueError("branch override must be append, reject or rewind")
         if not isinstance(self.note, str) or len(self.note) > MAX_NOTE_CHARS:
             raise ValueError(f"a branch note is text of at most {MAX_NOTE_CHARS} characters")
         if bool(self.override) != bool(self.note):

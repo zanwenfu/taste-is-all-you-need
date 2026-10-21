@@ -211,7 +211,7 @@ class TasteAgent(BaseAgent):
                                  container_id=backend.environment_id, workdir=self._workdir,
                                  branch=None if branch is None else settings.branch_policy(
                                      root / branch_trial.BRANCH_SCRIPT, branch.sha256, branch.note,
-                                     replay=branch.replay))
+                                     replay=branch.replay, rewind=branch.rewind))
         goal = settings.goal("trial-" + token[:20], instruction)
         self.owner = AzureTerminalTrial.create(
             root, backend, goal, policy, service_uid=self._service_uid,

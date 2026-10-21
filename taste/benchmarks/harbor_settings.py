@@ -113,6 +113,10 @@ class TrialSettings:
     branch_override: str = ""
     branch_tolerance: int = 0
     branch_replay: str = "auto"
+    # The rewind arm (taste.agents.agentrewind): a JSON file of its notes and the least an attempt must have
+    # left to commit ({"notes": [...], "restart_usd": ...}); its agent then has AgentRewind's two tools on
+    # every call. With branch_override=rewind, branch_note is the notebook of those notes.
+    branch_rewind: str = ""
     # For a fresh trial (or an agent given only a run's files): the task's
     # text replaced by this file's, and this file's text added after it (after
     # a blank line).
@@ -230,7 +234,9 @@ class TrialSettings:
         if self.branch_replay not in ("auto", "on", "off"):
             raise ValueError("branch_replay must be auto, on or off")
         if self.branch_override not in ("", *OVERRIDES):
-            raise ValueError("branch_override must be append or reject")
+            raise ValueError("branch_override must be append, reject or rewind")
+        if self.branch_override == "rewind" and not self.branch_rewind:
+            raise ValueError("branch_override=rewind needs branch_rewind=<the rewind arm's notes>")
         if bool(self.branch_override) != bool(self.branch_note):
             raise ValueError("branch_override and branch_note go together")
         if self.branch_override and self.branch_live == "off":
@@ -284,7 +290,7 @@ class TrialSettings:
             raise ValueError("the agent's time is too short for work, a closing reply and handoff")
         return started_unix + goal_seconds, started_unix + agent_timeout_seconds + 3600
 
-    def branch_policy(self, script, script_sha256, note="", *, replay=True):
+    def branch_policy(self, script, script_sha256, note="", *, replay=True, rewind=None):
         """The worker's branch: the replay script as the worker reads it (in the trial) and its digest.
 
         ``replay`` is the decision ``branch_trial.load_inputs`` made from the
@@ -295,7 +301,7 @@ class TrialSettings:
         return BranchPolicy(script=str(script), script_sha256=script_sha256, step=self.branch_step,
                             mode=self.branch_mode, live=self.branch_live == "on" or not replay,
                             override=self.branch_override, note=note, tolerance=self.branch_tolerance,
-                            replay=replay)
+                            replay=replay, rewind=rewind)
 
     def policy(self, endpoint, deadline_unix, *, owner_token, container_id, workdir, branch=None):
         coordinator, planner, worker_name, worker = self.models
@@ -355,7 +361,8 @@ class TrialSettings:
                                **({"replay": self.branch_replay} if self.branch_replay != "auto" else {}),
                                **({"checkpoint": self.branch_checkpoint} if self.branch_checkpoint else {}),
                                **({"override": self.branch_override, "note": self.branch_note}
-                                  if self.branch_override else {})}} if self.branch else {}),
+                                  if self.branch_override else {}),
+                               **({"rewind": self.branch_rewind} if self.branch_rewind else {})}} if self.branch else {}),
                 **({"task_text": self.task_text} if self.task_text else {}),
                 **({"task_suffix": self.task_suffix} if self.task_suffix else {}),
                 **({"final_checkpoint": self.final_checkpoint} if self.final_checkpoint else {}),

@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,6 +64,8 @@ class BranchInputs:
     script: ReplayScript
     note: str
     replay: bool = True
+    # The rewind arm's notes and restart floor (settings.branch_rewind), as read; None outside the arm.
+    rewind: Mapping | None = None
 
     @property
     def sha256(self):
@@ -92,7 +95,10 @@ def load_inputs(settings):
         raise ValueError("an agent given only the files changes them: its trial saves no checkpoint of step k")
     check_branch(script, settings.branch_step, mode=settings.branch_mode, override=settings.branch_override,
                  note=note, replay=replay)
-    return BranchInputs(raw, script, note, replay)
+    rewind = json.loads(Path(settings.branch_rewind).read_text(encoding="utf-8")) if settings.branch_rewind else None
+    if rewind is not None and not replay:
+        raise ValueError("the rewind arm replays its agent's run: it needs the replay")
+    return BranchInputs(raw, script, note, replay, rewind)
 
 
 def branch_instruction(inputs, instruction):
@@ -120,6 +126,8 @@ def disclosure(settings, inputs):
             "replay": "on" if inputs.replay else "off", "override": settings.branch_override,
             "tolerance": settings.branch_tolerance,
             **({"note_sha256": text_sha(inputs.note)} if inputs.note else {}),
+            **({"rewind_sha256": text_sha(json.dumps(inputs.rewind, sort_keys=True)),
+                "rewind_notes": len(inputs.rewind.get("notes") or ())} if inputs.rewind is not None else {}),
             "source": {key: source.get(key) for key in ("trial", "run_id", "model")}}
 
 

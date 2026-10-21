@@ -75,7 +75,7 @@ def test_the_worker_admits_its_branch_from_the_assignment():
 def test_a_branch_policy_is_refused_when_it_cannot_be_served():
     for changes, match in [({"script": "relative.json"}, "absolute"), ({"script_sha256": "x"}, "SHA-256"),
                            ({"mode": "copy"}, "rebuild or restore"), ({"override": "append"}, "needs a note"),
-                           ({"note": "text"}, "needs a note"), ({"override": "edit", "note": "x"}, "append or reject"),
+                           ({"note": "text"}, "needs a note"), ({"override": "edit", "note": "x"}, "append, reject or rewind"),
                            ({"override": "append", "note": "x", "live": False}, "branch_live=on"),
                            ({"override": "append", "note": "x", "replay": False}, "branch_replay=on"),
                            ({"tolerance": -1}, "nonnegative"), ({"live": "yes"}, "true or false"),
@@ -101,6 +101,8 @@ def test_a_branch_policy_is_refused_when_it_cannot_be_served():
     ({"branch": "/s", "branch_replay": "maybe"}, "auto, on or off"),
     ({"branch": "/s", "branch_replay": "off", "branch_override": "reject", "branch_note": "/n"}, "branch_replay=on"),
     ({"branch_replay": "off"}, "needs branch="),
+    ({"branch_rewind": "/r.json"}, "needs branch="),
+    ({"branch": "/s", "branch_override": "rewind", "branch_note": "/n"}, "branch_rewind"),
 ])
 def test_branch_settings_are_admitted_not_guessed(options, match):
     with pytest.raises(ValueError, match=match):
@@ -221,6 +223,36 @@ def test_the_owner_reads_and_checks_the_branch_before_the_trial(tmp_path):
         branch_trial.load_inputs(replace(settings, branch_step=2))
     with pytest.raises(ValueError, match="between 0 and 3"):
         branch_trial.load_inputs(replace(settings, branch_step=4, branch_override="", branch_note=""))
+
+
+def test_the_rewind_arm_is_a_branch_with_its_notes_file(tmp_path):
+    """branch_rewind names a JSON file of the rewind arm's notes and restart floor: its agent then has the two
+    tools on every call; with branch_override=rewind the note is the notebook of those notes."""
+    from taste.agents import agentrewind
+
+    path = _script(tmp_path)
+    notes = [{"memory_summary": "Read the parser first.", "target_record_uid": "llm-2", "reason": None}]
+    (tmp_path / "rewind.json").write_text(json.dumps({"notes": notes, "restart_usd": 0.004}))
+    (tmp_path / "notebook.txt").write_text(agentrewind.notebook(notes))
+    settings = TrialSettings.from_options({**ALONE, "branch": str(path), "branch_step": "1",
+                                           "branch_override": "rewind", "branch_note": str(tmp_path / "notebook.txt"),
+                                           "branch_rewind": str(tmp_path / "rewind.json")})
+    inputs = branch_trial.load_inputs(settings)
+    assert inputs.rewind == {"notes": notes, "restart_usd": 0.004}
+    policy = settings.branch_policy("/var/lib/taste-trials/t/branch-script.json", "b" * 64, inputs.note,
+                                    rewind=inputs.rewind)
+    assert policy.rewind == inputs.rewind and policy.agent_rewind() == {"notes": notes, "at_call": 2}
+    assert settings.disclosure()["branch"]["rewind"] == str(tmp_path / "rewind.json")
+    disclosed = branch_trial.disclosure(settings, inputs)
+    assert disclosed["rewind_notes"] == 1 and len(disclosed["rewind_sha256"]) == 64
+    # A notebook that is not its notes' is refused before the trial.
+    (tmp_path / "notebook.txt").write_text("Backtrack memory notebook from abandoned future branches:\n\n1. other")
+    with pytest.raises(ValueError, match="notebook"):
+        settings.branch_policy("/var/lib/taste-trials/t/branch-script.json", "b" * 64,
+                               branch_trial.load_inputs(settings).note, rewind=inputs.rewind)
+    # Without branch_rewind a branch has no rewind tools.
+    plain = TrialSettings.from_options({**ALONE, "branch": str(path), "branch_step": "2"})
+    assert branch_trial.load_inputs(plain).rewind is None
 
 
 def test_a_saved_checkpoint_is_refused_for_another_branch(tmp_path):
