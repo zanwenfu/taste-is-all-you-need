@@ -410,17 +410,21 @@ class AzureExecutionPolicy:
                 "issue the next one in a later plan revision")
 
     def validate_assignment(self, assignment):
+        from taste.brains.central_planner import _thaw
+
+        # An assignment holds its resources frozen (a list there is a tuple, as a rewind branch's notes): compare
+        # plain values.
         allowed = {"azure_openai", "monitor_budget_usd", "wall_timeout_seconds"}
         if self.terminal is not None:
             allowed.add(TERMINAL_POLICY_KEY)
-            if assignment.resources.get(TERMINAL_POLICY_KEY) != self.terminal.to_dict():
+            if _thaw(assignment.resources.get(TERMINAL_POLICY_KEY)) != self.terminal.to_dict():
                 raise ValueError("assignment differs from the goal's terminal policy")
         if self.worker_agent and (assignment.inputs or len(assignment.outputs) != 1
                                   or assignment.outputs[0].disposition != "present"
                                   or not assignment.outputs[0].required):
             raise ValueError("a hosted agent's assignment declares no inputs and exactly one "
                              "required output, its report")
-        if (assignment.resources.get("azure_openai") != self.worker_resources()
+        if (_thaw(assignment.resources.get("azure_openai")) != self.worker_resources()
                 or assignment.model != self.worker_model
                 or assignment.resources.get("monitor_budget_usd") != self.monitor_budget_usd
                 or assignment.contract.budget_usd != self.worker_budget_usd

@@ -283,6 +283,29 @@ def test_a_rewind_branch_prepares_its_goal_as_the_trial_service_does(tmp_path):
             other.bind_goal(bound)
 
 
+def test_the_fixed_plans_assignment_for_a_rewind_branch_is_the_goals_own():
+    """The agent's one assignment carries the policy's routing, the rewind notes with it, and an assignment freezes
+    its resources (a list becomes a tuple). The coordinator checks it against the policy: the same routing, so it
+    may not refuse it for that frozen form (every rewind run of study H's second pilot start stopped there,
+    planner_failed). Another branch is still refused."""
+    from taste.brains.records import Assignment
+    from taste.brains.single_run import single_run_proposal
+
+    notes = [{"memory_summary": "Read the parser first.", "target_record_uid": "llm-2", "reason": None}]
+    policy = policy_for(TrialSettings.from_options(ALONE), fork(rewind={"notes": notes, "restart_usd": 0.004}))
+    exemplar = {"model": policy.worker_model, "resources": policy.assignment_resources(),
+                "contract": {"budget_usd": policy.worker_budget_usd, "max_turns": policy.worker_max_calls}}
+    payload = {"request": {"operation_id": "op", "generation": 1, "parent_plan": None,
+                           "goal": {"task": "Fix the parser.", "success_criteria": ["the tests pass"]},
+                           "world": {"integration_state_id": "a" * 40}},
+               "required_output_shape": {"assignments": [exemplar]}}
+    [raw] = json.loads(single_run_proposal(json.dumps(payload)))["assignments"]
+    assignment = Assignment.from_dict(raw)
+    policy.validate_assignment(assignment)
+    with pytest.raises(ValueError, match="exact Azure execution policy"):
+        replace(policy, branch=fork(rewind={"notes": [], "restart_usd": 0.004})).validate_assignment(assignment)
+
+
 def test_a_saved_checkpoint_is_refused_for_another_branch(tmp_path):
     path = _script(tmp_path)
     directory = tmp_path / "checkpoint"
