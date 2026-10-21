@@ -85,8 +85,9 @@ exclude = ["tests*", "examples*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-# SWE-agent's configuration and tool bundles, byte for byte as upstream ships them.
-extend-exclude = ["taste/agents/swe_agent_files"]
+# SWE-agent's configuration and tool bundles, and AgentRewind's agent-facing code, byte for byte as
+# upstream ships them.
+extend-exclude = ["taste/agents/swe_agent_files", "taste/agents/agentrewind_upstream.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
