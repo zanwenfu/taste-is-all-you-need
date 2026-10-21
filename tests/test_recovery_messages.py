@@ -114,7 +114,7 @@ def test_a_nul_in_the_tests_output_is_written_as_an_escape_where_it_goes_in_as_t
     # A grader's log can hold NUL (a Redis assertion did); a task's text cannot, so a task suffix shows it as \x00.
     # A branch note delivers it as it is.
     output = FAILING.replace("got error", "got '0.00\x001'")
-    driver, run_id, first, saved = first_round(tmp_path, ["retry_tests", "rewind_tests"], output=output)
+    _driver, _run_id, first, _saved = first_round(tmp_path, ["retry_tests", "rewind_tests"], output=output)
     told = TOLD.replace("got error", "got '0.00\x001'")
     task = Path(first["rx"]["task_suffix"]).read_text()
     assert "\x00" not in task
@@ -198,7 +198,7 @@ def test_notes_for_the_richer_forms():
 
 
 def test_round_one_of_the_richer_forms_tells_the_code_the_wide_output_or_both(tmp_path):
-    driver, run_id, first, saved = first_round(
+    _driver, _run_id, first, saved = first_round(
         tmp_path, ["continue", "continue_tests", "continue_tests_code", "continue_tests_full", "continue_both",
                    "continue_tests_hidden"], output=FAR)
     assert sorted(first) == ["cc", "cf", "ch", "cr", "ct", "cx"]
@@ -253,7 +253,7 @@ def test_continue_both_is_decided_by_the_checker_and_tells_what_the_tests_said(t
 
 
 def test_continue_both_says_the_tests_pass_when_the_checker_rejects_a_passing_submission(tmp_path):
-    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue_both"], budget_runs=2.0)
+    jobs_dir, trials, given, _run_id = study(tmp_path, recoveries=["continue_both"], budget_runs=2.0)
     driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries(solved_from_round=1)))
     later = rounds_of(driver, "continue_both")
     assert later and all(Path(s["branch_note"]).read_text() == "Submission rejected by a reviewer: " + FEEDBACK
