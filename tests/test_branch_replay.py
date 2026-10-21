@@ -8,12 +8,13 @@ from dataclasses import replace
 
 import pytest
 
-from taste.agents import HostedStop, ModelReply, ShellResult
+from taste.agents import HostedStop, ModelReply, ShellResult, agentrewind
 from taste.brains.branch_replay import (
     OUTPUT_FLOOR,
     REJECT_EXIT,
     SCRIPT_SCHEMA,
     SENTINEL,
+    BranchPolicy,
     RecordedRun,
     ReplayHost,
     ReplayScript,
@@ -27,6 +28,8 @@ from taste.brains.branch_replay import (
     prompt_bound,
     rebuild,
     rebuild_timeout,
+    replay_message_shas,
+    replay_sha,
     reply_from_completion,
     reply_to_dict,
     request_sha,
@@ -107,13 +110,13 @@ class Recorder:
 
     def ask(self, *, messages, tools, effort):
         answer = self.inner.ask(messages=messages, tools=tools, effort=effort)
-        shas = message_shas(messages)
+        shas = replay_message_shas(messages)
         base = next((index for index, (a, b) in enumerate(zip(self.previous, shas, strict=False)) if a != b),
                     min(len(self.previous), len(shas)))
         self.previous = shas
         calls = [{"id": item["call_id"], "name": item["name"], "arguments": json.loads(item["arguments"])}
                  for item in answer.output if item["type"] == "function_call"]
-        self.steps.append({"step": len(self.steps) + 1, "request_sha": request_sha(messages, tools, effort),
+        self.steps.append({"step": len(self.steps) + 1, "request_sha": replay_sha(messages, tools, effort),
                            "messages": {"base": base, "added": shas[base:]}, "reply": reply_to_dict(answer),
                            "text": ["Next step."], "calls": calls, "runs": [], "replayed": False})
         return answer
@@ -263,6 +266,128 @@ def test_another_agent_given_only_the_files_starts_fresh_and_unchecked(recorded)
     with pytest.raises(ValueError, match="needs the replay"):
         check_branch(script, 3, mode="rebuild", override="reject", note=NOTE, replay=False)
     check_branch(script, 3, mode="rebuild", replay=False)
+
+
+class RewindAgent(Agent):
+    """The rewind arm's agent: its two tools and its guidance on every call, its notebook from call ``at_call``
+    on, after the messages that call restores (as ``taste.agents.mini_swe_agent`` adds them)."""
+
+    def __init__(self, notes=(), at_call=None, **options):
+        super().__init__(**options)
+        self.notes, self.at_call, self.calls, self.note_at = list(notes), at_call, 0, None
+
+    def run(self, host, limit=8):
+        agent = self
+
+        class Adding:
+            def ask(self, *, messages, tools, effort):
+                agent.calls += 1
+                sent = [dict(messages[0], content=agentrewind.with_guidance(messages[0]["content"])), *messages[1:]]
+                if agent.at_call is not None and agent.calls >= agent.at_call:
+                    agent.note_at = len(sent) if agent.note_at is None else agent.note_at
+                    sent.insert(agent.note_at, agentrewind.notebook_message(agent.notes))
+                return host.ask(messages=sent, tools=[*tools, *agentrewind.tools()], effort=effort)
+
+            def run(self, command, **options):
+                return host.run(command, **options)
+
+        return super().run(Adding(), limit)
+
+
+class Seeing(Live):
+    """A live side that keeps the messages it was sent."""
+
+    def __init__(self, *args, **options):
+        super().__init__(*args, **options)
+        self.sent = []
+
+    def ask(self, *, messages, tools, effort):
+        self.sent.append((list(messages), list(tools)))
+        return super().ask(messages=messages, tools=tools, effort=effort)
+
+
+def test_a_run_replays_whether_or_not_the_agent_adds_the_rewind_arms_tools_and_guidance(recorded):
+    """Round one of the rewind arm replays a run recorded without its tools; a later round may replay one
+    recorded with them, or with another notebook. A replay compares requests without them."""
+    script, _ = recorded
+    host, live, events = branch(script, 2, replies=[reply(f"echo {SENTINEL}")])
+    status, _ = RewindAgent().run(host)
+    assert status == "Submitted" and host.faithful and events[-1][1] == {"live": True, "context": "matched"}
+    assert live.asked != [script.steps[2].request_sha]  # what was sent carries the tools and the guidance
+    # A run recorded by the rewind arm's agent, with a notebook from its second call, replays for a plain agent.
+    recorder = Recorder(Live(BASE, OUTPUTS))
+    assert RewindAgent(notes=[{"memory_summary": "Run the tests first."}], at_call=2).run(recorder)[0] == "Submitted"
+    plain, _, events = branch(recorder.script(), 2, replies=[reply(f"echo {SENTINEL}")])
+    assert Agent().run(plain)[0] == "Submitted" and plain.faithful and events[-1][1]["context"] == "matched"
+    assert recorder.script().message_shas(3) == script.message_shas(3)
+
+
+def test_a_rewind_re_decides_step_k_with_the_notebook_after_the_messages_it_restores(recorded):
+    """Rewinding to llm-2 brings back step 1 (its files and its context) and makes step 2's call again, live,
+    with the notebook after the messages step 2's call was sent."""
+    script, original = recorded
+    notes = [{"memory_summary": "Do not run make test before reading the parser.", "target_record_uid": "llm-2",
+              "reason": "rejected twice"}]
+    events = []
+    live = Seeing([reply("sed -i 's/x/y/' parser.py && make test"), reply(f"echo {SENTINEL}")], OUTPUTS)
+    host = ReplayHost(live, script, 1, record=lambda kind, payload: events.append((kind, payload)),
+                      override="rewind", note=agentrewind.notebook(notes))
+    status, _ = RewindAgent(notes=notes, at_call=2).run(host)
+    assert status == "Submitted" and host.faithful and events[-1][1] == {"live": True, "context": "matched"}
+    messages, tools = live.sent[0]
+    restored = message_shas(original[:len(script.message_shas(2))])
+    assert messages[-1] == agentrewind.notebook_message(notes)
+    assert replay_message_shas(messages) == restored and [tool["name"] for tool in tools] == [
+        "bash", "backtrack_candidates", "backtrack_commit"]
+    # The notebook stays where it went in: after step 2's restored messages, before what followed.
+    later, _ = live.sent[1]
+    assert later[len(messages) - 1] == agentrewind.notebook_message(notes)
+    # Step 1's command was replayed, not run, and no command of step 1 was changed.
+    assert live.ran == ["sed -i 's/x/y/' parser.py && make test", f"echo {SENTINEL}"]
+    assert all(payload.get("override", "") == "" for kind, payload in events if kind == "replay_output")
+
+
+def test_a_rewind_branch_says_what_it_carries_and_needs_its_notebook():
+    notes = [{"memory_summary": "Read the parser first.", "target_record_uid": "llm-2", "reason": None}]
+    rewind = {"notes": notes, "restart_usd": 0.01}
+    policy = BranchPolicy("/s/script.json", "a" * 64, 1, override="rewind", note=agentrewind.notebook(notes),
+                          rewind=rewind)
+    assert BranchPolicy.from_dict(policy.to_dict()) == policy and policy.to_dict()["rewind"] == rewind
+    # The rewind arm's tools without a rewind: round one, carrying on in place after the rejection.
+    first = BranchPolicy("/s/script.json", "a" * 64, 3, override="reject", note=NOTE,
+                         rewind={"notes": [], "restart_usd": 0.01})
+    assert BranchPolicy.from_dict(first.to_dict()) == first
+    for options, match in [({"override": "rewind", "note": "other text", "rewind": rewind}, "notebook"),
+                           ({"override": "rewind", "note": agentrewind.notebook(notes)}, "rewind"),
+                           ({"rewind": {"notes": [{"memory_summary": ""}], "restart_usd": 0.0}}, "note"),
+                           ({"rewind": {"notes": [], "restart_usd": -1.0}}, "restart"),
+                           ({"rewind": {"notes": []}}, "rewind")]:
+        with pytest.raises(ValueError, match=match):
+            BranchPolicy("/s/script.json", "a" * 64, 1, **options)
+
+
+def test_a_rewind_may_go_back_to_any_call_and_a_rebuild_skips_the_tools_calls(recorded):
+    script, _ = recorded
+    notebook = agentrewind.notebook([{"memory_summary": "m"}])
+    for step in (0, 1, 2):
+        check_branch(script, step, mode="rebuild", override="rewind", note=notebook)
+    with pytest.raises(ValueError, match="needs its note"):
+        check_branch(script, 1, mode="rebuild", override="rewind")
+    # A call of the two tools changed no file: a rebuild runs none, and needs no exact text for them.
+    value = script.to_dict()
+    listing = agentrewind.tool_command("backtrack_candidates", {"reason": "stuck"})
+    value["steps"][1]["runs"].insert(0, {"command": listing, "executed": None, "cwd": "/app", "timeout_seconds": 30,
+                                         "output": "[]", "returncode": 0, "timed_out": False, "output_exact": True})
+    with_tools = ReplayScript.from_dict(value)
+    check_branch(with_tools, 3, mode="rebuild")
+    ran = []
+
+    async def execute(number, run):
+        ran.append(run.command)
+        return run.output, run.returncode, run.timed_out
+
+    account = asyncio.run(rebuild(with_tools, 3, execute))
+    assert account["faithful"] and listing not in ran and len(ran) == account["commands"] == 3
 
 
 def test_the_script_says_which_branches_it_can_serve(recorded):

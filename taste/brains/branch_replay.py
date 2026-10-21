@@ -92,14 +92,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from posixpath import isabs
 
-from taste.agents import HostedStop, ModelReply, ShellResult
+from taste.agents import HostedStop, ModelReply, ShellResult, agentrewind
 from taste.agents.protocols import MINI_SENTINEL, protocol
 from taste.pricing import request_token_bound
 from taste.providers._openai import _NATIVE
 
 SCRIPT_SCHEMA = "taste.branch/ReplayScript/1"
 MODES = ("rebuild", "restore")
-OVERRIDES = ("append", "reject")
+# rewind: step k's call is made again, live, with the rewind arm's notebook after the messages it restores.
+OVERRIDES = ("append", "reject", "rewind")
 # mini-swe-agent's submission protocol (TasteEnvironment._check_finished): the
 # output's first line is this, and the command exited 0.
 SENTINEL = MINI_SENTINEL
@@ -134,6 +135,22 @@ def request_sha(messages, tools, effort):
 
 def message_shas(messages):
     return [digest(message) for message in messages]
+
+
+def replay_sha(messages, tools, effort):
+    """The digest a replay compares a request by: without what the rewind arm adds to every call
+    (``taste.agents.agentrewind.strip``), the same as ``request_sha`` for any other request."""
+    messages, tools = agentrewind.strip(messages, tools)
+    return request_sha(messages, tools, effort)
+
+
+def replay_message_shas(messages):
+    return message_shas(agentrewind.strip(messages, None)[0])
+
+
+def tool_run(run):
+    """Whether a recorded command is a call of the rewind arm's tools, which changes no file."""
+    return agentrewind.parse_tool_command(run.command) is not None
 
 
 def measured(messages, tools, effort, prompt_tokens):
@@ -659,7 +676,7 @@ class ReplayScript:
 
     def diagnose(self, number, messages, tools, effort):
         """Where a request differs from step ``number``'s: the first message that differs, and more."""
-        recorded, observed = self.message_shas(number), message_shas(messages)
+        recorded, observed = self.message_shas(number), replay_message_shas(messages)
         first = next((index for index, (left, right) in enumerate(zip(recorded, observed, strict=False))
                       if left != right), None)
         if first is None and len(recorded) != len(observed):
@@ -667,7 +684,8 @@ class ReplayScript:
         detail = {"messages": len(observed), "recorded_messages": len(recorded), "first_differing_message": first}
         if self.source.get("effort") is not None and effort != self.source["effort"]:
             detail["effort"] = {"recorded": self.source["effort"], "now": effort}
-        if self.source.get("tools_sha256") is not None and digest(tools) != self.source["tools_sha256"]:
+        if (self.source.get("tools_sha256") is not None
+                and digest(agentrewind.strip((), tools)[1]) != self.source["tools_sha256"]):
             detail["tools_differ"] = True
         if first is not None and first < len(messages) and isinstance(messages[first], Mapping):
             detail["role"] = messages[first].get("role")
@@ -681,16 +699,18 @@ def check_branch(script, step, *, mode, override="", note="", replay=True):
     if mode not in MODES:
         raise ValueError("branch mode must be rebuild or restore")
     commands = [*(script.setup if step else ()), *(run for item in script.steps[:step] for run in item.runs)]
-    if mode == "rebuild" and any(run.executed is None for run in commands):
+    if mode == "rebuild" and any(run.executed is None and not tool_run(run) for run in commands):
         raise ValueError("this script lacks the exact commands the container ran (the trial's terminal "
                          "ledger), which a rebuild runs again")
     if override and not replay:
         raise ValueError("an override changes what the replayed agent sees: it needs the replay")
     if override:
         if override not in OVERRIDES:
-            raise ValueError("branch override must be append or reject")
+            raise ValueError("branch override must be append, reject or rewind")
         if not note:
             raise ValueError("a branch override needs its note")
+        if override == "rewind":
+            return  # it changes the next call, not a command's output: any step can be rewound to
         if step == 0 or script.protocol.note_index(script.steps[step - 1].runs) is None:
             raise ValueError("an override changes the output of step k's command, and this step ran none")
         if override == "reject" and not script.submission(step):
@@ -714,6 +734,9 @@ class BranchPolicy:
     # False: only the files of step k are brought back; the trial's own agent
     # (a checker given a run's final files, say) starts fresh with its own task.
     replay: bool = True
+    # The rewind arm (taste.agents.agentrewind): its tools on every call, the notes its earlier commits carried
+    # back ({"memory_summary", "target_record_uid", "reason"}), and what an attempt must have left to commit.
+    rewind: Mapping | None = None
 
     def __post_init__(self):
         if not isinstance(self.script, str) or not isabs(self.script) or "\x00" in self.script:
@@ -740,22 +763,46 @@ class BranchPolicy:
             raise ValueError("branch replay must be true or false")
         if self.override and not self.replay:
             raise ValueError("an override changes what the replayed agent sees: it needs branch_replay=on")
+        if self.rewind is not None:
+            _check_rewind(self.rewind)
+        if self.override == "rewind" and self.rewind is None:
+            raise ValueError("a rewind needs the rewind arm's notes")
+        if self.override == "rewind" and self.note != agentrewind.notebook(self.rewind["notes"]):
+            raise ValueError("a rewind's note is the notebook of its notes")
 
     def to_dict(self):
         value = {"script": self.script, "script_sha256": self.script_sha256, "step": self.step,
                  "mode": self.mode, "live": self.live, "tolerance": self.tolerance, "replay": self.replay}
         if self.override:
             value.update(override=self.override, note=self.note)
+        if self.rewind is not None:
+            value["rewind"] = {"notes": [dict(note) for note in self.rewind["notes"]],
+                               "restart_usd": self.rewind["restart_usd"]}
         return value
 
     @classmethod
     def from_dict(cls, value):
         required = {"script", "script_sha256", "step", "mode", "live", "tolerance", "replay"}
-        if not isinstance(value, Mapping) or not required <= set(value) <= {*required, "override", "note"}:
+        if not isinstance(value, Mapping) or not required <= set(value) <= {*required, "override", "note", "rewind"}:
             raise ValueError("invalid branch policy fields")
         if "override" in value and not value.get("override"):
             raise ValueError("invalid branch policy fields")
         return cls(**dict(value))
+
+
+def _check_rewind(rewind):
+    if not isinstance(rewind, Mapping) or set(rewind) != {"notes", "restart_usd"}:
+        raise ValueError("the rewind arm's settings are its notes and restart_usd")
+    notes = rewind["notes"]
+    if not isinstance(notes, list) or not all(
+            isinstance(note, Mapping) and set(note) <= {"memory_summary", "target_record_uid", "reason"}
+            and isinstance(note.get("memory_summary"), str) and note["memory_summary"].strip()
+            and isinstance(note.get("target_record_uid", ""), str)
+            and (note.get("reason") is None or isinstance(note["reason"], str)) for note in notes):
+        raise ValueError("each rewind note is a non-empty memory_summary, its target and its reason")
+    usd = rewind["restart_usd"]
+    if type(usd) not in (int, float) or not math.isfinite(usd) or usd < 0:
+        raise ValueError("the rewind arm's restart_usd is a nonnegative number of dollars")
 
 
 async def rebuild(script, step, execute, *, tolerance=0, on_row=None):
@@ -769,7 +816,8 @@ async def rebuild(script, step, execute, *, tolerance=0, on_row=None):
     """
     rows, divergent = [], 0
     commands = [(0, index, run) for index, run in enumerate(script.setup if step else ())]
-    commands += [(item.number, index, run) for item in script.steps[:step] for index, run in enumerate(item.runs)]
+    commands += [(item.number, index, run) for item in script.steps[:step] for index, run in enumerate(item.runs)
+                 if not tool_run(run)]
     for number, index, run in commands:
         output, returncode, timed_out = await execute(number, run)
         row = {"step": number, "run": index, **compare(run, output, returncode, timed_out)}
@@ -836,8 +884,10 @@ class ReplayHost:
         if not self.faithful:
             raise HostedStop("branch_unfaithful")
         context = "unchecked"
-        if sha is not None and self.context and not self.override and self.step < len(self.script.steps):
-            # Nothing was changed at step k: the next request must be the recorded one.
+        if (sha is not None and self.context and self.override in ("", "rewind")
+                and self.step < len(self.script.steps)):
+            # No output of step k was changed: the next request must be the recorded one (a rewind's
+            # notebook is not compared).
             expected = self.script.steps[self.step].request_sha
             context = "matched" if sha == expected else "differs"
             if context == "differs":
@@ -849,7 +899,7 @@ class ReplayHost:
         self._handed_over = True
 
     def ask(self, *, messages, tools, effort):
-        sha = request_sha(messages, tools, effort)
+        sha = replay_sha(messages, tools, effort)
         if not self._done and self._runs and self._rejected:
             # The rejection kept the agent from what its submission would have run next.
             dropped, self._runs = len(self._runs), []
@@ -866,7 +916,7 @@ class ReplayHost:
             self._diverged(number, "request", self.script.diagnose(number, messages, tools, effort))
         self.replayed = number
         self._runs, self._position = list(step.runs), 0
-        if number == self.step and self.override:
+        if number == self.step and self.override in ("append", "reject"):
             self._target = self.script.override_index(number, self.override)
         self.record("replay", {"step": number, "request_sha": sha, "text": list(step.text),
                                "calls": [dict(call) for call in step.calls], "model": step.reply.model,

@@ -36,12 +36,14 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from taste.agents import agentrewind
 from taste.brains.branch_replay import (
     REJECT_EXIT,
     SCRIPT_SCHEMA,
     ReplayScript,
     digest,
-    message_shas,
+    replay_message_shas,
+    replay_sha,
     reply_from_completion,
     reply_to_dict,
     request_sha,
@@ -115,7 +117,7 @@ def _parent_script(parent, branch):
 
 def _seen(run, override, note):
     """A replayed command's result as the branch showed it, beside what the container printed."""
-    if not override:
+    if override not in ("append", "reject"):
         return run
     printed = run.get("printed") or {key: run[key] for key in ("output", "returncode", "timed_out")}
     if override == "append":
@@ -178,12 +180,12 @@ def export_script(journal, *, ledger=None, parent=None, trial=None):
             if request_sha(request["messages"], request["tools"], request["effort"]) != requests.pop(event["id"]):
                 raise ValueError("a journaled request differs from the digest the run recorded")
             effort, tools = request["effort"], request["tools"]
-            shas = message_shas(request["messages"])
+            # As a replay compares them: without what the rewind arm adds to every call.
+            shas = replay_message_shas(request["messages"])
             base = next((index for index, (left, right) in enumerate(zip(previous, shas, strict=False))
                          if left != right), min(len(previous), len(shas)))
             previous = shas
-            steps.append({"step": len(steps) + 1, "request_sha": digest({"messages": request["messages"],
-                                                                         "tools": tools, "effort": effort}),
+            steps.append({"step": len(steps) + 1, "request_sha": replay_sha(request["messages"], tools, effort),
                           "messages": {"base": base, "added": shas[base:]},
                           "reply": reply_to_dict(reply_from_completion(json.loads(result), event["cost_usd"])),
                           "text": list(event["text"]), "calls": list(event["calls"]), "runs": [], "replayed": False})
@@ -209,7 +211,7 @@ def export_script(journal, *, ledger=None, parent=None, trial=None):
     source = {"trial": trial, "run_id": binding["run_id"], "agent": binding["agent"], "model": binding["model"],
               "workdir": binding["workdir"], "dropped_steps": len(steps) - kept,
               "effort": effort if effort is not None else (parent_script.source.get("effort") if parent_script else None),
-              "tools_sha256": digest(tools) if tools is not None else (
+              "tools_sha256": digest(agentrewind.strip((), tools)[1]) if tools is not None else (
                   parent_script.source.get("tools_sha256") if parent_script else None),
               "parent": None if branch is None else {
                   "script_sha256": branch["script_sha256"], "step": branch["step"],
