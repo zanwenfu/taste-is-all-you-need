@@ -50,8 +50,12 @@ def test_the_branch_settings_cover_rebuild_restore_and_both_overrides():
         jobs.branch("s.json", 4, mode="restore")
     with pytest.raises(ValueError, match="come together"):
         jobs.branch("s.json", 4, override="reject")
-    with pytest.raises(ValueError, match="append or reject"):
+    with pytest.raises(ValueError, match="append, reject or rewind"):
         jobs.branch("s.json", 4, override="replace", note="/n.txt")
+    with pytest.raises(ValueError, match="rewind arm's notes"):
+        jobs.branch("s.json", 4, override="rewind", note="/n.txt")
+    rewound = jobs.branch("s.json", 1, override="rewind", note="/n.txt", rewind="/r.json")
+    assert rewound["branch_override"] == "rewind" and rewound["branch_rewind"] == "/r.json"
     with pytest.raises(ValueError, match="rebuild or restore"):
         jobs.branch("s.json", 4, mode="snapshot")
     with pytest.raises(ValueError, match="whole number"):

@@ -88,7 +88,7 @@ def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submi
 def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None, model="azure/gpt-6-luna",
           tasks_dir="/study/tasks", seconds=120.0, cost=0.02, exit_status="Submitted", branch=None,
           handed_back=None, exception=None, name=None, task_text="Fix the bug.", audit_flags=(), verifier=None,
-          cache=(0, 0, 0), image=None):
+          cache=(0, 0, 0), image=None, stopped_by=""):
     """One finished Harbor trial; with steps, its settled Taste record; with ``handed_back``, its final reply;
     with ``verifier`` ({file name: text}), what its grader left in its verifier folder.
 
@@ -108,7 +108,8 @@ def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None
     if image is not None:
         taste["image_id"] = image
     if steps is not None:
-        record(trials_root, token, steps, task=task_text, exit_status=exit_status, cost=cost, cache=cache)
+        record(trials_root, token, steps, task=task_text, exit_status=exit_status, cost=cost, cache=cache,
+               stopped_by=stopped_by)
     result = {"task_name": task, "trial_name": name,
               "config": {"task": {"path": f"{tasks_dir}/{task}"},
                          "agent": {"model_name": model, "kwargs": dict(settings or {})}},

@@ -35,6 +35,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from taste.agents import agentrewind
 from taste.agents.checker import VERDICTS, parse_submission
 from taste.agents.protocols import MINI_SENTINEL, protocol
 from taste.agents.trajectory_reader import final_message, steps_from_trajectory
@@ -223,6 +224,8 @@ def trial(trial_dir, trials_root):
         "exit_status": view.get("exit_status"), "steps": len(view["steps"]) if view else None,
         # What ended the run early (budget, deadline, refusal, ...), "" if nothing did; None without a record.
         "stopped_by": view.get("stopped_by"), "model_stops": view.get("model_stops"),
+        # The rewind arm: the commit that ended the run, and where the agent was before it began to rewind.
+        **_rewind(view),
         # False: a settled record with no step of the agent. Taste never started
         # it; a reward Harbor gave its untouched container is not the agent's.
         "agent_started": None if nested is None else bool(view.get("steps")),
@@ -245,6 +248,15 @@ def image_changes(summaries, expected=None):
         if task in seen:
             seen[task].add(image)
     return {task: sorted(images) for task, images in sorted(seen.items()) if len(images) > 1}
+
+
+def _rewind(view):
+    ended = agentrewind.ended_at_commit(view["steps"]) if view.get("stopped_by") == "backtrack_commit" else None
+    if ended is None:
+        return {"rewind_commit": None, "rewind_protocol_from": None}
+    commit, first = ended
+    return {"rewind_commit": {"step": commit.step, "memory_summary": commit.memory_summary, "reason": commit.reason},
+            "rewind_protocol_from": first}
 
 
 def usable(summary):

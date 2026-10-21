@@ -167,6 +167,33 @@ def candidates(steps: Iterable[Step], limit=DEFAULT_CANDIDATE_LIMIT):
     return found[-limit:] if limit else found
 
 
+def _tool_calls(step):
+    """The step's commands, each as (name, arguments) if it called one of the two tools, else None; [] for none."""
+    lines = [line for line in str(step.command).split("\n") if line]
+    return [parse_tool_command(line) if line.startswith(TOOL_PREFIX) else None for line in lines]
+
+
+def ended_at_commit(steps):
+    """For a run that ended at an accepted commit, from its steps (``taste.agents.trajectory_reader.Step``):
+    ``(Commit, the first step of the block of steps at its end that only called the two tools)``; None if the
+    last tool call is not a commit. That block's first step is where the agent was before it began to rewind:
+    the place a commit that restores nothing goes back to."""
+    steps = list(steps)
+    calls = [call for call in (_tool_calls(steps[-1]) if steps else ()) if call is not None]
+    if not calls or calls[-1][0] != COMMIT:
+        return None
+    arguments = calls[-1][1] if isinstance(calls[-1][1], Mapping) else {}
+    match = _RECORD.fullmatch(str(arguments.get("record_uid", "")).strip())
+    summary = arguments.get("memory_summary")
+    if match is None or not isinstance(summary, str) or not summary.strip():
+        return None
+    first = len(steps)
+    while first > 1 and (found := _tool_calls(steps[first - 2])) and all(call is not None for call in found):
+        first -= 1
+    reason = arguments.get("reason")
+    return Commit(int(match.group(1)), summary, reason if isinstance(reason, str) and reason else None), first
+
+
 @dataclass(frozen=True)
 class Commit:
     """An accepted commit: the step to re-decide, and the note it carries back."""

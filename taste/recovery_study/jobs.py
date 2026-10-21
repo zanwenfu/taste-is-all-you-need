@@ -44,17 +44,17 @@ SETTING = {
     "script": "branch", "step": "branch_step", "mode": "branch_mode",
     "checkpoint": "branch_checkpoint", "live": "branch_live",
     "override": "branch_override", "note": "branch_note", "suffix": "task_suffix",
-    "task_text": "task_text",
+    "task_text": "task_text", "rewind": "branch_rewind",
     "spend_cap": "spend_cap_usd", "deadline": "agent_timeout_sec",
 }
 MODES = ("rebuild", "restore")
-OVERRIDES = ("append", "reject")
+OVERRIDES = ("append", "reject", "rewind")
 CAPS = frozenset({SETTING["spend_cap"], SETTING["deadline"]})
 # A job sets these itself (run-harbor.sh sets worker_python); they are never
 # copied from the trial it branches from or repeats. A task suffix is copied:
 # a branch of a trial that had one must give the agent the same task text.
 OWN = frozenset({SETTING[name] for name in ("script", "step", "mode", "checkpoint", "live", "override",
-                                            "note", "task_text")} | {"worker_python"})
+                                            "note", "task_text", "rewind")} | {"worker_python"})
 # A's exporter: writes a finished trial's replay script (its ordered model
 # calls and commands) from the trial's settled record.
 EXPORT_TEMPLATE = "python3 -m taste.benchmarks.replay_export --record {record} --out {out}"
@@ -119,8 +119,9 @@ def inherited(settings, *, drop=()):
     return {name: raw for name, raw in (settings or {}).items() if name not in dropped}
 
 
-def branch(script, step, *, mode="rebuild", checkpoint=None, live=True, override=None, note=None):
-    """Bring back the state at ``step`` of the trial ``script`` was exported from."""
+def branch(script, step, *, mode="rebuild", checkpoint=None, live=True, override=None, note=None, rewind=None):
+    """Bring back the state at ``step`` of the trial ``script`` was exported from; ``rewind``, the rewind arm's
+    notes file (``taste.agents.agentrewind``), gives its agent the two tools."""
     if mode not in MODES:
         raise ValueError("branch mode must be rebuild or restore")
     if mode == "restore" and not checkpoint:
@@ -128,7 +129,9 @@ def branch(script, step, *, mode="rebuild", checkpoint=None, live=True, override
     if (override is None) != (note is None):
         raise ValueError("an override and its note come together")
     if override is not None and override not in OVERRIDES:
-        raise ValueError("branch override must be append or reject")
+        raise ValueError("branch override must be append, reject or rewind")
+    if override == "rewind" and rewind is None:
+        raise ValueError("a rewind needs the rewind arm's notes")
     if int(step) != step or step < 0:
         raise ValueError("a branch step is a whole number of steps, 0 or more")
     values = {SETTING["script"]: str(script), SETTING["step"]: int(step), SETTING["mode"]: mode}
@@ -138,6 +141,8 @@ def branch(script, step, *, mode="rebuild", checkpoint=None, live=True, override
     if override is not None:
         values[SETTING["override"]] = override
         values[SETTING["note"]] = str(note)
+    if rewind is not None:
+        values[SETTING["rewind"]] = str(rewind)
     return values
 
 
