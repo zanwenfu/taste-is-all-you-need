@@ -233,7 +233,10 @@ def test_a_request_converse_cannot_carry_is_refused_before_it_is_sent(wire, mess
     assert sent == []
 
 
-def test_claude_reads_the_cache_its_last_step_wrote_and_is_sent_no_effort(wire):
+def test_claude_reads_the_cache_its_last_step_wrote_and_is_sent_its_effort_with_adaptive_thinking(wire):
+    """Unpinned, Sonnet 5.5 thinks adaptively at its default (high) effort while the record would say
+    none: the effort asked for is sent, with adaptive thinking, and recorded. Its thinking blocks are
+    never sent back (as on Luna's Bedrock route, where reasoning is not carried between turns)."""
     sent = wire(ok())
     completion = ask(LLM(azure_openai=route()), model=SONNET, system="A long, stable system prompt.",
                      messages=[{"role": "user", "content": "first"}, {"role": "assistant", "content": "ok"},
@@ -244,9 +247,21 @@ def test_claude_reads_the_cache_its_last_step_wrote_and_is_sent_no_effort(wire):
     assert sent_body["messages"][-1] == {"role": "user", "content": [
         {"text": "second"}, {"cachePoint": {"type": "default"}}]}
     assert sent[0].content.decode().count("cachePoint") == 2
-    assert "additionalModelRequestFields" not in sent_body and "temperature" not in sent[0].content.decode()
-    assert completion.effective_sampling == {"temperature": None, "effort": None,
-                                             "dropped": ["temperature", "effort"]}
+    assert sent_body["additionalModelRequestFields"] == {"thinking": {"type": "adaptive"},
+                                                          "output_config": {"effort": "medium"}}
+    assert "temperature" not in sent[0].content.decode()
+    assert completion.effective_sampling == {"temperature": None, "effort": "medium", "thinking": "adaptive",
+                                             "thinking_carried": False, "dropped": ["temperature"]}
+
+
+def test_claudes_thinking_is_left_out_of_the_reply_it_sends_back(wire):
+    sent = wire(ok({"reasoningContent": {"reasoningText": {"text": "Let me look.", "signature": "c2ln"}}},
+                   {"text": "I will list the files."},
+                   {"toolUse": {"toolUseId": "t1", "name": "bash", "input": {"command": "ls"}}},
+                   stop="tool_use"))
+    completion = ask(LLM(azure_openai=route()), model=SONNET)
+    assert "Let me look." not in json.dumps(completion.transcript_blocks) and "c2ln" not in json.dumps(completion.transcript_blocks)
+    assert [call.name for call in completion.tool_calls] == ["bash"]
 
 
 # ---------------------------------------------------------------- the reply

@@ -139,15 +139,18 @@ class BedrockProvider:
         dropped = ["temperature"] if request.sampling.temperature is not None else []
         if request.sampling.effort:
             if claude:
-                # No effort is sent to Claude until its Bedrock form is checked
-                # against the service; the record says so.
-                dropped.append("effort")
+                # Unpinned, Claude 5.x thinks adaptively at its default (high) effort; the effort asked
+                # for is sent with adaptive thinking. Its thinking blocks are never sent back (the reply
+                # drops them), as reasoning is not carried between turns on Luna's Bedrock route either.
+                body["additionalModelRequestFields"] = {"thinking": {"type": "adaptive"},
+                                                        "output_config": {"effort": request.sampling.effort}}
             else:
                 body["additionalModelRequestFields"] = {"reasoning": {"effort": request.sampling.effort}}
 
         payload, headers, waits = self._send(binding.deployment, body, request.timeout_seconds,
                                              request.request_seconds)
-        completion = self._to_completion(payload, request, dropped, dropped_items)
+        completion = self._to_completion(payload, request, dropped, dropped_items,
+                                         claude_thinking=claude and bool(request.sampling.effort))
         provenance = {
             "route": "bedrock", "endpoint": self._route.base_url,
             "deployment": binding.deployment, "deployment_type": binding.deployment_type,
@@ -232,7 +235,7 @@ class BedrockProvider:
     # ------------------------------------------------------------ response
 
     def _to_completion(self, payload: dict[str, Any], request: CompletionRequest, dropped: list[str],
-                       dropped_items: int) -> Completion:
+                       dropped_items: int, *, claude_thinking: bool = False) -> Completion:
         usage = _to_usage(payload.get("usage"))
         message = (payload.get("output") or {}).get("message") or {}
         content = message.get("content")
@@ -282,8 +285,8 @@ class BedrockProvider:
                     "type": "function_call", "call_id": call_id, "name": name,
                     "arguments": raw_arguments, "status": "completed"}})
                 transcript.append({"type": "tool_use", "id": call_id, "name": name, "input": arguments})
-            # Anything else (reasoning content, which no request here asks
-            # for) is not replayable and is left out.
+            # Anything else (Claude's thinking blocks, which are never sent
+            # back, and any unknown block) is not replayed and is left out.
         flush()
         if not complete:
             # As on the Responses route: a reply cut short is kept as the text
@@ -295,6 +298,8 @@ class BedrockProvider:
         sampling: dict[str, Any] = {"temperature": None, "effort": request.sampling.effort}
         if "effort" in dropped:
             sampling["effort"] = None
+        if claude_thinking:
+            sampling.update(thinking="adaptive", thinking_carried=False)
         if dropped:
             sampling["dropped"] = dropped
         if dropped_items:
