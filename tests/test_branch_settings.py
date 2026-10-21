@@ -367,6 +367,10 @@ def test_a_trials_final_files_are_restored_for_the_last_step_of_its_own_script(t
     # Each trial of a job keeps its own final files: an ID names one directory per trial.
     assert branch_trial.final_checkpoint_name("rec-x-ar-f1-final", "f00d") == "rec-x-ar-f1-final-f00d"
     assert branch_trial.final_checkpoint_name("/srv/final", "f00d") == "/srv/final"
+    # An ID stays an ID however long the job's name: cut, with a digest of what was cut, before the trial.
+    long = branch_trial.final_checkpoint_name("rec-" + "x" * 150 + "-final", "a" * 32)
+    assert len(long) <= 128 and long.endswith("-" + "a" * 32) and branch_trial._ID.fullmatch(long)
+    assert long != branch_trial.final_checkpoint_name("rec-" + "x" * 149 + "y-final", "a" * 32)
 
 
 def test_a_note_is_read_exactly_as_it_was_written(tmp_path):

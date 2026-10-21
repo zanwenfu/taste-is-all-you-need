@@ -164,8 +164,14 @@ def names_branch(identity, inputs, step):
 
 def final_checkpoint_name(value, trial):
     """Where a trial saves its final files (``final_checkpoint``): a path as given; an ID, one per trial, so that
-    each of a job's trials keeps its own."""
-    return str(value) if "/" in str(value) else f"{value}-{trial}"
+    each of a job's trials keeps its own, cut to fit an ID with a digest of what it was."""
+    value = str(value)
+    if "/" in value:
+        return value
+    name = f"{value}-{trial}"
+    if len(name) <= 128:
+        return name
+    return f"{value[:128 - len(str(trial)) - 10]}-{hashlib.sha256(value.encode()).hexdigest()[:8]}-{trial}"
 
 
 def changed_paths(manifest):

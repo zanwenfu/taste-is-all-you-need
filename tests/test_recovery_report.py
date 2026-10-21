@@ -228,3 +228,29 @@ def test_the_checkers_verdicts_are_counted_once_per_episode_though_two_sources_c
     found = report.checker_section({"r1": run})
     # Two rewind episodes (shared by the oracle and the rules) and two retry episodes: four verdicts.
     assert found["rounds"] == {"done_solved": 2, "done_unsolved": 2, "not_done_solved": 0, "not_done_unsolved": 0}
+
+
+def test_the_rewind_arms_twin_is_paired_episode_by_episode_and_an_episode_without_a_commit_is_its_own_twin():
+    """Contrast A: each agentrewind episode against its twin; one that never committed has no twin and is the
+    same episode on both sides (a difference of zero)."""
+    forked, plain = episodes(False, 0.4, count=2)
+    forked, plain = {**forked, "fork": 0, "commits": 1}, {**plain, "fork": None, "commits": 0}
+    twin = {**episodes(True, 0.5, count=1)[0], "forked_from": 0}
+    run = rejected({"agentrewind": [forked, plain], "agentrewind_norestore": [twin]})
+    seen = report.views(run)
+    assert seen["agentrewind"] == [forked, plain] and seen["agentrewind_norestore"] == [twin, plain]
+
+
+def test_comparisons_are_also_made_with_the_task_as_the_unit():
+    """Revision 1: intervals and sign-flip tests clustered by task are primary; runs of one task are averaged."""
+    summary = {}
+    for index, (task, wins) in enumerate([("a", True), ("a", True), ("a", False), ("b", True), ("c", True)]):
+        run = rejected({"retry": episodes(False, 0.5), "continue": episodes(wins, 0.3)})
+        summary[f"r{index}"] = {**run, "task": task}
+    found = report.recovery_section(summary, [("continue", "retry")], 2000, random.Random(3))
+    [solved] = found["comparisons"]["solved"]
+    assert solved["runs"] == 5 and solved["mean_difference"] == pytest.approx(0.8)
+    by_task = solved["by_task"]
+    assert by_task["tasks"] == 3 and by_task["mean_difference"] == pytest.approx((2 / 3 + 1 + 1) / 3)
+    # Three tasks differ, all one way: 2 of the 2**3 sign assignments are as extreme.
+    assert by_task["permutation_p"] == pytest.approx(2 / 8) and by_task["holm_p"] == pytest.approx(2 / 8)

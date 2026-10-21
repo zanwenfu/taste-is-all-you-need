@@ -63,7 +63,9 @@ VIEWS = ("retry", "retry_feedback", "rewind_oracle", "rewind_reader", "rewind_ru
          "retry_tests", "rewind_tests_oracle", "rewind_tests_reader", "rewind_tests_rules", "continue_tests",
          # Richer forms of the tests message where the agent stopped: with the tests' code, wide, with the feedback, or
          # saying the tests are hidden.
-         "continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden")
+         "continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden",
+         # AgentRewind, and its twin that restores nothing (an episode without a commit is its own twin).
+         "agentrewind", "agentrewind_norestore")
 REWINDS = ("rewind", "rewind_bare", "rewind_tests")
 # A deployed harness cannot rerun to find r*: the selector chooses among the others.
 SELECTABLE = ("retry", "retry_feedback", "rewind_reader", "rewind_rules", "continue", "continue_bare")
@@ -177,10 +179,23 @@ def choice_section(summary, reader):
 # The recoveries -----------------------------------------------------------
 
 def views(run):
-    """Each recovery's finished episodes for a run; rewind arms seen once per source that chose them."""
+    """Each recovery's finished episodes for a run; rewind arms seen once per source that chose them.
+
+    agentrewind_norestore is paired with agentrewind episode by episode: an episode's twin where its first
+    commit forked one, else the episode itself (it never committed, so restoring could change nothing).
+    """
     found = {}
-    for name, arm in run.get("arms", {}).items():
+    arms = run.get("arms", {})
+    for name, arm in arms.items():
         episodes = [episode for episode in arm["episodes"] if episode]
+        if arm["recovery"] == "agentrewind_norestore":
+            continue
+        if arm["recovery"] == "agentrewind":
+            twins = (arms.get("agentrewind_norestore") or {}).get("episodes") or []
+            paired = [episode if episode.get("fork") is None or episode["fork"] >= len(twins)
+                      else twins[episode["fork"]] for episode in arm["episodes"] if episode]
+            found[name], found["agentrewind_norestore"] = episodes, [episode for episode in paired if episode]
+            continue
         if arm["recovery"] in REWINDS:
             for source, step in run["sources"].items():
                 if step == arm["step"]:
@@ -214,17 +229,31 @@ def recovery_table(summary):
     return table
 
 
-def compare(table, other, base, measure, resamples, rng):
+def compare(table, other, base, measure, resamples, rng, tasks=None):
+    """The paired difference over runs; with ``tasks`` ({run: task}), also with the task as the unit (each task's
+    runs averaged, then bootstrapped and sign-flipped over tasks), as Revision 1 makes primary."""
     runs = sorted(run for run, found in table.items() if other in found and base in found)
     differences = [table[run][other][measure] - table[run][base][measure] for run in runs]
     if not runs:
-        return {"runs": 0, "mean_difference": None, "bootstrap_95": [None, None], "permutation_p": 1.0}
+        return {"runs": 0, "mean_difference": None, "bootstrap_95": [None, None], "permutation_p": 1.0,
+                **({"by_task": {"tasks": 0, "mean_difference": None, "bootstrap_95": [None, None],
+                                "permutation_p": 1.0}} if tasks is not None else {})}
     low, high = _study.bootstrap_interval(differences, resamples, rng)
-    return {"runs": len(runs), "mean_difference": rounded(math.fsum(differences) / len(runs)),
-            "bootstrap_95": [rounded(low), rounded(high)],
-            "other_better": sum(1 for d in differences if (d > 0) == (measure in HIGHER_IS_BETTER) and d != 0),
-            "base_better": sum(1 for d in differences if (d < 0) == (measure in HIGHER_IS_BETTER) and d != 0),
-            "permutation_p": _study.permutation_p(differences, resamples, rng)}
+    result = {"runs": len(runs), "mean_difference": rounded(math.fsum(differences) / len(runs)),
+              "bootstrap_95": [rounded(low), rounded(high)],
+              "other_better": sum(1 for d in differences if (d > 0) == (measure in HIGHER_IS_BETTER) and d != 0),
+              "base_better": sum(1 for d in differences if (d < 0) == (measure in HIGHER_IS_BETTER) and d != 0),
+              "permutation_p": _study.permutation_p(differences, resamples, rng)}
+    if tasks is not None:
+        grouped = {}
+        for run, difference in zip(runs, differences, strict=True):
+            grouped.setdefault(tasks.get(run, run), []).append(difference)
+        means = [math.fsum(values) / len(values) for _, values in sorted(grouped.items())]
+        low, high = _study.bootstrap_interval(means, resamples, rng)
+        result["by_task"] = {"tasks": len(means), "mean_difference": rounded(math.fsum(means) / len(means)),
+                             "bootstrap_95": [rounded(low), rounded(high)],
+                             "permutation_p": _study.permutation_p(means, resamples, rng)}
+    return result
 
 
 def recovery_section(summary, comparisons, resamples, rng):
@@ -252,12 +281,16 @@ def recovery_section(summary, comparisons, resamples, rng):
                       "rounds_per_episode": round(statistics.fmean(e["rounds"] for e in episodes), 3) if episodes else None,
                       "ends": dict(sorted(Counter(e["end"] for e in episodes).items()))}
     pairs = comparisons or [(other, base) for base, other in itertools.combinations(present, 2)]
+    tasks = {run_id: run.get("task") for run_id, run in summary.items() if run_id in table}
     measures = {}
     for measure in MEASURES:
-        items = [{"other": other, "base": base, **compare(table, other, base, measure, resamples, rng)}
+        items = [{"other": other, "base": base, **compare(table, other, base, measure, resamples, rng, tasks)}
                  for other, base in pairs]
         for item, adjusted in zip(items, _study.holm([item["permutation_p"] for item in items]), strict=True):
             item["holm_p"] = adjusted
+        by_task = _study.holm([item["by_task"]["permutation_p"] for item in items])
+        for item, adjusted in zip(items, by_task, strict=True):
+            item["by_task"]["holm_p"] = adjusted
         measures[measure] = items
     return {"arms": arms, "comparisons": measures, "per_run": table}
 

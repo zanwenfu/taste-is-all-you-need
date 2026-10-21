@@ -209,8 +209,10 @@ def trial(trial_dir, trials_root):
         "token": taste.get("trial"), "settled": nested is not None,
         # The task container's image ID: the same task in another image is not the same task.
         "image_id": taste.get("image_id"),
-        # Whether the trial saved its final files (final_checkpoint), which a later branch can restore.
-        "final_saved": bool((taste.get("final_checkpoint") or {}).get("saved")),
+        # Whether the trial saved its final files whole (final_checkpoint), which a later branch can restore; over
+        # the size cap a checkpoint is partial and cannot be.
+        "final_saved": bool((taste.get("final_checkpoint") or {}).get("saved"))
+                       and not (taste.get("final_checkpoint") or {}).get("partial"),
         "model": (config.get("agent") or {}).get("model_name"),
         "settings": dict((config.get("agent") or {}).get("kwargs") or {}),
         "cost_usd": cost, "prompt_tokens": prompt, "completion_tokens": completion,

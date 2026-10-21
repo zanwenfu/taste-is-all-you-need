@@ -152,3 +152,18 @@ def test_a_round_after_a_rejected_rewind_keeps_the_tools_the_sentence_and_the_no
     assert rewind["at_call"] == 2 and later["final_checkpoint"].endswith("-final")
     [episode] = driver.summary()[run_id]["arms"]["agentrewind"]["episodes"]
     assert episode["end"] == "done" and episode["rounds"] == 3 and episode["commits"] == 1
+
+
+def test_a_twin_rebuilds_when_the_committing_trials_final_files_were_saved_only_in_part(tmp_path):
+    """Over the size cap a checkpoint is partial and cannot be restored: the twin rebuilds instead."""
+    jobs_dir, trials, given, _run_id = study(tmp_path, recoveries=["agentrewind"], repeats=1)
+    base = rewinding()
+
+    def outcome(spec, task, settings, harbor):
+        fields = base(spec, task, settings, harbor)
+        if fields.get("final"):
+            fields["final"] = {**fields["final"], "partial": True}
+        return fields
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, outcome))
+    [stayed] = settings_of(driver, "agentrewind_norestore")
+    assert stayed["branch_mode"] == "rebuild" and "branch_checkpoint" not in stayed
