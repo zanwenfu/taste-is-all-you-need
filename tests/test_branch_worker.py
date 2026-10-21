@@ -314,7 +314,7 @@ def test_the_rewind_arm_lists_its_calls_commits_and_a_later_round_re_decides_the
     account = second.trace["extra"]["branch"]
     assert account["faithful"] and account["rebuild"]["commands"] == 1
     # Step 2's call made again: step 1's messages, then the notebook.
-    assert agentrewind.notebook(notes) in json.dumps(second.requests[0]["input"][-1])
+    assert second.requests[0]["input"][-1] == {"role": "user", "content": agentrewind.notebook(notes)}
     assert "tabs are still dropped" not in json.dumps(second.requests[0]["input"])
     assert len(second.commands) == 3
 
