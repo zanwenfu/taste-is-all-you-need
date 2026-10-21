@@ -31,12 +31,13 @@ import concurrent.futures
 import contextlib
 import hashlib
 import json
+import math
 import threading
 import time
 import uuid
 from dataclasses import asdict
 
-from taste.agents import HostedStop, ModelReply, ShellResult
+from taste.agents import HostedStop, ModelReply, ShellResult, agentrewind
 from taste.brains.azure_worker_policy import AzureWorkerPolicy
 from taste.brains.azure_worker_runtime import LOST_REPLIES, AzureWorkerRuntime
 from taste.brains.branch_replay import (
@@ -353,6 +354,9 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         timeout = min(float(timeout_seconds), float(grant.max_timeout_seconds))
         self._commands += 1
         effect_id = "effect_" + _sha([self.session.binding.run_id, "command", self._commands])
+        tool = agentrewind.parse_tool_command(command)
+        if tool is not None:
+            return self._answer_tool(effect_id, *tool, command, cwd, timeout)
         # The record shows the command as the agent wrote it; the ledger keeps
         # the exact text the container ran.
         self._append("command", effect_id=effect_id, command=_excerpt(shown or command, COMMAND_CHARS),
@@ -382,6 +386,28 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
             # The agent still sees this command's result; its next call ends it.
             self.host.stop("monitor_" + stops[0], now=False)
         return ShellResult(output, result.return_code, timed_out=result.terminated == "timeout")
+
+    def _answer_tool(self, effect_id, name, arguments, command, cwd, timeout):
+        """A call of the rewind arm's tools (``taste.agents.agentrewind``), answered from this run's record.
+
+        Nothing runs in the container. The call and its answer are recorded whole, where a command's output is
+        cut, so that a branch replays exactly what the agent saw. An accepted commit ends the run: the recovery
+        driver reads it from the record and branches from the chosen step.
+        """
+        self._append("command", effect_id=effect_id, command=command, cwd=cwd, timeout_seconds=timeout)
+        rewind = None if self.fork is None else self.fork.rewind
+        if rewind is None:
+            output, code, commit = f"Unknown tool '{name}'.", 1, None
+        else:
+            spent = math.fsum((self.session.known_cost_usd, self.session.lost_exposure_usd))
+            output, code, commit = agentrewind.answer(
+                name, arguments, agentrewind.timeline(self._events()), rewind["notes"],
+                can_restart=self.session.binding.budget_usd - spent >= rewind["restart_usd"])
+        self._append("output", effect_id=effect_id, returncode=code, terminated="", output=output,
+                     output_chars=len(output), dropped_bytes=0)
+        if commit is not None:
+            raise HostedStop("backtrack_commit")
+        return ShellResult(output, code)
 
     # -- a branch of an earlier run --------------------------------------------
 

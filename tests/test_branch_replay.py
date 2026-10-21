@@ -655,3 +655,14 @@ def test_the_digests_and_replies_are_the_hosted_workers_own():
                "effective_sampling": {}, "provenance": {}}
     completion = _completion(payload)
     assert reply_from_completion(_completion_payload(completion), 0.5) == _reply(completion, 0.5)
+
+
+def test_the_rewind_arms_agent_is_given_its_notes_and_the_call_they_go_in_at():
+    notes = [{"memory_summary": "Read the parser first.", "target_record_uid": "llm-3", "reason": None}]
+    rewound = BranchPolicy("/s/script.json", "a" * 64, 2, override="rewind", note=agentrewind.notebook(notes),
+                           rewind={"notes": notes, "restart_usd": 0.0})
+    assert rewound.agent_rewind() == {"notes": notes, "at_call": 3}
+    first = BranchPolicy("/s/script.json", "a" * 64, 3, override="reject", note=NOTE,
+                         rewind={"notes": [], "restart_usd": 0.0})
+    assert first.agent_rewind() == {"notes": [], "at_call": None}
+    assert BranchPolicy("/s/script.json", "a" * 64, 3, override="reject", note=NOTE).agent_rewind() is None

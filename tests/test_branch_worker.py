@@ -273,6 +273,52 @@ def test_a_second_round_branches_the_first_rounds_record(base, other, sdk_transp
     assert "tabs are still dropped" in context and "test_tabs.py still fails" in context
 
 
+def rewind_tool(name, arguments, call_id):
+    return {"type": "function_call", "id": "fc_" + call_id, "call_id": call_id, "name": name,
+            "arguments": json.dumps(arguments), "status": "completed"}
+
+
+def test_the_rewind_arm_lists_its_calls_commits_and_a_later_round_re_decides_the_chosen_one(
+        base, other, sdk_transport, tmp_path):
+    """AgentRewind: round one carries on after the rejection with the two tools on every call; its commit ends
+    the run; round two goes back to the chosen call, with the notebook after the messages it restores."""
+    from taste.agents import agentrewind
+
+    note = ("failed_check: tests/test_tabs.py. root_cause: parser.py was edited before it was read. "
+            "corrected_strategy: read parser.py first.")
+    first = branch(other, sdk_transport, tmp_path, base.script, 3, override="reject", note=REJECTION,
+                   rewind={"notes": [], "restart_usd": 0.0},
+                   replies={1: [rewind_tool("backtrack_candidates", {"reason": "rejected"}, "t1")],
+                            2: [rewind_tool("backtrack_commit", {"record_uid": "llm-2", "memory_summary": note}, "t2")]})
+    assert first.calls == 2 and first.trace["extra"]["exit"]["stopped_by"] == "backtrack_commit"
+    for request in first.requests:
+        assert [tool["name"] for tool in request["tools"]] == ["bash", "backtrack_candidates", "backtrack_commit"]
+        assert request["input"][0]["content"].endswith(agentrewind.GUIDANCE)
+    # The listing: the timeline's calls so far, the three replayed and the one that asked for it.
+    answered = json.loads(first.requests[1]["input"][-1]["output"])
+    assert [item["record_uid"] for item in json.loads(answered["output"])] == ["llm-1", "llm-2", "llm-3", "llm-4"]
+    # Nothing of the two tools ran in the container: only the three rebuilt commands did.
+    assert len(first.commands) == 3
+    record = export_script(first.journal, ledger=first.ledger, parent=first.path, trial="round-1")
+    assert [run["command"] for run in record["steps"][4]["runs"]] == [
+        agentrewind.tool_command("backtrack_commit", {"record_uid": "llm-2", "memory_summary": note})]
+    notes = [{"memory_summary": note, "target_record_uid": "llm-2", "reason": None}]
+    third = open_worker(tmp_path / "round2")
+    try:
+        second = branch(third, sdk_transport, tmp_path, record, 1, override="rewind",
+                        note=agentrewind.notebook(notes), rewind={"notes": notes, "restart_usd": 0.0},
+                        where="round2", replies={1: [bash("cat parser.py", "c7")], 2: [bash(f"echo {SENTINEL}", "c8")]})
+    finally:
+        third.store.close()
+    assert second.code == WorkerExitCode.COMPLETED and second.calls == 2
+    account = second.trace["extra"]["branch"]
+    assert account["faithful"] and account["rebuild"]["commands"] == 1
+    # Step 2's call made again: step 1's messages, then the notebook.
+    assert agentrewind.notebook(notes) in json.dumps(second.requests[0]["input"][-1])
+    assert "tabs are still dropped" not in json.dumps(second.requests[0]["input"])
+    assert len(second.commands) == 3
+
+
 def test_steps_are_the_trajectory_readers_steps(base, other, sdk_transport, tmp_path):
     """Step k is the same step to the map, the reader and a branch: the readers' steps are the script's."""
     run = branch(other, sdk_transport, tmp_path, base.script, 3, override="reject", note=REJECTION,

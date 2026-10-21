@@ -780,6 +780,14 @@ class BranchPolicy:
                                "restart_usd": self.rewind["restart_usd"]}
         return value
 
+    def agent_rewind(self):
+        """What the rewind arm's agent is given (``MiniSweAgent(rewind=...)``): the notes, and the call they go in
+        at, a rewind's step k + 1; None outside the arm."""
+        if self.rewind is None:
+            return None
+        return {"notes": [dict(note) for note in self.rewind["notes"]],
+                "at_call": self.step + 1 if self.override == "rewind" else None}
+
     @classmethod
     def from_dict(cls, value):
         required = {"script", "script_sha256", "step", "mode", "live", "tolerance", "replay"}

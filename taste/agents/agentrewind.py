@@ -122,6 +122,35 @@ def record_uid(number):
     return f"llm-{number}"
 
 
+def _result(command, returncode, output, timed_out):
+    tool = parse_tool_command(command)
+    name, arguments = tool if tool is not None else ("bash", {"command": command})
+    return {"name": name, "arguments": arguments, "output": {"returncode": returncode, "output": output},
+            "error": "timeout" if timed_out else None}
+
+
+def timeline(events, prefix="hosted_"):
+    """The current timeline's model calls, from a hosted run's record (``taste.brains.hosted_worker``): one per
+    reply the agent received, the replayed ones first, numbered as the study numbers steps; each with the
+    commands that followed it and what they returned. Setup commands and replies the run's end cut off are not
+    steps."""
+    steps, commands = [], {}
+    for event in events:
+        kind = str(event.get("kind", ""))
+        kind = kind[len(prefix):] if kind.startswith(prefix) else ""
+        if kind == "replay" or (kind == "completion" and not event.get("cut_off")):
+            calls = tuple({"name": call["name"], "arguments": call["arguments"]} for call in event.get("calls") or ())
+            steps.append((tuple(event.get("text") or ()), calls, []))
+        elif kind == "replay_output" and event.get("step") and steps:
+            steps[-1][2].append(_result(event["command"], event["returncode"], event["output"], event["timed_out"]))
+        elif kind == "command" and steps:
+            commands[event["effect_id"]] = event["command"]
+        elif kind == "output" and event.get("effect_id") in commands:
+            steps[-1][2].append(_result(commands.pop(event["effect_id"]), event["returncode"], event["output"],
+                                        event.get("terminated") == "timeout"))
+    return [Step(number, text, calls, tuple(results)) for number, (text, calls, results) in enumerate(steps, 1)]
+
+
 def candidates(steps: Iterable[Step], limit=DEFAULT_CANDIDATE_LIMIT):
     """The last ``limit`` model calls of the timeline as rewind targets, each rendered by upstream's
     ``candidate_from_segment``."""

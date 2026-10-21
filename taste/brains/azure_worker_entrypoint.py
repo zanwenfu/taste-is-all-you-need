@@ -57,7 +57,8 @@ def _hosted_runtime(policy, branch, assignment, session, monitor, terminal, dire
     from taste.brains.hosted_worker import HostedWorkerRuntime
 
     return HostedWorkerRuntime(branch, assignment, session, monitor, terminal_client=terminal,
-                               agent=hosted_agent(policy.agent, effort=policy.effort, uname=policy.uname),
+                               agent=hosted_agent(policy.agent, effort=policy.effort, uname=policy.uname,
+                                                  rewind=None if policy.branch is None else policy.branch.agent_rewind()),
                                model_name=assignment.model)
 
 

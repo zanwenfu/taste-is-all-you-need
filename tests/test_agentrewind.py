@@ -154,3 +154,38 @@ def test_a_commit_passes_upstreams_checks_in_their_order_then_the_studys_budget_
 
 def commit_note(summary):
     return {"memory_summary": summary, "target_record_uid": "llm-1", "reason": None}
+
+
+def test_the_timeline_is_the_runs_model_calls_replayed_then_live_with_what_each_returned():
+    """From a hosted run's record: one step per model reply the agent received, replayed ones first, as the
+    study numbers steps everywhere; a setup command, a reply cut off by the run's end and a lost call are not
+    steps."""
+    listing = agentrewind.tool_command("backtrack_candidates", {"reason": "stuck"})
+    events = [
+        {"kind": "hosted_replay_output", "step": 0, "command": "cd /app", "returncode": 0, "output": "",
+         "timed_out": False},
+        {"kind": "hosted_replay", "step": 1, "text": ["Look first."],
+         "calls": [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}}]},
+        {"kind": "hosted_replay_output", "step": 1, "command": "ls", "returncode": 0, "output": "src\n",
+         "timed_out": False},
+        {"kind": "hosted_request", "id": "r1"},
+        {"kind": "hosted_lost", "id": "r1"},
+        {"kind": "hosted_request", "id": "r2"},
+        {"kind": "hosted_completion", "id": "r2", "text": ["Which point?"],
+         "calls": [{"id": "t1", "name": "backtrack_candidates", "arguments": {"reason": "stuck"}}]},
+        {"kind": "hosted_command", "effect_id": "e1", "command": listing},
+        {"kind": "hosted_output", "effect_id": "e1", "returncode": 0, "output": "[]", "terminated": ""},
+        {"kind": "hosted_completion", "id": "r3", "text": ["Again."], "calls": [], "cut_off": True},
+        {"kind": "hosted_command", "effect_id": "e2", "command": "make test"},
+        {"kind": "hosted_output", "effect_id": "e2", "returncode": -1, "output": "", "terminated": "timeout"}]
+    steps = agentrewind.timeline(events)
+    assert [step.number for step in steps] == [1, 2]
+    assert steps[0] == agentrewind.Step(1, ("Look first.",), ({"name": "bash", "arguments": {"command": "ls"}},),
+                                        ({"name": "bash", "arguments": {"command": "ls"},
+                                          "output": {"returncode": 0, "output": "src\n"}, "error": None},))
+    assert steps[1].calls == ({"name": "backtrack_candidates", "arguments": {"reason": "stuck"}},)
+    assert steps[1].results == (
+        {"name": "backtrack_candidates", "arguments": {"reason": "stuck"}, "output": {"returncode": 0, "output": "[]"},
+         "error": None},
+        {"name": "bash", "arguments": {"command": "make test"}, "output": {"returncode": -1, "output": ""},
+         "error": "timeout"})

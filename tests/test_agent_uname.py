@@ -205,3 +205,13 @@ def test_a_recorded_setting_goes_back_to_the_command_line_as_the_json_harbor_rea
                            jobs_dir="/j", settings={"agent": "mini-swe-agent", "agent_uname": dict(AZURE)})
     [value] = [part.split("=", 1)[1] for part in spec.argv if part.startswith("agent_uname=")]
     assert value == canonical(AZURE) and json.loads(value) == AZURE
+
+
+def test_only_mini_swe_agent_runs_the_rewind_arm():
+    for name in ("swe-agent", "checker"):
+        with pytest.raises(ValueError, match="rewind"):
+            hosted_agent(name, effort="low", rewind={"notes": [], "at_call": None})
+    if mini_swe_agent():
+        agent = hosted_agent("mini-swe-agent", effort="low", rewind={"notes": [], "at_call": 2})
+        assert agent.rewind == {"notes": [], "at_call": 2}
+        assert agent.identity() == hosted_agent("mini-swe-agent", effort="low").identity()
