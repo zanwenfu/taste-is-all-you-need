@@ -45,6 +45,9 @@ from taste.brains.branch_replay import (
     ReplayHost,
     ReplayScript,
     check_branch,
+    measured,
+    measured_at,
+    prompt_bound,
     rebuild,
     rebuild_timeout,
 )
@@ -56,6 +59,7 @@ from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
 from taste.brains.worker_commands import bounded, ran, unfinished
 from taste.brains.worker_protocol import GOAL_TASK_PATH, ContractMismatch
 from taste.llm import BudgetExceeded, InfraFailure
+from taste.pricing import ensure_priced
 from taste.providers._openai import _NATIVE
 
 PREFIX = "hosted_"
@@ -74,6 +78,11 @@ SUMMARY_CHARS = 4_000
 
 def _json(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+
+
+def _window(model):
+    """The most prompt tokens a call may hold: the window the price table admits (200K for Claude)."""
+    return ensure_priced(model).context_window
 
 
 def _sha(value):
@@ -213,6 +222,9 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
         # A branch of an earlier run: its replay script, read and checked before anything is recorded.
         self.fork = policy.branch
         self.script = None if self.fork is None else branch_script(self.fork)
+        # The last request measured on this model: a branch's starts as step k's in the recorded run.
+        self._measured = (measured_at(self.script, self.fork.step, session.binding.model)
+                          if self.fork is not None and self.fork.replay else None)
         self.host = None
         self._inflight = None
         self._commands = 0
@@ -259,6 +271,9 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
             self._inflight = None
 
     async def _ask_model(self, messages, tools, effort):
+        # A prompt over the window is refused after it is paid for: a request that may not fit is not sent.
+        if prompt_bound(messages, tools, effort, self._measured) > _window(self.session.binding.model):
+            raise HostedStop("context_window")
         lost = 0
         while True:
             self._admitted()
@@ -290,6 +305,7 @@ class HostedWorkerRuntime(AzureWorkerRuntime):
             except ValueError:
                 raise HostedStop("request_too_large") from None
             cost = self._record_completion(request_id, completion)
+            self._measured = measured(messages, tools, effort, completion.usage.prompt_total)
             if completion.stop_reason in ENDING_STOPS:
                 # Asked again, the same conversation is refused or too long again, and each ask is paid for.
                 raise HostedStop(completion.stop_reason)

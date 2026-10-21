@@ -21,7 +21,10 @@ from taste.brains.branch_replay import (
     compare,
     digest,
     host_ordered,
+    measured,
+    measured_at,
     message_shas,
+    prompt_bound,
     rebuild,
     rebuild_timeout,
     reply_from_completion,
@@ -30,6 +33,7 @@ from taste.brains.branch_replay import (
     similarity,
     submitted,
 )
+from taste.pricing import request_token_bound
 
 TOOL = {"type": "function", "name": "bash", "parameters": {"type": "object"}}
 TASK = "Make the parser tests pass."
@@ -125,7 +129,7 @@ class Recorder:
     def script(self):
         return ReplayScript.from_dict({"schema": SCRIPT_SCHEMA, "task": TASK, "steps": self.steps, "exit": None,
                                        "source": {"effort": "low", "tools_sha256": digest([TOOL]),
-                                                  "agent": {"name": "mini-swe-agent"}}})
+                                                  "agent": {"name": "mini-swe-agent"}, "model": "gpt-test"}})
 
 
 OUTPUTS = {"make test": ("FAILED test_parse\n", 1),
@@ -289,6 +293,48 @@ def test_a_script_round_trips_and_rebuilds_its_request_messages(recorded):
     assert script.message_shas(3) == message_shas(original[:-3])
     with pytest.raises(ValueError, match="replay script"):
         ReplayScript.from_dict({**script.to_dict(), "schema": "other"})
+
+
+def size(value):
+    return len(json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode())
+
+
+def test_a_request_is_bounded_by_its_measured_start_and_the_bytes_added_since(recorded):
+    """A model's window is in tokens, and a request is only measured once it is answered: what an earlier,
+    measured request shares with this one is bounded by its measure, the messages added since by their bytes."""
+    script, original = recorded
+    whole = prompt_bound(original, [TOOL], "low")
+    assert whole == request_token_bound(size({"messages": original, "tools": [TOOL], "effort": "low"}))
+    # Step 2's request, as the recorded run measured it (100 prompt tokens on gpt-test).
+    earlier = measured_at(script, 2, "gpt-test")
+    shared = len(script.message_shas(2))
+    assert earlier[2] == 100 and 0 < shared < len(original)
+    assert prompt_bound(original, [TOOL], "low", earlier) == 100 + request_token_bound(size(original[shared:]))
+    assert prompt_bound(original, [TOOL], "low", earlier) < whole
+    # Another model's measure, other tools or effort, or a request that does not begin with the measured one:
+    # its bytes alone bound it.
+    assert measured_at(script, 2, "claude-sonnet-5-5") is None and measured_at(script, 0, "gpt-test") is None
+    for tools, effort in (([TOOL, TOOL], "low"), ([TOOL], "medium")):
+        assert prompt_bound(original, tools, effort, earlier) == prompt_bound(original, tools, effort)
+    changed = [dict(original[0], content="Another system prompt."), *original[1:]]
+    assert prompt_bound(changed, [TOOL], "low", earlier) == prompt_bound(changed, [TOOL], "low")
+    assert prompt_bound(original[:shared - 1], [TOOL], "low", earlier) == prompt_bound(original[:shared - 1],
+                                                                                         [TOOL], "low")
+    # A live call's own measure bounds the next request the same way.
+    live = measured(original[:4], [TOOL], "low", 5_000)
+    assert prompt_bound(original, [TOOL], "low", live) == 5_000 + request_token_bound(size(original[4:]))
+
+
+def test_a_recorded_step_without_a_whole_usage_gives_no_measure(recorded):
+    script, _ = recorded
+    for usage in ({"output_tokens": 20}, {"input_tokens": "100"}, {"input_tokens": 100, "cache_read_tokens": -1}):
+        steps = list(script.steps)
+        steps[1] = replace(steps[1], reply=replace(steps[1].reply, usage=usage))
+        assert measured_at(replace(script, steps=tuple(steps)), 2, "gpt-test") is None
+    cached = list(script.steps)
+    cached[1] = replace(cached[1], reply=replace(cached[1].reply, usage={
+        "input_tokens": 10, "cache_read_tokens": 80, "cache_write_tokens": 30, "output_tokens": 20}))
+    assert measured_at(replace(script, steps=tuple(cached)), 2, "gpt-test")[2] == 120
 
 
 def test_rebuilt_outputs_are_compared_by_their_normalized_lines():

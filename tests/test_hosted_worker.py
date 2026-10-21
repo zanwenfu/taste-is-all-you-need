@@ -273,6 +273,31 @@ def test_a_refused_reply_ends_the_run_and_says_so(worker, sdk_transport, tmp_pat
     assert [e["stop_reason"] for e in events if e["kind"] == "hosted_completion"] == ["tool_use", "refusal"]
 
 
+def test_a_request_that_may_not_fit_the_models_window_ends_the_run_unsent(worker, sdk_transport, tmp_path,
+                                                                         monkeypatch):
+    """A prompt over the window the study priced (200K for Claude) is refused after it is paid for; before
+    each call the run ends instead when the request's bound is over it. The bound's arithmetic is tested in
+    test_branch_replay; here the window is lowered once the first call is answered."""
+    from taste.brains import hosted_worker as module
+    windows = iter([1_000_000, 10])
+    monkeypatch.setattr(module, "_window", lambda model: next(windows))
+    _, calls, _ = install(sdk_transport, worker_reply=lambda number, _: [bash("make test", f"c{number}")])
+
+    async def scenario():
+        hosted(worker)
+        async with terminal(worker, tmp_path) as t:
+            scripted(t.env, {"make test": TerminalResult(1, b"FAILED test_parse\n", b"")})
+            await execute_worker(worker.config, store=worker.store, environ=worker.environ)
+            result = report(worker)
+            trace = json.loads((run_directory(worker.store, result.run_id) / "worker/trajectory.worker.json").read_text())
+            assert trace["extra"]["exit"]["stopped_by"] == "context_window"
+            assert calls["worker"] == 1
+    asyncio.run(scenario())
+    # Nothing was asked that has no answer: the second request was never journaled.
+    events = _hosted_events(worker)
+    assert _unsettled(events) == ([], []) and sum(e["kind"] == "hosted_request" for e in events) == 1
+
+
 def test_a_hosted_agent_needs_the_task_terminal_and_one_report(worker, sdk_transport):
     install(sdk_transport)
     hosted(worker)

@@ -94,6 +94,7 @@ from posixpath import isabs
 
 from taste.agents import HostedStop, ModelReply, ShellResult
 from taste.agents.protocols import MINI_SENTINEL, protocol
+from taste.pricing import request_token_bound
 from taste.providers._openai import _NATIVE
 
 SCRIPT_SCHEMA = "taste.branch/ReplayScript/1"
@@ -133,6 +134,38 @@ def request_sha(messages, tools, effort):
 
 def message_shas(messages):
     return [digest(message) for message in messages]
+
+
+def measured(messages, tools, effort, prompt_tokens):
+    """A request as its answer measured it, for bounding the next: its tools and effort, its messages, its tokens."""
+    return (digest(tools), effort), tuple(message_shas(messages)), prompt_tokens
+
+
+def measured_at(script, step, model):
+    """Step ``step``'s request as the recorded run measured it; None if it was not measured on ``model``."""
+    if not step or script.source.get("model") != model or script.source.get("tools_sha256") is None:
+        return None
+    usage = script.steps[step - 1].reply.usage
+    counts = [usage.get(name, 0) for name in ("input_tokens", "cache_read_tokens", "cache_write_tokens")]
+    if "input_tokens" not in usage or any(type(count) is not int or count < 0 for count in counts):
+        return None
+    return (script.source["tools_sha256"], script.source.get("effort")), tuple(script.message_shas(step)), sum(counts)
+
+
+def prompt_bound(messages, tools, effort, earlier=None):
+    """The most prompt tokens a request can hold.
+
+    A request is measured only once it is answered. An earlier one that was
+    (``measured``), with the same tools and effort, whose messages begin this
+    one's, bounds what they share by its measure; each message added since
+    is bounded by its bytes, as ``request_token_bound`` bounds a request.
+    Without one, the request's bytes bound it whole.
+    """
+    if earlier is not None:
+        frame, shas, tokens = earlier
+        if frame == (digest(tools), effort) and tuple(message_shas(messages[:len(shas)])) == shas:
+            return tokens + request_token_bound(len(_json(messages[len(shas):]).encode()))
+    return request_token_bound(len(_json({"messages": messages, "tools": tools, "effort": effort}).encode()))
 
 
 def text_sha(text):
