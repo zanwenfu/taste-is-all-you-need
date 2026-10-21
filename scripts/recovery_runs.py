@@ -58,7 +58,8 @@ OPTIONS = {"prefix": str, "model": str, "mode": str, "calibration_report": str, 
            "min_round_usd": float, "min_round_share": float, "min_round_seconds": float, "retry_rounds": str, "jobs_dir": str,
            "trials_root": str, "work_dir": str, "tasks_dir": str, "run_harbor": str, "export_template": str,
            "concurrent": int, "min_steps": int, "large_edit_lines": int, "attempts_factor": int, "checks_from": str,
-           "prior_checkpoints": str, "arm_order_seed": int}
+           "prior_checkpoints": str, "arm_order_seed": int, "tests_feedback_chars": int, "tests_code_chars": int,
+           "tests_full_chars": int}
 
 
 def table(summary):
