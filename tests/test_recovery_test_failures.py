@@ -244,3 +244,24 @@ def test_the_wide_excerpt_reaches_output_far_from_the_failing_tests_name(tmp_pat
     assert "the cause, far above" not in failures(trial, task)["excerpt"]
     wide = failures(trial, task, wide=True)
     assert "the cause, far above" in wide["excerpt"] and wide["failing"] == ["TestAuditUnaryInterceptor_CreateNamespace"]
+
+
+def test_a_grading_where_no_test_that_passed_before_the_change_still_passes_is_told_apart(tmp_path):
+    """SWE-bench Pro's grader lists only the tests it saw pass, so a grading in which no test ran looks like one
+    in which every test failed. Pass-to-pass tests passed before the agent's change: a grading in which none of
+    them passes is a broken build or a grader that ran nothing (Maven Central's 429 on 10-19), to be looked at."""
+    trial, task = pro_trial(tmp_path / "some", ["TestLoad", "TestKeep"], pass_to_pass=("TestKeep", "TestOther"))
+    assert test_failures.kept_passing(trial, task) == {"grader": "swebench-pro", "pass_to_pass": 2, "passing": 1}
+    trial, task = pro_trial(tmp_path / "none", [], pass_to_pass=("TestKeep", "TestOther"))
+    assert test_failures.kept_passing(trial, task) == {"grader": "swebench-pro", "pass_to_pass": 2, "passing": 0}
+    # A task without pass-to-pass tests says nothing either way.
+    trial, task = pro_trial(tmp_path / "f2p", [])
+    assert test_failures.kept_passing(trial, task) == {"grader": "swebench-pro", "pass_to_pass": 0, "passing": 0}
+    # The harness reads its log with the repository's parser; without one, what passed is unknown.
+    trial, task = harness_trial(tmp_path / "harness", log=RUST_LOG.replace(
+        "running 1 test\n", "running 2 tests\ntest basic ... ok\n"))
+    assert test_failures.kept_passing(trial, task, parsers={"sharkdp/bat": rust_parser}) == {
+        "grader": "swebench-harness", "pass_to_pass": 2, "passing": 1}
+    assert test_failures.kept_passing(trial, task, parsers={})["passing"] is None
+    # Not graded: nothing to say.
+    assert test_failures.kept_passing(tmp_path / "missing", task) is None

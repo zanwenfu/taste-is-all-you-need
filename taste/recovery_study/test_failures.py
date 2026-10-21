@@ -77,32 +77,26 @@ def _config(task_dir):
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def required(task_dir):
-    """The task's required tests, fail-to-pass first; None when its config is not there."""
+def required(task_dir, *, only_pass_to_pass=False):
+    """The task's required tests, fail-to-pass first (or its pass-to-pass alone); None when its config is not there."""
     config = _config(task_dir)
     if config is None:
         return None
     lower = "fail_to_pass" in config
-    names = _names(config.get("fail_to_pass" if lower else "FAIL_TO_PASS"))
+    names = [] if only_pass_to_pass else _names(config.get("fail_to_pass" if lower else "FAIL_TO_PASS"))
     names += _names(config.get("pass_to_pass" if lower else "PASS_TO_PASS"))
     return list(dict.fromkeys(names))
 
 
-def failures(trial_dir, task_dir, *, parsers=None, wide=False):
-    """``{"grader", "required", "failing", "excerpt"}`` for a graded trial; None when it has no grader output.
-
-    ``failing`` is None when the results cannot be read (no parser for the repository). ``parsers`` maps a
-    repository to its log parser (swebench's, by default). ``wide``: the excerpt keeps five times the context
-    around each failing test (the "full output" message).
-    """
+def _results(trial_dir, task_dir, parsers):
+    """(grader, each test's status or None when unreadable, the tests' output); None when it has no grader output."""
     verifier = Path(trial_dir) / "verifier"
-    names = required(task_dir)
     if (verifier / "output.json").exists():
         results = json.loads((verifier / "output.json").read_text()).get("tests") or []
         status = {str(item.get("name")): str(item.get("status")) for item in results}
         log = "\n".join(_read(verifier / name) for name in ("run-script-stdout.txt", "run-script-stderr.txt"))
-        grader = "swebench-pro"
-    elif (verifier / "test-stdout.txt").exists():
+        return "swebench-pro", status, log
+    if (verifier / "test-stdout.txt").exists():
         whole = _read(verifier / "test-stdout.txt")
         log = _between(whole)
         config = _config(task_dir) or {}
@@ -115,9 +109,37 @@ def failures(trial_dir, task_dir, *, parsers=None, wide=False):
             # As the grader: the marked span first, the whole log when the span yields no results.
             results = parse(log, spec) or parse(whole, spec)
             status = {str(name): getattr(value, "value", value) for name, value in results.items()}
-        grader = "swebench-harness"
-    else:
+        return "swebench-harness", status, log
+    return None
+
+
+def kept_passing(trial_dir, task_dir, *, parsers=None):
+    """``{"grader", "pass_to_pass", "passing"}``: of the task's pass-to-pass tests, how many passed this grading.
+
+    They passed before the agent's change, so a grading in which none passes (with some listed) is a broken build
+    or a grader that ran no test; Pro's grader lists only what passed, so it cannot say which. ``passing`` is None
+    when the results cannot be read; the whole is None when the trial has no grader output or its task no config.
+    """
+    found, names = _results(trial_dir, task_dir, parsers), required(task_dir, only_pass_to_pass=True)
+    if found is None or names is None:
         return None
+    grader, status, _ = found
+    passing = None if status is None else sum(status.get(name) in PASSING for name in names)
+    return {"grader": grader, "pass_to_pass": len(names), "passing": passing}
+
+
+def failures(trial_dir, task_dir, *, parsers=None, wide=False):
+    """``{"grader", "required", "failing", "excerpt"}`` for a graded trial; None when it has no grader output.
+
+    ``failing`` is None when the results cannot be read (no parser for the repository). ``parsers`` maps a
+    repository to its log parser (swebench's, by default). ``wide``: the excerpt keeps five times the context
+    around each failing test (the "full output" message).
+    """
+    names = required(task_dir)
+    found = _results(trial_dir, task_dir, parsers)
+    if found is None:
+        return None
+    grader, status, log = found
     # Without the task's list of required tests, which failed is unknown (not "none").
     failing = None if status is None or names is None else [name for name in names if status.get(name) not in PASSING]
     shape = (WIDE_BEFORE, WIDE_AFTER, WIDE_LINES) if wide else (CONTEXT_BEFORE, CONTEXT_AFTER, EXCERPT_LINES)

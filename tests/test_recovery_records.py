@@ -82,6 +82,21 @@ def test_a_trial_says_what_stopped_it_and_counts_the_model_stops_that_end_or_cut
     assert unsettled["stopped_by"] is None and unsettled["model_stops"] is None
 
 
+def test_each_trial_keeps_the_image_it_ran_in_and_a_task_that_changed_image_is_named(tmp_path):
+    """A task's image pulled again by its tag may not be the one the earlier study ran: each trial keeps its
+    container's image ID, and a task whose trials ran in another image than expected, or in two, is named."""
+    jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
+    old, new = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    names = [trial(jobs_dir, "j", task, reward=0.0, trials_root=trials, steps=agent_steps(2), image=image)
+             for task, image in (("task-a", old), ("task-a", old), ("task-b", old), ("task-b", new), ("task-c", None))]
+    summaries = [records.trial(jobs_dir / "j" / name, trials) for name in names]
+    assert [summary["image_id"] for summary in summaries] == [old, old, old, new, None]
+    assert records.image_changes(summaries) == {"task-b": [old, new]}
+    # Against the images the earlier study ran: task-a's moved too; a task with no expected image is checked alone.
+    assert records.image_changes(summaries, expected={"task-a": new, "task-b": old}) == {
+        "task-a": [old, new], "task-b": [old, new]}
+
+
 def test_without_a_record_harbors_figures_stand_and_an_unfaithful_branch_is_not_a_sample(tmp_path):
     jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
     name = trial(jobs_dir, "j", "task-a", reward=1.0, trials_root=trials, cost=0.5, seconds=99.0,

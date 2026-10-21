@@ -189,7 +189,9 @@ class TasteAgent(BaseAgent):
             output_limit=MAX_TERMINAL_OUTPUT_BYTES, compose_project=self._project,
             image_id=self._image, exec_user=self._exec_user)
         root = safe_parent(self.trials_root) / token
-        summary = {"trial": token, "configuration": settings.disclosure()}
+        summary = {"trial": token, "configuration": settings.disclosure(),
+                   # The image the task's container runs: a tag pulled again may name another.
+                   "image_id": self._image}
         context.metadata = {"taste": summary}
         if settings.task_text or settings.task_suffix or branch is not None:
             # The task text this trial gave, when it is not the benchmark's own.

@@ -206,6 +206,8 @@ def trial(trial_dir, trials_root):
         "reward": graded, "solved": None if graded is None else graded == 1.0,
         "exception": (result.get("exception_info") or {}).get("exception_type"),
         "token": taste.get("trial"), "settled": nested is not None,
+        # The task container's image ID: the same task in another image is not the same task.
+        "image_id": taste.get("image_id"),
         "model": (config.get("agent") or {}).get("model_name"),
         "settings": dict((config.get("agent") or {}).get("kwargs") or {}),
         "cost_usd": cost, "prompt_tokens": prompt, "completion_tokens": completion,
@@ -230,6 +232,19 @@ def trial(trial_dir, trials_root):
         "skip_marker": "skip_marker" in gaming_flags((), view.get("submission", "")),
         "audit_flags": audit,
     }
+
+
+def image_changes(summaries, expected=None):
+    """Tasks whose trials ran in more than one image, or in another than ``expected`` ({task: image ID}):
+    {task: the image IDs, sorted}. A trial that kept no image ID is not counted."""
+    seen = defaultdict(set)
+    for summary in summaries:
+        if summary.get("image_id"):
+            seen[summary["task"]].add(summary["image_id"])
+    for task, image in (expected or {}).items():
+        if task in seen:
+            seen[task].add(image)
+    return {task: sorted(images) for task, images in sorted(seen.items()) if len(images) > 1}
 
 
 def usable(summary):
