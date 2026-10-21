@@ -815,7 +815,8 @@ def _check_rewind(rewind):
         raise ValueError("the rewind arm's settings are its notes and restart_usd, and optionally restart_seconds, "
                          "spend_cap_usd and at_call")
     notes = rewind["notes"]
-    if not isinstance(notes, list) or not all(
+    # A list, or a tuple as a worker's frozen assignment holds it.
+    if not isinstance(notes, (list, tuple)) or not all(
             isinstance(note, Mapping) and set(note) <= {"memory_summary", "target_record_uid", "reason"}
             and isinstance(note.get("memory_summary"), str) and note["memory_summary"].strip()
             and isinstance(note.get("target_record_uid", ""), str)

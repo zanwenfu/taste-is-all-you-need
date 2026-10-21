@@ -673,7 +673,11 @@ def test_the_rewind_arms_agent_is_given_its_notes_and_the_call_they_go_in_at():
                          rewind={"notes": notes, "restart_usd": 0.0, "restart_seconds": 360.0, "at_call": 3})
     assert later.agent_rewind() == {"notes": notes, "at_call": 3}
     assert BranchPolicy.from_dict(later.to_dict()) == later
-    for bad in ({"at_call": 0}, {"at_call": "3"}, {"restart_seconds": -1}, {"extra": 1}):
+    # As a worker's assignment holds them, frozen: its lists are tuples.
+    frozen = BranchPolicy("/s/script.json", "a" * 64, 2, override="rewind", note=agentrewind.notebook(notes),
+                          rewind={"notes": tuple(notes), "restart_usd": 0.0})
+    assert frozen.agent_rewind() == {"notes": notes, "at_call": 3}
+    for bad in ({"at_call": 0}, {"at_call": "3"}, {"restart_seconds": -1}, {"extra": 1}, {"notes": "text"}):
         with pytest.raises(ValueError):
             BranchPolicy("/s/script.json", "a" * 64, 9, rewind={"notes": [], "restart_usd": 0.0, **bad})
 
