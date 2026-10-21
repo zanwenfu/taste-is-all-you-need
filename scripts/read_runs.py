@@ -15,8 +15,11 @@ Runs already there are not read again, so this can be run after each round of
 the driver's checks; a run that could not be read is printed with why, and is
 read next time.
 
-Azure credentials come from AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY.
-Each reading is one paid call, or two when the first reply is not a reading.
+The model route is the host's one route, as for Harbor: Azure's
+(AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY) or Bedrock's (TASTE_BEDROCK_URL
+and AWS_BEARER_TOKEN_BEDROCK, e.g. from /root/taste-secrets/bedrock.env), where
+each model is served through its global profile. Each reading is one paid
+call, or two when the first reply is not a reading.
 """
 
 from __future__ import annotations
@@ -65,13 +68,23 @@ def read_runs(state, trials_root, ask, known=(), failures=(trajectory_reader.Inv
             yield run_id, None, f"{type(failure).__name__}: {failure}"
 
 
-def azure_llm(budget_usd, model):
-    from taste.llm import LLM
-    from taste.providers.azure_openai import AzureDeployment, AzureOpenAIConfig
+def model_llm(budget_usd, model, environment):
+    """Taste's LLM on the host's one model route; on Bedrock, the model's global profile."""
+    import taste.llm
+    from taste.benchmarks.harbor_settings import model_route
+    from taste.providers.azure_openai import (
+        BEDROCK_PROFILES,
+        AzureDeployment,
+        AzureOpenAIConfig,
+        route_of,
+    )
 
-    azure = AzureOpenAIConfig.from_environment(os.environ, deployments=(AzureDeployment(SERVED_MODELS[model], model),))
-    return LLM(azure_openai=azure, budget_usd=budget_usd, cap_on="billed", max_attempts=1, load_env_file=False,
-               run_id="trajectory-reader")
+    served = SERVED_MODELS[model]
+    endpoint, key = model_route(environment)
+    deployment = BEDROCK_PROFILES.get(served, model) if route_of(endpoint) == "bedrock" else model
+    route = AzureOpenAIConfig(base_url=endpoint, api_key=key, deployments=(AzureDeployment(served, deployment),))
+    return taste.llm.LLM(azure_openai=route, budget_usd=budget_usd, cap_on="billed", max_attempts=1,
+                         load_env_file=False, run_id="trajectory-reader")
 
 
 def _save(path, readings):
@@ -92,7 +105,7 @@ def main(argv=None, llm=None):
     arguments = parser.parse_args(argv)
     state = json.loads(arguments.state.read_text())
     found = json.loads(arguments.out.read_text()) if arguments.out.exists() else {}
-    llm = llm or azure_llm(arguments.budget_usd, arguments.model)
+    llm = llm or model_llm(arguments.budget_usd, arguments.model, os.environ)
     served = SERVED_MODELS[arguments.model]
 
     def ask(messages):

@@ -88,3 +88,34 @@ def test_the_default_budget_holds_the_worst_case_a_call_reserves():
     from taste.pricing import max_call_cost_usd
     worst = max_call_cost_usd(SERVED_MODELS["gpt-6-sol"], max_output_tokens=cli.MAX_OUTPUT_TOKENS, cap_on="billed")
     assert worst < cli.BUDGET_USD < 2 * worst + 1
+
+
+def test_the_reader_runs_on_the_hosts_one_model_route_and_bedrock_through_its_global_profile(monkeypatch):
+    import pytest
+
+    import taste.llm
+    from taste.benchmarks.harbor_settings import SERVED_MODELS
+    from taste.providers.azure_openai import AzureDeployment
+    from taste.providers.base import ProtocolFailure
+
+    made = []
+    monkeypatch.setattr(taste.llm, "LLM", lambda **options: made.append(options) or options)
+    bedrock = {"TASTE_BEDROCK_URL": "https://bedrock-runtime.us-east-1.amazonaws.com",
+               "AWS_BEARER_TOKEN_BEDROCK": "bedrock-test-only"}
+    azure = {"AZURE_OPENAI_BASE_URL": "https://res.openai.azure.com/openai/v1", "AZURE_OPENAI_API_KEY": "azure-test-only"}
+    for model, profile in (("gpt-6-luna", "global.openai.gpt-6-luna"),
+                           ("claude-sonnet-5-5", "global.anthropic.claude-sonnet-5-5")):
+        cli.model_llm(1.0, model, bedrock)
+        route = made[-1]["azure_openai"]
+        assert route.route == "bedrock" and route.deployments == (AzureDeployment(SERVED_MODELS[model], profile),)
+    cli.model_llm(1.0, "gpt-6-sol", azure)
+    route = made[-1]["azure_openai"]
+    assert route.route == "azure_openai" and route.deployments == (AzureDeployment(SERVED_MODELS["gpt-6-sol"], "gpt-6-sol"),)
+    assert made[-1]["budget_usd"] == 1.0 and made[-1]["max_attempts"] == 1 and made[-1]["cap_on"] == "billed"
+    # One route, named by the host: both or neither is refused, and Bedrock serves only its verified profiles.
+    with pytest.raises(RuntimeError, match="both"):
+        cli.model_llm(1.0, "gpt-6-luna", {**bedrock, **azure})
+    with pytest.raises(RuntimeError, match="must be set"):
+        cli.model_llm(1.0, "gpt-6-luna", {})
+    with pytest.raises(ProtocolFailure, match="global profile"):
+        cli.model_llm(1.0, "gpt-5.6-luna", bedrock)
