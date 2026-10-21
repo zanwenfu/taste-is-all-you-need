@@ -81,6 +81,22 @@ def test_without_a_record_harbors_figures_stand_and_an_unfaithful_branch_is_not_
     assert summary["agent_started"] is None  # no record: Harbor's figures stand
 
 
+def test_a_taste_trial_whose_record_was_never_settled_is_not_a_sample(tmp_path):
+    """Graded and faithful, but Taste's record was never read (the settlement race of Phase 1, 43 of
+    16,767 trials): its exit status and submission are unknown, so the driver must retry it rather
+    than end the episode as "no submission"."""
+    jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
+    lost = records.trial(jobs_dir / "j" / trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials,
+                                                audit_flags=["settlement_failed:ResourceCleanupError"]), trials)
+    assert lost["settled"] is False and lost["faithful"] is None and not records.usable(lost)
+    plain = records.trial(jobs_dir / "j" / trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials), trials)
+    assert records.usable(plain)  # no record and no flag: Harbor's figures stand, as before
+    flagged = records.trial(jobs_dir / "j" / trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials,
+                                                   steps=agent_steps(2), audit_flags=["settlement_failed:RuntimeError"]),
+                            trials)
+    assert flagged["settled"] is True and not records.usable(flagged)
+
+
 def test_time_is_the_agents_execution_by_harbors_clock_less_the_prefix_for_a_branch(tmp_path):
     jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
     never = trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials, seconds=None, exception="AgentSetupError")

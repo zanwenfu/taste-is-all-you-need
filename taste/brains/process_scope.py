@@ -362,13 +362,19 @@ class OwnedProcessScope:
                 or _duration_us(observed.get("TimeoutStopUSec", "")) != math.ceil(self.spec.grace_seconds * 1e6)):
             raise RuntimeError("service deadline configuration differs")
         invocation = observed.get("InvocationID")
-        if not invocation or (state["invocation_id"] is not None
-                              and state["invocation_id"] != invocation):
+        # A fast unit can be seen still loaded but already ended, with its InvocationID cleared,
+        # before the first look. After an acknowledged launch, the owner-unique name, description
+        # and enforcement checked above identify it; an unbound unit that is still running does not.
+        ended_unbound = (not invocation and state["launch_acknowledged"]
+                         and observed.get("ActiveState") in {"inactive", "failed"})
+        if not ended_unbound and (not invocation or (state["invocation_id"] is not None
+                                                     and state["invocation_id"] != invocation)):
             raise RuntimeError("service invocation identity differs")
         group = observed.get("ControlGroup")
         if group not in {"", f"/system.slice/{self.unit}"}:
             raise RuntimeError("service cgroup differs")
-        state["invocation_id"] = invocation
+        if invocation:
+            state["invocation_id"] = invocation
         state["last_observation"] = observed
 
     def _failure(self, fd, state, operation, exc):

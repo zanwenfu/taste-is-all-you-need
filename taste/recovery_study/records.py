@@ -207,8 +207,13 @@ def trial(trial_dir, trials_root):
 
 
 def usable(summary):
-    """A graded trial of an agent that started, whose prefix, if it had one, was faithful: a sample of the outcome."""
-    return summary["reward"] is not None and summary["faithful"] is not False and summary["agent_started"] is not False
+    """A graded trial of an agent that started, whose prefix, if it had one, was faithful: a sample of the outcome.
+
+    A trial Taste flagged as not settled is not one: its record was never read (the settlement race),
+    so its exit status and submission are unknown; it is retried rather than read as "no submission"."""
+    unsettled = any(str(flag).startswith("settlement_failed") for flag in summary.get("audit_flags") or ())
+    return (summary["reward"] is not None and summary["faithful"] is not False
+            and summary["agent_started"] is not False and not unsettled)
 
 
 def verdict(summary):

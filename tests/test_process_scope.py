@@ -295,6 +295,42 @@ def test_fast_successful_execution_does_not_require_an_existing_unit(scope):
     assert not scope.manager.stops
 
 
+@pytest.mark.parametrize("ended", ["inactive", "failed"])
+def test_fast_execution_seen_ended_with_its_invocation_cleared_settles(scope, ended):
+    """A fast unit can be seen still loaded but already ended, its InvocationID cleared, before the
+    scope's first look (Phase 1: 43 of 16,767 trials were flagged unsettled this way). Its unique
+    name, description and enforcement still match, so it is this launch's unit, not a stranger."""
+    start = scope.manager.start
+
+    def fast(*args):
+        start(*args)
+        scope.manager.units[scope.unit].update(ActiveState=ended, InvocationID="", ControlGroup="")
+        scope.manager.populated.clear()
+
+    scope.manager.start = fast
+    scope.start()
+    receipt = scope.wait(timeout_seconds=1)
+    assert receipt["processes_stopped"] and receipt["goal_settlement_required"]
+    assert state(scope)["phase"] == "stopped" and len(scope.manager.starts) == 1
+
+
+def test_running_unit_without_an_invocation_id_is_still_refused(scope):
+    scope.start()
+    scope.manager.units[scope.unit]["InvocationID"] = ""
+    with pytest.raises(ResourceCleanupError):
+        restore(scope).stop("refuse an unbound running incarnation")
+    assert not scope.manager.stops and state(scope)["termination"] is None
+
+
+def test_ended_unit_without_an_invocation_id_is_refused_before_an_acknowledged_launch(scope):
+    state_before = state(scope)
+    assert state_before["launch_acknowledged"] is False
+    scope.manager.units[scope.unit] = {"Description": scope.description, "ActiveState": "inactive", "InvocationID": ""}
+    with pytest.raises(RuntimeError, match="already exists"):
+        scope.start()
+    assert scope.manager.starts == []
+
+
 @pytest.mark.parametrize("mutation", [
     {"launch_acknowledged": 1}, {"phase": "running", "launch_attempted": False},
     {"phase": "stopped", "termination": {"processes_stopped": True}},
