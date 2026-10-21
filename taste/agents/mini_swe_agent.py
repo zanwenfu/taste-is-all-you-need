@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import platform
 import shlex
@@ -45,6 +46,7 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
 import minisweagent
 import yaml
+from jinja2 import StrictUndefined, Template
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import builtin_config_dir
 from minisweagent.exceptions import FormatError, Submitted
@@ -59,7 +61,7 @@ from minisweagent.models.utils.openai_multimodal import expand_multimodal_conten
 from minisweagent.utils.serialize import recursive_merge
 from pydantic import BaseModel
 
-from taste.agents import AgentExit, ModelReply, uname_override
+from taste.agents import AgentExit, ModelReply, agentrewind, uname_override
 from taste.providers._openai import _NATIVE
 
 NAME = "mini-swe-agent"
@@ -183,6 +185,59 @@ class TasteResponsesModel:
                                     "model_type": f"{type(self).__module__}.{type(self).__name__}"}}}
 
 
+class RewindResponsesModel(TasteResponsesModel):
+    """The rewind arm's model class (``taste.agents.agentrewind``): AgentRewind's two tools beside the bash tool
+    and its guidance after the system prompt on every call, and from call ``at_call`` on its notebook after
+    the messages that call restores. What the agent keeps is its own: the additions are what is sent."""
+
+    def __init__(self, *, notes=(), at_call=None, **kwargs):
+        super().__init__(**kwargs)
+        self.notes, self.at_call = [dict(note) for note in notes], at_call
+        self._calls, self._note_at = 0, None
+
+    def _query(self, messages, **kwargs):
+        if kwargs:
+            raise ValueError("per-call model options are not supported")
+        sent = canonical_messages(messages)
+        if not sent or sent[0].get("role") != "system" or not isinstance(sent[0].get("content"), str):
+            raise ValueError("the rewind arm's guidance follows the system prompt, and this request has none")
+        sent[0] = {**sent[0], "content": agentrewind.with_guidance(sent[0]["content"])}
+        self._calls += 1
+        if self.at_call is not None and self._calls >= self.at_call:
+            # Where the restored messages end, the first time; there it stays, as the rewound context grows.
+            self._note_at = len(sent) if self._note_at is None else self._note_at
+            sent.insert(self._note_at, agentrewind.notebook_message(self.notes))
+        tools = [copy.deepcopy(BASH_TOOL_RESPONSE_API), *agentrewind.tools()]
+        return _Response(self.host.ask(messages=sent, tools=tools, effort=self.effort))
+
+    def _parse_actions(self, response):
+        """Upstream's parsing for its bash calls; a call of the two tools becomes a command the host answers."""
+        calls = [item for item in getattr(response, "output", []) or [] if item.get("type") == "function_call"]
+        if not any(item.get("name") in agentrewind.TOOL_NAMES for item in calls):
+            return super()._parse_actions(response)
+        actions = []
+        for item in calls:
+            if item.get("name") not in agentrewind.TOOL_NAMES:
+                actions += parse_toolcall_actions_response(
+                    [item], format_error_template=self.config.format_error_template,
+                    template_kwargs={"finish_reason": finish_reason_from_responses_api(response)})
+                continue
+            try:
+                arguments = json.loads(item.get("arguments", "{}"))
+            except ValueError as error:
+                arguments = f"Error parsing tool call arguments: {error}."
+            if not isinstance(arguments, dict):
+                text = arguments if isinstance(arguments, str) else "Tool call arguments must be a JSON object."
+                raise FormatError({"type": "message", "role": "user", "extra": {"interrupt_type": "FormatError"},
+                                   "content": [{"type": "input_text", "text": Template(
+                                       self.config.format_error_template, undefined=StrictUndefined).render(
+                                       error=text, actions=[], has_tool_calls=True,
+                                       finish_reason=finish_reason_from_responses_api(response))}]})
+            actions.append({"command": agentrewind.tool_command(item["name"], arguments),
+                            "tool_call_id": item.get("call_id") or item.get("id"), "rewind_tool": item["name"]})
+        return actions
+
+
 class TasteEnvironmentConfig(BaseModel):
     cwd: str = ""
     env: dict[str, str] = {}
@@ -209,6 +264,10 @@ class TasteEnvironment:
     def execute(self, action, cwd="", *, timeout=None):
         command = action.get("command", "")
         limit = timeout or self.config.timeout
+        if action.get("rewind_tool"):
+            # A call of the rewind arm's tools: the host answers it; nothing runs in the container.
+            result = self.host.run(command, cwd=cwd or self.config.cwd, timeout_seconds=limit, shown=command)
+            return {"output": result.output, "returncode": result.returncode, "exception_info": ""}
         result = self.host.run(self._shell(command), cwd=cwd or self.config.cwd, timeout_seconds=limit,
                                shown=command)
         if result.timed_out:
@@ -242,7 +301,7 @@ class MiniSweAgent:
 
     name = NAME
 
-    def __init__(self, *, effort, config="mini", uname=""):
+    def __init__(self, *, effort, config="mini", uname="", rewind=None):
         path = Path(builtin_config_dir) / f"{config}.yaml"
         self._raw = path.read_bytes()
         loaded = yaml.safe_load(self._raw)
@@ -251,6 +310,10 @@ class MiniSweAgent:
         # agent_uname: not part of the identity, which a branch compares with its record's; it is disclosed
         # with the trial's settings instead.
         self.uname = uname_override(uname)
+        # The rewind arm: {"notes", "at_call"}; disclosed with the branch it runs in, not in the identity.
+        if rewind is not None and (not isinstance(rewind, dict) or set(rewind) != {"notes", "at_call"}):
+            raise ValueError("the rewind arm's agent is given its notes and the call they go in at")
+        self.rewind = rewind
 
     def configs(self):
         return copy.deepcopy(self._configs)
@@ -259,13 +322,16 @@ class MiniSweAgent:
         return {"name": NAME, "version": minisweagent.__version__, "config": self.config_name,
                 "config_sha256": hashlib.sha256(self._raw).hexdigest()}
 
-    def run(self, task, host, *, cwd, model_name):
+    def _agent(self, host, *, cwd, model_name):
         configs = self.configs()
-        agent = DefaultAgent(
-            TasteResponsesModel(host=host, effort=self.effort, model_name=model_name, **configs["model"]),
-            TasteEnvironment(host=host, cwd=cwd, uname=self.uname, **configs["environment"]),
-            **configs["agent"],
-        )
+        model = (TasteResponsesModel if self.rewind is None else RewindResponsesModel)(
+            host=host, effort=self.effort, model_name=model_name, **configs["model"],
+            **({} if self.rewind is None else self.rewind))
+        return DefaultAgent(model, TasteEnvironment(host=host, cwd=cwd, uname=self.uname, **configs["environment"]),
+                            **configs["agent"])
+
+    def run(self, task, host, *, cwd, model_name):
+        agent = self._agent(host, cwd=cwd, model_name=model_name)
         result = agent.run(task)
         return AgentExit(result.get("exit_status", ""), result.get("submission", ""),
                          tuple(copy.deepcopy(agent.messages)), agent.n_calls)

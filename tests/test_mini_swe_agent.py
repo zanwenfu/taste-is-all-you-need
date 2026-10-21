@@ -322,3 +322,88 @@ def test_the_upstream_configuration_is_named_by_version_and_digest():
     assert identity["name"] == "mini-swe-agent" and identity["version"] == "2.4.6"
     assert identity["config"] == "mini" and identity["config_sha256"] == MiniSweAgent(effort="high").identity()["config_sha256"]
     assert len(identity["config_sha256"]) == 64
+
+
+# -- the rewind arm (taste.agents.agentrewind): AgentRewind's two tools and guidance beside mini-swe-agent's own
+
+def tool_call(name, arguments, call_id):
+    return {"type": "function_call", "id": "fc_" + call_id, "call_id": call_id, "name": name,
+            "arguments": json.dumps(arguments), "status": "completed"}
+
+
+def test_the_rewind_arm_offers_its_tools_and_guidance_on_every_call():
+    from taste.agents import agentrewind
+
+    host = ScriptedHost([reply(call("ls", "c1")), reply(call(f"echo {SENTINEL}", "c2"))],
+                        {SENTINEL: ShellResult(f"{SENTINEL}\n", 0)})
+    result = MiniSweAgent(effort="low", rewind={"notes": [], "at_call": None}).run(
+        "Fix it.", host, cwd="/app", model_name="m")
+    assert result.exit_status == "Submitted" and len(host.asked) == 2
+    for asked in host.asked:
+        assert [tool["name"] for tool in asked["tools"]] == ["bash", "backtrack_candidates", "backtrack_commit"]
+        assert asked["tools"][0] == BASH_TOOL_RESPONSE_API
+        assert asked["messages"][0] == {"role": "system", "content": agentrewind.with_guidance(
+            "You are a helpful assistant that can interact with a computer.")}
+        assert not any(agentrewind.is_notebook(message) for message in asked["messages"])
+    # The agent keeps its own messages: the guidance is what is sent, not what it remembers.
+    assert result.messages[0]["content"] == "You are a helpful assistant that can interact with a computer."
+    # Without the arm nothing is added.
+    plain = ScriptedHost([reply(call(f"echo {SENTINEL}", "c1"))], {SENTINEL: ShellResult(f"{SENTINEL}\n", 0)})
+    MiniSweAgent(effort="low").run("Fix it.", plain, cwd="/app", model_name="m")
+    assert plain.asked[0]["tools"] == [BASH_TOOL_RESPONSE_API]
+
+
+def test_a_rewound_call_carries_the_notebook_after_the_messages_it_restores():
+    from taste.agents import agentrewind
+
+    notes = [{"memory_summary": "Read src/p.py before editing it.", "target_record_uid": "llm-2", "reason": None}]
+    host = ScriptedHost([reply(call("ls", "c1")), reply(call("cat src/p.py", "c2")),
+                         reply(call(f"echo {SENTINEL}", "c3"))], {SENTINEL: ShellResult(f"{SENTINEL}\n", 0)})
+    MiniSweAgent(effort="low", rewind={"notes": notes, "at_call": 2}).run("Fix it.", host, cwd="/app",
+                                                                           model_name="m")
+    first, second, third = (asked["messages"] for asked in host.asked)
+    assert not any(agentrewind.is_notebook(message) for message in first)
+    assert second[-1] == agentrewind.notebook_message(notes) and second[:len(first)] == first
+    assert third[len(second) - 1] == agentrewind.notebook_message(notes)
+    assert sum(agentrewind.is_notebook(message) for message in third) == 1
+
+
+def test_a_call_of_the_tools_goes_to_the_host_as_its_command_and_comes_back_as_the_tools_output():
+    from taste.agents import agentrewind
+
+    listing = '[{"record_uid": "llm-1"}]'
+    host = ScriptedHost([reply(text("Let me see where to go back to."),
+                               tool_call("backtrack_candidates", {"reason": "rejected twice"}, "t1")),
+                         reply(call(f"echo {SENTINEL}", "c2"))],
+                        {"\x00taste-agentrewind\x00": ShellResult(listing, 0), SENTINEL: ShellResult(f"{SENTINEL}\n", 0)})
+    MiniSweAgent(effort="low", rewind={"notes": [], "at_call": None}).run("Fix it.", host, cwd="/app",
+                                                                           model_name="m")
+    command = agentrewind.tool_command("backtrack_candidates", {"reason": "rejected twice"})
+    assert host.ran[0] == (command, "/app", 30) and host.shown[0] == command
+    answered = [item for item in host.asked[1]["messages"] if isinstance(item["content"], list)
+                and item["content"][0]["item"].get("type") == "function_call_output"]
+    assert answered[-1]["content"][0]["item"]["call_id"] == "t1"
+    # Formatted as any command's result is, by the configuration's own observation template.
+    assert json.loads(answered[-1]["content"][0]["item"]["output"]) == {"returncode": 0, "output": listing}
+
+
+def test_a_reply_with_bash_and_a_tool_is_parsed_in_order_and_an_unknown_tool_is_still_refused():
+    from taste.agents import agentrewind
+
+    model = MiniSweAgent(effort="low", rewind={"notes": [], "at_call": None})
+    host = ScriptedHost([reply(call("ls", "c1"), tool_call("backtrack_commit", {"record_uid": "llm-1",
+                                                                                "memory_summary": "m"}, "t2")),
+                         reply(tool_call("other", {"x": 1}, "t3"))])
+    agent = model._agent(host, cwd="/app", model_name="m")
+    asked = [{"role": "system", "content": "Be careful."}, {"role": "user", "content": "go"}]
+    message = agent.model.query(asked)
+    assert [action.get("rewind_tool") for action in message["extra"]["actions"]] == [None, "backtrack_commit"]
+    assert message["extra"]["actions"][0]["command"] == "ls"
+    assert message["extra"]["actions"][1]["command"] == agentrewind.tool_command(
+        "backtrack_commit", {"record_uid": "llm-1", "memory_summary": "m"})
+    with pytest.raises(FormatError) as raised:
+        agent.model.query(asked)
+    assert "Unknown tool 'other'" in json.dumps(raised.value.messages[0])
+    # A request with no system prompt has nowhere for the guidance to go: refused, not sent without it.
+    with pytest.raises(ValueError, match="system prompt"):
+        agent.model.query([{"role": "user", "content": "go"}])
