@@ -1147,7 +1147,8 @@ class CentralPlanner:
 
     def _ensure_goal(self, goal: Goal) -> None:
         expected = None if self.azure_policy is None else self.azure_policy.to_dict()
-        if goal.metadata.get(POLICY_KEY) != expected:
+        # The goal holds its policy frozen (a list there is a tuple): compare plain values.
+        if _thaw(goal.metadata.get(POLICY_KEY)) != expected:
             raise PlannerIdentityConflict("goal and coordinator Azure execution policies differ")
         self._adopt_rewound_control()
         path = _goal_path(goal.goal_id)

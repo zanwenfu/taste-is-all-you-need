@@ -255,6 +255,34 @@ def test_the_rewind_arm_is_a_branch_with_its_notes_file(tmp_path):
     assert branch_trial.load_inputs(plain).rewind is None
 
 
+def test_a_rewind_branch_prepares_its_goal_as_the_trial_service_does(tmp_path):
+    """The rewind arm's notes are a list in its policy and a tuple in the goal that binds it (a goal freezes its
+    metadata). Preparation binds the goal, its host binds it again and the coordinator checks it: the same policy each
+    time, so none may refuse it for that frozen form (every rewind trial of study H's first pilot start stopped there).
+    Another policy is still refused."""
+    from taste.brains.azure_execution_policy import POLICY_KEY
+    from taste.brains.azure_goal_entrypoint import prepare_azure_goal_process
+    from taste.brains.central_planner import Goal
+
+    notes = [{"memory_summary": "Read the parser first.", "target_record_uid": "llm-2", "reason": None}]
+    policy = policy_for(TrialSettings.from_options(ALONE), fork(rewind={"notes": notes, "restart_usd": 0.004}))
+    goal = Goal(goal_id="branch-goal", task="Fix the parser", success_criteria=("the tests pass",), budget_usd=1)
+    bound = policy.bind_goal(goal)
+    assert policy.bind_goal(bound) == bound
+    root = tmp_path / "repo"
+    root.mkdir()
+    prepared = prepare_azure_goal_process(root, "branch-session", goal, policy=policy, environment={},
+                                          max_generations=1, wall_clock_seconds=1600, max_planner_failures=1)
+    assert prepared.goal == bound
+    # As the run and the settlement read it back from the prepared goal.
+    assert AzureExecutionPolicy.from_dict(prepared.goal.metadata[POLICY_KEY]) == policy
+    assert AzureExecutionPolicy.from_dict(prepared.goal.metadata[POLICY_KEY]).bind_goal(prepared.goal) == bound
+    for other in (replace(policy, branch=fork(rewind={"notes": [], "restart_usd": 0.004})),
+                  replace(policy, branch=fork())):
+        with pytest.raises(ValueError, match="another Azure execution policy"):
+            other.bind_goal(bound)
+
+
 def test_a_saved_checkpoint_is_refused_for_another_branch(tmp_path):
     path = _script(tmp_path)
     directory = tmp_path / "checkpoint"

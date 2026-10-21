@@ -194,12 +194,13 @@ class AzureExecutionPolicy:
         raise ValueError("invalid Azure execution policy fields or schema")
 
     def bind_goal(self, goal):
-        from taste.brains.central_planner import Goal
+        from taste.brains.central_planner import Goal, _thaw
 
         if not isinstance(goal, Goal) or goal.budget_usd is None or goal.budget_usd <= 0:
             raise ValueError("Azure execution requires a Goal with a positive global budget")
         prior = goal.metadata.get(POLICY_KEY)
-        if prior is not None and prior != self.to_dict():
+        # A goal holds its policy frozen (a list there is a tuple, as a rewind branch's notes): compare plain values.
+        if prior is not None and _thaw(prior) != self.to_dict():
             raise ValueError("goal already binds another Azure execution policy")
         return replace(goal, metadata={**goal.metadata, POLICY_KEY: self.to_dict()})
 

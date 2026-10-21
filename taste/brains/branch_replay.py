@@ -776,6 +776,9 @@ class BranchPolicy:
             raise ValueError("an override changes what the replayed agent sees: it needs branch_replay=on")
         if self.rewind is not None:
             _check_rewind(self.rewind)
+            # Held as plain values whatever form they came in (a goal's or a worker's frozen copy holds mapping
+            # proxies and tuples), so the policy copies, compares and writes out the same.
+            object.__setattr__(self, "rewind", {**self.rewind, "notes": [dict(note) for note in self.rewind["notes"]]})
         if self.override == "rewind" and self.rewind is None:
             raise ValueError("a rewind needs the rewind arm's notes")
         if self.override == "rewind" and self.note != agentrewind.notebook(self.rewind["notes"]):
