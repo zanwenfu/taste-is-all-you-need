@@ -35,9 +35,13 @@ which is not public:
   earlier than the others' near the window.
 
 The recovery driver's ``agentrewind_norestore`` twin (``taste.recovery_study.recovery_driver``) is a rewind,
-the same way and with the same note, to where the agent began to rewind (the step after the last one that ran
-a container command), so its files are its final files and the rollback guidance is true of it; its note
-names that call.
+the same way, to where the agent began to rewind (the step after the last one that ran a container command),
+so its files are its final files and the rollback guidance is true of it. Its note has the same memory and
+reason; only its target tag differs, naming that call. The memory still speaks of the call the agent chose.
+
+Files: a rewind's come back by running the run's recorded commands again in a fresh container and checking
+them against the record (``taste.brains.branch_replay.rebuild``), not from a snapshot as upstream's git
+workspace does; the twin's are its trial's saved final files.
 """
 
 from __future__ import annotations
@@ -241,8 +245,9 @@ def answer(name, arguments, steps, notes=(), *, can_restart=True):
     """(output, exit code, an accepted ``Commit`` or None) for one call of the two tools.
 
     A commit's checks run in upstream's order: a record id and a memory are required, a feasibility verdict is
-    refused, the target must be one of the timeline's model calls, and a note too like an earlier one is
-    refused; then the study's own rule, that the attempt can still start another round.
+    refused, the target must be one of the timeline's model calls (where upstream's commit lets an unknown one
+    through and its runner fails the rewind), and a note too like an earlier one is refused; then the study's
+    own rule, that the attempt can still start another round.
     """
     arguments = arguments if isinstance(arguments, Mapping) else {}
     steps = list(steps)

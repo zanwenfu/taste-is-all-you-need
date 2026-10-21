@@ -50,10 +50,12 @@ AgentRewind's method (Zhuang et al., arXiv 2608.14380; ``taste.agents.agentrewin
   the call made again with the notebook of the episode's notes. At an episode's first commit the episode
   forks: ``agentrewind_norestore`` is its twin, whose rewinds restore nothing (they go back to where the agent
   was before it began to rewind, the same way and with the same note), from the same rounds and so with the
-  same budget left. The twin's note names the call it goes back to, so that what the rewind guidance says of
-  a rewound context is true of it, and it restores the committing trial's saved final files (nothing after
-  that call changed a file) where those were saved; a twin whose commit step itself ran a command is flagged
-  (going back undoes it). An episode without a commit has no twin: its twin's outcome is its own. Every later
+  same budget left. The twin's note has the same memory and reason, its target tag naming the call it goes
+  back to, so that what the rewind guidance says of a rewound context is true of it; it restores the
+  committing trial's saved final files (nothing after that call changed a file) where those were saved; a
+  twin whose commit step itself ran a command is flagged (going back undoes it). The rewind side's files come
+  back by running the recorded commands again in a fresh container, checked against the record (a rebuild),
+  not from a snapshot: one that differs is tried again, and twice is the episode's failure. An episode without a commit has no twin: its twin's outcome is its own. Every later
   round, after a rewind or a rejection, keeps the tools, the sentence and the notebook where it went in. A
   rewind that cannot be brought back faithfully ends its episode as a failure; with no round left after a
   commit, the state the rewind chose is graded with no model call (the twin's is the committing round's own).
@@ -564,8 +566,9 @@ class RecoveryDriver(Driver):
                 if found:
                     current["agent"] = list(found[0])
                     continue
-                if current.get("rewind") and any(summary["faithful"] is False for _, summary in results):
-                    # Intention to treat: a rewind that cannot be brought back is the episode's failure.
+                if current.get("rewind") and sum(summary["faithful"] is False for _, summary in results) >= 2:
+                    # Intention to treat: a rewind that cannot be brought back, tried twice as a final state's
+                    # rebuild is, is the episode's failure.
                     episode["end"] = "rewind_unfaithful"
                     return
                 if len(self.counted(current["agent_jobs"])) >= 2:
@@ -665,10 +668,11 @@ class RecoveryDriver(Driver):
 
     def _rewind_file(self, job, run, notes, settings, *, cap_usd, at_call=None):
         """The rewind arm's notes for a trial, and the floor a commit needs: in dollars against this trial's own
-        cap, and in seconds against its deadline (a round's least time beside the prefix allowance)."""
+        cap (dollars bind), and in seconds against its deadline, a round's least time. The deadline holds the
+        prefix allowance, of which the run does not know how much bringing its prefix back used, so the time rule
+        is the looser of the two; a commit it lets through with no round left has its chosen state graded."""
         values = {"notes": notes, "restart_usd": round(self.least_usd(run), 8),
-                  "restart_seconds": round(round_seconds(settings, self.settings["min_round_seconds"])
-                                           + self.settings["prefix_allowance"], 3),
+                  "restart_seconds": round(round_seconds(settings, self.settings["min_round_seconds"]), 3),
                   "spend_cap_usd": round(float(cap_usd), 6), **({"at_call": at_call} if at_call else {})}
         return str(jobs.write_text(self.work_dir() / "rewind" / f"{job}.json", json.dumps(values, indent=1)))
 

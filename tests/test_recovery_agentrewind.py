@@ -59,10 +59,10 @@ def test_round_one_carries_on_after_the_rejection_with_the_two_tools_and_one_sen
     told = Path(first["branch_note"]).read_text()
     assert told.startswith("Submission rejected by a reviewer: ") and told.endswith("\n\n" + SENTENCE)
     # The rewind arm's tools, no notes yet, and the floor a commit needs: a round's least share of the budget,
-    # and a round's least time (the base run's 10 s reply reserve, 90 s plan, a minute of work) beside the 300 s
-    # prefix allowance, measured against this trial's own cap.
+    # against this trial's own cap, and a round's least time (the base run's 10 s reply reserve, 90 s plan, a
+    # minute of work).
     assert json.loads(Path(first["branch_rewind"]).read_text()) == {
-        "notes": [], "restart_usd": 0.07, "restart_seconds": 460.0, "spend_cap_usd": 0.7}
+        "notes": [], "restart_usd": 0.07, "restart_seconds": 160.0, "spend_cap_usd": 0.7}
     assert first["final_checkpoint"].endswith("-ar-f1-final")
     episodes = driver.summary()[run_id]["arms"]["agentrewind"]["episodes"]
     assert [episode["end"] for episode in episodes] == ["done", "done"]
@@ -109,6 +109,16 @@ def test_a_rewind_that_cannot_be_brought_back_faithfully_is_scored_a_failure(tmp
     [restored] = summary["agentrewind"]["episodes"]
     assert restored["end"] == "rewind_unfaithful" and restored["solved"] is False and restored["reward"] == 0.0
     assert summary["agentrewind_norestore"]["episodes"][0]["end"] == "done"
+    # Tried twice, as a rebuild of a final state is: a rebuild can differ once by chance.
+    assert len(settings_of(driver, "agentrewind")) == 2
+
+
+def test_a_rewind_whose_first_rebuild_differs_is_tried_again(tmp_path):
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["agentrewind"], repeats=1)
+    harbor = FakeHarbor(trials, rewinding(faithful=lambda spec: not spec.name.endswith("-ar-e1r2-a1")))
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, harbor)
+    [restored] = driver.summary()[run_id]["arms"]["agentrewind"]["episodes"]
+    assert restored["end"] == "done" and restored["rounds"] == 2 and len(settings_of(driver, "agentrewind")) == 2
 
 
 def test_a_commit_with_no_round_left_grades_the_state_it_chose(tmp_path):
