@@ -93,6 +93,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import random
 from pathlib import Path
 
 from taste.agents.checker import BARE_FEEDBACK, checker_task, feedback
@@ -174,6 +175,9 @@ DEFAULTS = {
     # their names are outside this state's prefix) are rebuilt from the record, as on a new host that does not
     # keep them. This state's own checkpoints are restored either way.
     "prior_checkpoints": "restore",
+    # A seed: each run's arms are emitted in an order shuffled by it and the run's id (kept as the run's
+    # arm_order), so no arm is always first in the spool. None: the order of `recoveries`.
+    "arm_order_seed": None,
 }
 
 
@@ -310,7 +314,7 @@ class RecoveryDriver(Driver):
             if run.get("skipped") or not self._initial_check(run_id, run):
                 continue
             self._sources(run_id, run)
-            for name, recovery, step in self._arms(run):
+            for name, recovery, step in self._ordered(run_id, run, self._arms(run)):
                 arm = run["arms"].setdefault(name, {
                     "recovery": recovery, "step": step, "first": [],
                     "episodes": [{"rounds": [], "end": None} for _ in range(self.settings["repeats"])]})
@@ -378,6 +382,17 @@ class RecoveryDriver(Driver):
             else:
                 arms.append((recovery, recovery, run["steps"] if recovery.startswith("continue") else 0))
         return arms
+
+    def _ordered(self, run_id, run, arms):
+        """The run's arms in its seeded order; reshuffled from the seed alone when a new arm appears."""
+        seed = self.settings["arm_order_seed"]
+        if seed is None:
+            return arms
+        names = sorted(name for name, _, _ in arms)
+        if sorted(run.get("arm_order") or ()) != names:
+            run["arm_order"] = names
+            random.Random(f"{seed}:{run_id}").shuffle(run["arm_order"])
+        return sorted(arms, key=lambda arm: run["arm_order"].index(arm[0]))
 
     def _advance_arm(self, run_id, run, name, arm):
         values = self.settings

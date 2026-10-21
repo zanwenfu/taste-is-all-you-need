@@ -118,6 +118,39 @@ def test_the_checker_checks_a_saved_copy_of_the_final_state_then_each_recovery_s
     assert first["ct"].prepare and not first["rt"].prepare
 
 
+def test_a_seed_shuffles_each_runs_arms_reproducibly_and_records_the_order(tmp_path):
+    """Arms go to one first-in-first-out spool; in a fixed order the same arm would always be first, so a
+    time-varying factor (throttling, host load) could fall on one arm. The order is a shuffle seeded by the
+    study's seed and the run's id: the same on every call and after a restart, and kept in the state."""
+    import random
+    arms = ["retry", "retry_feedback", "continue", "continue_bare", "retry_bare", "continue_tests"]
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=arms, arm_order_seed=7)
+    path, harbor = tmp_path / "rec.json", FakeHarbor(trials, recoveries())
+    driver, [saved] = step(path, given, jobs_dir)
+    harbor.run([saved])
+    driver, [check] = step(path, given, jobs_dir)
+    harbor.run([check])
+    driver, first = step(path, given, jobs_dir)
+    expected = sorted(arms)
+    random.Random(f"7:{run_id}").shuffle(expected)
+    assert driver.runs[run_id]["arm_order"] == expected
+    slug = recovery_driver.SLUG
+    assert [spec.name.split("-")[-2] for spec in first] == [slug[a] for a in expected]
+    assert RecoveryDriver.open(path, given).runs[run_id]["arm_order"] == expected
+
+
+def test_without_a_seed_arms_keep_the_settings_order(tmp_path):
+    arms = ["retry", "retry_feedback", "continue"]
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=arms)
+    path, harbor = tmp_path / "rec.json", FakeHarbor(trials, recoveries())
+    driver, [saved] = step(path, given, jobs_dir)
+    harbor.run([saved])
+    driver, [check] = step(path, given, jobs_dir)
+    harbor.run([check])
+    driver, first = step(path, given, jobs_dir)
+    assert [spec.name.split("-")[-2] for spec in first] == ["rt", "rf", "ct"] and "arm_order" not in driver.runs[run_id]
+
+
 def test_rounds_continue_until_the_budget_cannot_pay_for_another_and_spending_adds_up(tmp_path):
     jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["retry", "continue"])
     driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, recoveries()))
@@ -400,6 +433,16 @@ def test_the_command_line_sets_how_an_earlier_studys_checkpoints_are_used(tmp_pa
                "--launcher", str(tmp_path / "next.sh"), "--prior-checkpoints", "rebuild"]
     assert cli.main(options) == STARTED
     assert json.loads(state.read_text())["settings"]["prior_checkpoints"] == "rebuild"
+
+
+def test_the_command_line_sets_the_arm_order_seed(tmp_path):
+    jobs_dir, trials, _, _ = study(tmp_path)
+    state = tmp_path / "rec.json"
+    options = ["--state", str(state), "--base-job", str(jobs_dir / "base"), "--calibration",
+               str(jobs_dir / "calibration"), "--jobs-dir", str(jobs_dir), "--trials", str(trials),
+               "--launcher", str(tmp_path / "next.sh"), "--arm-order-seed", "20261021"]
+    assert cli.main(options) == STARTED
+    assert json.loads(state.read_text())["settings"]["arm_order_seed"] == 20261021
 
 
 def test_jobs_harbor_ended_before_any_trial_are_not_attempts_and_the_episodes_go_on(tmp_path):
