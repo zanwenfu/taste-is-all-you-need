@@ -594,6 +594,14 @@ def test_a_cut_off_walks_binary_file_notices_are_not_counted_among_its_lines():
     older = replace(run, output="Binary file openlibrary/i18n/ru/messages.mo matches\n"
                                 "openlibrary/a.py:1:escape\nopenlibrary/b.py:2:escape\n'Work search plugin.'\n")
     assert compare(older, other, 0, False)["host_ordered"] is True
+    # Written as it came, a notice can fall inside a line the cut let through.
+    inside = replace(run, output="openlibrary/a.py:1:escgrep: openlibrary/i18n/ru/messages.mo: binary file matches\n"
+                                 "ape\nopenlibrary/b.py:2:escape\n'Work search plugin.'\n")
+    assert compare(inside, other, 0, False)["host_ordered"] is True
+    # And in pieces: grep's name in one place, the rest of the notice in another.
+    pieces = replace(run, output="openlibrary/a.py:1:escgrep: ape\nopenlibrary/i18n/zh/messages.mo: binary file "
+                                 "matches\nopenlibrary/b.py:2:escape\n'Work search plugin.'\n")
+    assert compare(pieces, other, 0, False)["host_ordered"] is True
     # A line more or fewer than the notices is still a difference in what the command printed.
     assert compare(run, other + "'Work search plugin.'\n", 0, False)["divergent"] is True
     assert compare(run, other.replace("openlibrary/c.js:3:escape\n", ""), 0, False)["divergent"] is True

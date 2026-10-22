@@ -61,9 +61,10 @@ walk's output to its first or last lines (``grep -r``, ``rg``, ``find`` or
 ``host_ordered``) prints the lines the host lists first, and hosts, even two
 containers of one host, list a directory in different orders. Such a command
 that would diverge only by its output is not divergent when its exit code,
-its time-out and its number of normalized lines match the record's (grep's
-notices that a binary file matched left out: it writes them to standard
-error, which no cut reaches, as many as the walk got to); the row says
+its time-out and its number of lines match the record's (less one line for
+each of grep's notices that a binary file matched: it writes them to
+standard error, which no cut reaches, as many as the walk got to, in pieces
+that fall anywhere among the lines the cut let through); the row says
 ``host_ordered``, and the commands after it, compared as usual, show
 whether the files differ. A command the
 record shows finishing is given REBUILD_TIME_FACTOR times its limit to finish
@@ -267,14 +268,18 @@ _ORDER_KEEPING = frozenset({"grep", "egrep", "fgrep", "rg", "cut", "tr", "sed", 
 # command in a group with standard error folded in.
 _MINI_WRAPPER = re.compile(r"(?:export(?: [A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:@%+,=-]*)+; )?"
                            r"\{\n(?P<command>.*)\n\} 2>&1", re.DOTALL)
-# grep's notice that a binary file matched (as GNU grep 3.5 on says it, and as before), a normalized line. grep
-# writes it to its standard error, which no head or tail cuts: as many as the walk reached before the cut.
-_BINARY_NOTICE = re.compile(r"(?:grep: .+: binary file matches|Binary file .+ matches)")
+# grep's notice that a binary file matched (as GNU grep 3.5 on says it, and as before). grep writes it to its
+# standard error, which no head or tail cuts: as many as the walk reached before the cut, in pieces (its name, the
+# message, the newline) that fall where they fall among the lines the cut let through, even inside one.
+_BINARY_NOTICE = re.compile(r"binary file matches|Binary file [^\n]*? matches")
 
 
 def _walk_lines(text):
-    """The normalized lines a cut-off walk is counted by: grep's notices of matching binary files left out."""
-    return [line for line in normalized_lines(text) if not _BINARY_NOTICE.fullmatch(line)]
+    """How many lines a cut-off walk printed: its lines, less one for each of grep's notices that a binary file
+    matched (each brings one newline, wherever its pieces fell)."""
+    text = str(text)
+    lines = text.count("\n") + (bool(text) and not text.endswith("\n"))
+    return lines - len(_BINARY_NOTICE.findall(text))
 
 
 def _tokens(command):
@@ -474,7 +479,7 @@ def compare(run, output, returncode, timed_out):
            "timed_out": bool(timed_out), "recorded_timed_out": recorded["timed_out"],
            "similarity": score, "divergent": divergent}
     if (divergent and returncode == recorded["returncode"] and not timed_out
-            and len(_walk_lines(output)) == len(_walk_lines(recorded["output"]))
+            and _walk_lines(output) == _walk_lines(recorded["output"])
             and _host_ordered_run(run)):
         # A cut-off walk printed the lines this host lists first (see the fidelity rule).
         row.update(divergent=False, host_ordered=True)
