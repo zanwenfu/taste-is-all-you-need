@@ -239,14 +239,21 @@ class TasteAgent(BaseAgent):
                         # and running. A resource this owner could not free
                         # is no reason to keep the trial from its verifier.
                         context.metadata["taste"]["release_failed"] = type(failure).__name__
-        self._check_started(outcome, context)
+        self._check_started(outcome, context, branch)
 
-    def _check_started(self, outcome, context):
+    def _check_started(self, outcome, context, branch=None):
         """A run that ended on its own with no step of the hosted agent is not handed to grading.
 
         A run the benchmark's time limit cut short (no outcome) is graded as it
-        stands, as is one whose record could not be read (no step count).
+        stands, as is one whose record could not be read (no step count), and a
+        replayed branch from step 0 with live off: no step to answer from the
+        record and no live call, so none is taken by design, and the task's own
+        files are graded (the rewind arm's way back to the start, no round left).
         """
+        settings = self.settings
+        if (branch is not None and branch.replay and settings.branch_live == "off"
+                and settings.branch_step == 0):
+            return
         if outcome is not None and context.metadata["taste"].get("agent_steps") == 0:
             raise HostedAgentNotStarted(f"the hosted agent never took a step; the run stopped: {outcome.stop_reason}")
 

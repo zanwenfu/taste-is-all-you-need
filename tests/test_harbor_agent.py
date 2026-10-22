@@ -117,6 +117,30 @@ def test_the_record_counts_the_hosted_agents_steps_and_a_run_without_one_is_not_
     agent._check_started(None, context)
 
 
+@pytest.mark.parametrize("replay,live,step,graded", [
+    (True, "off", 0, True),    # back to the start with no round left: nothing to answer, the task's own files graded
+    (True, "off", 3, False),   # three steps to answer from the record and none taken: the harness failed
+    (True, "on", 0, False),    # a live branch whose agent never took a step
+    (False, "off", 0, False),  # given only the files, the trial's own agent runs from the start, whatever live says
+])
+def test_a_replayed_branch_with_no_step_to_replay_and_no_live_call_is_graded_without_one(
+        harbor_agent, tmp_path, replay, live, step, graded):
+    agent = harbor_agent.TasteAgent(tmp_path, model_name="azure/gpt-6-luna", agent="mini-swe-agent",
+                                    services="none", alone="once", worker_python="/usr/bin/python3",
+                                    branch=str(tmp_path / "replay.json"), branch_step=step, branch_live=live)
+    agent.owner = SimpleNamespace(audit_flags=(), outcome=None, root=tmp_path / "trial", sealed=True,
+                                  trajectory_path=_settled(tmp_path, ("mini-swe-agent", ["user"])))
+    context = SimpleNamespace(metadata={"taste": {"trial": "t", "configuration": {}}})
+    agent._record("goal-1", "Fix the build.", None, context, started=0.0)
+    assert context.metadata["taste"]["agent_steps"] == 0
+    ended, branch = SimpleNamespace(stop_reason="generation_bound"), SimpleNamespace(replay=replay)
+    if graded:
+        agent._check_started(ended, context, branch)
+    else:
+        with pytest.raises(harbor_agent.HostedAgentNotStarted, match="never took a step"):
+            agent._check_started(ended, context, branch)
+
+
 def test_without_a_settled_record_or_a_hosted_agent_no_step_count_is_claimed(harbor_agent, tmp_path):
     context = SimpleNamespace(metadata={"taste": {"trial": "t", "configuration": {}}})
     agent = harbor_agent.TasteAgent(tmp_path, model_name="azure/gpt-6-luna", agent="mini-swe-agent",

@@ -580,6 +580,28 @@ def test_a_cut_off_walk_that_printed_other_lines_is_not_divergent_when_its_count
     assert "host_ordered" not in compare(run, other, 1, False)
 
 
+def test_a_cut_off_walks_binary_file_notices_are_not_counted_among_its_lines():
+    # grep says a binary file matched on its error stream, which no head cuts: how many it says is how far the walk
+    # got before the cut, so the host's order too (an openlibrary run of SWE-bench Pro rebuilt on another host).
+    command = "cd /app && grep -R 'escape' -n openlibrary | head -2 && sed -n '1,2p' openlibrary/__init__.py"
+    run = recorded_run(command, "grep: openlibrary/i18n/ru/messages.mo: binary file matches\n"
+                                "grep: openlibrary/i18n/de/messages.mo: binary file matches\n"
+                                "openlibrary/a.py:1:escape\nopenlibrary/b.py:2:escape\n'Work search plugin.'\n")
+    other = "openlibrary/c.js:3:escape\nopenlibrary/d.js:4:escape\n'Work search plugin.'\n"
+    row = compare(run, other, 0, False)
+    assert row["similarity"] < OUTPUT_FLOOR and row["divergent"] is False and row["host_ordered"] is True
+    # As older grep says it.
+    older = replace(run, output="Binary file openlibrary/i18n/ru/messages.mo matches\n"
+                                "openlibrary/a.py:1:escape\nopenlibrary/b.py:2:escape\n'Work search plugin.'\n")
+    assert compare(older, other, 0, False)["host_ordered"] is True
+    # A line more or fewer than the notices is still a difference in what the command printed.
+    assert compare(run, other + "'Work search plugin.'\n", 0, False)["divergent"] is True
+    assert compare(run, other.replace("openlibrary/c.js:3:escape\n", ""), 0, False)["divergent"] is True
+    # A command that is no cut-off walk counts every line, as before.
+    plain = recorded_run("grep -n escape a.py | head -2", run.output)
+    assert compare(plain, other, 0, False)["divergent"] is True
+
+
 def test_the_rule_for_cut_off_walks_only_lets_through_what_diverged_by_its_lines_alone():
     # Against the rule as it was: no row it found faithful is divergent now, and a row it found divergent is
     # faithful now only when it says host_ordered.
