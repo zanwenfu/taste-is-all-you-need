@@ -125,30 +125,39 @@ from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver
 
 RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare",
               "retry_bare", "rewind_bare", "retry_tests", "rewind_tests", "continue_tests",
-              "continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden", "agentrewind")
-# The rewind arm and its twin, which the first commit of each of its episodes forks.
+              "continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden", "agentrewind",
+              "agentrewind_tests")
+# The rewind arm and its twin, which the first commit of each of its episodes forks; and the same pair decided by
+# the hidden tests, told Phase 1b's code message where the reviewer's feedback was.
 AGENTREWIND, NORESTORE = "agentrewind", "agentrewind_norestore"
+AGENTREWIND_TESTS, NORESTORE_TESTS = "agentrewind_tests", "agentrewind_tests_norestore"
+TWINS = {AGENTREWIND: NORESTORE, AGENTREWIND_TESTS: NORESTORE_TESTS}
+REWIND_ARMS = frozenset((*TWINS, *TWINS.values()))
 REWINDS = ("rewind", "rewind_bare", "rewind_tests")
 SOURCES = ("oracle", "reader", "rules")
 SLUG = {"retry": "rt", "retry_feedback": "rf", "continue": "ct", "continue_bare": "cb",
         "retry_bare": "rb", "retry_tests": "rx", "continue_tests": "cx",
         "continue_tests_code": "cc", "continue_tests_full": "cf", "continue_both": "cr", "continue_tests_hidden": "ch",
-        AGENTREWIND: "ar", NORESTORE: "an"}
+        AGENTREWIND: "ar", NORESTORE: "an", AGENTREWIND_TESTS: "ax", NORESTORE_TESTS: "nx"}
 # What each recovery tells the agent: the checker's feedback, its bare rejection, the failed tests, or both.
 MESSAGE = {"retry": "reviewer", "retry_feedback": "reviewer", "rewind": "reviewer", "continue": "reviewer",
            "retry_bare": "bare", "rewind_bare": "bare", "continue_bare": "bare",
            "retry_tests": "tests", "rewind_tests": "tests", "continue_tests": "tests",
            "continue_tests_code": "tests", "continue_tests_full": "tests", "continue_both": "both",
-           "continue_tests_hidden": "tests", AGENTREWIND: "reviewer", NORESTORE: "reviewer"}
+           "continue_tests_hidden": "tests", AGENTREWIND: "reviewer", NORESTORE: "reviewer",
+           AGENTREWIND_TESTS: "tests", NORESTORE_TESTS: "tests"}
 # The form of a tests message: the excerpt, or with the failing tests' code, or the wide excerpt.
-TESTS_FORM = {"continue_tests_code": "code", "continue_tests_full": "full"}
+TESTS_FORM = {"continue_tests_code": "code", "continue_tests_full": "full", AGENTREWIND_TESTS: "code",
+              NORESTORE_TESTS: "code"}
+# The rewind arms' one sentence, after what they are told.
+REWIND_SENTENCE = ("You may also return to an earlier point of this run with backtrack_candidates and backtrack_commit, "
+                   "or repair the current state.")
 NOTES = {"retry_feedback": "A previous attempt was rejected by a reviewer: {feedback}",
          "rewind": "Note: an attempt that continued from here was rejected by a reviewer: {feedback}",
          "continue": "Submission rejected by a reviewer: {feedback}",
          "continue_both": "Submission rejected by a reviewer: {feedback}",
          # The sentence is the study's: AgentRewind's after-rejection prompt is not public.
-         AGENTREWIND: "Submission rejected by a reviewer: {feedback}\n\nYou may also return to an earlier point of "
-                      "this run with backtrack_candidates and backtrack_commit, or repair the current state."}
+         AGENTREWIND: "Submission rejected by a reviewer: {feedback}\n\n" + REWIND_SENTENCE}
 BARE_NOTES = {"retry_bare": "A previous attempt was rejected by a reviewer.",
               "rewind_bare": "Note: an attempt that continued from here was rejected by a reviewer.",
               "continue_bare": BARE_FEEDBACK}
@@ -233,6 +242,8 @@ def note(recovery, submission, tests=None):
     True when every required test passed, or ""/None when the grader left nothing to tell."""
     if recovery in BARE_NOTES:
         return BARE_NOTES[recovery]
+    if recovery in (AGENTREWIND_TESTS, NORESTORE_TESTS):
+        return note("continue_tests_code", submission) + "\n\n" + REWIND_SENTENCE
     if recovery in TESTS_NOTES:
         return TESTS_NOTES[recovery] + (f"\n\n{submission}" if submission else "")
     told = NOTES[recovery].format(feedback=feedback(submission, "evidence"))
@@ -407,7 +418,7 @@ class RecoveryDriver(Driver):
                 for step in sorted(set(run["sources"].values())):
                     arms.append((f"{recovery}@{step}", recovery, step))
             else:
-                where = recovery.startswith("continue") or recovery == AGENTREWIND
+                where = recovery.startswith("continue") or recovery in TWINS
                 arms.append((recovery, recovery, run["steps"] if where else 0))
         return arms
 
@@ -442,10 +453,11 @@ class RecoveryDriver(Driver):
                 arm["first"].append(job)
         for index, episode in enumerate(arm["episodes"]):
             self._advance_episode(run_id, run, name, arm, index, episode)
-        twin = run["arms"].get(NORESTORE) if name == AGENTREWIND else None
+        twin_name = TWINS.get(name)
+        twin = run["arms"].get(twin_name) if twin_name else None
         for index, episode in enumerate(twin["episodes"] if twin else ()):
             # The twins exist only by the forks of this arm's episodes: they start no round one of their own.
-            self._advance_episode(run_id, run, NORESTORE, twin, index, episode)
+            self._advance_episode(run_id, run, twin_name, twin, index, episode)
 
     def _saved(self, checkpoint):
         """The checkpoint to restore, or None to rebuild: with prior_checkpoints "rebuild", one an earlier study
@@ -581,7 +593,7 @@ class RecoveryDriver(Driver):
             if current.get("grade_only"):
                 episode["end"] = "budget"
                 return
-            if arm["recovery"] in (AGENTREWIND, NORESTORE) and agent.get("stopped_by") == "backtrack_commit":
+            if arm["recovery"] in REWIND_ARMS and agent.get("stopped_by") == "backtrack_commit":
                 if not self._after_commit(run, name, arm, index, episode, agent):
                     return
                 continue
@@ -631,18 +643,18 @@ class RecoveryDriver(Driver):
                     "reason": commit["reason"]}
 
         before = list(episode.get("notes", ()))
-        if name == AGENTREWIND and episode.get("fork") is None:
-            twins = run["arms"].setdefault(NORESTORE, {"recovery": NORESTORE, "step": arm["step"], "first": [],
-                                                       "episodes": []})
+        if name in TWINS and episode.get("fork") is None:
+            twins = run["arms"].setdefault(TWINS[name], {"recovery": TWINS[name], "step": arm["step"], "first": [],
+                                                         "episodes": []})
             twin = {**copy.deepcopy(episode), "forked_from": index, "fork": None,
                     "undoes_a_command": bool(agent.get("rewind_commit_ran_command"))}
             twins["episodes"].append(twin)
             episode["fork"] = len(twins["episodes"]) - 1
             self._rewind_round(run, twin, agent, agent["rewind_protocol_from"],
                                [*before, noted(agent["rewind_protocol_from"])], restores=False)
-        target = commit["step"] if name == AGENTREWIND else agent["rewind_protocol_from"]
+        target = commit["step"] if name in TWINS else agent["rewind_protocol_from"]
         return self._rewind_round(run, episode, agent, target, [*before, noted(target)],
-                                  restores=name == AGENTREWIND)
+                                  restores=name in TWINS)
 
     def _rewind_round(self, run, episode, agent, target, notes, *, restores):
         """Queue the round that goes back to call ``target``; with no round left, grade the state it chose.
@@ -727,7 +739,7 @@ class RecoveryDriver(Driver):
                 override, found = "reject", (self.final_state(run["check"]) or (None, None))[0]
             checkpoint = self._saved(found)
             rewind = None
-            if recovery == AGENTREWIND:
+            if recovery in TWINS:
                 rewind = self._rewind_file(job, run, [], base, cap_usd=run["budget"]["usd"])
                 settings["final_checkpoint"] = f"{job}-final"
             settings.update(jobs.branch(script, step, mode="restore" if checkpoint else "rebuild",
@@ -787,8 +799,8 @@ class RecoveryDriver(Driver):
                 # the submission, so they are told as continue_tests is (a continue arm in its own form).
                 found = checkpoint = None
                 form = TESTS_FORM.get(recovery, "excerpt")
-                text = note(recovery if recovery.startswith("continue") else "continue_tests",
-                            self._tests_message(run, graded, form))
+                text = note(recovery if recovery.startswith("continue") or recovery in REWIND_ARMS
+                            else "continue_tests", self._tests_message(run, graded, form))
             else:
                 found = (self.final_state(previous["check"]) or (None, None))[0]
                 checkpoint = self._saved(found)
@@ -801,7 +813,7 @@ class RecoveryDriver(Driver):
                     text = note("continue_bare" if message == "bare" else "continue", submission)
             caps = self._caps(usd, seconds, base, branch=True)
             rewind = None
-            if recovery in (AGENTREWIND, NORESTORE):
+            if recovery in REWIND_ARMS:
                 # The tools, the sentence, and the notebook where the last rewind put it, on every later round.
                 base = {key: raw for key, raw in base.items() if key != "final_checkpoint"}
                 rewind = self._rewind_file(job, run, episode.get("notes", []), base,
@@ -859,12 +871,12 @@ class RecoveryDriver(Driver):
 
     def _rewinds(self, arm, episode, outcome):
         """The rewind arm's own report fields: commits, the calls gone back to, and the fork between twins."""
-        if outcome is None or arm["recovery"] not in (AGENTREWIND, NORESTORE):
+        if outcome is None or arm["recovery"] not in REWIND_ARMS:
             return outcome
         trials = [self.trial(step["agent"]) for step in episode["rounds"] if step.get("agent")]
         return {**outcome, "commits": sum(trial.get("stopped_by") == "backtrack_commit" for trial in trials),
                 "targets": [step["rewind"]["target"] for step in episode["rounds"] if step.get("rewind")],
-                **({"fork": episode.get("fork")} if arm["recovery"] == AGENTREWIND
+                **({"fork": episode.get("fork")} if arm["recovery"] in TWINS
                    else {"forked_from": episode.get("forked_from")})}
 
 

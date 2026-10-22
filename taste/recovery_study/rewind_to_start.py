@@ -12,7 +12,7 @@ jobs at that code.
 from __future__ import annotations
 
 from taste.recovery_study.jobs import JobSpec
-from taste.recovery_study.recovery_driver import AGENTREWIND, new_check
+from taste.recovery_study.recovery_driver import TWINS, new_check
 
 REASON = ("a grade-only round back to the run's first call replays no step, and the harness stopped its trial as one "
           "whose agent never started (harbor_agent._check_started) instead of grading it")
@@ -35,29 +35,32 @@ def stopped(driver, names):
 
 
 def reopen(driver):
-    """Void the jobs of every rewind episode that ended ``agent_failed`` on such a round, and put the round back.
+    """Void the jobs of every restoring rewind arm's episode that ended ``agent_failed`` on such a round, and put the
+    round back (a twin restores nothing: with no round left it ends where the commit left it).
 
     Returns the job names voided and the episodes reopened as (run, arm, episode, round). Running it again does
     nothing more."""
     voided, reopened = [], []
     for run_id, run in driver.runs.items():
-        arm = (run.get("arms") or {}).get(AGENTREWIND)
-        for index, episode in enumerate((arm or {}).get("episodes") or ()):
-            if episode["end"] != "agent_failed" or not episode["rounds"] or not episode.get("notes"):
-                continue
-            number = len(episode["rounds"]) + 1
-            names = [name for name, job in driver.jobs.items()
-                     if job.get("purpose") == "round" and job.get("run") == run_id and job.get("arm") == AGENTREWIND
-                     and job.get("episode") == index and job.get("round") == number]
-            if not stopped(driver, names):
-                continue
-            [target] = {driver.jobs[name]["rewind_target"] for name in names}
-            for name in names:
-                driver.void(name, REASON)
-            voided += names
-            # As _rewind_round queued it; the voided jobs stay its own, so the next is named after them.
-            episode["rounds"].append({"agent": None, "agent_jobs": list(names), "check": new_check(),
-                                      "rewind": {"target": target, "notes": episode["notes"]}, "grade_only": True})
-            episode["end"] = None
-            reopened.append((run_id, AGENTREWIND, index, number))
+        for arm_name in TWINS:
+            arm = (run.get("arms") or {}).get(arm_name)
+            for index, episode in enumerate((arm or {}).get("episodes") or ()):
+                if episode["end"] != "agent_failed" or not episode["rounds"] or not episode.get("notes"):
+                    continue
+                number = len(episode["rounds"]) + 1
+                names = [job_name for job_name, job in driver.jobs.items()
+                         if job.get("purpose") == "round" and job.get("run") == run_id and job.get("arm") == arm_name
+                         and job.get("episode") == index and job.get("round") == number]
+                if not stopped(driver, names):
+                    continue
+                [target] = {driver.jobs[job_name]["rewind_target"] for job_name in names}
+                for job_name in names:
+                    driver.void(job_name, REASON)
+                voided += names
+                # As _rewind_round queued it; the voided jobs stay its own, so the next is named after them.
+                episode["rounds"].append({"agent": None, "agent_jobs": list(names), "check": new_check(),
+                                          "rewind": {"target": target, "notes": episode["notes"]},
+                                          "grade_only": True})
+                episode["end"] = None
+                reopened.append((run_id, arm_name, index, number))
     return {"voided": voided, "reopened": reopened}

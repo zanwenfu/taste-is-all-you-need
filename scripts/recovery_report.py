@@ -64,9 +64,12 @@ VIEWS = ("retry", "retry_feedback", "rewind_oracle", "rewind_reader", "rewind_ru
          # Richer forms of the tests message where the agent stopped: with the tests' code, wide, with the feedback, or
          # saying the tests are hidden.
          "continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden",
-         # AgentRewind, and its twin that restores nothing (an episode without a commit is its own twin).
-         "agentrewind", "agentrewind_norestore")
+         # AgentRewind, and its twin that restores nothing (an episode without a commit is its own twin); and the same
+         # pair decided by the hidden tests.
+         "agentrewind", "agentrewind_norestore", "agentrewind_tests", "agentrewind_tests_norestore")
 REWINDS = ("rewind", "rewind_bare", "rewind_tests")
+# Each AgentRewind arm and its twin.
+TWINS = {"agentrewind": "agentrewind_norestore", "agentrewind_tests": "agentrewind_tests_norestore"}
 # A deployed harness cannot rerun to find r*: the selector chooses among the others.
 SELECTABLE = ("retry", "retry_feedback", "rewind_reader", "rewind_rules", "continue", "continue_bare")
 # usd and seconds are everything an episode spent, the checker's included;
@@ -181,20 +184,22 @@ def choice_section(summary, reader):
 def views(run):
     """Each recovery's finished episodes for a run; rewind arms seen once per source that chose them.
 
-    agentrewind_norestore is paired with agentrewind episode by episode: an episode's twin where its first
-    commit forked one, else the episode itself (it never committed, so restoring could change nothing).
+    agentrewind_norestore is paired with agentrewind episode by episode (agentrewind_tests_norestore with
+    agentrewind_tests): an episode's twin where its first commit forked one, else the episode itself (it never
+    committed, so restoring could change nothing).
     """
     found = {}
     arms = run.get("arms", {})
     for name, arm in arms.items():
         episodes = [episode for episode in arm["episodes"] if episode]
-        if arm["recovery"] == "agentrewind_norestore":
+        if arm["recovery"] in TWINS.values():
             continue
-        if arm["recovery"] == "agentrewind":
-            twins = (arms.get("agentrewind_norestore") or {}).get("episodes") or []
+        if arm["recovery"] in TWINS:
+            twin = TWINS[arm["recovery"]]
+            twins = (arms.get(twin) or {}).get("episodes") or []
             paired = [episode if episode.get("fork") is None or episode["fork"] >= len(twins)
                       else twins[episode["fork"]] for episode in arm["episodes"] if episode]
-            found[name], found["agentrewind_norestore"] = episodes, [episode for episode in paired if episode]
+            found[name], found[twin] = episodes, [episode for episode in paired if episode]
             continue
         if arm["recovery"] in REWINDS:
             for source, step in run["sources"].items():

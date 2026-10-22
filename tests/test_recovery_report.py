@@ -239,6 +239,12 @@ def test_the_rewind_arms_twin_is_paired_episode_by_episode_and_an_episode_withou
     run = rejected({"agentrewind": [forked, plain], "agentrewind_norestore": [twin]})
     seen = report.views(run)
     assert seen["agentrewind"] == [forked, plain] and seen["agentrewind_norestore"] == [twin, plain]
+    # The pair decided by the hidden tests is paired the same way, each arm with its own twin.
+    other = {**episodes(True, 0.3, count=1)[0], "forked_from": 0}
+    run = rejected({"agentrewind": [forked, plain], "agentrewind_norestore": [twin],
+                    "agentrewind_tests": [forked, plain], "agentrewind_tests_norestore": [other]})
+    seen = report.views(run)
+    assert seen["agentrewind_norestore"] == [twin, plain] and seen["agentrewind_tests_norestore"] == [other, plain]
 
 
 def test_comparisons_are_also_made_with_the_task_as_the_unit():
