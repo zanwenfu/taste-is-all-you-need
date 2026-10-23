@@ -662,3 +662,15 @@ def test_a_multilingual_syntax_error_counts_by_its_own_text() -> None:
     error = "SyntaxError: /testbed/src/diff/children.js: Unexpected token (12:5)"
     assert report.shows_evidence("x\n" + error + "\n", (), (error,), (), multilingual=True)
     assert not report.shows_evidence("x\n" + error + "\n", (), (error,), ())
+
+
+@pytest.mark.parametrize("error", [
+    "Fatal error: During inheritance of Carbon\\Carbon: Uncaught ParseError: Unclosed '{' on line 195 in /testbed/s.php",
+    "Parse error:  syntax error, unexpected token \"}\" in /testbed/src/x.php on line 12",
+    "/testbed/lib/x.rb:12: syntax error, unexpected end-of-input",
+    "SyntaxError: /testbed/src/diff/children.js: Unexpected token (12:5)",
+])
+def test_multilingual_syntax_errors_are_flagged_as_such(error: str) -> None:
+    interval = SimpleNamespace(kind="load", tests=frozenset())
+    assert report.break_flags(interval, [], [error], [], multilingual=True)["syntax_error"]
+    assert not report.break_flags(interval, [], ["AssertionError: expected 2"], [], multilingual=True)["syntax_error"]

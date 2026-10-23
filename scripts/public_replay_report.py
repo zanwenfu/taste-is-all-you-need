@@ -511,8 +511,13 @@ _COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 SYNTAX_ERRORS = ("SyntaxError", "IndentationError", "TabError")
 
 
+# How the Multilingual runtimes name a syntax error: JavaScript's SyntaxError, PHP's ParseError ("Parse error:
+# syntax error, unexpected ..."), Ruby's "syntax error" and SyntaxError.
+_SYNTAX_ML = re.compile(r"\bSyntaxError\b|\bParseError\b|\bParse error:|\bsyntax errors?\b")
+
+
 def break_flags(interval: Interval, records: Sequence[dict | None], errors: Sequence[str],
-                places: Sequence[str]) -> dict[str, bool]:
+                places: Sequence[str], *, multilingual: bool = False) -> dict[str, bool]:
     """What a cheaper check would have caught, and what the official grade would ignore.
 
     ``syntax_error``: the break's own error lines include a syntax error (or its
@@ -522,6 +527,7 @@ def break_flags(interval: Interval, records: Sequence[dict | None], errors: Sequ
     passing nor as failing.
     """
     syntax = bool(places) or any(e.split(":", 1)[0].rsplit(".", 1)[-1] in SYNTAX_ERRORS for e in errors)
+    syntax = syntax or (multilingual and any(_SYNTAX_ML.search(e) for e in errors))
     skip_only = interval.kind == "test" and not any(
         interval.tests & frozenset((record or {}).get("failed", [])) for record in records)
     return {"syntax_error": syntax, "skip_only": skip_only}
@@ -966,7 +972,8 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
                 "evidence_lines": len(errors),
                 # The break's own error lines and syntax-error places, as the seen/unseen rule matched them.
                 "evidence": " | ".join(errors)[:600], "evidence_places": " | ".join(places)[:300],
-                **break_flags(interval, [timeline[index].record for index in interval.states], errors, places),
+                **break_flags(interval, [timeline[index].record for index in interval.states], errors, places,
+                              multilingual=multilingual),
                 "tests": ";".join(sorted(interval.tests)), "load_members": len(interval.loads), **seen,
             })
         row["silent_intervals"] = silent if recorded or not cell_intervals else None
