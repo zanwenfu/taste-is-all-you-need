@@ -162,6 +162,12 @@ class SandboxRouter:
         #: so even an agent that commits cannot hide its work from the pull.
         self._advance = advance_baseline
         self._baseline = prepare_container_tree(sandbox, workdir=workdir)
+        #: Transparent mode only: the paths that differed from the baseline at
+        #: the last pull. A path that leaves this set has stopped differing --
+        #: reverted, stashed, or a new file deleted -- and must be brought home
+        #: too, or the host keeps the last differing copy and every later
+        #: observation records a break, or a scratch file, that is gone.
+        self._differing: set[str] = set()
 
     # ------------------------------------------------------------ marking
 
@@ -212,6 +218,11 @@ class SandboxRouter:
         changed = self._changes_since_baseline() if not self._advance else self._changes_since_sync()
 
         pulled: list[str] = []
+        if not self._advance:
+            current = {rel for _, rel in changed if not self._excluded(rel)}
+            returned = sorted(self._differing - current)
+            self._differing = current
+            pulled.extend(self._bring_back(returned))
         for kind, rel in changed:
             if self._excluded(rel):
                 continue
@@ -239,6 +250,35 @@ class SandboxRouter:
         if changed and self._advance:
             self._advance_baseline()
         return tuple(pulled)
+
+    def _bring_back(self, paths: list[str]) -> list[str]:
+        """Make the host match the container for paths that stopped differing.
+
+        Each is now either the baseline's file again (copied home) or absent
+        (removed from the host). One existence probe for the batch; returns
+        are rare, so the cost is nothing on the common path.
+        """
+        if not paths:
+            return []
+        quoted = " ".join(shlex.quote(p) for p in paths)
+        probe = self.sandbox.exec(
+            f"cd {self._q} && for p in {quoted}; do "
+            f"if [ -f \"$p\" ] && [ ! -L \"$p\" ]; then printf '%s\\0' \"$p\"; fi; done; true",
+            timeout=120,
+        )
+        present = {p for p in probe.stdout.split("\0") if p}
+        moved: list[str] = []
+        for rel in paths:
+            host = self.workspace / rel
+            if rel in present:
+                host.parent.mkdir(parents=True, exist_ok=True)
+                host.write_bytes(self.sandbox.get_bytes(f"{self.workdir}/{rel}"))
+            elif host.is_file() or host.is_symlink():
+                host.unlink()
+            else:
+                continue
+            moved.append(rel)
+        return moved
 
     def _changes_since_sync(self) -> list[tuple[str, str]]:
         """What moved since the last sync commit: one ``git status``."""

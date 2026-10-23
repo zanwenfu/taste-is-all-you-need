@@ -153,6 +153,43 @@ def test_transparent_mode_pulls_work_the_agent_committed(testbed: Path, tmp_path
     assert router.pull() == ("committed.py",)
 
 
+def test_transparent_mode_follows_a_path_back_to_the_baseline(testbed: Path, tmp_path: Path) -> None:
+    """A revert is a change too.
+
+    Transparent mode pulls whatever differs from the baseline, so a path that
+    stops differing -- ``git checkout -- f``, ``git stash``, a scratch file the
+    agent deletes -- drops out of that list, and the host used to keep the last
+    differing copy: a repair by revert read as a break that never ended, and a
+    deleted scratch script stayed in every later observation. Found by the
+    public-run replay's planted known-answer check.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "lib.py").write_text((testbed / "lib.py").read_text())
+    router = SandboxRouter(LocalSandbox(testbed), ws, workdir=str(testbed), advance_baseline=False)
+    original = (ws / "lib.py").read_text()
+
+    router.exec("printf 'def rate(:\\n' > lib.py")
+    assert (ws / "lib.py").read_text() == "def rate(:\n"
+    router.exec("git checkout -- lib.py")
+    assert (ws / "lib.py").read_text() == original, "a revert to the baseline must reach the host"
+
+    router.exec("printf 'print(1)\\n' > scratch.py")
+    assert (ws / "scratch.py").exists()
+    router.exec("rm scratch.py")
+    assert not (ws / "scratch.py").exists(), "deleting a new file must reach the host"
+
+    router.exec("rm lib.py")
+    assert not (ws / "lib.py").exists()
+    router.exec("git checkout -- lib.py")
+    assert (ws / "lib.py").read_text() == original, "restoring a deleted file must reach the host"
+
+    router.exec("printf 'x\\n' > lib.py && git -c user.name=a -c user.email=a@b stash -q")
+    assert (ws / "lib.py").read_text() == original, "a stash returns the tree to the baseline"
+    router.exec("git -c user.name=a -c user.email=a@b stash pop -q")
+    assert (ws / "lib.py").read_text() == "x\n"
+
+
 def test_junk_from_a_test_run_never_crosses_the_boundary(
     testbed: Path, tmp_path: Path
 ) -> None:

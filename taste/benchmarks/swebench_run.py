@@ -406,7 +406,7 @@ def make_grade(*, timeout: int = 1800, grader=None):
     return grade
 
 
-def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
+def make_score(*, ledger_dir: Path, grade=None, suite_factory=None, executor_factory=None):
     """Build the ``score`` callable: replay, attribute, and write the sidecar.
 
     Two things are injected rather than imported, and for the same reason:
@@ -415,6 +415,10 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
     package nor Docker exists on a development machine, and the whole
     timeline is computable without either — so the seam is where the
     dependency is, not scattered through the driver.
+
+    ``executor_factory(sandbox, memory, ctx)`` replaces the default probe
+    executor; the public-run replay passes one that also logs every state it
+    tests (:class:`taste.benchmarks.public_replay.StateLogExecutor`).
     """
     build_suite = suite_factory or swebench.pass_to_pass_suite
 
@@ -434,7 +438,10 @@ def make_score(*, ledger_dir: Path, grade=None, suite_factory=None):
             if ctx.provider is not None:
                 sandbox = ctx.provider.open(key=ctx.instance.instance_id, image=ctx.instance.image)
                 resources.callback(close_sandbox, sandbox)
-                executor = SandboxProbeExecutor(sandbox, memory, ctx.instance.base_commit)
+                executor = (
+                    executor_factory(sandbox, memory, ctx) if executor_factory is not None
+                    else SandboxProbeExecutor(sandbox, memory, ctx.instance.base_commit)
+                )
 
             attribution = None
             if ctx.probe_coverage and ctx.monitor_coverage:
