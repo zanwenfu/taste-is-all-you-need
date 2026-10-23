@@ -862,6 +862,11 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
     checks["resolved_agreement_exact"] = dict(Counter(
         f"leaderboard={r['leaderboard_resolved']},replay={r['replay_resolved']}" for r in rows if r["tier"] == "exact"))
     checks["cells_by_state"] = dict(Counter(c.state for c in cells))
+    # Per-command fidelity over every finished, usable run (main or not): what "exited as recorded" rests on.
+    checks["exit_status_agreement"] = {
+        "matched": sum(int(c.fidelity.get("rc_matched") or 0) for c in done if prepared[(c.submission, c.task)][1]),
+        "compared": sum(int(c.fidelity.get("rc_compared") or 0) for c in done if prepared[(c.submission, c.task)][1]),
+    }
     checks["state_rows"] = state_rows
     return rows, intervals, checks
 
@@ -1140,6 +1145,7 @@ def run(root: Path, out: Path) -> dict[str, Any]:
             "grade_agreement_main_submitted": checks["grade_agreement"],
             "resolved_agreement_exact": checks["resolved_agreement_exact"],
             "planted": checks["planted"],
+            "exit_status_agreement": checks["exit_status_agreement"],
         },
     }
     out.mkdir(parents=True, exist_ok=True)

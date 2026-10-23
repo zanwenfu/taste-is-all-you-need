@@ -460,6 +460,7 @@ def test_a_whole_report_over_synthetic_cells(study: Path) -> None:
     assert checks["flaky_excluded_total"] == 1 and checks["final_duplicate"] == {"compared": 3, "disagreed": 1, "rate": 1 / 3}
     assert checks["grade_agreement_main_submitted"] == {"same_breaks": 1}
     assert checks["resolved_agreement_exact"] == {"leaderboard=False,replay=False": 1}
+    assert checks["exit_status_agreement"] == {"matched": 6 + 3 + 2, "compared": 6 + 3 + 2}  # usable runs A, B, C
     assert summary["cells"]["by_state"] == {"done": 4, "crashed": 1}
     assert summary["cross_model"]["spearman"] is None  # two models are not a correlation
     assert (study / "report" / "summary.md").read_text().startswith("# Public-run replay: summary")
