@@ -444,6 +444,9 @@ def test_a_whole_report_over_synthetic_cells(study: Path) -> None:
         ("subB", "3", "", "test", "", "True", "True", "True", "False", "False"),
     ]
 
+    # Each break carries its own error lines and places (none are planted here), for audits that show them.
+    assert [(i["evidence"], i["evidence_places"]) for i in intervals] == [("", "")] * 3
+
     states = _csv(study / "report" / "states.csv")
     assert [(s["command"], s["status"], s["f2p_passing"]) for s in states if s["submission"] == "subA"
             and s["task"] == "pkg__pkg-1"] == [("0", "ok", "0"), ("2", "broken", "0"), ("4", "ok", "1"),

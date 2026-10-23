@@ -907,6 +907,8 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
                 "onset": interval.onset, "repair": interval.repair, "duration": interval.duration,
                 "kind": interval.kind, "ended": interval.ended, "open_at_end": interval.repair is None,
                 "evidence_lines": len(errors),
+                # The break's own error lines and syntax-error places, as the seen/unseen rule matched them.
+                "evidence": " | ".join(errors)[:600], "evidence_places": " | ".join(places)[:300],
                 **break_flags(interval, [timeline[index].record for index in interval.states], errors, places),
                 "tests": ";".join(sorted(interval.tests)), "load_members": len(interval.loads), **seen,
             })
