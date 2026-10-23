@@ -266,8 +266,9 @@ def container_of(test_id: str) -> str | None:
 def label_state(record: dict | None, base: frozenset, suite: Sequence[str] = ()) -> Label:
     """Definition 4.
 
-    A test break is a P member that failed or was skipped (the official grader
-    counts a skip as not passing). A load break is a P member that could not run:
+    A test break is a P member that failed or was skipped (a skipped test no
+    longer checks anything; the official grader counts it neither as passing
+    nor as failing, so such breaks are also counted apart, see break_flags). A load break is a P member that could not run:
     the suite reported nothing at all, or every member of its group (``suite``:
     all the suite's members, to know a group whole) went unreported. A P member
     missing from a group the runner otherwise reported is a parser miss, counted
@@ -462,6 +463,25 @@ def shows_failure(returncode: int | None, output: str) -> bool:
 
 
 _COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+SYNTAX_ERRORS = ("SyntaxError", "IndentationError", "TabError")
+
+
+def break_flags(interval: Interval, records: Sequence[dict | None], errors: Sequence[str],
+                places: Sequence[str]) -> dict[str, bool]:
+    """What a cheaper check would have caught, and what the official grade would ignore.
+
+    ``syntax_error``: the break's own error lines include a syntax error (or its
+    location), which a compile check after each edit finds without running a
+    test. ``skip_only``: a test break whose tests were only ever skipped, never
+    failed, in its states; the official grader counts a skipped test neither as
+    passing nor as failing.
+    """
+    syntax = bool(places) or any(e.split(":", 1)[0].rsplit(".", 1)[-1] in SYNTAX_ERRORS for e in errors)
+    skip_only = interval.kind == "test" and not any(
+        interval.tests & frozenset((record or {}).get("failed", [])) for record in records)
+    return {"syntax_error": syntax, "skip_only": skip_only}
 
 
 def evidence_cut(record: dict | None) -> bool:
@@ -887,6 +907,7 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
                 "onset": interval.onset, "repair": interval.repair, "duration": interval.duration,
                 "kind": interval.kind, "ended": interval.ended, "open_at_end": interval.repair is None,
                 "evidence_lines": len(errors),
+                **break_flags(interval, [timeline[index].record for index in interval.states], errors, places),
                 "tests": ";".join(sorted(interval.tests)), "load_members": len(interval.loads), **seen,
             })
         row["silent_intervals"] = silent if recorded or not cell_intervals else None
@@ -955,6 +976,10 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
         "median_interval_duration": median(i["duration"] for i in intervals),
         "silent_interval_share": mean(i["silent"] for i in intervals),
         "unseen_interval_share": mean(i["unseen"] for i in intervals),
+        # A compile check after each edit would catch these; the official grade ignores skip-only breaks.
+        "syntax_error_share": mean(i.get("syntax_error") for i in intervals),
+        "syntax_error_load_share": mean(i.get("syntax_error") for i in intervals if i["kind"] == "load"),
+        "skip_only_breaks": sum(1 for i in intervals if i.get("skip_only")),
         # Error lines a stored output may have cut (see unseen_bounds): unseen among the breaks whose
         # own and base evidence is complete, and the share if every break in doubt went the other way.
         "unseen_complete_share": mean(i["unseen"] for i in intervals

@@ -578,3 +578,18 @@ def test_unseen_bounds_turn_every_break_in_doubt_the_other_way() -> None:
         brk(None, None, None, True, True),  # no recorded outputs: not judged
     ]
     assert report.unseen_bounds(breaks) == {"floor": 0.25, "ceiling": 0.75}
+
+
+def test_break_flags_name_what_a_compile_check_catches_and_what_the_grade_ignores() -> None:
+    test_break = report.Interval(onset=1, repair=3, duration=2, tests=frozenset({"t::a"}), loads=frozenset(),
+                                 ended="clean", states=(1, 2))
+    skipped = [{"failed": [], "skipped": ["t::a"]}, {"failed": [], "skipped": ["t::a"]}]
+    assert report.break_flags(test_break, skipped, [], []) == {"syntax_error": False, "skip_only": True}
+    failed_once = [{"failed": ["t::a"], "skipped": []}, {"failed": [], "skipped": ["t::a"]}]
+    assert report.break_flags(test_break, failed_once, [], [])["skip_only"] is False
+    load_break = report.Interval(onset=1, repair=None, duration=1, tests=frozenset(), loads=frozenset({"t::b"}),
+                                 states=(1,))
+    assert report.break_flags(load_break, [{}], ["IndentationError: unexpected indent"], []) == {
+        "syntax_error": True, "skip_only": False}
+    assert report.break_flags(load_break, [{}], [], ["pkg/x.py:3"])["syntax_error"] is True  # a syntax error's location
+    assert report.break_flags(load_break, [{}], ["ImportError: cannot import name 'f'"], [])["syntax_error"] is False
