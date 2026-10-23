@@ -345,6 +345,7 @@ class DockerSandbox:
         network_mode: str = "none",
         env_prefix: str | None = None,
         labels: dict[str, str] | None = None,
+        login_shell: bool = True,
     ) -> None:
         if client is None:
             import docker
@@ -380,6 +381,11 @@ class DockerSandbox:
             if env_prefix is None
             else env_prefix
         )
+        # False runs each command in a plain `bash -c`. SWE-bench Multilingual's
+        # images ship a /root/.bashrc that sources a conda they do not have, so a
+        # login shell prints an error into every command's output; the published
+        # runs' outputs carry none.
+        self.login_shell = login_shell
         try:
             self.container = client.containers.run(
                 image,
@@ -453,7 +459,8 @@ class DockerSandbox:
     def exec(
         self, command: str, *, timeout: int = 600, env: dict[str, str] | None = None
     ) -> ExecResult:
-        wrapped = f"timeout --signal=KILL {int(timeout)} bash -lc {shlex.quote(command)}"
+        shell = "bash -lc" if self.login_shell else "bash -c"
+        wrapped = f"timeout --signal=KILL {int(timeout)} {shell} {shlex.quote(command)}"
         started = time.monotonic()
         exit_code, (stdout, stderr) = self.container.exec_run(
             ["bash", "-c", wrapped],
@@ -581,6 +588,7 @@ class DockerProvider:
         platform: str = "linux/amd64",
         client: Any | None = None,
         env_prefix: str | None = None,
+        login_shell: bool = True,
     ) -> None:
         if client is None:
             import docker
@@ -590,6 +598,7 @@ class DockerProvider:
         self.prefix = prefix
         self.platform = platform
         self.env_prefix = env_prefix
+        self.login_shell = login_shell
         self._open: dict[str, DockerSandbox] = {}
         self._open_specs: dict[str, tuple[str, str, str, str | None]] = {}
         self._owner_id = uuid.uuid4().hex
@@ -627,6 +636,7 @@ class DockerProvider:
             network_mode=network_mode,
             env_prefix=self.env_prefix,
             labels={"taste.owner": self._owner_id, "taste.key": key, "taste.pid": str(os.getpid())},
+            login_shell=self.login_shell,
         )
         self._open[key] = sandbox
         self._open_specs[key] = requested

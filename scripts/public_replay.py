@@ -253,8 +253,10 @@ def run_cell(root: Path, submission: str, task: str, *, force: bool = False, pla
 
     # A patient client: with two dozen replays starting at once the daemon can take
     # over a minute to remove a container, and an unconfirmed removal blocks the cell.
-    # Multilingual images carry no conda: their runtimes are on the image's own PATH.
-    docker = DockerProvider(client=docker_sdk.from_env(timeout=600), env_prefix="" if multilingual else None)
+    # Multilingual images carry no conda (their runtimes are on the image's own PATH), and a
+    # .bashrc that sources one anyway: no activation, and no login shell to read it.
+    docker = DockerProvider(client=docker_sdk.from_env(timeout=600), env_prefix="" if multilingual else None,
+                            login_shell=not multilingual)
     provider = NetworkedAgentProvider(docker)
     if multilingual:
         from taste.benchmarks import swebench_multilingual as ml
@@ -482,7 +484,8 @@ def retest_cell(root: Path, submission: str, task: str) -> dict[str, int]:
     instance = {i.instance_id: i for i in swebench.load_dataset(dataset_path(root))}[task]
     object.__setattr__(instance, "image", instance.published_image)
     multilingual = is_multilingual(root)
-    docker = DockerProvider(client=docker_sdk.from_env(timeout=600), env_prefix="" if multilingual else None)
+    docker = DockerProvider(client=docker_sdk.from_env(timeout=600), env_prefix="" if multilingual else None,
+                            login_shell=not multilingual)
     provider = NetworkedAgentProvider(docker)
     if multilingual:
         from taste.benchmarks import swebench_multilingual as ml
