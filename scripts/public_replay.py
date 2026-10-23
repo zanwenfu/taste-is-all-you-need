@@ -19,7 +19,7 @@ Everything a cell produces lands in <root>/cells/<submission>/<task>/:
   fidelity.json            the replay against the record: same submission? same exit statuses?
   status.json              written last; its presence means the cell is finished
 
-<root> holds verified.jsonl, submissions.json (name -> version, trajectory prefix),
+<root> holds verified.jsonl (or multilingual.jsonl and scripts/<task>.sh), submissions.json (name -> version, trajectory prefix),
 details/<submission>.json (the leaderboard's per-instance verdicts) and
 trajs/<submission>/<task>.traj.json.
 """
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as futures
+import functools
 import json
 import os
 import shutil
@@ -68,6 +69,27 @@ def load_submissions(root: Path) -> dict[str, dict]:
 
 def trajectory_path(root: Path, submission: str, task: str) -> Path:
     return root / "trajs" / submission / f"{task}.traj.json"
+
+
+def is_multilingual(root: Path) -> bool:
+    """A replay root for SWE-bench Multilingual holds its dataset and the leaderboard's test scripts."""
+    return (root / "multilingual.jsonl").exists()
+
+
+def dataset_path(root: Path) -> Path:
+    return root / ("multilingual.jsonl" if is_multilingual(root) else "verified.jsonl")
+
+
+def eval_script(root: Path, task: str) -> str:
+    """The script the leaderboard graded this task with: every state and the final patch are tested by it."""
+    return (root / "scripts" / f"{task}.sh").read_text()
+
+
+def image_environment(image: str) -> dict[str, str]:
+    """The image's ``Config.Env``: what ``docker exec`` gives a process before anything else runs."""
+    inspected = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config.Env}}", image],
+                               capture_output=True, text=True, timeout=120)
+    return dict(item.split("=", 1) for item in json.loads(inspected.stdout or "[]") if "=" in item)
 
 
 def free_gb(path: Path) -> float:
@@ -220,29 +242,38 @@ def run_cell(root: Path, submission: str, task: str, *, force: bool = False, pla
     if trajectory.instance_id and trajectory.instance_id != task:
         return write_status(directory, "unparseable", error=f"trajectory is for {trajectory.instance_id}")
 
-    instances = {i.instance_id: i for i in swebench.load_dataset(root / "verified.jsonl")}
+    multilingual = is_multilingual(root)
+    instances = {i.instance_id: i for i in swebench.load_dataset(dataset_path(root))}
     instance = instances[task]
     object.__setattr__(instance, "image", instance.published_image)
     ignore, build_patch = build_edits(root, instance.image, task, instance.base_commit)
 
-    inspected = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config.Env}}", instance.image],
-                               capture_output=True, text=True, timeout=120)
-    image_env = dict(item.split("=", 1) for item in json.loads(inspected.stdout or "[]") if "=" in item)
+    image_env = image_environment(instance.image)
     import docker as docker_sdk
 
     # A patient client: with two dozen replays starting at once the daemon can take
     # over a minute to remove a container, and an unconfirmed removal blocks the cell.
-    docker = DockerProvider(client=docker_sdk.from_env(timeout=600))
+    # Multilingual images carry no conda: their runtimes are on the image's own PATH.
+    docker = DockerProvider(client=docker_sdk.from_env(timeout=600), env_prefix="" if multilingual else None)
     provider = NetworkedAgentProvider(docker)
+    if multilingual:
+        from taste.benchmarks import swebench_multilingual as ml
+
+        suite_factory = functools.partial(ml.suite, eval_script=eval_script(root, task), image_env=image_env)
+        grade = make_replay_grade(grader=functools.partial(ml.grade_in_sandbox, eval_script=eval_script(root, task),
+                                                           image_env=image_env))
+        parity_check = ml.parity_check
+    else:
+        suite_factory, grade, parity_check = progress_suite, make_replay_grade(), None
     started = time.time()
     try:
         report = run_sweep(
             tasks=[task], arms=[ARM], trials=1, ledger_dir=directory / "ledger",
             prepare=make_prepare(instances={task: instance}, root=directory / "runs", provider=provider,
-                                 route_execution=True, observe_tools=True),
+                                 route_execution=True, observe_tools=True, parity_check=parity_check),
             execute=make_replay_execute(lambda cell: trajectory, source=submission, image_env=image_env),
-            score=make_score(ledger_dir=directory / "ledger", grade=make_replay_grade(),
-                             suite_factory=progress_suite, executor_factory=make_state_log_factory()),
+            score=make_score(ledger_dir=directory / "ledger", grade=grade,
+                             suite_factory=suite_factory, executor_factory=make_state_log_factory()),
         )
     finally:
         # Only this provider's containers, found by the owner label it stamps on each launch.
@@ -448,13 +479,20 @@ def retest_cell(root: Path, submission: str, task: str) -> dict[str, int]:
     from taste.benchmarks.public_replay import NetworkedAgentProvider, retest_states
     from taste.execution import DockerProvider
 
-    instance = {i.instance_id: i for i in swebench.load_dataset(root / "verified.jsonl")}[task]
+    instance = {i.instance_id: i for i in swebench.load_dataset(dataset_path(root))}[task]
     object.__setattr__(instance, "image", instance.published_image)
-    docker = DockerProvider(client=docker_sdk.from_env(timeout=600))
+    multilingual = is_multilingual(root)
+    docker = DockerProvider(client=docker_sdk.from_env(timeout=600), env_prefix="" if multilingual else None)
     provider = NetworkedAgentProvider(docker)
+    if multilingual:
+        from taste.benchmarks import swebench_multilingual as ml
+
+        suite = ml.suite(instance, eval_script(root, task), image_env=image_environment(instance.image))
+    else:
+        suite = progress_suite(instance)
     try:
         # The probe container exactly as the cell's own testing opened it (make_score).
-        return retest_states(cell_dir(root, submission, task), instance.base_commit, progress_suite(instance),
+        return retest_states(cell_dir(root, submission, task), instance.base_commit, suite,
                              lambda: provider.open(key=instance.instance_id, image=instance.image))
     finally:
         owner = getattr(docker, "_owner_id", None)
@@ -578,7 +616,7 @@ def cmd_pull(args) -> int:
 
     root = Path(args.root)
     tasks = sorted({task for _, task in read_cells(Path(args.cells))})
-    instances = {i.instance_id: i for i in swebench.load_dataset(root / "verified.jsonl")}
+    instances = {i.instance_id: i for i in swebench.load_dataset(dataset_path(root))}
     images = [instances[t].published_image for t in tasks]
 
     def one(image: str) -> str:

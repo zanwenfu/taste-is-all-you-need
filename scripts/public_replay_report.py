@@ -732,7 +732,7 @@ def load_members(root: Path) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]
     from taste.benchmarks import swebench
 
     return {i.instance_id: (tuple(i.pass_to_pass), tuple(i.fail_to_pass))
-            for i in swebench.load_dataset(root / "verified.jsonl")}
+            for i in swebench.load_dataset(root / ("multilingual.jsonl" if (root / "multilingual.jsonl").exists() else "verified.jsonl"))}
 
 
 def leaderboard_rates(root: Path) -> dict[str, float]:

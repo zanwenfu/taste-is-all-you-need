@@ -103,6 +103,7 @@ ignore = ["E501"]
 # reformat that "modernises" an import or collapses a multi-line condition
 # destroys the line-for-line correspondence a reviewer needs to check them.
 "taste/benchmarks/swebench_log.py" = ["UP", "SIM", "B", "RUF", "E"]
+"taste/benchmarks/swebench_log_multilingual.py" = ["UP", "SIM", "B", "RUF", "E"]
 "taste/benchmarks/swebench_specs.py" = ["UP", "SIM", "B", "RUF", "E"]
 
 [tool.pytest.ini_options]
