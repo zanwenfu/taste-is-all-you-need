@@ -551,8 +551,27 @@ def test_the_submitting_commands_output_is_not_part_of_the_log(tmp_path: Path, m
     assert [c.output for c in loaded] == ["", ""] and loaded[1].command.startswith("echo COMPLETE")
 
 
-def test_a_state_whose_error_may_have_been_cut_from_its_stored_output_is_flagged() -> None:
-    assert report.evidence_cut({"exceptions": [], "output_head": "h" * 2000, "output_tail": "t" * 6000}) is True
-    assert report.evidence_cut({"exceptions": ["NameError: x"], "output_head": "h" * 2000, "output_tail": "t" * 6000}) is False
-    assert report.evidence_cut({"exceptions": [], "output_head": "short", "output_tail": "short"}) is False
+def test_a_coloured_state_cut_in_storage_may_hide_error_lines() -> None:
+    # Evidence is read from the whole output when a state is tested; only coloured outputs, whose error
+    # lines were missed before colour was stripped, had theirs recovered later from the kept head and tail.
+    coloured = "\x1b[31m" + "h" * 2000
+    assert report.evidence_cut({"output_head": coloured, "output_tail": "t" * 6000}) is True
+    assert report.evidence_cut({"exceptions": ["NameError: x"], "output_head": coloured, "output_tail": "t" * 6000}) is True
+    assert report.evidence_cut({"output_head": "h" * 2000, "output_tail": "t" * 6000}) is False
+    assert report.evidence_cut({"output_head": "\x1b[31mshort", "output_tail": "short"}) is False
     assert report.evidence_cut(None) is False
+
+
+def test_unseen_bounds_turn_every_break_in_doubt_the_other_way() -> None:
+    def brk(unseen, saw_failure, named, own, base):
+        return {"unseen": unseen, "saw_failure": saw_failure, "named": named,
+                "evidence_complete": own, "base_evidence_complete": base}
+
+    breaks = [
+        brk(True, False, False, True, True),  # unseen on complete evidence: unseen in both bounds
+        brk(True, False, False, False, True),  # its own error lines may be cut: may be named, seen at the floor
+        brk(False, False, True, True, False),  # named against a cut base: may be a base error, unseen at the ceiling
+        brk(False, True, True, True, False),  # a failing test run: seen whatever the evidence
+        brk(None, None, None, True, True),  # no recorded outputs: not judged
+    ]
+    assert report.unseen_bounds(breaks) == {"floor": 0.25, "ceiling": 0.75}

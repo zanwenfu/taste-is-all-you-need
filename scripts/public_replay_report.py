@@ -466,13 +466,31 @@ _COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 def evidence_cut(record: dict | None) -> bool:
     """Whether a state's error lines may sit in the part of its output that was not kept.
 
-    A state keeps its output's first 2,000 and last 6,000 characters; with no
-    error line found in them and both at their limit, its own error may be in
-    the middle, and a break built on it cannot be called unseen with certainty.
+    Evidence is read from the whole output when a state is tested, but colour
+    codes hid pytest's error lines from the reader until it stripped them; a
+    coloured output's evidence was then recovered from the kept first 2,000 and
+    last 6,000 characters only. With both parts at their limit, more may sit in
+    the middle.
     """
-    if not record or record.get("exceptions"):
+    if not record:
         return False
-    return len(record.get("output_head") or "") >= 2000 and len(record.get("output_tail") or "") >= 6000
+    head, tail = record.get("output_head") or "", record.get("output_tail") or ""
+    return len(head) >= 2000 and len(tail) >= 6000 and ("\x1b[" in head or "\x1b[" in tail)
+
+
+def unseen_bounds(intervals: Sequence[dict]) -> dict[str, float | None]:
+    """The unseen share if every break the stored outputs leave in doubt went the other way.
+
+    The floor counts as seen an unseen break whose own states may hide error
+    lines; the ceiling counts as unseen a break seen only by naming when its
+    run's base state may hide errors, since an error the base shows is not the
+    break's own.
+    """
+    judged = [i for i in intervals if i["unseen"] is not None]
+    floor = [bool(i["unseen"] and i.get("evidence_complete", True)) for i in judged]
+    ceiling = [bool(i["unseen"] or (not i["saw_failure"] and i["named"] and not i.get("base_evidence_complete", True)))
+               for i in judged]
+    return {"floor": mean(floor), "ceiling": mean(ceiling)}
 
 
 def seen_output(recorded: Any) -> str:
@@ -871,6 +889,7 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
             seen = visibility(interval, recorded, commands, errors, places) if recorded else {
                 key: None for key in ("window", "ran_tests", "saw_failure", "named", "silent", "unseen")}
             seen["evidence_complete"] = not any(evidence_cut(timeline[index].record) for index in interval.states)
+            seen["base_evidence_complete"] = not evidence_cut(timeline[0].record)
             silent += bool(seen["silent"])
             intervals.append({
                 "submission": cell.submission, "task": cell.task, "tier": tier, "main": row["main"],
@@ -945,12 +964,14 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
         "median_interval_duration": median(i["duration"] for i in intervals),
         "silent_interval_share": mean(i["silent"] for i in intervals),
         "unseen_interval_share": mean(i["unseen"] for i in intervals),
-        # Bounds for the error lines a state's stored output may have cut: unseen among breaks whose
-        # evidence is complete, and a floor that counts every incomplete unseen break as seen.
-        "unseen_complete_share": mean(i["unseen"] for i in intervals if i.get("evidence_complete")),
-        "breaks_evidence_complete": sum(1 for i in intervals if i.get("evidence_complete")),
-        "unseen_floor_share": mean((i["unseen"] is True and bool(i.get("evidence_complete"))) if i["unseen"] is not None
-                                   else None for i in intervals),
+        # Error lines a stored output may have cut (see unseen_bounds): unseen among the breaks whose
+        # own and base evidence is complete, and the share if every break in doubt went the other way.
+        "unseen_complete_share": mean(i["unseen"] for i in intervals
+                                      if i.get("evidence_complete") and i.get("base_evidence_complete")),
+        "breaks_evidence_complete": sum(1 for i in intervals
+                                        if i.get("evidence_complete") and i.get("base_evidence_complete")),
+        "unseen_floor_share": unseen_bounds(intervals)["floor"],
+        "unseen_ceiling_share": unseen_bounds(intervals)["ceiling"],
         "exposure_mean": mean(c["exposure"] for c in cells),
         "exposure_after_first_edit_mean": mean(c["exposure_after_first_edit"] for c in cells),
         "wasted_share_mean": mean(c["wasted_share"] for c in cells),
