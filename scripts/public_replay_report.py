@@ -24,13 +24,16 @@ can be traced to the line that computed it.
    at some bases and not at others is excluded for the whole task (counted).
    The disagreement rate between the final duplicate and its predecessor
    (one tree, tested twice) is reported beside it.
-4. State labels. For a later state: test breaks = P ∩ failed; load breaks =
-   P ∩ unreported, when the suite ran, did not time out, and either reported
-   normally or reported nothing at all ("no results for any graded test").
-   Hang = ran and timed out. Unknown = never tested, not run (the reset or the
-   patch failed), or any other infrastructure error (a log the parser could
-   not read). Broken = test or load breaks. Hangs and unknowns are counted and
-   reported, never treated as breaks; test- and load-level are reported apart.
+4. State labels. For a later state: test breaks = P members that failed or
+   were skipped (the official grader counts a skip as not passing). Load
+   breaks = P members that could not run: the suite reported nothing at all
+   ("no results for any graded test"), or every member of their group (a
+   pytest file or class, a django TestCase class) went unreported. A P member
+   missing from a group the runner otherwise reported is a parser miss: counted
+   as unmeasured, never a break. Hang = ran and timed out. Unknown = never
+   tested, not run (the reset or the patch failed), or any other infrastructure
+   error. Broken = test or load breaks; a broken state's kind is load if it has
+   load breaks, else test. Hangs and unknowns are never breaks.
 5. Exposure. For command i in 1..N (N = commands replayed), state_after(i) is
    the last tool state with NNN <= i, else the run state, and state_before(i)
    = state_after(i-1). Exposure = share of commands after which the tree is
@@ -39,34 +42,36 @@ can be traced to the line that computed it.
    and unmeasured_share says how far it could move. Exposure after the first
    edit counts only commands from the first observed tree change onward.
    Wasted share = share of commands that started on a broken tree.
-6. Break intervals. Maximal runs of broken states (the final duplicate is
-   ignored); hang and unknown states neither open nor close one. Onset a =
-   the command that produced the first broken state; repair b = the command
-   that produced the next clean state, or none if the run ended broken.
-   Duration = b - a commands, or N - a + 1 when still open. Kind = test,
-   load, or both.
-7. Log visibility, from the ORIGINAL recorded commands: the log the agent
-   saw. Window W = commands a..b (a..N when open): the command that broke the
-   tree and every command that started on the broken tree. ran_tests = some
-   command in W invokes a test runner. saw_failure = some test-runner command
-   in W exited non-zero or printed a failure marker (a timed-out one counts
-   only by its markers). named = some output in W names a broken test's
-   function (word-bounded) or, for a load break, shows SyntaxError,
-   ImportError, IndentationError, ModuleNotFoundError or NameError. Silent =
-   not saw_failure. Unseen (the headline, conservative) = not saw_failure and
-   not named: nothing in the window could have shown the break.
-8. Shipped. For runs that submitted: whether the final tree was broken, read
-   from the final duplicate's predecessor (from the duplicate itself when the
-   predecessor was unmeasured), and compared with the official grade's
-   PASS_TO_PASS failures restricted to P. For runs that never submitted:
-   stop broken = the final tree was broken -- the stop at which a harness
-   that submits on its way out would have shipped a break.
-9. Fidelity tier. Exact = the original submitted, the replay submitted the
-   same patch, no recorder error, no skipped sync path, no replay exception.
-   Unsubmitted = the original never submitted, no replay exception, no
-   recorder error or skipped path, and >= 90% of comparable exit statuses
-   matched. Diverged otherwise. Main results use usable exact + unsubmitted
-   cells; every model row is repeated over all usable cells as a sensitivity.
+6. Breaks (intervals). Consecutive broken states of one kind (the final
+   duplicate is ignored; hang and unknown states neither open nor close one).
+   Onset a = the command that produced the first; the break ends at the next
+   clean state (ended = clean, repair b = its command), at the next state broken
+   in the other kind (ended = changed, b = its command), or not at all (ended =
+   None). Duration = b - a commands, or N - a + 1 when still open.
+7. Log visibility, from the ORIGINAL recorded commands, as the model saw them
+   (the first and last 5,000 characters of a long output). Window W = commands
+   a..b (a..N when open). ran_tests = a test-runner invocation in W whose output
+   shows tests ran. saw_failure = such a run that reported a failure (a missing
+   runner or nothing collected is not one). named = some output in W that is not
+   a pure listing (cat, grep, sed -n, git diff, ...) shows this break: a broken
+   test on a result line (its name and a failure word on one line), or one of
+   the break's own error lines (from the instrument's runs at its broken states,
+   less those already at the base); a syntax error counts only with the file
+   and line the instrument's run pointed at. Silent = not saw_failure. Unseen
+   (the headline, conservative) = not (saw_failure or named).
+8. Shipped. For runs that submitted: whether the official grade of the
+   replayed submission fails a P member (the scaffold's later versions submit a
+   file list the agent chose, not its tree); the end tree's label is kept as
+   end_broken and compared with the grade. For runs that never submitted: stop
+   broken = the end tree (the final duplicate's predecessor) was broken -- the
+   stop at which a harness that submits on its way out would ship a break.
+9. Fidelity tier. Both tiers need a healthy replay: every command it was meant
+   to replay ran, no recorder error, no skipped sync path, no transport failure,
+   no replay exception, and at least 90% of comparable exit statuses as
+   recorded (a timeout on one side only counts against). Exact = the original
+   and the replay submitted the same patch. Unsubmitted = neither submitted.
+   Diverged otherwise. Main results use usable exact + unsubmitted cells; every
+   model row is repeated over all usable cells as a sensitivity.
 Progress (extra columns; no break metric uses them). The suite also runs the
 FAIL_TO_PASS tests, but P is built from PASS_TO_PASS alone. Per measured
 state, f2p_passing = FAIL_TO_PASS members not failed, unreported or skipped.
@@ -109,15 +114,6 @@ BOOTSTRAP_RESAMPLES = 2000
 PERMUTATIONS = 10000
 
 _STEP = re.compile(r"^cmd-(\d+)$")
-# A test-runner invocation. "./tests/" counts only where it starts a command
-# (running a script there), so `cat ./tests/test_x.py` is not a test run.
-_TEST_RUNNER = re.compile(
-    r"pytest|py\.test|runtests\.py|bin/test|unittest|\btox\b|nosetests|manage\.py\s+test|make\s+test"
-    r"|(?:^|[;&|(]\s*)\./tests/",
-    re.M,
-)
-_FAILURE = re.compile(r"FAILED|FAIL:|ERROR|Error|Traceback|failed|errors=|error:")
-_LOAD_FAILURE = re.compile(r"SyntaxError|ImportError|IndentationError|ModuleNotFoundError|NameError")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -142,6 +138,15 @@ class Label:
     """``ok``, ``broken``, ``hang`` or ``unknown``."""
     test_breaks: frozenset = frozenset()
     load_breaks: frozenset = frozenset()
+    unmeasured: frozenset = frozenset()
+    """P members the runner did not report in a group it otherwise reported: a parser miss, not a break."""
+
+    @property
+    def kind(self) -> str | None:
+        """A broken state's kind: ``load`` when a group of tests could not run at all, else ``test``."""
+        if self.status != "broken":
+            return None
+        return "load" if self.load_breaks else "test"
 
     @property
     def broken(self) -> bool:
@@ -160,17 +165,22 @@ UNKNOWN = Label("unknown")
 
 @dataclass(frozen=True)
 class Interval:
+    """One break: consecutive broken states of one kind (a phase)."""
+
     onset: int
     repair: int | None
+    """The command that ended it: the next clean state's, or the next state that broke differently."""
     duration: int
     tests: frozenset
     loads: frozenset
+    ended: str | None = None
+    """``clean`` (repaired), ``changed`` (the tree broke in another way), or None (still open at the end)."""
+    states: tuple[int, ...] = ()
+    """Timeline indices of the broken states in it: where its evidence is read."""
 
     @property
     def kind(self) -> str:
-        if self.tests and self.loads:
-            return "both"
-        return "test" if self.tests else "load"
+        return "load" if self.loads else "test"
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -232,17 +242,51 @@ def task_base_set(base_sets: Sequence[frozenset]) -> tuple[frozenset, frozenset]
     return common, union - common
 
 
-def label_state(record: dict | None, base: frozenset) -> Label:
-    """Definition 4."""
+def container_of(test_id: str) -> str | None:
+    """The group a runner loads together: a pytest file or class, a django TestCase class.
+
+    ``path::Class::test_x[p]`` -> ``path::Class``; ``path::test_x`` -> ``path``;
+    django's ``test_x (app.tests.Class)`` -> ``app.tests.Class``. None when the id
+    names no group (sympy's bare function names).
+    """
+    text = test_id.strip()
+    if "::" in text:
+        return base_test_id(text).rsplit("::", 1)[0]
+    if text.endswith(")") and " (" in text:
+        return text.rsplit(" (", 1)[1][:-1]
+    return None
+
+
+def label_state(record: dict | None, base: frozenset, suite: Sequence[str] = ()) -> Label:
+    """Definition 4.
+
+    A test break is a P member that failed or was skipped (the official grader
+    counts a skip as not passing). A load break is a P member that could not run:
+    the suite reported nothing at all, or every member of its group (``suite``:
+    all the suite's members, to know a group whole) went unreported. A P member
+    missing from a group the runner otherwise reported is a parser miss, counted
+    as unmeasured and never as a break.
+    """
     if record is None or not record.get("ran"):
         return UNKNOWN
     if record.get("timed_out"):
         return Label("hang")
     if record.get("infra_error") not in (None, NO_RESULTS):
         return UNKNOWN
-    tests = base & frozenset(record.get("failed", []))
-    loads = base & frozenset(record.get("unreported", []))
-    return Label("broken" if tests or loads else "ok", tests, loads)
+    unreported = frozenset(record.get("unreported", []))
+    tests = base & (frozenset(record.get("failed", [])) | frozenset(record.get("skipped", [])))
+    if record.get("infra_error") == NO_RESULTS:
+        loads, unmeasured = base & unreported, frozenset()
+    else:
+        groups: dict[str, list[str]] = {}
+        for member in suite or base:
+            group = container_of(member)
+            if group is not None:
+                groups.setdefault(group, []).append(member)
+        dead = {group for group, members in groups.items() if all(m in unreported for m in members)}
+        loads = frozenset(m for m in base & unreported if container_of(m) in dead)
+        unmeasured = (base & unreported) - loads
+    return Label("broken" if tests or loads else "ok", tests, loads, unmeasured)
 
 
 def f2p_passing(record: dict | None, fail_to_pass: Sequence[str]) -> int | None:
@@ -296,24 +340,36 @@ def exposure(after: Sequence[Label], commands: int, first_edit: int | None) -> d
 
 
 def break_intervals(timeline: Sequence[State], labels: Sequence[Label], commands: int) -> list[Interval]:
-    """Definition 6."""
+    """Definition 6: phases. A phase is consecutive broken states of one kind; it ends at the
+    next clean state (``clean``) or the next state that is broken in the other way (``changed``)."""
     intervals: list[Interval] = []
     onset: int | None = None
+    kind: str | None = None
     tests: set = set()
     loads: set = set()
-    for state, label in zip(timeline, labels, strict=True):
+    members: list[int] = []
+
+    def close(end: int | None, how: str | None) -> None:
+        duration = (end - onset) if end is not None else commands - onset + 1
+        intervals.append(Interval(onset, end, duration, frozenset(tests), frozenset(loads), how, tuple(members)))
+
+    for index, (state, label) in enumerate(zip(timeline, labels, strict=True)):
         if state.trigger == "final" or not label.measured:
             continue
         if label.broken:
+            if onset is not None and label.kind != kind:
+                close(state.command, "changed")
+                onset = None
             if onset is None:
-                onset, tests, loads = state.command, set(), set()
+                onset, kind, tests, loads, members = state.command, label.kind, set(), set(), []
             tests |= label.test_breaks
             loads |= label.load_breaks
+            members.append(index)
         elif onset is not None:
-            intervals.append(Interval(onset, state.command, state.command - onset, frozenset(tests), frozenset(loads)))
+            close(state.command, "clean")
             onset = None
     if onset is not None:
-        intervals.append(Interval(onset, None, commands - onset + 1, frozenset(tests), frozenset(loads)))
+        close(None, None)
     return intervals
 
 
@@ -337,38 +393,138 @@ def test_function_name(test_id: str) -> str | None:
     return name if name.lower().startswith("test") and len(name) > 4 else None
 
 
+# Command segments, for telling a test run or a listing from anything else.
+_SEGMENT = re.compile(r"&&|\|\||;|\||\n")
+_PREFIX = re.compile(r"^(?:cd\s+\S+|timeout\s+(?:-\S+\s+)*\d+[smh]?|env(?:\s+-\S+)*|[A-Z_][A-Z0-9_]*=\S*|sudo|time|nice)\s*")
+_RUNNER = re.compile(
+    r"^(?:pytest|py\.test|nosetests|tox|(?:\./)?bin/test|(?:\./)?(?:tests/)?runtests\.py|(?:\./)?manage\.py\s+test"
+    r"|python[\d.]*\s+(?:-\S+\s+)*(?:-m\s+(?:pytest|unittest|nose|django\s+test)|(?:\./)?(?:tests/)?runtests\.py"
+    r"|(?:\./)?bin/test|(?:\./)?manage\.py\s+test))\b"
+)
+_LISTING_WORDS = {"cat", "head", "tail", "nl", "less", "more", "grep", "egrep", "fgrep", "rg", "ls", "find", "wc",
+                  "diff", "echo", "printf", "pwd", "which", "true", ":"}
+_LISTING_PAIRS = {("sed", "-n"), ("git", "diff"), ("git", "show"), ("git", "log"), ("git", "status"), ("git", "grep")}
+# A runner that ran tests says how many, or names a collection.
+_TESTS_RAN = re.compile(r"\bRan [1-9]\d* tests?\b|\b[1-9]\d* (?:passed|failed)\b|\bcollected [1-9]\d* items?\b")
+_RUN_FAILED = re.compile(r"\bFAILED\b|^FAIL:|^ERROR:|\b\d+ failed\b|\b\d+ errors?\b|errors=\d+|failures=\d+", re.M)
+_RESULT_FAILURE = re.compile(r"\b(?:FAIL|FAILED|ERROR|Error|failed|FAILURE)\b")
+
+
+def _segments(command: str) -> list[str]:
+    out = []
+    for part in _SEGMENT.split(command or ""):
+        part = part.strip().lstrip("(").strip()
+        while True:
+            stripped = _PREFIX.sub("", part, count=1).strip()
+            if stripped == part:
+                break
+            part = stripped
+        if part:
+            out.append(part)
+    return out
+
+
 def is_test_command(command: str) -> bool:
-    return bool(_TEST_RUNNER.search(command or ""))
+    """A test runner invoked as a command (not a file named after one: `cat tests/runtests.py`)."""
+    return any(_RUNNER.match(segment) for segment in _segments(command))
+
+
+def is_listing(command: str) -> bool:
+    """A command that only prints files or state: its output quotes source, not a run."""
+    segments = _segments(command)
+    if not segments:
+        return False
+    for segment in segments:
+        words = segment.split()
+        if words[0] in _LISTING_WORDS or tuple(words[:2]) in _LISTING_PAIRS:
+            continue
+        return False
+    return True
+
+
+def tests_ran(output: str) -> bool:
+    return bool(_TESTS_RAN.search(output or ""))
 
 
 def shows_failure(returncode: int | None, output: str) -> bool:
-    if returncode is not None and returncode != 0:
-        return True
-    return bool(_FAILURE.search(output or ""))
+    """A test run that ran tests and reported a failure (a missing runner, or nothing collected, is not)."""
+    if not tests_ran(output):
+        return False
+    return (returncode is not None and returncode != 0) or bool(_RUN_FAILED.search(output or ""))
 
 
-def visibility(interval: Interval, recorded: Sequence[Any], commands: int) -> dict[str, Any]:
-    """Definition 7, over the recorded commands (``recorded[k - 1]`` is command k)."""
+def seen_output(recorded: Any) -> str:
+    """What the model was shown: a v2 record keeps the whole output, but the model saw its
+    first and last 5,000 characters (a v1 record keeps only those already)."""
+    output = recorded.output or ""
+    if getattr(recorded, "output_truncated", False) and len(output) > 10000:
+        return output[:5000] + "\n" + output[-5000:]
+    return output
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+_SYNTAX_TYPES = ("SyntaxError", "IndentationError", "TabError")
+_LOCATION = re.compile(r'File "([^"]+)", line (\d+)')
+
+
+def shows_evidence(output: str, names: Sequence[str], exceptions: Sequence[str], locations: Sequence[str]) -> bool:
+    """Whether an output shows this break: a broken test reported failing, or the break's own error.
+
+    A broken test counts on a result line (its name and a failure word on one
+    line). An error counts by its line as the instrument's run printed it; a
+    syntax error's message is generic, so it counts only with the file and line
+    the instrument's run pointed at.
+    """
+    if not output:
+        return False
+    for line in output.splitlines():
+        if _RESULT_FAILURE.search(line) and any(re.search(rf"\b{re.escape(name)}\b", line) for name in names):
+            return True
+    flat = _norm(output)
+    for error in exceptions:
+        kind = error.split(":", 1)[0].rsplit(".", 1)[-1]
+        if kind in _SYNTAX_TYPES:
+            if kind not in output:
+                continue
+            for location in locations:
+                found = _LOCATION.search(location)
+                if not found:
+                    continue
+                name, line_no = found.group(1).rsplit("/", 1)[-1], found.group(2)
+                if re.search(rf'{re.escape(name)}", line {line_no}\b|\({re.escape(name)}, line {line_no}\)', output):
+                    return True
+        else:
+            needle = _norm(error)[:120]
+            if len(needle) >= 12 and needle in flat:
+                return True
+    return False
+
+
+def visibility(interval: Interval, recorded: Sequence[Any], commands: int,
+               exceptions: Sequence[str] = (), locations: Sequence[str] = ()) -> dict[str, Any]:
+    """Definition 7, over the recorded commands (``recorded[k - 1]`` is command k), as the model saw them.
+
+    ``exceptions`` and ``locations`` are the break's own error lines (from the
+    instrument's runs at its broken states, less those already at the base).
+    """
     last = interval.repair if interval.repair is not None else commands
     window = [recorded[k - 1] for k in range(interval.onset, last + 1) if 1 <= k <= len(recorded)]
+    names = sorted({name for t in interval.tests | interval.loads if (name := test_function_name(t))})
     tested = [c for c in window if is_test_command(c.command)]
-    names = sorted({name for t in interval.tests if (name := test_function_name(t))})
-    patterns = [re.compile(rf"\b{re.escape(name)}\b") for name in names]
-    named_test = any(p.search(c.output or "") for c in window for p in patterns)
-    named_load = bool(interval.loads) and any(_LOAD_FAILURE.search(c.output or "") for c in window)
-    saw_failure = any(shows_failure(c.returncode, c.output) for c in tested)
+    saw_failure = any(shows_failure(c.returncode, seen_output(c)) for c in tested)
+    named = any(shows_evidence(seen_output(c), names, exceptions, locations) for c in window if not is_listing(c.command))
     return {
         "window": len(window),
-        "ran_tests": bool(tested),
+        "ran_tests": any(tests_ran(seen_output(c)) for c in tested),
         "saw_failure": saw_failure,
-        "named_test": named_test,
-        "named_load": named_load,
-        "named": named_test or named_load,
+        "named": named,
         "silent": not saw_failure,
-        # The conservative reading, and the headline: nothing in the window could
-        # have shown the break -- no failing test run, no output naming a broken
-        # test, no import or syntax error anywhere (a reproduction script counts).
-        "unseen": not (saw_failure or named_test or named_load),
+        # The headline, and conservative: unseen only if no test run the agent made
+        # reported any failure and no output showed this break's own evidence.
+        "unseen": not (saw_failure or named),
     }
 
 
@@ -405,13 +561,14 @@ def _verdict_index(timeline: Sequence[State], labels: Sequence[Label], source: s
 
 
 def guard_counterfactual(timeline: Sequence[State], labels: Sequence[Label], solved_at: Sequence[bool | None],
-                         end_index: int | None) -> dict[str, Any]:
+                         end_index: int | None, commands: int | None = None) -> dict[str, Any]:
     """What returning to the last clean tree would have shipped in place of a broken end tree.
 
     The guard the labels make possible: at a stop, go back to the last measured
     state with no break (the run's base when there is none). Reported: whether
     that state holds any of the run's work, whether it already solved the task
-    (every target test passing), and how many commands of work it discards.
+    (every target test passing), and how many commands of work it discards (to
+    the run's last command when ``commands`` is given, else to the end tree).
     All None when the end tree is not broken.
     """
     none = {"guard_keeps_work": None, "guard_solved": None, "guard_discards_cmds": None}
@@ -422,7 +579,8 @@ def guard_counterfactual(timeline: Sequence[State], labels: Sequence[Label], sol
             return {
                 "guard_keeps_work": timeline[i].trigger == "tool",
                 "guard_solved": None if solved_at[i] is None else bool(solved_at[i]),
-                "guard_discards_cmds": timeline[end_index].command - timeline[i].command,
+                "guard_discards_cmds": (commands if commands is not None else timeline[end_index].command)
+                - timeline[i].command,
             }
     return none
 
@@ -450,15 +608,28 @@ def rc_agreement(fidelity: dict) -> float | None:
 
 
 def fidelity_tier(fidelity: dict, manifest: dict) -> str:
-    """Definition 9."""
-    recorder_clean = int(fidelity.get("shadow_errors") or manifest.get("shadow_errors") or 0) == 0 and not (
-        fidelity.get("sync_skipped_paths") or manifest.get("sync_skipped_paths"))
-    exception = fidelity.get("replay_exception") or manifest.get("exception")
-    if fidelity.get("recorded_submitted"):
-        exact = fidelity.get("same_submission") is True and recorder_clean and not exception
-        return "exact" if exact else "diverged"
+    """Definition 9.
+
+    Both tiers need a healthy replay: every command it was meant to replay ran
+    (none stopped it early), no recorder error, no skipped sync path, no
+    transport failure, no replay exception, and at least 90% of comparable exit
+    statuses as recorded (a one-sided timeout counts against). Exact: the
+    original submitted and the replay submitted the same patch. Unsubmitted:
+    neither submitted.
+    """
+    healthy = (
+        int(fidelity.get("shadow_errors") or manifest.get("shadow_errors") or 0) == 0
+        and not (fidelity.get("sync_skipped_paths") or manifest.get("sync_skipped_paths"))
+        and not (fidelity.get("replay_exception") or manifest.get("exception"))
+        and int(manifest.get("transport_errors") or 0) == 0
+        and manifest.get("commands_replayed") == manifest.get("commands_to_replay")
+    )
     agreement = rc_agreement(fidelity)
-    if not exception and recorder_clean and agreement is not None and agreement >= RC_AGREEMENT_FLOOR:
+    agrees = agreement is None or agreement >= RC_AGREEMENT_FLOOR
+    if fidelity.get("recorded_submitted"):
+        exact = healthy and agrees and fidelity.get("replay_submitted") and fidelity.get("same_submission") is True
+        return "exact" if exact else "diverged"
+    if healthy and not fidelity.get("replay_submitted") and agreement is not None and agrees:
         return "unsubmitted"
     return "diverged"
 
@@ -588,7 +759,9 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
             continue
         base, excluded = task_sets[cell.task]
         commands = int(cell.manifest.get("commands_replayed") or 0)
-        labels = [label_state(state.record, base) for state in timeline]
+        suite = tuple(members[cell.task][0]) + tuple(members[cell.task][1])
+        labels = [label_state(state.record, base, suite) for state in timeline]
+        base_errors = set((timeline[0].record or {}).get("exceptions", []))
         fail_to_pass = members[cell.task][1]
         passing = [f2p_passing(state.record, fail_to_pass) for state in timeline]
         solved_at = [solved(label, count, fail_to_pass) for label, count in zip(labels, passing, strict=True)]
@@ -621,15 +794,20 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
             "states_broken": sum(label.broken for label in later),
             "states_hang": sum(label.status == "hang" for label in later),
             "states_unknown": sum(label.status == "unknown" for label in later),
+            "states_with_unmeasured": sum(bool(label.unmeasured) for label in later),
             "any_break": any(label.broken for label in later),
             "test_break": any(label.test_breaks for label in later),
             "load_break": any(label.load_breaks for label in later),
             "intervals": len(cell_intervals),
             **exposure(after, commands, tool_commands[0] if tool_commands else None),
             "final_source": source, "final_agree": agree,
+            # What the run shipped: the official grade of the submitted patch, restricted to P
+            # (a later scaffold submits a file list the agent chose, not its tree).
+            "shipped_any": (bool(base & set(cell.evidence.get("grade_failed") or []))
+                            if submitted and cell.evidence.get("grade") else None),
+            "end_broken": verdict.broken if submitted and verdict else None,
             "shipped_test": bool(verdict.test_breaks) if submitted and verdict else None,
             "shipped_load": bool(verdict.load_breaks) if submitted and verdict else None,
-            "shipped_any": verdict.broken if submitted and verdict else None,
             "stop_broken": verdict.broken if not submitted and verdict else None,
             "grade_agreement": grade_agreement(verdict, cell.evidence, base) if submitted else None,
             "f2p_total": len(fail_to_pass),
@@ -637,18 +815,24 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
             "first_solved_cmd": first_solved,
             "solved_end": end_solved,
             "overshoot": (first_solved is not None and end_solved is False) if end_solved is not None else None,
-            **guard_counterfactual(timeline, labels, solved_at, end_index),
+            **guard_counterfactual(timeline, labels, solved_at, end_index, commands),
         })
         silent = 0
         for interval in cell_intervals:
-            seen = visibility(interval, recorded, commands) if recorded else {
-                key: None for key in ("window", "ran_tests", "saw_failure", "named_test", "named_load", "named", "silent",
-                                      "unseen")}
+            errors: list[str] = []
+            places: list[str] = []
+            for index in interval.states:
+                record = timeline[index].record or {}
+                errors += [e for e in record.get("exceptions", []) if e not in base_errors and e not in errors]
+                places += [loc for loc in record.get("error_locations", []) if loc not in places]
+            seen = visibility(interval, recorded, commands, errors, places) if recorded else {
+                key: None for key in ("window", "ran_tests", "saw_failure", "named", "silent", "unseen")}
             silent += bool(seen["silent"])
             intervals.append({
                 "submission": cell.submission, "task": cell.task, "tier": tier, "main": row["main"],
                 "onset": interval.onset, "repair": interval.repair, "duration": interval.duration,
-                "kind": interval.kind, "open_at_end": interval.repair is None,
+                "kind": interval.kind, "ended": interval.ended, "open_at_end": interval.repair is None,
+                "evidence_lines": len(errors),
                 "tests": ";".join(sorted(interval.tests)), "load_members": len(interval.loads), **seen,
             })
         row["silent_intervals"] = silent if recorded or not cell_intervals else None

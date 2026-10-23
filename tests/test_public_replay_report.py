@@ -36,8 +36,8 @@ def rec(sha, *, ran=True, timed_out=False, infra=None, failed=(), unreported=(),
             "failed": list(failed), "unreported": list(unreported), "skipped": list(skipped), "output_tail": ""}
 
 
-def cmd(command, rc=0, output=""):
-    return SimpleNamespace(command=command, returncode=rc, output=output, timed_out=rc is None)
+def cmd(command, rc=0, output="", truncated=False):
+    return SimpleNamespace(command=command, returncode=rc, output=output, timed_out=rc is None, output_truncated=truncated)
 
 
 # ------------------------------------------------------------- the definitions
@@ -59,22 +59,37 @@ def test_a_broken_test_is_named_by_its_function(test_id, name) -> None:
 @pytest.mark.parametrize("command, expected", [
     ("python -m pytest tests/test_mod.py -q", True),
     ("cd /testbed && ./tests/runtests.py queries --verbosity 2", True),
+    ("cd /testbed && python tests/runtests.py aggregation", True),
     ("bin/test sympy/core/tests/test_basic.py", True),
     ("tox -e py39", True),
     ("python -m unittest discover", True),
+    ("timeout 60 python -m pytest -x", True),
+    ("cd /testbed && PYTHONPATH=. pytest -q tests", True),
+    ("python -m django test --settings=x", True),
+    ("python manage.py test app", True),
     ("cat ./tests/test_mod.py", False),
     ("grep -rn foo src/ && ls", False),
+    ("sed -n '1,80p' src/_pytest/python.py", False),
+    ("cat tox.ini", False),
+    ("grep -n x tests/runtests.py", False),
+    ("pip install pytest", False),
+    ("ls bin/test", False),
+    ("cat > test_x.py <<'EOF'\nimport unittest\nEOF", False),
 ])
 def test_test_runner_invocations(command, expected) -> None:
     assert report.is_test_command(command) is expected
 
 
 def test_failure_signals() -> None:
-    assert report.shows_failure(1, "") is True
-    assert report.shows_failure(0, "FAILED tests/x.py::t") is True
-    assert report.shows_failure(0, "Traceback (most recent call last)") is True
+    """A failure counts only from a run that ran tests: a missing runner or nothing collected is not one."""
+    assert report.shows_failure(1, "Ran 3 tests in 0.01s\n\nFAILED (failures=1)") is True
+    assert report.shows_failure(0, "FAILED tests/x.py::t - AssertionError\n1 failed, 2 passed in 0.1s") is True
     assert report.shows_failure(0, "5 passed in 0.10s") is False
-    assert report.shows_failure(None, "Command timed out") is False  # a timeout counts only by its markers
+    assert report.shows_failure(1, "") is False
+    assert report.shows_failure(1, "/opt/miniconda3/bin/python: No module named pytest") is False
+    assert report.shows_failure(5, "collected 0 items\n\nno tests ran in 0.01s") is False
+    assert report.shows_failure(None, "Command timed out") is False
+    assert report.shows_failure(1, "Traceback (most recent call last):\nNameError: x") is False
 
 
 def test_state_labels_follow_definition_four() -> None:
@@ -89,6 +104,26 @@ def test_state_labels_follow_definition_four() -> None:
     assert report.label_state(None, base).status == "unknown"
     # a member outside P (never passing, or flaky at the base) never makes a break
     assert report.label_state(rec("s", failed=[T3, F1]), base).status == "ok"
+    # a skipped P member is not passing, as the official grader counts it
+    skipped = report.label_state(rec("s", skipped=[T2]), base)
+    assert skipped.status == "broken" and skipped.test_breaks == {T2}
+
+
+def test_a_test_missing_from_a_group_that_otherwise_ran_is_a_parser_miss_not_a_break() -> None:
+    """Only a whole group that could not run is a load break (a module that will not import, a
+    class whose set-up dies); one unreported test among reported ones is unmeasured."""
+    suite = (T1, T2, T3, F1)
+    base = frozenset({T1, T2})
+    miss = report.label_state(rec("s", unreported=[T1]), base, suite)
+    assert miss.status == "ok" and miss.unmeasured == {T1} and not miss.load_breaks
+    whole = report.label_state(rec("s", unreported=[T1, T2, T3, F1]), base, suite)
+    assert whole.status == "broken" and whole.load_breaks == {T1, T2} and whole.kind == "load"
+    a1, a2, b1 = "test_a (app.tests.A)", "test_b (app.tests.A)", "test_c (app.tests.B)"
+    django = report.label_state(rec("s", unreported=[a1, a2]), frozenset({a1, a2, b1}), (a1, a2, b1))
+    assert django.load_breaks == {a1, a2} and django.status == "broken"
+    assert report.container_of(a1) == "app.tests.A" and report.container_of(T2) == "tests/test_mod.py"
+    assert report.container_of("tests/x.py::Cls::test_y[1]") == "tests/x.py::Cls"
+    assert report.container_of("test_Add") is None
 
 
 def test_the_base_set_is_previously_passing_tests_only_and_flaky_ones_leave_the_task() -> None:
@@ -131,25 +166,54 @@ def test_intervals_close_only_on_a_clean_state_and_skip_unmeasured_ones() -> Non
     assert [(i.onset, i.repair, i.duration, i.kind) for i in intervals] == [(2, 6, 4, "test"), (7, None, 3, "load")]
 
 
-def test_visibility_reads_the_original_log() -> None:
+def test_visibility_reads_the_original_log_for_this_breaks_own_evidence() -> None:
+    """Seen means the log shows this break: a broken test reported failing, or the break's own error."""
     recorded = [
         cmd("ls"), cmd("sed -i 's/a/b/' pkg/mod.py"),
-        cmd("python -m pytest tests/test_mod.py", 1, "FAILED tests/test_mod.py::test_one - AssertionError"),
+        cmd("python -m pytest tests/test_mod.py", 1, "FAILED tests/test_mod.py::test_one - AssertionError\n1 failed, 2 passed in 0.1s"),
         cmd("sed -i 's/b/a/' pkg/mod.py"), cmd("printf 'x = (' > pkg/mod.py"), cmd("git diff"),
     ]
     seen = report.visibility(report.Interval(2, 4, 2, frozenset({T1}), frozenset()), recorded, 6)
-    assert seen == {"window": 3, "ran_tests": True, "saw_failure": True, "named_test": True, "named_load": False,
-                    "named": True, "silent": False, "unseen": False}
+    assert seen == {"window": 3, "ran_tests": True, "saw_failure": True, "named": True, "silent": False, "unseen": False}
     quiet = report.visibility(report.Interval(5, None, 2, frozenset(), frozenset({T1})), recorded, 6)
-    assert quiet["window"] == 2 and quiet["ran_tests"] is False and quiet["silent"] is True and quiet["named"] is False
-    assert quiet["unseen"] is True
-    # A reproduction script's traceback is not a test run, but it shows a load break: not unseen.
-    repro = [cmd("printf 'x = (' > pkg/mod.py"), cmd("python repro.py", 1, "SyntaxError: invalid syntax")]
-    shown = report.visibility(report.Interval(1, None, 2, frozenset(), frozenset({T1})), repro, 2)
-    assert shown["silent"] is True and shown["named"] is True and shown["unseen"] is False
-    # a name must match as a word: test_one is not named by test_one_more
-    near = [cmd("pytest -q", 0, "test_one_more PASSED")]
-    assert report.visibility(report.Interval(1, None, 1, frozenset({T1}), frozenset()), near, 1)["named_test"] is False
+    assert (quiet["ran_tests"], quiet["silent"], quiet["named"], quiet["unseen"]) == (False, True, False, True)
+
+    name_error = "NameError: name 'having_group_by' is not defined"
+    # The agent's reproduction script printed the break's own error: not a test run, but seen.
+    repro = [cmd("sed -i '139d' compiler.py"), cmd("python repro.py", 1, f"Traceback (most recent call last):\n{name_error}")]
+    shown = report.visibility(report.Interval(1, None, 2, frozenset(), frozenset({T1})), repro, 2, [name_error])
+    assert (shown["silent"], shown["named"], shown["unseen"]) == (True, True, False)
+    # Another error is not this break's.
+    other = [cmd("python repro.py", 1, "NameError: name 'y' is not defined")]
+    assert report.visibility(report.Interval(1, None, 1, frozenset(), frozenset({T1})), other, 1, [name_error])["unseen"] is True
+    # A source listing that quotes an error type is not a run.
+    listing = [cmd("grep -n 'except ImportError' pkg/mod.py", 0, "12: except ImportError: cannot import name 'Random'")]
+    assert report.visibility(report.Interval(1, None, 1, frozenset(), frozenset({T1})), listing, 1,
+                             ["ImportError: cannot import name 'Random'"])["unseen"] is True
+    # A syntax error counts only at the file and line the instrument's run pointed at.
+    where = ['File "/testbed/pylint/lint/pylinter.py", line 614']
+    syntax = "SyntaxError: invalid syntax"
+    at = [cmd("python -c 'import pylint.lint'", 1, f'  File "/testbed/pylint/lint/pylinter.py", line 614\n    if x(\n{syntax}')]
+    elsewhere = [cmd("python -c 'import pylint.lint'", 1, f'  File "/testbed/pylint/lint/pylinter.py", line 700\n{syntax}')]
+    pytest_form = [cmd("python -m pytest tests", 2, f"E   {syntax} (pylinter.py, line 614)\ncollected 0 items / 1 error")]
+    interval = report.Interval(1, None, 1, frozenset(), frozenset({T1}))
+    assert report.visibility(interval, at, 1, [syntax], where)["unseen"] is False
+    assert report.visibility(interval, elsewhere, 1, [syntax], where)["unseen"] is True
+    assert report.visibility(interval, pytest_form, 1, [syntax], where)["unseen"] is False
+    # A runner that is not installed ran no test: no failure seen.
+    missing = [cmd("python -m pytest tests", 1, "/usr/bin/python: No module named pytest")]
+    assert report.visibility(interval, missing, 1)["saw_failure"] is False
+    # Listing the test file names the test but reports nothing.
+    names = [cmd("cat tests/test_mod.py", 0, "def test_one():\n    assert broken()  # Error")]
+    assert report.visibility(report.Interval(1, None, 1, frozenset({T1}), frozenset()), names, 1)["named"] is False
+    # A name must match as a word.
+    near = [cmd("pytest -q", 1, "FAILED tests/test_mod.py::test_one_more\n1 failed in 0.1s")]
+    assert report.visibility(report.Interval(1, None, 1, frozenset({T1}), frozenset()), near, 1)["named"] is False
+    # The model saw the first and last 5,000 characters of a long output; evidence in the middle was never shown.
+    middle = "x" * 6000 + "\n" + name_error + "\n" + "y" * 6000
+    long = [cmd("python repro.py", 1, middle, truncated=True)]
+    assert report.visibility(interval, long, 1, [name_error])["unseen"] is True
+    assert report.visibility(interval, [cmd("python repro.py", 1, middle)], 1, [name_error])["unseen"] is False
 
 
 def test_the_end_tree_is_read_from_the_duplicates_predecessor() -> None:
@@ -162,16 +226,24 @@ def test_the_end_tree_is_read_from_the_duplicates_predecessor() -> None:
 
 
 def test_fidelity_tiers() -> None:
-    exact = {"recorded_submitted": True, "same_submission": True, "shadow_errors": 0, "sync_skipped_paths": []}
-    assert report.fidelity_tier(exact, {}) == "exact"
-    assert report.fidelity_tier({**exact, "same_submission": False}, {}) == "diverged"
-    assert report.fidelity_tier({**exact, "shadow_errors": 2}, {}) == "diverged"
-    assert report.fidelity_tier({**exact, "sync_skipped_paths": ["big.bin"]}, {}) == "diverged"
-    assert report.fidelity_tier(exact, {"exception": "RuntimeError: dead"}) == "diverged"
-    stopped = {"recorded_submitted": False, "rc_compared": 10, "rc_matched": 9}
-    assert report.fidelity_tier(stopped, {}) == "unsubmitted"
-    assert report.fidelity_tier({**stopped, "rc_matched": 8}, {}) == "diverged"
-    assert report.fidelity_tier({**stopped, "rc_compared": 0, "rc_matched": 0}, {}) == "diverged"
+    """A replay counts only if it ran every command it was meant to, healthily, and exited as recorded."""
+    healthy = {"commands_replayed": 5, "commands_to_replay": 5, "transport_errors": 0}
+    exact = {"recorded_submitted": True, "replay_submitted": True, "same_submission": True, "shadow_errors": 0,
+             "sync_skipped_paths": [], "rc_compared": 10, "rc_matched": 10}
+    assert report.fidelity_tier(exact, healthy) == "exact"
+    assert report.fidelity_tier({**exact, "same_submission": False}, healthy) == "diverged"
+    assert report.fidelity_tier({**exact, "replay_submitted": False}, healthy) == "diverged"
+    assert report.fidelity_tier({**exact, "shadow_errors": 2}, healthy) == "diverged"
+    assert report.fidelity_tier({**exact, "sync_skipped_paths": ["big.bin"]}, healthy) == "diverged"
+    assert report.fidelity_tier({**exact, "rc_matched": 8}, healthy) == "diverged"
+    assert report.fidelity_tier(exact, {**healthy, "exception": "RuntimeError: dead"}) == "diverged"
+    assert report.fidelity_tier(exact, {**healthy, "commands_replayed": 3}) == "diverged"  # stopped early
+    assert report.fidelity_tier(exact, {**healthy, "transport_errors": 1}) == "diverged"
+    stopped = {"recorded_submitted": False, "replay_submitted": False, "rc_compared": 10, "rc_matched": 9}
+    assert report.fidelity_tier(stopped, healthy) == "unsubmitted"
+    assert report.fidelity_tier({**stopped, "rc_matched": 8}, healthy) == "diverged"
+    assert report.fidelity_tier({**stopped, "rc_compared": 0, "rc_matched": 0}, healthy) == "diverged"
+    assert report.fidelity_tier({**stopped, "replay_submitted": True}, healthy) == "diverged"  # ended at an early sentinel
 
 
 def test_a_timeline_out_of_command_order_is_refused() -> None:
@@ -234,10 +306,11 @@ def _cell(root, submission, task, *, states, commands, fidelity, evidence=None, 
     full = {"recorded_submitted": False, "same_submission": None, "shadow_errors": 0, "replay_exception": None,
             "sync_skipped_paths": [], "rc_compared": commands, "rc_matched": commands, "leaderboard_resolved": False,
             "replay_resolved": None, "commands_replayed": commands, **fidelity}
+    full.setdefault("replay_submitted", full["recorded_submitted"])
     (directory / "fidelity.json").write_text(json.dumps(full))
     (directory / "manifest.json").write_text(json.dumps({
-        "session": session, "commands_replayed": commands, "shadow_errors": 0, "sync_skipped_paths": [],
-        "exception": None, "scaffold_version_recorded": "2.0.0"}))
+        "session": session, "commands_replayed": commands, "commands_to_replay": commands, "transport_errors": 0,
+        "shadow_errors": 0, "sync_skipped_paths": [], "exception": None, "scaffold_version_recorded": "2.0.0"}))
     (directory / "ledger" / "evidence" / f"{task}__MSWE__t1.json").write_text(json.dumps(evidence or {"resolved": None}))
     (directory / "status.json").write_text(json.dumps({"state": status}))
 
@@ -290,13 +363,14 @@ def study(tmp_path: Path, monkeypatch) -> Path:
     logs = {
         ("subA", "pkg__pkg-1"): [
             cmd("ls"), cmd("sed -i 's/a/b/' pkg/mod.py"),
-            cmd("python -m pytest tests/test_mod.py", 1, "FAILED tests/test_mod.py::test_one - AssertionError"),
+            cmd("python -m pytest tests/test_mod.py", 1,
+                "FAILED tests/test_mod.py::test_one - AssertionError\n1 failed, 2 passed in 0.1s"),
             cmd("sed -i 's/b/a/' pkg/mod.py"), cmd("printf 'x = (' > pkg/mod.py"),
             cmd("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git diff"),
         ],
         ("subB", "pkg__pkg-1"): [
             cmd("python setup.py build_ext -i", None, "timed out"), cmd("sed -i 's/a/b/' pkg/mod.py"),
-            cmd("python -m pytest tests/test_mod.py -k two", 1, "FAILED tests/test_mod.py::test_two[param]"),
+            cmd("python -m pytest tests/test_mod.py -k two", 1, "FAILED tests/test_mod.py::test_two[param]\n1 failed in 0.1s"),
         ],
     }
     monkeypatch.setattr(report, "load_recorded_commands", lambda root, sub, task, version="": logs[(sub, task)])
@@ -331,19 +405,20 @@ def test_a_whole_report_over_synthetic_cells(study: Path) -> None:
     assert b["first_solved_cmd"] == "" and b["overshoot"] == "False"
 
     c = cells[("subA", "pkg__pkg-2")]
-    assert (c["tier"], c["main"], c["final_agree"], c["shipped_any"]) == ("diverged", "False", "False", "False")
+    # no official grade on record for it, so nothing is said about what it shipped; its end tree was clean
+    assert (c["tier"], c["main"], c["final_agree"], c["shipped_any"], c["end_broken"]) == ("diverged", "False", "False", "", "False")
     assert (c["first_solved_cmd"], c["solved_end"], c["overshoot"]) == ("1", "True", "False")
 
     d = cells[("subB", "pkg__pkg-2")]
     assert (d["usable"], d["problem"], d["tier"]) == ("False", "base state not clean", "diverged")
 
     intervals = _csv(study / "report" / "intervals.csv")
-    shape = [(i["submission"], i["onset"], i["repair"], i["kind"], i["ran_tests"], i["saw_failure"], i["named"], i["silent"])
-             for i in intervals]
+    shape = [(i["submission"], i["onset"], i["repair"], i["kind"], i["ended"], i["ran_tests"], i["saw_failure"],
+              i["named"], i["silent"], i["unseen"]) for i in intervals]
     assert shape == [
-        ("subA", "2", "4", "test", "True", "True", "True", "False"),
-        ("subA", "5", "", "load", "False", "False", "False", "True"),
-        ("subB", "3", "", "test", "True", "True", "True", "False"),
+        ("subA", "2", "4", "test", "clean", "True", "True", "True", "False", "False"),
+        ("subA", "5", "", "load", "", "False", "False", "False", "True", "True"),
+        ("subB", "3", "", "test", "", "True", "True", "True", "False", "False"),
     ]
 
     states = _csv(study / "report" / "states.csv")
@@ -390,3 +465,18 @@ def test_the_guard_returns_to_the_last_clean_tree_before_a_broken_end() -> None:
     # A clean end needs no guard.
     timeline, labels = _states(("run", 0, OK), ("tool", 1, OK), ("final", 2, OK))
     assert report.guard_counterfactual(timeline, labels, [False, True, True], 1)["guard_keeps_work"] is None
+
+
+def test_a_break_that_changes_kind_is_two_phases_and_says_how_each_ended() -> None:
+    """A tree that cannot load, then loads but fails a test: two breaks with their own evidence."""
+    timeline, labels = _states(("run", 0, OK), ("tool", 2, BROKEN_LOAD), ("tool", 4, BROKEN_T1), ("tool", 6, OK),
+                               ("tool", 8, BROKEN_T1), ("final", 9, BROKEN_T1))
+    intervals = report.break_intervals(timeline, labels, 9)
+    assert [(i.onset, i.repair, i.kind, i.ended, i.states) for i in intervals] == [
+        (2, 4, "load", "changed", (1,)), (4, 6, "test", "clean", (2,)), (8, None, "test", None, (4,))]
+
+
+def test_the_guard_counts_discarded_work_to_the_runs_last_command() -> None:
+    timeline, labels = _states(("run", 0, OK), ("tool", 2, OK), ("tool", 5, BROKEN_T1), ("final", 9, BROKEN_T1))
+    guard = report.guard_counterfactual(timeline, labels, [False, True, False, False], 2, commands=9)
+    assert guard == {"guard_keeps_work": True, "guard_solved": True, "guard_discards_cmds": 7}
