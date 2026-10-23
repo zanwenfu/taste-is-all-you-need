@@ -33,6 +33,7 @@ containers that test each state stay severed.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import gzip
 import hashlib
@@ -631,16 +632,21 @@ def export_states(workspace: Path, timeline: Any, out_path: Path) -> int:
     against the same image.
     """
 
-    def git(*args: str) -> str:
-        return subprocess.run(["git", *args], cwd=workspace, capture_output=True, text=True, check=True).stdout
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", *args], cwd=workspace, capture_output=True, check=True).stdout
 
-    root = git("rev-list", "--max-parents=0", "HEAD").split()[0]
+    root = git("rev-list", "--max-parents=0", "HEAD").decode().split()[0]
     records = []
     for commit in timeline:
-        records.append({
-            "seq": commit.seq, "sha": commit.sha, "step_id": commit.step_id, "trigger": commit.trigger,
-            "files": list(commit.files), "patch": git("diff", "--binary", root, commit.sha),
-        })
+        record = {"seq": commit.seq, "sha": commit.sha, "step_id": commit.step_id, "trigger": commit.trigger,
+                  "files": list(commit.files)}
+        patch = git("diff", "--binary", root, commit.sha)
+        try:
+            record["patch"] = patch.decode("utf-8")
+        except UnicodeDecodeError:
+            # A non-UTF-8 file in the tree: kept byte for byte, so the state can still be re-tested.
+            record["patch_b64"] = base64.b64encode(patch).decode("ascii")
+        records.append(record)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(out_path, "wt", encoding="utf-8") as handle:
         json.dump({"root": root, "states": records}, handle)

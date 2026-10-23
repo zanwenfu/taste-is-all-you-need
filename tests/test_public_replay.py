@@ -461,3 +461,22 @@ def test_a_file_mode_is_not_content() -> None:
     new_a = "diff --git a/b.bak b/b.bak\nnew file mode 100644\n--- /dev/null\n+++ b/b.bak\n@@ -0,0 +1 @@\n+x\n"
     assert same_patch(new_a, new_a.replace("100644", "100755")) == (True, [])
     assert same_patch(new_a, new_a.replace("+x", "+y"))[0] is False
+
+
+def test_a_state_with_a_non_utf8_file_is_exported_byte_exact(tmp_path: Path) -> None:
+    """A tree holding a non-UTF-8 file (sphinx-7462 under one model wrote 10 MB of one) must export,
+    and its patch must come back byte for byte so the state can be re-tested."""
+    import base64
+    import gzip
+
+    ws = _workspace(tmp_path)
+    (ws / "notes.txt").write_bytes(b"caf\xe9 \x8f\n")
+    subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-qm", "x"], cwd=ws, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ws, capture_output=True, text=True).stdout.strip()
+    timeline = [SimpleNamespace(seq=1, sha=head, step_id="cmd-001", trigger="tool", files=("notes.txt",))]
+    out = tmp_path / "states.json.gz"
+    assert public_replay.export_states(ws, timeline, out) == 1
+    with gzip.open(out, "rt") as handle:
+        (state,) = json.load(handle)["states"]
+    assert "patch" not in state and b"caf\xe9 \x8f" in base64.b64decode(state["patch_b64"])
