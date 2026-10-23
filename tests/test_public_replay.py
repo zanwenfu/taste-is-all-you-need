@@ -449,3 +449,15 @@ def test_a_broken_state_keeps_every_error_line_of_its_full_output() -> None:
     assert record["output_head"].startswith("Creating test database")
     clean = state_record("abc", SuiteRun(statuses={"t::a": "pass"}), _Raw("NameError: x", exit_code=0), 1.0)
     assert clean["exceptions"] == [] and clean["output_head"] == ""
+
+
+def test_a_file_mode_is_not_content() -> None:
+    """Today's rebuilt images ship some files executable where the 2025 images did not, so a copy or a
+    move carries another mode into the patch; the lines are what a test reads."""
+    body = "--- a/pkg/mod.py\n+++ b/pkg/mod.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+    plain = "diff --git a/pkg/mod.py b/pkg/mod.py\nindex 1..2 100644\n" + body
+    moded = "diff --git a/pkg/mod.py b/pkg/mod.py\nold mode 100755\nnew mode 100644\nindex 1..2\n" + body
+    assert same_patch(plain, moded) == (True, [])
+    new_a = "diff --git a/b.bak b/b.bak\nnew file mode 100644\n--- /dev/null\n+++ b/b.bak\n@@ -0,0 +1 @@\n+x\n"
+    assert same_patch(new_a, new_a.replace("100644", "100755")) == (True, [])
+    assert same_patch(new_a, new_a.replace("+x", "+y"))[0] is False
