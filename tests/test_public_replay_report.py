@@ -75,6 +75,12 @@ def test_a_broken_test_is_named_by_its_function(test_id, name) -> None:
     ("pip install pytest", False),
     ("ls bin/test", False),
     ("cat > test_x.py <<'EOF'\nimport unittest\nEOF", False),
+    ("/opt/miniconda3/envs/testbed/bin/python -m pytest tests/test_mod.py", True),
+    ("cd /testbed && /usr/bin/pytest -q", True),
+    ("python -W ignore -m pytest tests", True),
+    ("./runtests.py aggregation", True),
+    ("python3.9 -X dev -m unittest tests.test_x", True),
+    ("python manage.py testserver", False),
 ])
 def test_test_runner_invocations(command, expected) -> None:
     assert report.is_test_command(command) is expected
@@ -124,6 +130,9 @@ def test_a_test_missing_from_a_group_that_otherwise_ran_is_a_parser_miss_not_a_b
     assert report.container_of(a1) == "app.tests.A" and report.container_of(T2) == "tests/test_mod.py"
     assert report.container_of("tests/x.py::Cls::test_y[1]") == "tests/x.py::Cls"
     assert report.container_of("test_Add") is None
+    # Python 3.11's unittest names a test with its method too: the group is still the class.
+    assert report.container_of("test_x (app.tests.Cls.test_x)") == "app.tests.Cls"
+    assert report.container_of("test_x (app.tests.Cls)") == "app.tests.Cls"
 
 
 def test_the_base_set_is_previously_passing_tests_only_and_flaky_ones_leave_the_task() -> None:

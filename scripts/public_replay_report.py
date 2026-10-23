@@ -253,7 +253,12 @@ def container_of(test_id: str) -> str | None:
     if "::" in text:
         return base_test_id(text).rsplit("::", 1)[0]
     if text.endswith(")") and " (" in text:
-        return text.rsplit(" (", 1)[1][:-1]
+        name, inside = text.rsplit(" (", 1)
+        inside = inside[:-1]
+        # Python 3.11's unittest repeats the method: `test_x (app.tests.Cls.test_x)`.
+        if inside.endswith("." + name.strip()):
+            inside = inside[: -len(name.strip()) - 1]
+        return inside
     return None
 
 
@@ -397,9 +402,11 @@ def test_function_name(test_id: str) -> str | None:
 _SEGMENT = re.compile(r"&&|\|\||;|\||\n")
 _PREFIX = re.compile(r"^(?:cd\s+\S+|timeout\s+(?:-\S+\s+)*\d+[smh]?|env(?:\s+-\S+)*|[A-Z_][A-Z0-9_]*=\S*|sudo|time|nice)\s*")
 _RUNNER = re.compile(
-    r"^(?:pytest|py\.test|nosetests|tox|(?:\./)?bin/test|(?:\./)?(?:tests/)?runtests\.py|(?:\./)?manage\.py\s+test"
-    r"|python[\d.]*\s+(?:-\S+\s+)*(?:-m\s+(?:pytest|unittest|nose|django\s+test)|(?:\./)?(?:tests/)?runtests\.py"
-    r"|(?:\./)?bin/test|(?:\./)?manage\.py\s+test))\b"
+    # An optional path before the program (agents outside the project's env called it by its full path),
+    # python flags with or without one argument (-W ignore, -X dev), then the runner.
+    r"^(?:\S*/)?(?:pytest|py\.test|nosetests|tox|bin/test|runtests\.py|manage\.py\s+test"
+    r"|python[\d.]*\s+(?:-[A-Za-z]\s+(?!-)\S+\s+|-\S+\s+)*(?:-m\s+(?:pytest|unittest|nose|django\s+test)"
+    r"|(?:\S*/)?(?:runtests\.py|bin/test|manage\.py\s+test)))(?=\s|$)"
 )
 _LISTING_WORDS = {"cat", "head", "tail", "nl", "less", "more", "grep", "egrep", "fgrep", "rg", "ls", "find", "wc",
                   "diff", "echo", "printf", "pwd", "which", "true", ":"}
