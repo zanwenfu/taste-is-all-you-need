@@ -140,6 +140,41 @@ class StateLogExecutor:
         self.inner.close()
 
 
+# An error line as a traceback or a runner prints it: `NameError: ...`, pytest's
+# `E   SyntaxError: ...`, a dotted class (`django.db.transaction.TransactionManagementError: ...`).
+_EXCEPTION_LINE = re.compile(r"^\s*(?:E\s+)?((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)(?::.*)?)$")
+_LOCATION_LINE = re.compile(r'^\s*(File "[^"]+", line \d+)')
+_SYNTAX_ERRORS = ("SyntaxError", "IndentationError", "TabError")
+
+
+def error_evidence(output: str, *, limit: int = 30) -> tuple[list[str], list[str]]:
+    """Every distinct error line of a suite's output, and where each syntax error points.
+
+    What the analysis looks for in the agent's own outputs to decide whether
+    the log ever showed this break: its error, not any error. A syntax error's
+    message is generic ("invalid syntax"), so the ``File "...", line N`` above
+    it is kept to make it specific.
+    """
+    exceptions: list[str] = []
+    locations: list[str] = []
+    recent: tuple[int, str] | None = None
+    for k, line in enumerate(output.splitlines()):
+        located = _LOCATION_LINE.match(line)
+        if located:
+            recent = (k, located.group(1))
+            continue
+        error = _EXCEPTION_LINE.match(line)
+        if not error:
+            continue
+        text = error.group(1).strip()[:300]
+        if text not in exceptions and len(exceptions) < limit:
+            exceptions.append(text)
+        near = recent is not None and k - recent[0] <= 6
+        if text.startswith(_SYNTAX_ERRORS) and near and recent[1] not in locations and len(locations) < 10:
+            locations.append(recent[1])
+    return exceptions, locations
+
+
 def state_record(sha: str, run: SuiteRun, raw: Any, seconds: float, tail_chars: int = 6000) -> dict[str, Any]:
     """One tested state, as the analysis reads it.
 
@@ -157,6 +192,7 @@ def state_record(sha: str, run: SuiteRun, raw: Any, seconds: float, tail_chars: 
             by_verdict.setdefault(verdict, []).append(member)
     output = str(getattr(raw, "output", "") or "") if raw is not None else ""
     clean = raw is not None and run.infra_error is None and not by_verdict["fail"] and not by_verdict["error"]
+    exceptions, locations = ([], []) if clean else error_evidence(output)
     return {
         "sha": sha,
         "seconds": round(seconds, 2),
@@ -171,6 +207,9 @@ def state_record(sha: str, run: SuiteRun, raw: Any, seconds: float, tail_chars: 
         # The tail is for auditing a state that is not clean; a clean state's
         # output says nothing the counts do not.
         "output_tail": "" if clean else output[-tail_chars:],
+        "output_head": "" if clean else output[:2000],
+        "exceptions": exceptions,
+        "error_locations": locations,
     }
 
 

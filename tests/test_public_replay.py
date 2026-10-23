@@ -419,3 +419,33 @@ def test_a_transport_failure_is_recorded_on_its_command(tmp_path: Path, monkeypa
     assert "daemon hiccup" in lines[1]["exception_info"]
     manifest = json.loads((ctx.gitdir / "manifest.json").read_text())
     assert manifest["transport_errors"] == 1
+
+
+def test_a_broken_state_keeps_every_error_line_of_its_full_output() -> None:
+    """The analysis asks whether anything the agent saw contained the break's own error, so a
+    broken state keeps every distinct error line of the suite's output, not only the tail's,
+    with the file and line a syntax error names."""
+    output = "\n".join([
+        "Creating test database...",
+        'File "/testbed/django/db/models/sql/compiler.py", line 139',
+        "    having_group_by = self.having.get_group_by_cols() if self.having else ()",
+        "NameError: name 'having_group_by' is not defined",
+        *[f"test_{i} (aggregation.tests.T) ... ok" for i in range(400)],
+        '  File "/testbed/pylint/lint/pylinter.py", line 614',
+        "    if file.endswith('.py') and not _is_ignored_file(",
+        "    ^",
+        "E   SyntaxError: invalid syntax",
+        "NameError: name 'having_group_by' is not defined",
+        "django.db.transaction.TransactionManagementError: An error occurred in the current transaction.",
+    ])
+    run = SuiteRun(statuses={"t::a": "error"}, exit_code=1, infra_error="no results for any graded test")
+    record = state_record("abc", run, _Raw(output), 1.0, tail_chars=200)
+    assert record["exceptions"] == [
+        "NameError: name 'having_group_by' is not defined",
+        "SyntaxError: invalid syntax",
+        "django.db.transaction.TransactionManagementError: An error occurred in the current transaction.",
+    ]
+    assert record["error_locations"] == ['File "/testbed/pylint/lint/pylinter.py", line 614']
+    assert record["output_head"].startswith("Creating test database")
+    clean = state_record("abc", SuiteRun(statuses={"t::a": "pass"}), _Raw("NameError: x", exit_code=0), 1.0)
+    assert clean["exceptions"] == [] and clean["output_head"] == ""
