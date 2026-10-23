@@ -192,6 +192,9 @@ def run_cell(root: Path, submission: str, task: str, *, force: bool = False, pla
 
     meta = load_submissions(root).get(submission, {})
     version = str(meta.get("version") or meta.get("mini_version") or meta.get("mini-swe-agent_version") or "")
+    if planted is None and not trajectory_path(root, submission, task).exists():
+        # The submission published no run for this task (gemini-3-5-flash has 441 of 500).
+        return write_status(directory, "missing", error="no published trajectory for this task")
     try:
         if planted is not None:
             trajectory = planted_trajectory(planted)
@@ -210,7 +213,11 @@ def run_cell(root: Path, submission: str, task: str, *, force: bool = False, pla
     inspected = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config.Env}}", instance.image],
                                capture_output=True, text=True, timeout=120)
     image_env = dict(item.split("=", 1) for item in json.loads(inspected.stdout or "[]") if "=" in item)
-    docker = DockerProvider()
+    import docker as docker_sdk
+
+    # A patient client: with two dozen replays starting at once the daemon can take
+    # over a minute to remove a container, and an unconfirmed removal blocks the cell.
+    docker = DockerProvider(client=docker_sdk.from_env(timeout=600))
     provider = NetworkedAgentProvider(docker)
     started = time.time()
     try:
@@ -295,13 +302,21 @@ def cmd_cell(args) -> int:
     print(json.dumps({"submission": args.submission, "task": args.task, **{k: status.get(k) for k in (
         "state", "seconds", "same_submission", "resolved", "leaderboard_resolved", "observations", "episodes", "error")}}),
           flush=True)
-    return 0 if status.get("state") in ("done", "unparseable") else 1
+    return 0 if status.get("state") in ("done", "unparseable", "missing") else 1
 
 
 def cmd_pool(args) -> int:
     """Run cells in parallel subprocesses, oldest first, holding a disk floor."""
     root = Path(args.root)
-    cells = [c for c in read_cells(Path(args.cells)) if args.force or not (cell_dir(root, *c) / "status.json").exists()]
+    redo = {state for state in args.redo.split(",") if state}
+
+    def pending(cell: tuple[str, str]) -> bool:
+        status = cell_dir(root, *cell) / "status.json"
+        if args.force or not status.exists():
+            return True
+        return json.loads(status.read_text()).get("state") in redo
+
+    cells = [c for c in read_cells(Path(args.cells)) if pending(c)]
     log = (root / "pool.log").open("a", buffering=1)
     log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pool start: {len(cells)} cells, {args.jobs} jobs\n")
 
@@ -313,7 +328,7 @@ def cmd_pool(args) -> int:
         out = root / "logs" / submission / f"{task}.log"
         out.parent.mkdir(parents=True, exist_ok=True)
         command = [sys.executable, __file__, "cell", "--root", str(root), "--submission", submission, "--task", task]
-        if args.force:
+        if args.force or (cell_dir(root, submission, task) / "status.json").exists():
             command.append("--force")
         with out.open("w") as handle:
             try:
@@ -436,6 +451,7 @@ def main() -> int:
     p.add_argument("--cell-timeout", type=int, default=4 * 3600)
     p.add_argument("--min-free-gb", type=float, default=60.0)
     p.add_argument("--force", action="store_true")
+    p.add_argument("--redo", default="", help="comma-separated finished states to run again, e.g. crashed,timed_out")
     f = sub.add_parser("fetch")
     f.add_argument("--root", required=True)
     f.add_argument("--cells", required=True)
