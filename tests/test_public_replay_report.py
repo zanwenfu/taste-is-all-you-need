@@ -373,3 +373,20 @@ def test_a_whole_report_over_synthetic_cells(study: Path) -> None:
     assert summary["cells"]["by_state"] == {"done": 4, "crashed": 1}
     assert summary["cross_model"]["spearman"] is None  # two models are not a correlation
     assert (study / "report" / "summary.md").read_text().startswith("# Public-run replay: summary")
+
+
+def test_the_guard_returns_to_the_last_clean_tree_before_a_broken_end() -> None:
+    """What a guard that returns to the last state with no break would have shipped instead."""
+    timeline, labels = _states(("run", 0, OK), ("tool", 2, OK), ("tool", 5, BROKEN_T1), ("tool", 6, HANG),
+                               ("tool", 8, BROKEN_LOAD), ("final", 9, BROKEN_LOAD))
+    solved_at = [False, True, False, None, False, False]
+    end = report._verdict_index(timeline, labels, report.final_verdict(timeline, labels)[1])
+    guard = report.guard_counterfactual(timeline, labels, solved_at, end)
+    assert guard == {"guard_keeps_work": True, "guard_solved": True, "guard_discards_cmds": 6}
+    # No clean state after the base: the guard ships the base, with none of the run's work.
+    timeline, labels = _states(("run", 0, OK), ("tool", 1, BROKEN_T1), ("final", 3, BROKEN_T1))
+    guard = report.guard_counterfactual(timeline, labels, [False, False, False], 1)
+    assert guard == {"guard_keeps_work": False, "guard_solved": False, "guard_discards_cmds": 1}
+    # A clean end needs no guard.
+    timeline, labels = _states(("run", 0, OK), ("tool", 1, OK), ("final", 2, OK))
+    assert report.guard_counterfactual(timeline, labels, [False, True, True], 1)["guard_keeps_work"] is None

@@ -404,6 +404,29 @@ def _verdict_index(timeline: Sequence[State], labels: Sequence[Label], source: s
     return None
 
 
+def guard_counterfactual(timeline: Sequence[State], labels: Sequence[Label], solved_at: Sequence[bool | None],
+                         end_index: int | None) -> dict[str, Any]:
+    """What returning to the last clean tree would have shipped in place of a broken end tree.
+
+    The guard the labels make possible: at a stop, go back to the last measured
+    state with no break (the run's base when there is none). Reported: whether
+    that state holds any of the run's work, whether it already solved the task
+    (every target test passing), and how many commands of work it discards.
+    All None when the end tree is not broken.
+    """
+    none = {"guard_keeps_work": None, "guard_solved": None, "guard_discards_cmds": None}
+    if end_index is None or not labels[end_index].broken:
+        return none
+    for i in range(end_index - 1, -1, -1):
+        if labels[i].status == "ok":
+            return {
+                "guard_keeps_work": timeline[i].trigger == "tool",
+                "guard_solved": None if solved_at[i] is None else bool(solved_at[i]),
+                "guard_discards_cmds": timeline[end_index].command - timeline[i].command,
+            }
+    return none
+
+
 def grade_agreement(verdict: Label | None, evidence: dict, base: frozenset) -> str | None:
     """Our end-tree breaks against the official grade's PASS_TO_PASS failures, both within P."""
     if verdict is None or evidence.get("resolved") is None or not evidence.get("grade"):
@@ -614,6 +637,7 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
             "first_solved_cmd": first_solved,
             "solved_end": end_solved,
             "overshoot": (first_solved is not None and end_solved is False) if end_solved is not None else None,
+            **guard_counterfactual(timeline, labels, solved_at, end_index),
         })
         silent = 0
         for interval in cell_intervals:
@@ -681,6 +705,9 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
         "stop_runs": sum(1 for c in unsubmitted if c["stop_broken"] is not None),
         "stop_broken_share": mean(c["stop_broken"] for c in unsubmitted),
         "ever_solved_share": mean((c["first_solved_cmd"] is not None) for c in cells),
+        "broken_end_runs": sum(1 for c in cells if c.get("guard_keeps_work") is not None),
+        "guard_keeps_work_share": mean(c.get("guard_keeps_work") for c in cells),
+        "guard_solved_share": mean(c.get("guard_solved") for c in cells),
         "overshoot_share": mean(c["overshoot"] for c in cells),
     }
 
@@ -845,6 +872,8 @@ def headline(summary: dict[str, Any]) -> str:
         f"shipped (submitted runs): {_pct(main['shipped_share'])}{_ci(ci['shipped_share'])} of {main['shipped_runs']}; "
         f"stop broken (unsubmitted runs): {_pct(main['stop_broken_share'])}{_ci(ci['stop_broken_share'])} "
         f"of {main['stop_runs']}",
+        f"broken end trees: {main['broken_end_runs']}; a last-clean-state guard keeps work in "
+        f"{_pct(main['guard_keeps_work_share'])} and ships a solved tree in {_pct(main['guard_solved_share'])}",
         f"Spearman(leaderboard resolve rate, exposure) over {corr['models']} models: {rho}",
         f"final duplicate disagreement: {summary['checks']['final_duplicate']}",
     ])
