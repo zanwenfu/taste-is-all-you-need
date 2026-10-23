@@ -139,9 +139,14 @@ def test_visibility_reads_the_original_log() -> None:
     ]
     seen = report.visibility(report.Interval(2, 4, 2, frozenset({T1}), frozenset()), recorded, 6)
     assert seen == {"window": 3, "ran_tests": True, "saw_failure": True, "named_test": True, "named_load": False,
-                    "named": True, "silent": False}
+                    "named": True, "silent": False, "unseen": False}
     quiet = report.visibility(report.Interval(5, None, 2, frozenset(), frozenset({T1})), recorded, 6)
     assert quiet["window"] == 2 and quiet["ran_tests"] is False and quiet["silent"] is True and quiet["named"] is False
+    assert quiet["unseen"] is True
+    # A reproduction script's traceback is not a test run, but it shows a load break: not unseen.
+    repro = [cmd("printf 'x = (' > pkg/mod.py"), cmd("python repro.py", 1, "SyntaxError: invalid syntax")]
+    shown = report.visibility(report.Interval(1, None, 2, frozenset(), frozenset({T1})), repro, 2)
+    assert shown["silent"] is True and shown["named"] is True and shown["unseen"] is False
     # a name must match as a word: test_one is not named by test_one_more
     near = [cmd("pytest -q", 0, "test_one_more PASSED")]
     assert report.visibility(report.Interval(1, None, 1, frozenset({T1}), frozenset()), near, 1)["named_test"] is False

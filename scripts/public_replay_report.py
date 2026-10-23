@@ -53,7 +53,8 @@ can be traced to the line that computed it.
    only by its markers). named = some output in W names a broken test's
    function (word-bounded) or, for a load break, shows SyntaxError,
    ImportError, IndentationError, ModuleNotFoundError or NameError. Silent =
-   not saw_failure.
+   not saw_failure. Unseen (the headline, conservative) = not saw_failure and
+   not named: nothing in the window could have shown the break.
 8. Shipped. For runs that submitted: whether the final tree was broken, read
    from the final duplicate's predecessor (from the duplicate itself when the
    predecessor was unmeasured), and compared with the official grade's
@@ -364,6 +365,10 @@ def visibility(interval: Interval, recorded: Sequence[Any], commands: int) -> di
         "named_load": named_load,
         "named": named_test or named_load,
         "silent": not saw_failure,
+        # The conservative reading, and the headline: nothing in the window could
+        # have shown the break -- no failing test run, no output naming a broken
+        # test, no import or syntax error anywhere (a reproduction script counts).
+        "unseen": not (saw_failure or named_test or named_load),
     }
 
 
@@ -599,7 +604,8 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
         silent = 0
         for interval in cell_intervals:
             seen = visibility(interval, recorded, commands) if recorded else {
-                key: None for key in ("window", "ran_tests", "saw_failure", "named_test", "named_load", "named", "silent")}
+                key: None for key in ("window", "ran_tests", "saw_failure", "named_test", "named_load", "named", "silent",
+                                      "unseen")}
             silent += bool(seen["silent"])
             intervals.append({
                 "submission": cell.submission, "task": cell.task, "tier": tier, "main": row["main"],
@@ -651,6 +657,7 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
         "intervals_per_run": mean(c["intervals"] for c in cells),
         "median_interval_duration": median(i["duration"] for i in intervals),
         "silent_interval_share": mean(i["silent"] for i in intervals),
+        "unseen_interval_share": mean(i["unseen"] for i in intervals),
         "exposure_mean": mean(c["exposure"] for c in cells),
         "exposure_after_first_edit_mean": mean(c["exposure_after_first_edit"] for c in cells),
         "wasted_share_mean": mean(c["wasted_share"] for c in cells),
@@ -665,6 +672,7 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
 
 
 CI_METRICS = ("runs_with_break_any", "runs_with_break_test", "runs_with_break_load", "silent_interval_share",
+              "unseen_interval_share",
               "exposure_mean", "exposure_after_first_edit_mean", "wasted_share_mean", "shipped_share",
               "stop_broken_share")
 
@@ -814,7 +822,8 @@ def headline(summary: dict[str, Any]) -> str:
         f"diverged {cells['tiers'].get('diverged', 0)}; main {cells['main']})",
         f"runs with a break: {_pct(main['runs_with_break_any'])}{_ci(ci['runs_with_break_any'])} "
         f"(test {_pct(main['runs_with_break_test'])}, load {_pct(main['runs_with_break_load'])})",
-        f"break intervals: {main['intervals']}; silent in the log: {_pct(main['silent_interval_share'])}"
+        f"break intervals: {main['intervals']}; unseen in the log: {_pct(main['unseen_interval_share'])}"
+        f"{_ci(ci['unseen_interval_share'])}; no failing test run: {_pct(main['silent_interval_share'])}"
         f"{_ci(ci['silent_interval_share'])}; median length {main['median_interval_duration']} commands",
         f"exposure: {_pct(main['exposure_mean'])}{_ci(ci['exposure_mean'])}; after the first edit "
         f"{_pct(main['exposure_after_first_edit_mean'])}; wasted {_pct(main['wasted_share_mean'])}; "

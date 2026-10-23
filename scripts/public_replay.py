@@ -345,6 +345,46 @@ def cmd_pool(args) -> int:
     return 0
 
 
+def cmd_refidelity(args) -> int:
+    """Recompute every finished cell's patch comparison from its stored files; nothing is re-run.
+
+    For when the comparison itself changes (a normalisation added after a cell
+    finished). Run it with no pool running: it rewrites fidelity.json and the
+    status's copy of the verdict.
+    """
+    from taste.benchmarks.public_replay import same_patch
+    from taste.benchmarks.public_trajectories import parse_trajectory
+
+    root = Path(args.root)
+    subs = load_submissions(root)
+    checked = changed = 0
+    for status_path in sorted((root / "cells").glob("*/*/status.json")):
+        directory = status_path.parent
+        submission, task = directory.parent.name, directory.name
+        status = json.loads(status_path.read_text())
+        submitted_diff = directory / "replay_submission.diff"
+        if submission == "planted" or status.get("state") != "done" or not submitted_diff.exists():
+            continue
+        fidelity = json.loads((directory / "fidelity.json").read_text())
+        if not fidelity.get("recorded_submitted"):
+            continue
+        meta = subs.get(submission, {})
+        version = str(meta.get("version") or "")
+        trajectory = parse_trajectory(json.loads(trajectory_path(root, submission, task).read_text()), mini_version=version)
+        cache = json.loads((root / "build_edits" / f"{task}.json").read_text())
+        same, differing = same_patch(trajectory.submission, submitted_diff.read_text(),
+                                     ignore=tuple(cache["paths"]), build=cache.get("build_patch", ""))
+        checked += 1
+        if same != fidelity.get("same_submission") or differing != fidelity.get("differing_files"):
+            changed += 1
+            print(f"  {submission} {task}: same {fidelity.get('same_submission')} -> {same} {differing}")
+        fidelity.update(same_submission=same, differing_files=differing, fidelity_recomputed_at=time.time())
+        (directory / "fidelity.json").write_text(json.dumps(fidelity, indent=1, sort_keys=True))
+        write_status(directory, status.pop("state"), **{**status, "same_submission": same})
+    print(f"recomputed {checked} cells; {changed} changed")
+    return 0
+
+
 def cmd_fetch(args) -> int:
     """Download each cell's trajectory from the public bucket (anonymous HTTPS, no credentials)."""
     root = Path(args.root)
@@ -459,6 +499,8 @@ def main() -> int:
     u.add_argument("--root", required=True)
     u.add_argument("--cells", required=True)
     u.add_argument("--jobs", type=int, default=4)
+    r = sub.add_parser("refidelity")
+    r.add_argument("--root", required=True)
     n = sub.add_parser("plan")
     n.add_argument("--root", required=True)
     n.add_argument("--submissions", required=True, help="one submission name per line")
@@ -467,7 +509,8 @@ def main() -> int:
     n.add_argument("--exclude", default="", help="JSON {instance_id: reason} for drawn tasks that were dropped")
     n.add_argument("--out", required=True)
     args = ap.parse_args()
-    return {"cell": cmd_cell, "pool": cmd_pool, "fetch": cmd_fetch, "pull": cmd_pull, "plan": cmd_plan}[args.cmd](args)
+    return {"cell": cmd_cell, "pool": cmd_pool, "fetch": cmd_fetch, "pull": cmd_pull, "plan": cmd_plan,
+            "refidelity": cmd_refidelity}[args.cmd](args)
 
 
 if __name__ == "__main__":
