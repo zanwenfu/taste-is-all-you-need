@@ -151,18 +151,30 @@ class _Exec:
     stdout: str
     stderr: str = ""
     timed_out: bool = False
+    duration_s: float = 0.0
 
 
 class _HostBash:
-    """Runs each command with the host's bash in the workspace: real trees for the shadow log."""
+    """Runs each command with the host's bash in the workspace: real trees for the shadow log.
+
+    Like the container's sandbox, it flags exit 124/137 as a timeout and reports its duration;
+    a command over the limit is killed and returns 137."""
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
         self.skipped: list[str] = []
 
     def exec(self, command: str, *, timeout: int = 600) -> _Exec:
-        done = subprocess.run(["bash", "-c", command], cwd=self.workspace, capture_output=True, text=True, timeout=timeout)
-        return _Exec(exit_code=done.returncode, stdout=done.stdout, stderr=done.stderr)
+        import time as _time
+
+        started = _time.monotonic()
+        try:
+            done = subprocess.run(["bash", "-c", command], cwd=self.workspace, capture_output=True, text=True, timeout=timeout)
+            code, out, err = done.returncode, done.stdout, done.stderr
+        except subprocess.TimeoutExpired:
+            code, out, err = 137, "", ""
+        return _Exec(exit_code=code, stdout=out, stderr=err, timed_out=code in (124, 137),
+                     duration_s=_time.monotonic() - started)
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -364,3 +376,46 @@ def test_a_run_whose_record_shows_no_git_author_replays_without_one(tmp_path: Pa
     make_replay_execute(lambda cell: without, router_factory=lambda c: _HostBash(ws))(SimpleNamespace(key="k"), ctx)
     assert issued and "--unset-all user.name" in issued[0] and "--unset-all user.email" in issued[0]
     assert json.loads((ctx.gitdir / "manifest.json").read_text())["git_author"] == "removed: the record shows none"
+
+
+def test_an_inner_timeout_is_an_exit_status_and_only_a_real_one_is_a_timeout(tmp_path: Path, monkeypatch) -> None:
+    """The sandbox flags any exit 124/137 as a timeout; an agent's own `timeout 1 ...` exits 124
+    in a second, which the record shows as exit 124. Only reaching the run's limit is a timeout,
+    and one side timing out while the other does not is a mismatch, never "not compared"."""
+    monkeypatch.setattr(public_replay, "close_sandbox", lambda sandbox: None)
+    ws = _workspace(tmp_path)
+    trajectory = _trajectory([("exit 124", 124), ("sleep 6", 0), ("true", 0)], timeout=4)
+    recorded = list(trajectory.commands)
+    recorded[2] = RecordedCommand(index=2, command="true", returncode=None, output="", output_truncated=False, timed_out=True)
+    trajectory = PublicTrajectory(**{**trajectory.__dict__, "commands": tuple(recorded)})
+    ctx = _ctx(tmp_path, ws)
+    make_replay_execute(lambda cell: trajectory, router_factory=lambda c: _HostBash(ws))(SimpleNamespace(key="k"), ctx)
+    lines = [json.loads(x) for x in (ctx.gitdir / "replay.jsonl").read_text().splitlines()]
+    assert (lines[0]["replay_rc"], lines[0]["replay_timed_out"], lines[0]["rc_match"]) == (124, False, True)
+    assert (lines[1]["replay_timed_out"], lines[1]["rc_match"]) == (True, False)  # only the replay hit the limit
+    assert (lines[2]["replay_timed_out"], lines[2]["rc_match"]) == (False, False)  # only the original did
+    assert not any(line["transport_error"] for line in lines)
+
+
+def test_a_transport_failure_is_recorded_on_its_command(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(public_replay, "close_sandbox", lambda sandbox: None)
+    ws = _workspace(tmp_path)
+    host = _HostBash(ws)
+    calls = {"n": 0}
+    real = host.exec
+
+    def flaky(command, *, timeout=600):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("daemon hiccup")
+        return real(command, timeout=timeout)
+
+    host.exec = flaky
+    trajectory = _trajectory([("true", 0), ("printf 'x = 2\\n' > pkg/mod.py", 0), ("true", 0)])
+    ctx = _ctx(tmp_path, ws)
+    make_replay_execute(lambda cell: trajectory, router_factory=lambda c: host)(SimpleNamespace(key="k"), ctx)
+    lines = [json.loads(x) for x in (ctx.gitdir / "replay.jsonl").read_text().splitlines()]
+    assert [line["transport_error"] for line in lines] == [False, True, False]
+    assert "daemon hiccup" in lines[1]["exception_info"]
+    manifest = json.loads((ctx.gitdir / "manifest.json").read_text())
+    assert manifest["transport_errors"] == 1

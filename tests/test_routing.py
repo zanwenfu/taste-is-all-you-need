@@ -388,3 +388,41 @@ def test_an_untransportable_path_is_skipped_and_counted_not_fatal(
     assert (ws / "real_file.py").exists(), "the regular file must still arrive"
     assert not (ws / "broken_link").exists()
     assert "broken_link" in router.skipped, "the skip must be visible, not silent"
+
+
+def test_a_path_that_cannot_be_brought_back_is_retried_or_reported_never_lost(testbed: Path, tmp_path: Path, monkeypatch) -> None:
+    """If bringing a reverted path home fails, the host would keep a stale copy for good; the
+    path must stay pending (a transport error) or be reported as skipped (an unreadable file)."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "lib.py").write_text((testbed / "lib.py").read_text())
+    sandbox = LocalSandbox(testbed)
+    router = SandboxRouter(sandbox, ws, workdir=str(testbed), advance_baseline=False)
+    original = (ws / "lib.py").read_text()
+    router.exec("printf 'def rate(:\\n' > lib.py")
+
+    real = sandbox.get_bytes
+    calls = {"n": 0}
+
+    def flaky(path: str) -> bytes:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("daemon hiccup")
+        return real(path)
+
+    monkeypatch.setattr(sandbox, "get_bytes", flaky)
+    with pytest.raises(OSError):
+        router.exec("git checkout -- lib.py")
+    router.exec("true")  # the next pull retries the pending path
+    assert (ws / "lib.py").read_text() == original
+
+
+def test_thousands_of_deleted_scratch_files_come_home_in_batches(testbed: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "lib.py").write_text((testbed / "lib.py").read_text())
+    router = SandboxRouter(LocalSandbox(testbed), ws, workdir=str(testbed), advance_baseline=False)
+    router.exec("mkdir -p scratch && for i in $(seq 1 1500); do printf x > scratch/f_$i.txt; done")
+    assert len(list((ws / "scratch").iterdir())) == 1500
+    router.exec("rm -rf scratch")
+    assert not list((ws / "scratch").glob("*.txt"))

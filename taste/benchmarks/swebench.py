@@ -347,6 +347,23 @@ def plain_suite_command(instance: SWEInstance, test_files) -> str:
     ))
 
 
+def restorable_test_files(instance: SWEInstance) -> set[str]:
+    """The graded files that exist at the base commit: the test patch's ``--- a/`` paths.
+
+    What the official harness restores around the test run. A file the patch
+    creates is not at the base, and naming it makes ``git checkout <base> --
+    a b`` fail as a whole -- so an agent's edit to an existing graded test
+    file survived the restore, and the test patch could not apply over it.
+    """
+    files: set[str] = set()
+    for line in instance.test_patch.splitlines():
+        if line.startswith("--- a/"):
+            path = line[6:].strip()
+            if path:
+                files.add(path)
+    return files
+
+
 def graded_test_files(instance: SWEInstance) -> set[str]:
     """The files the gold test patch touches — the graded set."""
     files: set[str] = set()
@@ -425,7 +442,10 @@ def build_eval_script(instance: SWEInstance, *, workdir: str = "/testbed") -> st
     """
     spec = spec_for(instance.repo, instance.version)
     directives = " ".join(test_directives(instance.repo, instance.test_patch))
-    graded = " ".join(sorted(graded_test_files(instance))) or "."
+    # Empty means skip the restore: `git checkout <base> -- .` would reset the
+    # agent's whole tree before the probe runs, and every state would read as the base.
+    graded = " ".join(sorted(restorable_test_files(instance)))
+    restore = f"git checkout {instance.base_commit} -- {graded}" if graded else ""
     setup = "\n".join(spec.eval_commands)
     return "\n".join(
         part
@@ -440,7 +460,7 @@ def build_eval_script(instance: SWEInstance, *, workdir: str = "/testbed") -> st
             f"cd {workdir}",
             setup,
             f"git config --global --add safe.directory {workdir}",
-            f"git checkout {instance.base_commit} -- {graded}",
+            restore,
             f"git apply -v - <<'TASTE_TEST_PATCH'\n{instance.test_patch}\nTASTE_TEST_PATCH",
             # `echo`, not `:`. The shell's null command accepts an argument and
             # prints nothing, so the marker never reached the log, the slice
@@ -450,7 +470,7 @@ def build_eval_script(instance: SWEInstance, *, workdir: str = "/testbed") -> st
             f"echo '{START_MARKER}'",
             f"{spec.test_cmd} {directives}".strip(),
             f"echo '{END_MARKER}'",
-            f"git checkout {instance.base_commit} -- {graded}",
+            restore,
         )
         if part
     )

@@ -529,3 +529,35 @@ def test_the_reset_target_is_the_image_state_not_the_upstream_base(tmp_path: Pat
         "the second observation saw the pre_install edit reverted: the reset "
         "target is the upstream base, not the image state"
     )
+
+
+def test_a_state_holding_a_binary_or_non_utf8_file_is_still_tested(tmp_path: Path) -> None:
+    """A text diff carries a binary file as "Binary files differ", which ``git apply`` refuses,
+    and a non-UTF-8 file cannot cross a text transport: either made every later state a hole.
+    Agents write both (a saved plot, a SQLite file, a latin-1 fixture)."""
+    import shutil
+
+    from taste.execution import LocalSandbox
+
+    ws, memory, base = _repo(tmp_path)
+    bed = tmp_path / "bed"  # stands in for the image's /testbed, at the same base tree
+    shutil.copytree(ws, bed, ignore=shutil.ignore_patterns(".git"))
+    for args in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-qm", "img"]):
+        subprocess.run(["git", *args], cwd=bed, check=True)
+    (ws / "plot.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x01binary\xff\xfe")
+    (ws / "notes.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+    (ws / "src.py").write_text("x = 3\n")
+    subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t.co", "commit", "-qm", "agent"], cwd=ws, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ws, capture_output=True, text=True).stdout.strip()
+
+    check = (
+        "python3 -c \"import pathlib; p = pathlib.Path; "
+        "ok = p('plot.png').read_bytes().endswith(b'binary\\\\xff\\\\xfe') and p('notes.txt').read_bytes() == b'caf\\\\xe9\\\\n' "
+        "and p('src.py').read_text() == 'x = 3\\\\n'; print(('PASSED' if ok else 'FAILED') + ' t_a')\""
+    )
+    run = SandboxProbeExecutor(LocalSandbox(bed), memory, base).run(
+        head, SuiteProbe(name="s", command=check, members=("t_a",), parse=_parse_pairs)
+    )
+    assert run.infra_error is None, run.infra_error
+    assert run.statuses["t_a"] == "pass"

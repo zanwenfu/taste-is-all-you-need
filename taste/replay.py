@@ -443,7 +443,11 @@ class SandboxProbeExecutor:
         if not self.local_base:
             return hole("no local base commit to diff against")
         try:
-            patch = self.memory.repo.git.diff(self.local_base, sha)
+            # Bytes, with binary hunks: a text diff carries a binary file only as
+            # "Binary files differ", which `git apply` refuses, and a non-UTF-8
+            # file cannot cross a text transport -- either made every later state
+            # a hole. Agents write both (a saved plot, a SQLite file).
+            patch = self.memory.repo.git.diff("--binary", self.local_base, sha, stdout_as_string=False)
         except Exception as exc:
             return hole(f"diff failed: {exc!r}")
 
@@ -459,7 +463,7 @@ class SandboxProbeExecutor:
                 self._reset_target = prepare_container_tree(
                     self.sandbox, workdir=workdir, hide_upstream=False
                 )
-            self.sandbox.put_text(patch_path, (patch or "") + "\n")
+            self.sandbox.put_bytes(patch_path, (patch or b"") + b"\n")
             reset = self.sandbox.exec(
                 f"cd {workdir} && git checkout -q {self._reset_target} -- . "
                 f"&& git clean -qfd",

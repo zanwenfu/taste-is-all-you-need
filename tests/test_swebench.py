@@ -687,3 +687,43 @@ def test_materialize_skips_untransportable_links_instead_of_aborting(tmp_path) -
         tar.extractall(tmp_path, filter=lenient_data_filter(skipped))
     assert (tmp_path / "pkg" / "a.py").read_text() == "print(1)\n"
     assert skipped == ["pkg/pip"]
+
+
+def test_the_eval_script_restores_only_test_files_that_exist_at_the_base() -> None:
+    """The official harness restores the test patch's ``--- a/`` files only. Naming a file the
+    patch creates makes ``git checkout <base> -- a b`` fail as a whole, so an agent's edit to an
+    existing graded test file survived, and the test patch could no longer apply on top of it."""
+    from taste.benchmarks.swebench import build_eval_script, restorable_test_files
+
+    patch = (
+        "diff --git a/tests/test_old.py b/tests/test_old.py\n--- a/tests/test_old.py\n+++ b/tests/test_old.py\n"
+        "@@ -1 +1,2 @@\n x = 1\n+y = 2\n"
+        "diff --git a/tests/roots/new_case.py b/tests/roots/new_case.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/tests/roots/new_case.py\n@@ -0,0 +1 @@\n+z = 3\n"
+    )
+    instance = SWEInstance(
+        instance_id="pytest-dev__pytest-1001", repo="pytest-dev/pytest", base_commit="b" * 40,
+        problem_statement="", test_patch=patch, version="7.2",
+        fail_to_pass=("tests/test_old.py::test_y",), pass_to_pass=("tests/test_old.py::test_x",),
+    )
+    assert restorable_test_files(instance) == {"tests/test_old.py"}
+    assert graded_test_files(instance) == {"tests/test_old.py", "tests/roots/new_case.py"}
+    checkouts = [line for line in build_eval_script(instance).splitlines() if line.startswith("git checkout")]
+    assert checkouts == [f"git checkout {'b' * 40} -- tests/test_old.py"] * 2
+
+
+def test_a_test_patch_that_only_creates_files_restores_nothing_rather_than_everything() -> None:
+    """With no ``--- a/`` file the restore must be skipped: ``git checkout <base> -- .`` would
+    reset the agent's whole tree in the probe, and every state would read as the base."""
+    from taste.benchmarks.swebench import build_eval_script
+
+    patch = ("diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n"
+             "--- /dev/null\n+++ b/tests/test_new.py\n@@ -0,0 +1 @@\n+def test_z(): pass\n")
+    instance = SWEInstance(
+        instance_id="pytest-dev__pytest-1002", repo="pytest-dev/pytest", base_commit="c" * 40,
+        problem_statement="", test_patch=patch, version="7.2",
+        fail_to_pass=("tests/test_new.py::test_z",), pass_to_pass=("tests/test_other.py::test_x",),
+    )
+    script = build_eval_script(instance)
+    assert "git checkout" not in script and "-- ." not in script
+    assert "git apply -v -" in script

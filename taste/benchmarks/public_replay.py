@@ -240,25 +240,70 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+class _LastResult:
+    """Passes every call through; keeps the raw result of the last ``exec``.
+
+    The environment turns a sandbox result it flags as timed out into exit -1
+    and a notice, and the sandbox flags any exit 124 or 137 -- including an
+    agent's own ``timeout 10 ...`` returning 124 in ten seconds. The raw exit
+    status and duration are what tell the two apart.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.last: Any = None
+
+    def exec(self, command: str, *args: Any, **kwargs: Any) -> Any:
+        self.last = None
+        result = self._inner.exec(command, *args, **kwargs)
+        self.last = result
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 def command_record(
-    index: int, recorded: Any, outcome: dict[str, Any], observed: bool, seconds: float, exception: str | None
+    index: int, recorded: Any, outcome: dict[str, Any], observed: bool, seconds: float, exception: str | None,
+    raw: Any = None, limit: int | None = None,
 ) -> dict[str, Any]:
-    """One replayed command beside the recorded one: the per-command fidelity line."""
-    replay_rc = outcome.get("returncode") if outcome else None
-    replay_timed_out = "timed out" in str(outcome.get("exception_info", "")) if outcome else False
+    """One replayed command beside the recorded one: the per-command fidelity line.
+
+    A timeout is the run's limit being reached (the raw result flagged and as
+    long as the limit); a flagged result that ended early is the command's own
+    exit status. Both sides timing out is agreement; one side alone is a
+    mismatch. A transport failure (the command may not have run) is marked.
+    """
+    info = str(outcome.get("exception_info", "")) if outcome else ""
+    flagged = bool(getattr(raw, "timed_out", False))
+    duration = float(getattr(raw, "duration_s", 0.0) or 0.0)
+    # The outer `timeout --signal=KILL <limit>` kills at the limit, so a flagged result that
+    # ended earlier is the command's own exit status (an agent's `timeout 10 ...` -> 124).
+    replay_timed_out = flagged and (limit is None or duration >= limit - 0.5)
+    if raw is not None and flagged and not replay_timed_out:
+        replay_rc = getattr(raw, "exit_code", None)
+    else:
+        replay_rc = outcome.get("returncode") if outcome else None
+    transport_error = bool(outcome) and raw is None and outcome.get("returncode") == -1 and bool(info)
     replay_output = str(outcome.get("output", "")) if outcome else ""
+    if recorded.timed_out or replay_timed_out:
+        rc_match = recorded.timed_out == replay_timed_out
+    elif recorded.returncode is None or replay_rc is None:
+        rc_match = None  # nothing recorded (the planted check) or nothing returned
+    else:
+        rc_match = recorded.returncode == replay_rc
     return {
         "i": index,
         "observed": observed,
         "seconds": round(seconds, 2),
         "recorded_rc": recorded.returncode,
         "replay_rc": replay_rc,
+        "replay_raw_rc": getattr(raw, "exit_code", None),
         "recorded_timed_out": recorded.timed_out,
         "replay_timed_out": replay_timed_out,
-        # Nothing to compare when either side has no exit status: a timeout, or
-        # a command that was never recorded (the planted check).
-        "rc_match": None if (recorded.returncode is None or replay_rc is None or recorded.timed_out or replay_timed_out)
-        else recorded.returncode == replay_rc,
+        "rc_match": rc_match,
+        "transport_error": transport_error,
+        "exception_info": info[:500],
         "replay_output_sha": _digest(replay_output),
         "replay_output_chars": len(replay_output),
         "replay_output_head": replay_output[:2000],
@@ -311,7 +356,7 @@ def _replay_cell(
 ) -> RunResult:
     memory = Memory.open_session(ctx.workspace, session_id, base_ref="HEAD")
     try:
-        router = (router_factory or _live_router)(ctx)
+        router = _LastResult((router_factory or _live_router)(ctx))
         ctx.router = router
         gitdir = Path(ctx.gitdir)
         gitdir.mkdir(parents=True, exist_ok=True)
@@ -348,10 +393,11 @@ def _replay_cell(
             # (which bash -c only warns about) swallows the rest of the wrapper.
             commands = [f"bash -c {shlex.quote(command)}" for command in commands]
         submitted_type = _submitted_type()
-        submitted, submission, exception, replayed = False, "", None, 0
+        submitted, submission, exception, replayed, transport_errors = False, "", None, 0, 0
         with (gitdir / "replay.jsonl").open("w", encoding="utf-8") as log:
             for index, command in enumerate(commands):
                 before, t0, outcome = env.observed, time.monotonic(), {}
+                router.last = None
                 try:
                     outcome = env.execute({"command": command})
                 except Exception as exc:
@@ -369,9 +415,12 @@ def _replay_cell(
                     if lines and lines[0].strip() == SENTINEL:
                         submission, submitted = "".join(lines[1:]), True
                 replayed += 1
-                log.write(json.dumps(command_record(
+                line = command_record(
                     index, trajectory.commands[index], outcome, env.observed > before, time.monotonic() - t0, exception,
-                ), sort_keys=True) + "\n")
+                    raw=router.last, limit=env.timeout,
+                )
+                transport_errors += line["transport_error"]
+                log.write(json.dumps(line, sort_keys=True) + "\n")
                 if submitted or exception:
                     break
 
@@ -403,6 +452,7 @@ def _replay_cell(
             "submission_chars": len(submission),
             "exception": exception,
             "observations": env.observed,
+            "transport_errors": transport_errors,
             "shadow_errors": int(getattr(shadow, "errors", 0)),
             "sync_skipped_paths": list(getattr(router, "skipped", [])),
             "environment": env.get_template_vars(),

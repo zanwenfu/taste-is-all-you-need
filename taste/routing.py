@@ -221,8 +221,10 @@ class SandboxRouter:
         if not self._advance:
             current = {rel for _, rel in changed if not self._excluded(rel)}
             returned = sorted(self._differing - current)
-            self._differing = current
+            # Only once they are home: a failure here leaves them pending, so the
+            # next pull retries them instead of the host keeping a stale copy.
             pulled.extend(self._bring_back(returned))
+            self._differing = current
         for kind, rel in changed:
             if self._excluded(rel):
                 continue
@@ -260,19 +262,28 @@ class SandboxRouter:
         """
         if not paths:
             return []
-        quoted = " ".join(shlex.quote(p) for p in paths)
-        probe = self.sandbox.exec(
-            f"cd {self._q} && for p in {quoted}; do "
-            f"if [ -f \"$p\" ] && [ ! -L \"$p\" ]; then printf '%s\\0' \"$p\"; fi; done; true",
-            timeout=120,
-        )
-        present = {p for p in probe.stdout.split("\0") if p}
+        present: set[str] = set()
+        for start in range(0, len(paths), 500):  # argv stays far below the kernel's limit
+            quoted = " ".join(shlex.quote(p) for p in paths[start:start + 500])
+            probe = self.sandbox.exec(
+                f"cd {self._q} && for p in {quoted}; do "
+                f"if [ -f \"$p\" ] && [ ! -L \"$p\" ]; then printf '%s\\0' \"$p\"; fi; done; true",
+                timeout=120,
+            )
+            present.update(p for p in probe.stdout.split("\0") if p)
         moved: list[str] = []
         for rel in paths:
             host = self.workspace / rel
             if rel in present:
+                try:
+                    payload = self.sandbox.get_bytes(f"{self.workdir}/{rel}")
+                except (FileNotFoundError, KeyError, IsADirectoryError):
+                    # Unreadable as a file after all: reported, as the main pull does.
+                    if rel not in self.skipped:
+                        self.skipped.append(rel)
+                    continue
                 host.parent.mkdir(parents=True, exist_ok=True)
-                host.write_bytes(self.sandbox.get_bytes(f"{self.workdir}/{rel}"))
+                host.write_bytes(payload)
             elif host.is_file() or host.is_symlink():
                 host.unlink()
             else:
