@@ -460,13 +460,17 @@ def shows_failure(returncode: int | None, output: str) -> bool:
     return (returncode is not None and returncode != 0) or bool(_RUN_FAILED.search(output or ""))
 
 
+_COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
 def seen_output(recorded: Any) -> str:
-    """What the model was shown: a v2 record keeps the whole output, but the model saw its
-    first and last 5,000 characters (a v1 record keeps only those already)."""
+    """What the model was shown, as text: a v2 record keeps the whole output, but the model saw
+    its first and last 5,000 characters (a v1 record keeps only those already); colour codes
+    (astropy and sphinx force coloured pytest output) are not text and are dropped."""
     output = recorded.output or ""
     if getattr(recorded, "output_truncated", False) and len(output) > 10000:
-        return output[:5000] + "\n" + output[-5000:]
-    return output
+        output = output[:5000] + "\n" + output[-5000:]
+    return _COLOUR.sub("", output)
 
 
 def _norm(text: str) -> str:

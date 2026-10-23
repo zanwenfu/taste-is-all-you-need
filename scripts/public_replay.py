@@ -401,6 +401,50 @@ def cmd_refidelity(args) -> int:
     return 0
 
 
+def rescan_evidence(root: Path) -> dict[str, int]:
+    """Re-read every recorded state's error lines from its stored output with today's rules.
+
+    A state keeps the head and tail of its suite output; the evidence the
+    analysis matches (error lines, syntax-error locations) is recomputed from
+    them and merged with what was recorded, never replacing it. The original
+    file is kept beside it as states.recorded.jsonl. Idempotent.
+    """
+    from taste.benchmarks.public_replay import error_evidence
+
+    counts = {"cells": 0, "states": 0}
+    for path in sorted((root / "cells").glob("*/*/states.jsonl")):
+        records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        touched = 0
+        for record in records:
+            text = (record.get("output_head") or "") + "\n" + (record.get("output_tail") or "")
+            if not text.strip():
+                continue
+            exceptions, locations = error_evidence(text)
+            added_e = [e for e in exceptions if e not in record.get("exceptions", [])]
+            added_l = [loc for loc in locations if loc not in record.get("error_locations", [])]
+            if added_e or added_l:
+                record["exceptions"] = list(record.get("exceptions", [])) + added_e
+                record["error_locations"] = list(record.get("error_locations", [])) + added_l
+                record["evidence_rescanned"] = True
+                touched += 1
+        if touched:
+            backup = path.with_name("states.recorded.jsonl")
+            if not backup.exists():
+                backup.write_text(path.read_text())
+            tmp = path.with_suffix(".jsonl.tmp")
+            tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+            tmp.replace(path)
+            counts["cells"] += 1
+            counts["states"] += touched
+    return counts
+
+
+def cmd_rescan(args) -> int:
+    counts = rescan_evidence(Path(args.root))
+    print(f"rescanned: {counts['states']} states in {counts['cells']} cells gained evidence")
+    return 0
+
+
 def cmd_fetch(args) -> int:
     """Download each cell's trajectory from the public bucket (anonymous HTTPS, no credentials)."""
     root = Path(args.root)
@@ -517,6 +561,8 @@ def main() -> int:
     u.add_argument("--jobs", type=int, default=4)
     r = sub.add_parser("refidelity")
     r.add_argument("--root", required=True)
+    q = sub.add_parser("rescan")
+    q.add_argument("--root", required=True)
     n = sub.add_parser("plan")
     n.add_argument("--root", required=True)
     n.add_argument("--submissions", required=True, help="one submission name per line")
@@ -526,7 +572,7 @@ def main() -> int:
     n.add_argument("--out", required=True)
     args = ap.parse_args()
     return {"cell": cmd_cell, "pool": cmd_pool, "fetch": cmd_fetch, "pull": cmd_pull, "plan": cmd_plan,
-            "refidelity": cmd_refidelity}[args.cmd](args)
+            "refidelity": cmd_refidelity, "rescan": cmd_rescan}[args.cmd](args)
 
 
 if __name__ == "__main__":

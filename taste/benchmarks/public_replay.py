@@ -144,6 +144,16 @@ class StateLogExecutor:
 # An error line as a traceback or a runner prints it: `NameError: ...`, pytest's
 # `E   SyntaxError: ...`, a dotted class (`django.db.transaction.TransactionManagementError: ...`).
 _EXCEPTION_LINE = re.compile(r"^\s*(?:E\s+)?((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)(?::.*)?)$")
+# Colour (SGR and other CSI) sequences: astropy and sphinx force coloured pytest output.
+_COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# pytest's short summary: `FAILED path::test - ErrType: message`, often the only line naming a test's error.
+_SUMMARY_ERROR = re.compile(r"^\s*(?:FAILED|ERROR)\s+\S+\s+-\s+((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)(?::.*)?)$")
+
+
+def strip_colour(text: str) -> str:
+    return _COLOUR.sub("", text or "")
+
+
 # pytest prefixes a traceback's lines with `E`, its location lines included.
 _LOCATION_LINE = re.compile(r'^\s*(?:E\s+)?(File "[^"]+", line \d+)')
 # The `(file.py, line N)` a syntax error's message carries on pytest's import-failure lines.
@@ -167,7 +177,7 @@ def error_evidence(output: str, *, limit: int = 30) -> tuple[list[str], list[str
         if place not in locations and len(locations) < 10:
             locations.append(place)
 
-    for k, line in enumerate(output.splitlines()):
+    for k, line in enumerate(strip_colour(output).splitlines()):
         located = _LOCATION_LINE.match(line)
         if located:
             recent = (k, located.group(1))
@@ -175,7 +185,7 @@ def error_evidence(output: str, *, limit: int = 30) -> tuple[list[str], list[str
         if any(kind in line for kind in _SYNTAX_ERRORS):
             for name, number in _PAREN_LOCATION.findall(line):
                 locate(f'File "{name}", line {number}')
-        error = _EXCEPTION_LINE.match(line)
+        error = _EXCEPTION_LINE.match(line) or _SUMMARY_ERROR.match(line)
         if not error:
             continue
         text = error.group(1).strip()[:300]

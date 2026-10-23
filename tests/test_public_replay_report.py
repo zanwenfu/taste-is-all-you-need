@@ -225,6 +225,12 @@ def test_visibility_reads_the_original_log_for_this_breaks_own_evidence() -> Non
     # but a listing of an old log that mentions a test count is not a run
     old_log = [cmd("cat test_output.txt", 0, "Ran 5 tests in 0.1s\n\nFAILED (failures=2)")]
     assert report.visibility(interval, old_log, 1)["saw_failure"] is False
+    # Colour codes are not text: a coloured failing pytest run is a failing run, and its error line counts.
+    coloured = [cmd("python -m pytest -q", 1, "\x1b[31mFAILED\x1b[0m tests/test_mod.py::\x1b[1mtest_one\x1b[0m - "
+                    "AttributeError: 'Row' object has no attribute 'strip'\n\x1b[31m1 failed\x1b[0m, \x1b[32m2 passed\x1b[0m")]
+    seen_coloured = report.visibility(report.Interval(1, None, 1, frozenset({T1}), frozenset()), coloured, 1,
+                                      ["AttributeError: 'Row' object has no attribute 'strip'"])
+    assert (seen_coloured["ran_tests"], seen_coloured["saw_failure"], seen_coloured["named"]) == (True, True, True)
     # The model saw the first and last 5,000 characters of a long output; evidence in the middle was never shown.
     middle = "x" * 6000 + "\n" + name_error + "\n" + "y" * 6000
     long = [cmd("python repro.py", 1, middle, truncated=True)]

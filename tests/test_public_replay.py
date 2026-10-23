@@ -505,3 +505,47 @@ def test_error_locations_are_read_from_real_pytest_output() -> None:
     assert 'File "/testbed/pylint/lint/pylinter.py", line 614' in locations
     assert 'File "pylinter.py", line 614' in locations
     assert 'File "expand_modules.py", line 70' in locations
+
+
+def test_error_lines_are_read_through_colour_codes_and_from_pytest_summary_lines() -> None:
+    """astropy and sphinx force coloured pytest output; and a summary line `FAILED t - Err: msg` is
+    often the only place a test's error is printed."""
+    from taste.benchmarks.public_replay import error_evidence, strip_colour
+
+    coloured = "\n".join([
+        "\x1b[31mE   AttributeError: 'Row' object has no attribute 'strip'\x1b[0m",
+        "\x1b[31mFAILED\x1b[0m astropy/io/ascii/tests/test_rst.py::\x1b[1mtest_write_normal\x1b[0m - "
+        "TypeError: unsupported operand\x1b[0m",
+        "ERROR tests/test_x.py::test_y - ImportError: cannot import name 'Random'",
+    ])
+    assert strip_colour("\x1b[32mPASSED\x1b[0m t") == "PASSED t"
+    exceptions, _ = error_evidence(coloured)
+    assert exceptions == ["AttributeError: 'Row' object has no attribute 'strip'", "TypeError: unsupported operand",
+                          "ImportError: cannot import name 'Random'"]
+
+
+def test_rescanning_a_cell_adds_the_error_lines_a_coloured_output_hid(tmp_path: Path) -> None:
+    """Recorded states keep their output's head and tail; a rescan reads them with today's rules and
+    keeps the original file beside it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("driver", Path(__file__).resolve().parent.parent / "scripts" / "public_replay.py")
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    cell = tmp_path / "cells" / "sub" / "astropy__astropy-1"
+    cell.mkdir(parents=True)
+    states = [
+        {"sha": "a", "exceptions": [], "error_locations": [], "output_head": "", "output_tail": ""},
+        {"sha": "b", "exceptions": ["NameError: x"], "error_locations": [], "output_head": "",
+         "output_tail": "\x1b[31mE   AttributeError: 'Row' object has no attribute 'strip'\x1b[0m\n"},
+    ]
+    (cell / "states.jsonl").write_text("".join(json.dumps(s) + "\n" for s in states))
+    (cell / "status.json").write_text(json.dumps({"state": "done"}))
+    changed = driver.rescan_evidence(tmp_path)
+    assert changed == {"cells": 1, "states": 1}
+    after = [json.loads(x) for x in (cell / "states.jsonl").read_text().splitlines()]
+    assert after[0]["exceptions"] == [] and after[1]["exceptions"] == [
+        "NameError: x", "AttributeError: 'Row' object has no attribute 'strip'"]
+    assert after[1]["evidence_rescanned"] is True
+    assert (cell / "states.recorded.jsonl").read_text().count("NameError") == 1
+    assert driver.rescan_evidence(tmp_path) == {"cells": 0, "states": 0}  # idempotent
