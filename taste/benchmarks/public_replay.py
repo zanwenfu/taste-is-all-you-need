@@ -255,6 +255,14 @@ def output_may_hide_evidence(record: dict | None) -> bool:
     return len(head) >= 2000 and len(tail) >= 6000 and ("\x1b[" in head or "\x1b[" in tail)
 
 
+def needs_retest(record: dict) -> bool:
+    """A state :func:`retest_states` takes up: in doubt, and never tested again or tested when it could not run.
+
+    A state whose re-test reported other verdicts is not tried again: that would keep the luckier run.
+    """
+    return record.get("evidence_retested") in (None, "could not run") and output_may_hide_evidence(record)
+
+
 class _ExportedTrees:
     """The two reads :class:`SandboxProbeExecutor` makes of a workspace, served from a cell's export."""
 
@@ -295,11 +303,7 @@ def retest_states(directory: Path, base_commit: str, suite: SuiteProbe, open_san
     """
     path = directory / "states.jsonl"
     records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-
-    def pending(record: dict) -> bool:
-        return record.get("evidence_retested") in (None, "could not run") and output_may_hide_evidence(record)
-
-    targets = sorted({r["sha"] for r in records if pending(r)})
+    targets = sorted({r["sha"] for r in records if needs_retest(r)})
     counts = {"states": 0, "gained": 0, "verdicts_differ": 0, "infra": 0}
     if not targets:
         return counts
@@ -316,7 +320,7 @@ def retest_states(directory: Path, base_commit: str, suite: SuiteProbe, open_san
     again = {r["sha"]: r for r in (json.loads(line) for line in log.read_text().splitlines() if line.strip())}
     for record in records:
         retest = again.get(record["sha"])
-        if retest is None or not pending(record):
+        if retest is None or not needs_retest(record):
             continue
         counts["states"] += 1
         if not retest["ran"] or retest["timed_out"] or retest["infra_error"] not in (None, NO_GRADED_RESULTS):

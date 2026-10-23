@@ -654,3 +654,12 @@ def test_a_state_whose_suite_reported_nothing_is_a_measurement_not_an_infrastruc
         "states": 1, "gained": 1, "verdicts_differ": 0, "infra": 0}
     merged = json.loads(path.read_text().splitlines()[1])
     assert merged["evidence_retested"] is True and "SyntaxError: invalid syntax" in merged["exceptions"]
+
+
+def test_which_stored_states_a_retest_takes_up() -> None:
+    coloured = {"output_head": "\x1b[31m" + "h" * 2000, "output_tail": "t" * 6000}
+    assert public_replay.needs_retest(coloured)
+    assert public_replay.needs_retest({**coloured, "evidence_retested": "could not run"})  # tried again
+    assert not public_replay.needs_retest({**coloured, "evidence_retested": "verdicts differ"})  # never re-rolled
+    assert not public_replay.needs_retest({**coloured, "evidence_retested": True})
+    assert not public_replay.needs_retest({"output_head": "h" * 2000, "output_tail": "t" * 6000})  # not coloured

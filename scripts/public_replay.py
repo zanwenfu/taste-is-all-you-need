@@ -466,7 +466,7 @@ def retest_cell(root: Path, submission: str, task: str) -> dict[str, int]:
 
 
 def cmd_retest(args) -> int:
-    from taste.benchmarks.public_replay import output_may_hide_evidence
+    from taste.benchmarks.public_replay import needs_retest
 
     root = Path(args.root)
     cells = read_cells(Path(args.cells)) if args.cells else [
@@ -475,8 +475,7 @@ def cmd_retest(args) -> int:
     def in_doubt(cell: tuple[str, str]) -> bool:
         path = cell_dir(root, *cell) / "states.jsonl"
         return path.exists() and any(
-            "evidence_retested" not in record and output_may_hide_evidence(record)
-            for record in (json.loads(line) for line in path.read_text().splitlines() if line.strip()))
+            needs_retest(record) for record in (json.loads(line) for line in path.read_text().splitlines() if line.strip()))
 
     todo = [cell for cell in cells if in_doubt(cell)]
     print(f"{len(todo)} cells hold states to re-test", flush=True)
