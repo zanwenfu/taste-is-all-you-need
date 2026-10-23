@@ -230,9 +230,34 @@ PROMPTS_SHA256 = hashlib.sha256(json.dumps(
     [SYSTEM_TEMPLATE, TASK_TEMPLATE, CHANGED_TEMPLATE, LAST_STEP, NO_ACTION, CUT_OFF, REFUSED, TOOLS,
      FORBIDDEN_PATHS, FORBIDDEN_WORDS], sort_keys=True).encode()).hexdigest()
 
+# Version 2, after the head-to-head's hand check of 50 rejections of work the hidden tests pass (2026-10-22): an
+# existing test that a change the task requires breaks shows nothing, and a reading the task's text does not force
+# is no requirement. Two lines of the system prompt differ; everything else, and version 1, is as it was.
+VERSION_2 = "2"
+_CHANGED_LINES = (
+    ("2. Run the repository's existing tests that cover the change.\n",
+     "2. Run the repository's existing tests that cover the change. A test that expects behaviour, output, an "
+     "interface or a signature the task changes fails because of the task, not the work: it shows nothing unless "
+     "the task says that test must keep passing.\n"),
+    ("- Judge the task as written: do not add requirements it does not state, and do not reject work for its style.\n",
+     "- Judge the task as written: do not add requirements it does not state, and do not reject work for its style "
+     "(lint, formatting, unused imports, types that change no behaviour). Where the wording allows more than one "
+     "reasonable reading, work that meets one of them meets it. Tests the agent wrote are no requirement unless the "
+     "task asks for them.\n"))
+SYSTEM_TEMPLATE_2 = SYSTEM_TEMPLATE
+for _old, _new in _CHANGED_LINES:
+    if SYSTEM_TEMPLATE_2.count(_old) != 1:
+        raise RuntimeError("checker version 2: a line it changes is not in version 1's prompt once")
+    SYSTEM_TEMPLATE_2 = SYSTEM_TEMPLATE_2.replace(_old, _new)
+PROMPTS_SHA256_2 = hashlib.sha256(json.dumps(
+    [SYSTEM_TEMPLATE_2, TASK_TEMPLATE, CHANGED_TEMPLATE, LAST_STEP, NO_ACTION, CUT_OFF, REFUSED, TOOLS,
+     FORBIDDEN_PATHS, FORBIDDEN_WORDS], sort_keys=True).encode()).hexdigest()
+# Each version's system prompt and the hash of all it is told.
+PROMPTS = {VERSION: (SYSTEM_TEMPLATE, PROMPTS_SHA256), VERSION_2: (SYSTEM_TEMPLATE_2, PROMPTS_SHA256_2)}
 
-def system_prompt(cwd: str, settings: CheckerSettings) -> str:
-    return SYSTEM_TEMPLATE.format(cwd=cwd, seconds=f"{settings.command_seconds:g}", steps=settings.max_steps)
+
+def system_prompt(cwd: str, settings: CheckerSettings, version: str = VERSION) -> str:
+    return PROMPTS[version][0].format(cwd=cwd, seconds=f"{settings.command_seconds:g}", steps=settings.max_steps)
 
 
 def checker_task(task: str, final_message: str, submission: str, *, changed_paths=None) -> str:
@@ -516,6 +541,7 @@ class Checker:
     """The checker as a hosted agent: its prompts, its two tools, its own limits."""
 
     name = NAME
+    version = VERSION
 
     def __init__(self, *, effort, settings: CheckerSettings | None = None, clock=time.monotonic):
         self.effort = effort
@@ -523,7 +549,7 @@ class Checker:
         self.clock = clock
 
     def identity(self):
-        return {"name": NAME, "version": VERSION, "schema": SCHEMA, "prompts_sha256": PROMPTS_SHA256,
+        return {"name": NAME, "version": self.version, "schema": SCHEMA, "prompts_sha256": PROMPTS[self.version][1],
                 "settings": asdict(self.settings)}
 
     def run(self, task, host, *, cwd, model_name):
@@ -531,12 +557,19 @@ class Checker:
         return _Review(self, host, cwd).run(task)
 
 
+class CheckerV2(Checker):
+    """The checker's version 2 (``VERSION_2``): its system prompt's two changed lines; the same tools, limits and
+    schema."""
+
+    version = VERSION_2
+
+
 class _Review:
     def __init__(self, checker, host, cwd):
         if not isinstance(cwd, str) or not cwd.startswith("/"):
             raise ValueError("the checker works in the task's directory, an absolute path")
         self.settings, self.effort, self.host, self.cwd = checker.settings, checker.effort, host, _normal(cwd)
-        self.clock = checker.clock
+        self.clock, self.version = checker.clock, checker.version
         self.items = []
         self.steps = self.commands = self.refused = self.format_errors = 0
         self.spent = self.costliest = self.slowest = 0.0
@@ -559,7 +592,7 @@ class _Review:
 
     def run(self, task):
         self.started = self.clock()
-        self.items = [{"role": "system", "content": system_prompt(self.cwd, self.settings)},
+        self.items = [{"role": "system", "content": system_prompt(self.cwd, self.settings, self.version)},
                       {"role": "user", "content": task}]
         while True:
             ended = self._limit(1)

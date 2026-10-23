@@ -33,6 +33,7 @@ from taste.agents.checker import (
     forbidden_reference,
     json_object,
     parse_submission,
+    system_prompt,
     validate_verdict,
 )
 from taste.benchmarks.harbor_settings import TrialSettings
@@ -566,3 +567,31 @@ def test_the_checker_alone_reviews_once_and_its_verdict_is_the_trials_final_repl
                 await service.close()
                 owner.close()
     asyncio.run(scenario())
+
+
+def test_version_two_is_its_own_hosted_agent_and_differs_from_version_one_where_the_hand_check_found_errors():
+    # Version 1 stays exactly as every study so far ran it.
+    one = hosted_agent("checker", effort="medium").identity()
+    assert one["version"] == "1"
+    assert one["prompts_sha256"] == "dad59ab0e9f95bef12317a46df0f4d6f1ad691fa36fd874413f687bf93917679"
+    assert HOSTED_AGENTS["checker-v2"] == ("taste.agents.checker", "CheckerV2")
+    agent = hosted_agent("checker-v2", effort="medium")
+    two = agent.identity()
+    assert (two["name"], two["version"], two["schema"]) == ("taste-checker", "2", SCHEMA)
+    assert two["prompts_sha256"] != one["prompts_sha256"] and two["settings"] == one["settings"]
+    first, second = (system_prompt("/app", CheckerSettings(), version) for version in ("1", "2"))
+    # Two lines changed, nothing else: step 2 (an existing test that a required change breaks shows nothing) and the
+    # rule on what the task states (style named, a reasonable reading accepted, the agent's own tests not required).
+    gone = [line for line in first.splitlines() if line not in second.splitlines()]
+    new = [line for line in second.splitlines() if line not in first.splitlines()]
+    assert [line[:12] for line in gone] == [line[:12] for line in new] == ["2. Run the r", "- Judge the "]
+    assert "fails because of the task, not the work" in new[0] and "must keep passing" in new[0]
+    assert "more than one reasonable reading" in new[1] and "unused imports" in new[1]
+    assert "Tests the agent wrote are no requirement" in new[1]
+    # A review by version 2 sends version 2's prompt; one by version 1, version 1's.
+    host = Host([reply(submit({"verdict": "done", "confidence": 0.5}))])
+    agent.run("Count the lines of a file.", host, cwd="/app", model_name="gpt-6-luna")
+    assert host.asked[0]["messages"][0]["content"] == second
+    host = Host([reply(submit({"verdict": "done", "confidence": 0.5}))])
+    review(host)
+    assert host.asked[0]["messages"][0]["content"] == first

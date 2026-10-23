@@ -78,7 +78,8 @@ class Host(Protocol):
 # way; it is run alone (services none) on a copy of an agent's final files.
 HOSTED_AGENTS = {"mini-swe-agent": ("taste.agents.mini_swe_agent", "MiniSweAgent"),
                  "swe-agent": ("taste.agents.swe_agent", "SweAgent"),
-                 "checker": ("taste.agents.checker", "Checker")}
+                 "checker": ("taste.agents.checker", "Checker"),
+                 "checker-v2": ("taste.agents.checker", "CheckerV2")}
 
 
 # The fields of ``platform.uname()`` mini-swe-agent writes into its task message; node is not among them, but may be
