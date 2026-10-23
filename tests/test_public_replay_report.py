@@ -549,3 +549,10 @@ def test_the_submitting_commands_output_is_not_part_of_the_log(tmp_path: Path, m
     (tmp_path / "trajs" / "s" / "t.traj.json").write_text("{}")
     loaded = report.load_recorded_commands(tmp_path, "s", "t")
     assert [c.output for c in loaded] == ["", ""] and loaded[1].command.startswith("echo COMPLETE")
+
+
+def test_a_state_whose_error_may_have_been_cut_from_its_stored_output_is_flagged() -> None:
+    assert report.evidence_cut({"exceptions": [], "output_head": "h" * 2000, "output_tail": "t" * 6000}) is True
+    assert report.evidence_cut({"exceptions": ["NameError: x"], "output_head": "h" * 2000, "output_tail": "t" * 6000}) is False
+    assert report.evidence_cut({"exceptions": [], "output_head": "short", "output_tail": "short"}) is False
+    assert report.evidence_cut(None) is False

@@ -463,6 +463,18 @@ def shows_failure(returncode: int | None, output: str) -> bool:
 _COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
+def evidence_cut(record: dict | None) -> bool:
+    """Whether a state's error lines may sit in the part of its output that was not kept.
+
+    A state keeps its output's first 2,000 and last 6,000 characters; with no
+    error line found in them and both at their limit, its own error may be in
+    the middle, and a break built on it cannot be called unseen with certainty.
+    """
+    if not record or record.get("exceptions"):
+        return False
+    return len(record.get("output_head") or "") >= 2000 and len(record.get("output_tail") or "") >= 6000
+
+
 def seen_output(recorded: Any) -> str:
     """What the model was shown, as text: a v2 record keeps the whole output, but the model saw
     its first and last 5,000 characters (a v1 record keeps only those already); colour codes
@@ -858,6 +870,7 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
                 places += [loc for loc in record.get("error_locations", []) if loc not in places]
             seen = visibility(interval, recorded, commands, errors, places) if recorded else {
                 key: None for key in ("window", "ran_tests", "saw_failure", "named", "silent", "unseen")}
+            seen["evidence_complete"] = not any(evidence_cut(timeline[index].record) for index in interval.states)
             silent += bool(seen["silent"])
             intervals.append({
                 "submission": cell.submission, "task": cell.task, "tier": tier, "main": row["main"],
@@ -932,6 +945,12 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
         "median_interval_duration": median(i["duration"] for i in intervals),
         "silent_interval_share": mean(i["silent"] for i in intervals),
         "unseen_interval_share": mean(i["unseen"] for i in intervals),
+        # Bounds for the error lines a state's stored output may have cut: unseen among breaks whose
+        # evidence is complete, and a floor that counts every incomplete unseen break as seen.
+        "unseen_complete_share": mean(i["unseen"] for i in intervals if i.get("evidence_complete")),
+        "breaks_evidence_complete": sum(1 for i in intervals if i.get("evidence_complete")),
+        "unseen_floor_share": mean((i["unseen"] is True and bool(i.get("evidence_complete"))) if i["unseen"] is not None
+                                   else None for i in intervals),
         "exposure_mean": mean(c["exposure"] for c in cells),
         "exposure_after_first_edit_mean": mean(c["exposure_after_first_edit"] for c in cells),
         "wasted_share_mean": mean(c["wasted_share"] for c in cells),
