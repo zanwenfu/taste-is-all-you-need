@@ -480,3 +480,28 @@ def test_a_state_with_a_non_utf8_file_is_exported_byte_exact(tmp_path: Path) -> 
     with gzip.open(out, "rt") as handle:
         (state,) = json.load(handle)["states"]
     assert "patch" not in state and b"caf\xe9 \x8f" in base64.b64decode(state["patch_b64"])
+
+
+def test_error_locations_are_read_from_real_pytest_output() -> None:
+    """pytest prints a syntax error's location with its `E` prefix, and in the
+    `(file.py, line N)` form on its import-failure lines: both must be read, or every
+    syntax-error break in a pytest project reads as unseen whatever the agent saw."""
+    from taste.benchmarks.public_replay import error_evidence
+
+    output = "\n".join([
+        "ConftestImportFailure: SyntaxError: invalid syntax (pylinter.py, line 614) (from /testbed/tests/conftest.py)",
+        "ImportError while loading conftest '/testbed/tests/conftest.py'.",
+        "tests/conftest.py:15: in <module>",
+        "    from pylint.lint import PyLinter",
+        'E     File "/testbed/pylint/lint/pylinter.py", line 614',
+        "E       if file.endswith(\".py\") and not _is_ignored_file(",
+        "E       ^",
+        "E   SyntaxError: invalid syntax",
+        "E   IndentationError: unexpected indent (expand_modules.py, line 70)",
+    ])
+    exceptions, locations = error_evidence(output)
+    assert "SyntaxError: invalid syntax" in exceptions
+    assert "IndentationError: unexpected indent (expand_modules.py, line 70)" in exceptions
+    assert 'File "/testbed/pylint/lint/pylinter.py", line 614' in locations
+    assert 'File "pylinter.py", line 614' in locations
+    assert 'File "expand_modules.py", line 70' in locations

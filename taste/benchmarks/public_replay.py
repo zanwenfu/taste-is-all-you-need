@@ -144,7 +144,10 @@ class StateLogExecutor:
 # An error line as a traceback or a runner prints it: `NameError: ...`, pytest's
 # `E   SyntaxError: ...`, a dotted class (`django.db.transaction.TransactionManagementError: ...`).
 _EXCEPTION_LINE = re.compile(r"^\s*(?:E\s+)?((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)(?::.*)?)$")
-_LOCATION_LINE = re.compile(r'^\s*(File "[^"]+", line \d+)')
+# pytest prefixes a traceback's lines with `E`, its location lines included.
+_LOCATION_LINE = re.compile(r'^\s*(?:E\s+)?(File "[^"]+", line \d+)')
+# The `(file.py, line N)` a syntax error's message carries on pytest's import-failure lines.
+_PAREN_LOCATION = re.compile(r"\(([^()\s,]+\.pyx?), line (\d+)\)")
 _SYNTAX_ERRORS = ("SyntaxError", "IndentationError", "TabError")
 
 
@@ -159,20 +162,27 @@ def error_evidence(output: str, *, limit: int = 30) -> tuple[list[str], list[str
     exceptions: list[str] = []
     locations: list[str] = []
     recent: tuple[int, str] | None = None
+
+    def locate(place: str) -> None:
+        if place not in locations and len(locations) < 10:
+            locations.append(place)
+
     for k, line in enumerate(output.splitlines()):
         located = _LOCATION_LINE.match(line)
         if located:
             recent = (k, located.group(1))
             continue
+        if any(kind in line for kind in _SYNTAX_ERRORS):
+            for name, number in _PAREN_LOCATION.findall(line):
+                locate(f'File "{name}", line {number}')
         error = _EXCEPTION_LINE.match(line)
         if not error:
             continue
         text = error.group(1).strip()[:300]
         if text not in exceptions and len(exceptions) < limit:
             exceptions.append(text)
-        near = recent is not None and k - recent[0] <= 6
-        if text.startswith(_SYNTAX_ERRORS) and near and recent[1] not in locations and len(locations) < 10:
-            locations.append(recent[1])
+        if text.startswith(_SYNTAX_ERRORS) and recent is not None and k - recent[0] <= 6:
+            locate(recent[1])
     return exceptions, locations
 
 
