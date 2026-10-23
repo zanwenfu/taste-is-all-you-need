@@ -757,6 +757,7 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
             "submission": cell.submission, "task": cell.task, "repo": cell.task.split("__")[0],
             "tier": tier, "usable": usable, "problem": problem or "", "main": usable and tier in MAIN_TIERS,
             "recorded_submitted": bool(cell.fidelity.get("recorded_submitted")),
+            "recorded_exit_status": str(cell.manifest.get("recorded_exit_status") or ""),
             "leaderboard_resolved": cell.fidelity.get("leaderboard_resolved"),
             "replay_resolved": cell.evidence.get("resolved", cell.fidelity.get("replay_resolved")),
             "rc_agreement": rc_agreement(cell.fidelity),
@@ -883,7 +884,17 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
         "runs_with_break_test": mean(c["test_break"] for c in cells),
         "runs_with_break_load": mean(c["load_break"] for c in cells),
         "intervals": len(intervals),
+        "intervals_test": sum(1 for i in intervals if i["kind"] == "test"),
+        "intervals_load": sum(1 for i in intervals if i["kind"] == "load"),
         "intervals_per_run": mean(c["intervals"] for c in cells),
+        "repaired_share": mean((i["ended"] == "clean") for i in intervals),
+        "unseen_no_tests_share": mean((not i["ran_tests"]) for i in intervals if i["unseen"] is True),
+        "unseen_repaired_share": mean((i["ended"] == "clean") for i in intervals if i["unseen"] is True),
+        "end_tree_broken_share": mean(c.get("end_broken") if c["recorded_submitted"] else c.get("stop_broken") for c in cells),
+        "limit_stop_runs": sum(1 for c in unsubmitted if c.get("recorded_exit_status") == "LimitsExceeded"
+                               and c["stop_broken"] is not None),
+        "limit_stop_broken_share": mean(c["stop_broken"] for c in unsubmitted
+                                        if c.get("recorded_exit_status") == "LimitsExceeded"),
         "median_interval_duration": median(i["duration"] for i in intervals),
         "silent_interval_share": mean(i["silent"] for i in intervals),
         "unseen_interval_share": mean(i["unseen"] for i in intervals),
@@ -904,7 +915,7 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
 
 
 CI_METRICS = ("runs_with_break_any", "runs_with_break_test", "runs_with_break_load", "silent_interval_share",
-              "unseen_interval_share",
+              "unseen_interval_share", "end_tree_broken_share", "limit_stop_broken_share",
               "exposure_mean", "exposure_after_first_edit_mean", "wasted_share_mean", "shipped_share",
               "stop_broken_share")
 

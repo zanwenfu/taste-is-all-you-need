@@ -319,7 +319,8 @@ def _cell(root, submission, task, *, states, commands, fidelity, evidence=None, 
     (directory / "fidelity.json").write_text(json.dumps(full))
     (directory / "manifest.json").write_text(json.dumps({
         "session": session, "commands_replayed": commands, "commands_to_replay": commands, "transport_errors": 0,
-        "shadow_errors": 0, "sync_skipped_paths": [], "exception": None, "scaffold_version_recorded": "2.0.0"}))
+        "shadow_errors": 0, "sync_skipped_paths": [], "exception": None, "scaffold_version_recorded": "2.0.0",
+        "recorded_exit_status": "Submitted" if full["recorded_submitted"] else "LimitsExceeded"}))
     (directory / "ledger" / "evidence" / f"{task}__MSWE__t1.json").write_text(json.dumps(evidence or {"resolved": None}))
     (directory / "status.json").write_text(json.dumps({"state": status}))
 
@@ -446,6 +447,11 @@ def test_a_whole_report_over_synthetic_cells(study: Path) -> None:
 
     main = summary["overall_main"]
     assert main["runs"] == 2 and main["intervals"] == 3
+    assert (main["intervals_test"], main["intervals_load"]) == (2, 1)
+    assert main["repaired_share"] == pytest.approx(1 / 3)  # A's test break ended clean; the other two stayed open
+    assert main["unseen_no_tests_share"] == 1.0 and main["unseen_repaired_share"] == 0.0  # A's load break: no tests, open
+    assert main["end_tree_broken_share"] == 1.0  # A shipped a broken end tree, B stopped on one
+    assert main["limit_stop_runs"] == 1 and main["limit_stop_broken_share"] == 1.0
     assert main["silent_interval_share"] == pytest.approx(1 / 3)
     assert main["exposure_mean"] == pytest.approx((4 / 6 + 1 / 3) / 2)
     assert main["shipped_share"] == 1.0 and main["stop_broken_share"] == 1.0
