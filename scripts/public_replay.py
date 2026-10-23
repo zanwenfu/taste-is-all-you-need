@@ -123,8 +123,12 @@ def leaderboard_resolved(root: Path, submission: str, task: str) -> bool | None:
     return None if not isinstance(row, dict) or "resolved" not in row else bool(row["resolved"])
 
 
+#: The pinned code tree a cell ran from (``code-<commit>`` on the machine): provenance for every status.
+CODE = Path(__file__).resolve().parent.parent.name
+
+
 def write_status(directory: Path, state: str, **fields) -> dict:
-    status = {"state": state, "finished_at": time.time(), **fields}
+    status = {"state": state, "finished_at": time.time(), "code": CODE, **fields}
     directory.mkdir(parents=True, exist_ok=True)
     tmp = directory / "status.json.tmp"
     tmp.write_text(json.dumps(status, indent=1, sort_keys=True))
