@@ -549,3 +549,83 @@ def test_rescanning_a_cell_adds_the_error_lines_a_coloured_output_hid(tmp_path: 
     assert after[1]["evidence_rescanned"] is True
     assert (cell / "states.recorded.jsonl").read_text().count("NameError") == 1
     assert driver.rescan_evidence(tmp_path) == {"cells": 0, "states": 0}  # idempotent
+
+
+# ---------------------------------------------------------------- re-testing a stored state
+
+
+_COLOURED_FAILURE = (
+    "\x1b[1m" + "=" * 2100 + "\n"
+    + "\x1b[1m\x1b[31mE       AttributeError: 'Foo' object has no attribute 'bar'\x1b[0m\n"
+    + "PASSED t::other\n" * 600
+    + "\x1b[31mFAILED\x1b[0m t::a\n"
+)
+
+
+def _cut_cell(tmp_path: Path, output: str) -> Path:
+    """A finished cell: one clean state, and one failing state whose coloured output was cut in storage."""
+    import gzip
+
+    clean = {"sha": "s0", "ran": True, "infra_error": None, "failed": [], "unreported": [], "skipped": [],
+             "exceptions": [], "error_locations": [], "output_head": "", "output_tail": ""}
+    cut = {"sha": "s1", "ran": True, "infra_error": None, "failed": ["t::a"], "unreported": [], "skipped": [],
+           "exceptions": [], "error_locations": [], "output_head": output[:2000], "output_tail": output[-6000:]}
+    (tmp_path / "states.jsonl").write_text(json.dumps(clean) + "\n" + json.dumps(cut) + "\n")
+    with gzip.open(tmp_path / "states.json.gz", "wt", encoding="utf-8") as handle:
+        json.dump({"root": "r0", "states": [{"sha": "s0", "patch": ""},
+                                            {"sha": "s1", "patch": "diff --git a/x.py b/x.py\n+y = 1\n"}]}, handle)
+    return tmp_path
+
+
+def test_a_retest_reads_the_error_lines_a_cut_coloured_output_hid(tmp_path: Path) -> None:
+    from taste.execution import ExecResult, ScriptedSandbox
+
+    cell = _cut_cell(tmp_path, _COLOURED_FAILURE)
+    stored = [json.loads(line) for line in (cell / "states.jsonl").read_text().splitlines()]
+    assert public_replay.output_may_hide_evidence(stored[1]) and not public_replay.output_may_hide_evidence(stored[0])
+    sandbox = ScriptedSandbox().on("run-suite", ExecResult(1, _COLOURED_FAILURE, ""))
+    suite = SuiteProbe(name="p2p", command="run-suite", members=("t::a",), parse=lambda out: {"t::a": "FAILED"})
+
+    counts = public_replay.retest_states(cell, "upstream", suite, lambda: sandbox)
+
+    assert counts == {"states": 1, "gained": 1, "verdicts_differ": 0, "infra": 0}
+    clean, cut = [json.loads(line) for line in (cell / "states.jsonl").read_text().splitlines()]
+    assert cut["exceptions"] == ["AttributeError: 'Foo' object has no attribute 'bar'"]
+    assert cut["evidence_retested"] is True and not public_replay.output_may_hide_evidence(cut)
+    assert cut["failed"] == ["t::a"] and cut["output_tail"] == stored[1]["output_tail"]  # verdicts and output as recorded
+    assert "evidence_retested" not in clean
+    (uploaded,) = [text for name, text in sandbox.files.items() if name.endswith(".diff")]
+    assert uploaded == "diff --git a/x.py b/x.py\n+y = 1\n"  # the bytes the original probe applied
+    assert (cell / "states.before-retest.jsonl").read_text().splitlines()[1] == json.dumps(stored[1])
+    assert sandbox.closed
+    # Idempotent: nothing is left in doubt, so no container is opened.
+    opened: list[int] = []
+    assert public_replay.retest_states(cell, "upstream", suite, lambda: opened.append(1))["states"] == 0
+    assert opened == []
+
+
+def test_a_retest_that_disagrees_with_the_recorded_verdicts_changes_no_evidence(tmp_path: Path) -> None:
+    from taste.execution import ExecResult, ScriptedSandbox
+
+    cell = _cut_cell(tmp_path, _COLOURED_FAILURE)
+    sandbox = ScriptedSandbox().on("run-suite", ExecResult(0, "PASSED t::a\n", ""))
+    suite = SuiteProbe(name="p2p", command="run-suite", members=("t::a",), parse=lambda out: {"t::a": "PASSED"})
+
+    counts = public_replay.retest_states(cell, "upstream", suite, lambda: sandbox)
+
+    assert counts == {"states": 1, "gained": 0, "verdicts_differ": 1, "infra": 0}
+    cut = json.loads((cell / "states.jsonl").read_text().splitlines()[1])
+    assert cut["exceptions"] == [] and cut["failed"] == ["t::a"]  # a flaky re-run is not this state's evidence
+    assert cut["evidence_retested"] == "verdicts differ" and public_replay.output_may_hide_evidence(cut)
+
+
+def test_a_retest_that_cannot_run_leaves_the_state_in_doubt(tmp_path: Path) -> None:
+    from taste.execution import ExecResult, ScriptedSandbox
+
+    cell = _cut_cell(tmp_path, _COLOURED_FAILURE)
+    sandbox = ScriptedSandbox().on("git apply", ExecResult(1, "", "patch does not apply"))
+    suite = SuiteProbe(name="p2p", command="run-suite", members=("t::a",), parse=lambda out: {"t::a": "FAILED"})
+
+    assert public_replay.retest_states(cell, "upstream", suite, lambda: sandbox)["infra"] == 1
+    cut = json.loads((cell / "states.jsonl").read_text().splitlines()[1])
+    assert cut["evidence_retested"] == "could not run" and public_replay.output_may_hide_evidence(cut)

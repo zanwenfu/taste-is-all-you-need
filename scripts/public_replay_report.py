@@ -104,6 +104,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from taste.benchmarks.public_replay import output_may_hide_evidence
 from taste.replay import base_test_id
 
 ARM_SUFFIX = "__MSWE__t1"
@@ -464,18 +465,8 @@ _COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def evidence_cut(record: dict | None) -> bool:
-    """Whether a state's error lines may sit in the part of its output that was not kept.
-
-    Evidence is read from the whole output when a state is tested, but colour
-    codes hid pytest's error lines from the reader until it stripped them; a
-    coloured output's evidence was then recovered from the kept first 2,000 and
-    last 6,000 characters only. With both parts at their limit, more may sit in
-    the middle.
-    """
-    if not record:
-        return False
-    head, tail = record.get("output_head") or "", record.get("output_tail") or ""
-    return len(head) >= 2000 and len(tail) >= 6000 and ("\x1b[" in head or "\x1b[" in tail)
+    """Whether a state's error lines may sit in the cut part of its stored output (see the replay's rule)."""
+    return output_may_hide_evidence(record)
 
 
 def unseen_bounds(intervals: Sequence[dict]) -> dict[str, float | None]:

@@ -560,6 +560,9 @@ def test_a_coloured_state_cut_in_storage_may_hide_error_lines() -> None:
     assert report.evidence_cut({"output_head": "h" * 2000, "output_tail": "t" * 6000}) is False
     assert report.evidence_cut({"output_head": "\x1b[31mshort", "output_tail": "short"}) is False
     assert report.evidence_cut(None) is False
+    # Read again from the whole output: no longer in doubt.
+    assert report.evidence_cut({"evidence_retested": True, "output_head": coloured, "output_tail": "t" * 6000}) is False
+    assert report.evidence_cut({"evidence_retested": "verdicts differ", "output_head": coloured, "output_tail": "t" * 6000})
 
 
 def test_unseen_bounds_turn_every_break_in_doubt_the_other_way() -> None:

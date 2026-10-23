@@ -5,6 +5,7 @@
     python scripts/public_replay.py fetch --root /data/pubreplay --cells cells.txt
     python scripts/public_replay.py pull  --root /data/pubreplay --cells cells.txt
     python scripts/public_replay.py plan  --root /data/pubreplay --submissions subs.txt --tasks 40 --out cells.txt
+    python scripts/public_replay.py retest --root /data/pubreplay [--cells cells.txt] --jobs 24
 
 A cell is one (submission, task): the published run of one model on one task.
 Everything a cell produces lands in <root>/cells/<submission>/<task>/:
@@ -439,6 +440,65 @@ def rescan_evidence(root: Path) -> dict[str, int]:
     return counts
 
 
+def retest_cell(root: Path, submission: str, task: str) -> dict[str, int]:
+    """Re-test a finished cell's states whose stored output may hide error lines (see retest_states)."""
+    import docker as docker_sdk
+
+    from taste.benchmarks import swebench
+    from taste.benchmarks.public_replay import NetworkedAgentProvider, retest_states
+    from taste.execution import DockerProvider
+
+    instance = {i.instance_id: i for i in swebench.load_dataset(root / "verified.jsonl")}[task]
+    object.__setattr__(instance, "image", instance.published_image)
+    docker = DockerProvider(client=docker_sdk.from_env(timeout=600))
+    provider = NetworkedAgentProvider(docker)
+    try:
+        # The probe container exactly as the cell's own testing opened it (make_score).
+        return retest_states(cell_dir(root, submission, task), instance.base_commit, progress_suite(instance),
+                             lambda: provider.open(key=instance.instance_id, image=instance.image))
+    finally:
+        owner = getattr(docker, "_owner_id", None)
+        if owner:
+            leftover = subprocess.run(["docker", "ps", "-aq", "--filter", f"label=taste.owner={owner}"],
+                                      capture_output=True, text=True).stdout.split()
+            if leftover:
+                subprocess.run(["docker", "rm", "-f", *leftover], capture_output=True)
+
+
+def cmd_retest(args) -> int:
+    from taste.benchmarks.public_replay import output_may_hide_evidence
+
+    root = Path(args.root)
+    cells = read_cells(Path(args.cells)) if args.cells else [
+        (path.parent.parent.name, path.parent.name) for path in sorted((root / "cells").glob("*/*/states.jsonl"))]
+
+    def in_doubt(cell: tuple[str, str]) -> bool:
+        path = cell_dir(root, *cell) / "states.jsonl"
+        return path.exists() and any(
+            "evidence_retested" not in record and output_may_hide_evidence(record)
+            for record in (json.loads(line) for line in path.read_text().splitlines() if line.strip()))
+
+    todo = [cell for cell in cells if in_doubt(cell)]
+    print(f"{len(todo)} cells hold states to re-test", flush=True)
+    totals: dict[str, int] = {"cells": 0, "failed_cells": 0}
+    with futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        jobs = {pool.submit(retest_cell, root, submission, task): (submission, task) for submission, task in todo}
+        for done in futures.as_completed(jobs):
+            submission, task = jobs[done]
+            try:
+                counts = done.result()
+            except Exception as exc:
+                totals["failed_cells"] += 1
+                print(f"FAILED {submission} {task}: {type(exc).__name__}: {exc}", flush=True)
+                continue
+            totals["cells"] += 1
+            for key, value in counts.items():
+                totals[key] = totals.get(key, 0) + value
+            print(f"{submission} {task} {counts}", flush=True)
+    print("retested:", totals, flush=True)
+    return 0
+
+
 def cmd_rescan(args) -> int:
     counts = rescan_evidence(Path(args.root))
     print(f"rescanned: {counts['states']} states in {counts['cells']} cells gained evidence")
@@ -561,6 +621,10 @@ def main() -> int:
     u.add_argument("--jobs", type=int, default=4)
     r = sub.add_parser("refidelity")
     r.add_argument("--root", required=True)
+    t = sub.add_parser("retest")
+    t.add_argument("--root", required=True)
+    t.add_argument("--cells", help="cells file; default every finished cell")
+    t.add_argument("--jobs", type=int, default=24)
     q = sub.add_parser("rescan")
     q.add_argument("--root", required=True)
     n = sub.add_parser("plan")
@@ -572,7 +636,7 @@ def main() -> int:
     n.add_argument("--out", required=True)
     args = ap.parse_args()
     return {"cell": cmd_cell, "pool": cmd_pool, "fetch": cmd_fetch, "pull": cmd_pull, "plan": cmd_plan,
-            "refidelity": cmd_refidelity, "rescan": cmd_rescan}[args.cmd](args)
+            "refidelity": cmd_refidelity, "rescan": cmd_rescan, "retest": cmd_retest}[args.cmd](args)
 
 
 if __name__ == "__main__":

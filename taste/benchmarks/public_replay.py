@@ -45,6 +45,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from taste.benchmarks import swebench
@@ -232,6 +233,101 @@ def state_record(sha: str, run: SuiteRun, raw: Any, seconds: float, tail_chars: 
         "exceptions": exceptions,
         "error_locations": locations,
     }
+
+
+def output_may_hide_evidence(record: dict | None) -> bool:
+    """Whether a state's error lines may sit in the part of its output that was not kept.
+
+    Evidence is read from the whole output when a state is tested, but colour
+    codes hid pytest's error lines from the reader until it stripped them, and
+    for states tested before then a later rescan could read only the kept
+    head and tail (:func:`state_record`). A coloured output with both at their
+    limit may hold more in the middle, until :func:`retest_states` reads the
+    whole output again.
+    """
+    if not record or record.get("evidence_retested") is True:
+        return False
+    head, tail = record.get("output_head") or "", record.get("output_tail") or ""
+    return len(head) >= 2000 and len(tail) >= 6000 and ("\x1b[" in head or "\x1b[" in tail)
+
+
+class _ExportedTrees:
+    """The two reads :class:`SandboxProbeExecutor` makes of a workspace, served from a cell's export."""
+
+    def __init__(self, export: dict) -> None:
+        self.root = export["root"]
+        self.patches = {
+            state["sha"]: base64.b64decode(state["patch_b64"]) if "patch_b64" in state else state["patch"].encode("utf-8")
+            for state in export["states"]
+        }
+        self.repo = SimpleNamespace(git=self)
+
+    def rev_list(self, *args: str) -> str:
+        return self.root
+
+    def diff(self, *args: str, stdout_as_string: bool = True) -> bytes | str:
+        if len(args) != 3 or args[:2] != ("--binary", self.root):
+            raise ValueError(f"an exported tree is a binary patch against the root, not git diff {' '.join(args)}")
+        patch = self.patches[args[2]]
+        # GitPython drops one trailing newline from what git prints; the export kept it.
+        patch = patch[:-1] if patch.endswith(b"\n") else patch
+        return patch.decode("utf-8") if stdout_as_string else patch
+
+
+def retest_states(directory: Path, base_commit: str, suite: SuiteProbe, open_sandbox: Callable[[], Any]) -> dict[str, int]:
+    """Test again the states whose stored output may hide error lines, and read them from the whole output.
+
+    Each such state is rebuilt from the cell's exported patches and tested in a
+    fresh probe container of the same image with the same suite. When the
+    re-test reports the recorded verdicts, the error lines it reads are merged
+    into the record, never replacing what was recorded; when it reports others
+    (a flaky test) or cannot run, the record keeps its evidence and says why it
+    is still in doubt. Verdicts and stored output are never changed. The
+    original file is kept as states.before-retest.jsonl and each re-test's own
+    record in states.retest.jsonl. Idempotent.
+    """
+    path = directory / "states.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    targets = sorted({r["sha"] for r in records if "evidence_retested" not in r and output_may_hide_evidence(r)})
+    counts = {"states": 0, "gained": 0, "verdicts_differ": 0, "infra": 0}
+    if not targets:
+        return counts
+    with gzip.open(directory / "states.json.gz", "rt", encoding="utf-8") as handle:
+        trees = _ExportedTrees(json.load(handle))
+    log = directory / "states.retest.jsonl"
+    log.unlink(missing_ok=True)
+    executor = StateLogExecutor(open_sandbox(), trees, base_commit, log_path=log)
+    try:
+        for sha in targets:
+            executor.run(sha, suite)
+    finally:
+        executor.close()
+    again = {r["sha"]: r for r in (json.loads(line) for line in log.read_text().splitlines() if line.strip())}
+    for record in records:
+        retest = again.get(record["sha"])
+        if retest is None or "evidence_retested" in record or not output_may_hide_evidence(record):
+            continue
+        counts["states"] += 1
+        if not retest["ran"] or retest["infra_error"]:
+            record["evidence_retested"] = "could not run"
+            counts["infra"] += 1
+        elif any(retest[key] != record.get(key) for key in ("failed", "unreported", "skipped")):
+            record["evidence_retested"] = "verdicts differ"
+            counts["verdicts_differ"] += 1
+        else:
+            added_e = [e for e in retest["exceptions"] if e not in record.get("exceptions", [])]
+            added_l = [loc for loc in retest["error_locations"] if loc not in record.get("error_locations", [])]
+            record["exceptions"] = list(record.get("exceptions", [])) + added_e
+            record["error_locations"] = list(record.get("error_locations", [])) + added_l
+            record["evidence_retested"] = True
+            counts["gained"] += bool(added_e or added_l)
+    backup = directory / "states.before-retest.jsonl"
+    if not backup.exists():
+        backup.write_text(path.read_text())
+    tmp = path.with_suffix(".jsonl.tmp")
+    tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+    tmp.replace(path)
+    return counts
 
 
 def make_state_log_factory(log_name: str = "states.jsonl") -> Callable[[Any, Memory, Any], StateLogExecutor]:
