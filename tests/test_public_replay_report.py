@@ -632,6 +632,7 @@ def test_a_shell_test_or_a_listing_is_not_a_runner(command: str) -> None:
     ("10 tests, 20 assertions, 2 failures, 0 errors", True),
     ("  34 passing (2s)\n  1 failing", True),
     ("Executed 35 of 35 (1 FAILED)", True),
+    ("0 examples, 0 failures, 1 error occurred outside of examples", True),
 ])
 def test_multilingual_summaries_say_tests_ran_and_whether_one_failed(output: str, failed: bool) -> None:
     assert report.tests_ran(output, multilingual=True)

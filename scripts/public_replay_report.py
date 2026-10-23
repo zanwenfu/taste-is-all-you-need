@@ -434,6 +434,7 @@ _RUNNER_ML = re.compile(
 _TESTS_RAN_ML = re.compile(
     r"\bOK \([1-9]\d* tests?\b|\bTests: [1-9]\d*, Assertions\b"     # phpunit
     r"|\b[1-9]\d* examples?, \d+ failures?\b"                         # rspec
+    r"|\b[1-9]\d* errors? occurred outside of examples\b"              # rspec, a spec that cannot load
     r"|\b[1-9]\d* (?:runs|tests), \d+ assertions\b"                   # minitest, test-unit
     r"|\b[1-9]\d* (?:passing|failing)\b"                              # mocha
     r"|\bExecuted [1-9]\d* of \d+\b"                                  # karma
