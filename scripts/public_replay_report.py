@@ -482,9 +482,23 @@ def load_members(root: Path) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]
 
 
 def leaderboard_rates(root: Path) -> dict[str, float]:
-    """Each submission's own resolve rate, over every instance its details file lists."""
-    rates = {}
+    """Each submission's resolve rate as the leaderboard reports it (its metadata's ``resolved``).
+
+    Not recomputed from the per-instance details file: seven submissions publish
+    none, and one publishes a file that marks all 500 instances unresolved while
+    its metadata reports 69.6%. The details file is the fallback when no
+    metadata rate exists.
+    """
+    rates: dict[str, float] = {}
+    listing = root / "submissions.json"
+    if listing.exists():
+        raw = json.loads(listing.read_text())
+        for row in raw.get("submissions", raw) if isinstance(raw, dict) else raw:
+            if isinstance(row, dict) and row.get("resolved_pct") is not None:
+                rates[str(row["name"])] = float(row["resolved_pct"]) / 100
     for path in sorted((root / "details").glob("*.json")):
+        if path.stem in rates:
+            continue
         rows = [row for row in json.loads(path.read_text()).values() if isinstance(row, dict) and "resolved" in row]
         if rows:
             rates[path.stem] = sum(bool(row["resolved"]) for row in rows) / len(rows)

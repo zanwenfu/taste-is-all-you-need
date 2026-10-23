@@ -106,10 +106,20 @@ def build_edits(root: Path, image: str, task: str, base_commit: str) -> tuple[tu
 
 
 def leaderboard_resolved(root: Path, submission: str, task: str) -> bool | None:
+    """The leaderboard's verdict on this run, or None when it publishes no trustworthy one.
+
+    A details file whose verdicts contradict the submission's own reported rate
+    (all unresolved against a positive rate: gemini-3-pro-high) says nothing.
+    """
     path = root / "details" / f"{submission}.json"
     if not path.exists():
         return None
-    row = json.loads(path.read_text()).get(task)
+    details = json.loads(path.read_text())
+    rows = [row for row in details.values() if isinstance(row, dict) and "resolved" in row]
+    reported = load_submissions(root).get(submission, {}).get("resolved_pct")
+    if rows and not any(row["resolved"] for row in rows) and reported:
+        return None
+    row = details.get(task)
     return None if not isinstance(row, dict) or "resolved" not in row else bool(row["resolved"])
 
 
@@ -363,24 +373,26 @@ def cmd_refidelity(args) -> int:
         submission, task = directory.parent.name, directory.name
         status = json.loads(status_path.read_text())
         submitted_diff = directory / "replay_submission.diff"
-        if submission == "planted" or status.get("state") != "done" or not submitted_diff.exists():
+        if submission == "planted" or status.get("state") != "done":
             continue
         fidelity = json.loads((directory / "fidelity.json").read_text())
-        if not fidelity.get("recorded_submitted"):
-            continue
-        meta = subs.get(submission, {})
-        version = str(meta.get("version") or "")
-        trajectory = parse_trajectory(json.loads(trajectory_path(root, submission, task).read_text()), mini_version=version)
-        cache = json.loads((root / "build_edits" / f"{task}.json").read_text())
-        same, differing = same_patch(trajectory.submission, submitted_diff.read_text(),
-                                     ignore=tuple(cache["paths"]), build=cache.get("build_patch", ""))
+        same, differing = fidelity.get("same_submission"), fidelity.get("differing_files")
+        if fidelity.get("recorded_submitted") and submitted_diff.exists():
+            meta = subs.get(submission, {})
+            trajectory = parse_trajectory(json.loads(trajectory_path(root, submission, task).read_text()),
+                                          mini_version=str(meta.get("version") or ""))
+            cache = json.loads((root / "build_edits" / f"{task}.json").read_text())
+            same, differing = same_patch(trajectory.submission, submitted_diff.read_text(),
+                                         ignore=tuple(cache["paths"]), build=cache.get("build_patch", ""))
         checked += 1
         if same != fidelity.get("same_submission") or differing != fidelity.get("differing_files"):
             changed += 1
             print(f"  {submission} {task}: same {fidelity.get('same_submission')} -> {same} {differing}")
-        fidelity.update(same_submission=same, differing_files=differing, fidelity_recomputed_at=time.time())
+        board = leaderboard_resolved(root, submission, task)
+        fidelity.update(same_submission=same, differing_files=differing, leaderboard_resolved=board,
+                        fidelity_recomputed_at=time.time())
         (directory / "fidelity.json").write_text(json.dumps(fidelity, indent=1, sort_keys=True))
-        write_status(directory, status.pop("state"), **{**status, "same_submission": same})
+        write_status(directory, status.pop("state"), **{**status, "same_submission": same, "leaderboard_resolved": board})
     print(f"recomputed {checked} cells; {changed} changed")
     return 0
 

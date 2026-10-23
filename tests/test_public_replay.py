@@ -342,3 +342,25 @@ def test_a_generated_timestamp_is_the_only_thing_normalised() -> None:
 
     assert same_patch(migration("2025-08-08 02:59"), migration("2026-10-23 07:42")) == (True, [])
     assert same_patch(migration("2025-08-08 02:59"), migration("2026-10-23 07:42", field="title"))[0] is False
+
+
+def test_a_run_whose_record_shows_no_git_author_replays_without_one(tmp_path: Path, monkeypatch) -> None:
+    """Today's rebuilt images configure a git author; the 2025 images had none, so a recorded
+    `git commit` (or `git stash`) failed then. Only the record can say which image a run saw."""
+    from taste.benchmarks.public_replay import record_shows_no_git_author
+
+    monkeypatch.setattr(public_replay, "close_sandbox", lambda sandbox: None)
+    refused = "Author identity unknown\n\n*** Please tell me who you are.\n"
+    without = _trajectory([("git commit -qam x", 128)])
+    without = PublicTrajectory(**{**without.__dict__, "commands": (RecordedCommand(
+        index=0, command="git commit -qam x", returncode=128, output=refused, output_truncated=False, timed_out=False),)})
+    assert record_shows_no_git_author(without)
+    assert not record_shows_no_git_author(_trajectory([("git commit -qam x", 0)]))
+
+    issued: list[str] = []
+    ws = _workspace(tmp_path)
+    ctx = _ctx(tmp_path, ws)
+    ctx.agent_sandbox = SimpleNamespace(workdir="/testbed", exec=lambda command, **kw: issued.append(command))
+    make_replay_execute(lambda cell: without, router_factory=lambda c: _HostBash(ws))(SimpleNamespace(key="k"), ctx)
+    assert issued and "--unset-all user.name" in issued[0] and "--unset-all user.email" in issued[0]
+    assert json.loads((ctx.gitdir / "manifest.json").read_text())["git_author"] == "removed: the record shows none"

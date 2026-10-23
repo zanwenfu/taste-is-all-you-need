@@ -209,6 +209,21 @@ def plain_shell(command: str, image_env: dict[str, str], run_env: dict[str, str]
     return f'env -i {assigns} HOSTNAME="$HOSTNAME" bash -c {shlex.quote(command)}'
 
 
+_NO_GIT_AUTHOR = ("Please tell me who you are", "Author identity unknown")
+
+
+def record_shows_no_git_author(trajectory: PublicTrajectory) -> bool:
+    """Whether the run's image had no git author configured, as its own record shows.
+
+    The leaderboard's rebuilt images set one in ``/root/.gitconfig``; the 2025
+    images had none, so a recorded ``git commit`` -- or a ``git stash``, which
+    changes the tree -- failed then and would succeed now. A run that never
+    met the refusal is replayed as the image is: either the author was there,
+    or nothing needed it.
+    """
+    return any(marker in (c.output or "") for c in trajectory.commands for marker in _NO_GIT_AUTHOR)
+
+
 def _text_actions(trajectory: PublicTrajectory) -> bool:
     return trajectory.trajectory_format in ("", "mini-swe-agent-1")
 
@@ -311,6 +326,15 @@ def _replay_cell(
         ctx.shadow_ref = shadow.ref if hasattr(shadow, "ref") else f"TASTE_SHADOW_HEAD_{session_id.upper()}"
         shadow.observe(step_id="run", attempt=0, trigger="run")
 
+        git_author = "as the image has it"
+        if record_shows_no_git_author(trajectory):
+            # Outside the tree, so no observation; raw exec, so nothing is synced.
+            ctx.agent_sandbox.exec(
+                "git config --global --unset-all user.name; git config --global --unset-all user.email; true",
+                timeout=60,
+            )
+            git_author = "removed: the record shows none"
+
         commands = replay_commands(trajectory)
         shell = "login"
         if needs_plain_shell(trajectory):
@@ -385,6 +409,7 @@ def _replay_cell(
             "network_mode": getattr(ctx.agent_sandbox, "network_mode", None),
             "streams": "merged (2>&1 at the shell)",
             "shell": shell,
+            "git_author": git_author,
             "interpreter_recorded": list(trajectory.interpreter),
             "created_at": started,
             "elapsed_s": round(time.time() - started, 2),
