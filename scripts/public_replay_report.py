@@ -417,6 +417,36 @@ _LISTING_PAIRS = {("sed", "-n"), ("git", "diff"), ("git", "show"), ("git", "log"
 _TESTS_RAN = re.compile(r"\bRan [1-9]\d* tests?\b|\b[1-9]\d* (?:passed|failed)\b|\bcollected [1-9]\d* items?\b")
 _RUN_FAILED = re.compile(r"\bFAILED\b|^FAIL:|^ERROR:|\b\d+ failed\b|\b\d+ errors?\b|errors=\d+|failures=\d+", re.M)
 _RESULT_FAILURE = re.compile(r"\b(?:FAIL|FAILED|ERROR|Error|failed|FAILURE)\b")
+# SWE-bench Multilingual (JavaScript/TypeScript, PHP, Ruby), used only on its replays, alongside the
+# Python patterns: each language's runners as commands, and its summary lines as proof that tests ran
+# and that one failed. Counts must be non-zero: minitest prints "0 failures, 0 errors" on every pass.
+_RUNNER_ML = re.compile(
+    r"^(?:(?:npx|bunx|pnpx)\s+(?:-\S+\s+)*|(?:yarn|pnpm|npm)\s+(?:run\s+|exec\s+)?|(?:\S*/)?node_modules/\.bin/)?"
+    r"(?:jest|mocha|vitest|karma|ava|jasmine)(?=\s|$)"
+    r"|^(?:yarn|pnpm|npm)\s+(?:run\s+)?(?:test|t)(?::\S+)?(?=\s|$)"
+    r"|^node\s+(?:-\S+\s+)*--test(?=\s|$)"
+    r"|^(?:php\s+(?:-\S+(?:\s+[^-\s]\S*)?\s+)*)?(?:\S*/)?(?:phpunit|pest|paratest)(?=\s|$)"
+    r"|^composer\s+(?:run(?:-script)?\s+)?(?:test|phpunit)\S*(?=\s|$)"
+    r"|^php\s+artisan\s+test(?=\s|$)"
+    r"|^(?:bundle\s+exec\s+)?(?:\S*/)?(?:rspec|rake)(?=\s|$)"
+    r"|^(?:bundle\s+exec\s+)?ruby\s+(?:-\S+\s+)*\S*(?:test|spec)\S*\.rb(?=\s|$)"
+)
+_TESTS_RAN_ML = re.compile(
+    r"\bOK \([1-9]\d* tests?\b|\bTests: [1-9]\d*, Assertions\b"     # phpunit
+    r"|\b[1-9]\d* examples?, \d+ failures?\b"                         # rspec
+    r"|\b[1-9]\d* (?:runs|tests), \d+ assertions\b"                   # minitest, test-unit
+    r"|\b[1-9]\d* (?:passing|failing)\b"                              # mocha
+    r"|\bExecuted [1-9]\d* of \d+\b"                                  # karma
+    r"|^# (?:pass|fail)\s+[1-9]\d*",                                   # tap
+    re.M,
+)
+_RUN_FAILED_ML = re.compile(
+    r"\bFAILED\b|^FAIL[:\s]|^ERROR:|^(?:FAILURES|ERRORS)!|\b(?:Failures|Errors): [1-9]"
+    r"|\b[1-9]\d* (?:failed|failures?|errors?|failing)\b|errors=[1-9]|failures=[1-9]|^# fail\s+[1-9]|^not ok\b",
+    re.M,
+)
+# The runners' failure marks: jest's U+2715, phpunit's U+2718, vitest's U+00D7, mocha's U+2717.
+_RESULT_FAILURE_ML = re.compile(r"\b(?:FAIL|FAILED|ERROR|Error|failed|FAILURE|Failure|failing)\b|[\u2715\u2718\u00d7\u2717]|^\s*not ok\b")
 
 
 def _segments(command: str) -> list[str]:
@@ -433,9 +463,10 @@ def _segments(command: str) -> list[str]:
     return out
 
 
-def is_test_command(command: str) -> bool:
+def is_test_command(command: str, *, multilingual: bool = False) -> bool:
     """A test runner invoked as a command (not a file named after one: `cat tests/runtests.py`)."""
-    return any(_RUNNER.match(segment) for segment in _segments(command))
+    return any(_RUNNER.match(segment) or (multilingual and _RUNNER_ML.match(segment))
+               for segment in _segments(command))
 
 
 def is_listing(command: str) -> bool:
@@ -451,15 +482,27 @@ def is_listing(command: str) -> bool:
     return True
 
 
-def tests_ran(output: str) -> bool:
-    return bool(_TESTS_RAN.search(output or ""))
+def tests_ran(output: str, *, multilingual: bool = False) -> bool:
+    return bool(_TESTS_RAN.search(output or "") or (multilingual and _TESTS_RAN_ML.search(output or "")))
 
 
-def shows_failure(returncode: int | None, output: str) -> bool:
+def shows_failure(returncode: int | None, output: str, *, multilingual: bool = False) -> bool:
     """A test run that ran tests and reported a failure (a missing runner, or nothing collected, is not)."""
-    if not tests_ran(output):
+    if not tests_ran(output, multilingual=multilingual):
         return False
-    return (returncode is not None and returncode != 0) or bool(_RUN_FAILED.search(output or ""))
+    failed = _RUN_FAILED_ML if multilingual else _RUN_FAILED
+    return (returncode is not None and returncode != 0) or bool(failed.search(output or ""))
+
+
+def display_names(test_id: str) -> list[str]:
+    """A Multilingual test's names as its runners print them: the whole id, and its last ``" > "`` part.
+
+    Its ids are runner descriptions (``memo() > should not reorder children``,
+    ``Tests\\Foo > Returns total value``), not function names; one shorter than
+    12 characters is too generic to count.
+    """
+    text = test_id.strip()
+    return sorted({part for part in (text, text.split(" > ")[-1].strip()) if len(part) >= 12})
 
 
 _COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
@@ -522,7 +565,8 @@ _SYNTAX_TYPES = ("SyntaxError", "IndentationError", "TabError")
 _LOCATION = re.compile(r'File "([^"]+)", line (\d+)')
 
 
-def shows_evidence(output: str, names: Sequence[str], exceptions: Sequence[str], locations: Sequence[str]) -> bool:
+def shows_evidence(output: str, names: Sequence[str], exceptions: Sequence[str], locations: Sequence[str],
+                   *, multilingual: bool = False) -> bool:
     """Whether an output shows this break: a broken test reported failing, or the break's own error.
 
     A broken test counts on a result line (its name and a failure word on one
@@ -533,12 +577,17 @@ def shows_evidence(output: str, names: Sequence[str], exceptions: Sequence[str],
     if not output:
         return False
     for line in output.splitlines():
-        if _RESULT_FAILURE.search(line) and any(re.search(rf"\b{re.escape(name)}\b", line) for name in names):
+        if multilingual:
+            if _RESULT_FAILURE_ML.search(line) and any(name in line for name in names):
+                return True
+        elif _RESULT_FAILURE.search(line) and any(re.search(rf"\b{re.escape(name)}\b", line) for name in names):
             return True
     flat = _norm(output)
     for error in exceptions:
         kind = error.split(":", 1)[0].rsplit(".", 1)[-1]
-        if kind in _SYNTAX_TYPES:
+        # Python's syntax error says only "invalid syntax"; the other runtimes' messages carry
+        # their file and line, so on Multilingual every error is matched by its own text.
+        if kind in _SYNTAX_TYPES and not multilingual:
             if kind not in output:
                 continue
             for location in locations:
@@ -556,7 +605,8 @@ def shows_evidence(output: str, names: Sequence[str], exceptions: Sequence[str],
 
 
 def visibility(interval: Interval, recorded: Sequence[Any], commands: int,
-               exceptions: Sequence[str] = (), locations: Sequence[str] = ()) -> dict[str, Any]:
+               exceptions: Sequence[str] = (), locations: Sequence[str] = (), *,
+               multilingual: bool = False) -> dict[str, Any]:
     """Definition 7, over the recorded commands (``recorded[k - 1]`` is command k), as the model saw them.
 
     ``exceptions`` and ``locations`` are the break's own error lines (from the
@@ -564,15 +614,21 @@ def visibility(interval: Interval, recorded: Sequence[Any], commands: int,
     """
     last = interval.repair if interval.repair is not None else commands
     window = [recorded[k - 1] for k in range(interval.onset, last + 1) if 1 <= k <= len(recorded)]
-    names = sorted({name for t in interval.tests | interval.loads if (name := test_function_name(t))})
+    if multilingual:
+        names = sorted({name for t in interval.tests | interval.loads for name in display_names(t)})
+    else:
+        names = sorted({name for t in interval.tests | interval.loads if (name := test_function_name(t))})
+    ml = {"multilingual": multilingual}
     # A test run by its command, or by its output (a runner called from a one-liner or a script),
     # never a listing (an old log that mentions a test count).
-    tested = [c for c in window if is_test_command(c.command) or (tests_ran(seen_output(c)) and not is_listing(c.command))]
-    saw_failure = any(shows_failure(c.returncode, seen_output(c)) for c in tested)
-    named = any(shows_evidence(seen_output(c), names, exceptions, locations) for c in window if not is_listing(c.command))
+    tested = [c for c in window if is_test_command(c.command, **ml)
+              or (tests_ran(seen_output(c), **ml) and not is_listing(c.command))]
+    saw_failure = any(shows_failure(c.returncode, seen_output(c), **ml) for c in tested)
+    named = any(shows_evidence(seen_output(c), names, exceptions, locations, **ml)
+                for c in window if not is_listing(c.command))
     return {
         "window": len(window),
-        "ran_tests": any(tests_ran(seen_output(c)) for c in tested),
+        "ran_tests": any(tests_ran(seen_output(c), **ml) for c in tested),
         "saw_failure": saw_failure,
         "named": named,
         "silent": not saw_failure,
@@ -781,6 +837,7 @@ def load_recorded_commands(root: Path, submission: str, task: str, version: str 
 def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
     """Every done cell under the definitions: (cell rows, interval rows, instrument checks)."""
     members = load_members(root)
+    multilingual = (root / "multilingual.jsonl").exists()
     cells = find_cells(root)
     done = [c for c in cells if c.state == "done"]
 
@@ -897,7 +954,7 @@ def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:
                 record = timeline[index].record or {}
                 errors += [e for e in record.get("exceptions", []) if e not in base_errors and e not in errors]
                 places += [loc for loc in record.get("error_locations", []) if loc not in places]
-            seen = visibility(interval, recorded, commands, errors, places) if recorded else {
+            seen = visibility(interval, recorded, commands, errors, places, multilingual=multilingual) if recorded else {
                 key: None for key in ("window", "ran_tests", "saw_failure", "named", "silent", "unseen")}
             seen["evidence_complete"] = not any(evidence_cut(timeline[index].record) for index in interval.states)
             seen["base_evidence_complete"] = not evidence_cut(timeline[0].record)

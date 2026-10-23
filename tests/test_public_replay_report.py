@@ -596,3 +596,69 @@ def test_break_flags_name_what_a_compile_check_catches_and_what_the_grade_ignore
         "syntax_error": True, "skip_only": False}
     assert report.break_flags(load_break, [{}], [], ["pkg/x.py:3"])["syntax_error"] is True  # a syntax error's location
     assert report.break_flags(load_break, [{}], ["ImportError: cannot import name 'f'"], [])["syntax_error"] is False
+
+
+# ------------------------------------------------------- SWE-bench Multilingual's runners
+
+
+@pytest.mark.parametrize("command", [
+    "cd /testbed && vendor/bin/phpunit tests/CarbonInterval/TotalTest.php",
+    "php -d memory_limit=-1 ./vendor/bin/phpunit --filter testFoo",
+    "composer test",
+    "bundle exec rspec spec/rubocop/cop/style/redundant_freeze_spec.rb",
+    "bundle exec ruby -Itest test/plugin/test_in_tail.rb",
+    "bundle exec rake test",
+    "npx jest test/foo.test.js",
+    "yarn test --grep memo",
+    "npm run test:unit",
+    "npx karma start --single-run",
+])
+def test_multilingual_runners_are_test_commands_only_on_multilingual(command: str) -> None:
+    assert report.is_test_command(command, multilingual=True)
+    assert not report.is_test_command(command)
+
+
+@pytest.mark.parametrize("command", ["test -f package.json", "cat vendor/bin/phpunit", "grep -r rspec spec/"])
+def test_a_shell_test_or_a_listing_is_not_a_runner(command: str) -> None:
+    assert not report.is_test_command(command, multilingual=True)
+
+
+@pytest.mark.parametrize("output, failed", [
+    ("FAILURES!\nTests: 31, Assertions: 40, Failures: 1.", True),
+    ("OK (31 tests, 40 assertions)", False),
+    ("35 examples, 1 failure", True),
+    ("35 examples, 0 failures", False),
+    ("10 runs, 20 assertions, 0 failures, 0 errors, 0 skips", False),
+    ("10 tests, 20 assertions, 2 failures, 0 errors", True),
+    ("  34 passing (2s)\n  1 failing", True),
+    ("Executed 35 of 35 (1 FAILED)", True),
+])
+def test_multilingual_summaries_say_tests_ran_and_whether_one_failed(output: str, failed: bool) -> None:
+    assert report.tests_ran(output, multilingual=True)
+    assert report.shows_failure(0, output, multilingual=True) is failed
+
+
+def test_minitests_zero_counts_are_not_a_failure_but_python_still_reads_them_as_before() -> None:
+    line = "Ran 3 tests\n0 errors"
+    assert report.shows_failure(0, line) is True
+    assert report.shows_failure(0, line, multilingual=True) is False
+
+
+def test_display_names_are_the_id_and_its_last_part_when_specific() -> None:
+    assert report.display_names("memo() > should not unnecessarily reorder children #2895") == [
+        "memo() > should not unnecessarily reorder children #2895", "should not unnecessarily reorder children #2895"]
+    assert report.display_names("Total > Absolute diff") == ["Absolute diff", "Total > Absolute diff"]
+    assert report.display_names("Foo > works") == []
+
+
+def test_a_multilingual_break_is_named_by_its_description_on_a_failure_line() -> None:
+    out = "  ✕ should not unnecessarily reorder children #2895 (12 ms)"
+    names = report.display_names("memo() > should not unnecessarily reorder children #2895")
+    assert report.shows_evidence(out, names, (), (), multilingual=True)
+    assert not report.shows_evidence("  ✓ should not unnecessarily reorder children #2895", names, (), (), multilingual=True)
+
+
+def test_a_multilingual_syntax_error_counts_by_its_own_text() -> None:
+    error = "SyntaxError: /testbed/src/diff/children.js: Unexpected token (12:5)"
+    assert report.shows_evidence("x\n" + error + "\n", (), (error,), (), multilingual=True)
+    assert not report.shows_evidence("x\n" + error + "\n", (), (error,), ())

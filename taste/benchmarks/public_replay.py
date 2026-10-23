@@ -149,6 +149,18 @@ _EXCEPTION_LINE = re.compile(r"^\s*(?:E\s+)?((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:E
 _COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # pytest's short summary: `FAILED path::test - ErrType: message`, often the only line naming a test's error.
 _SUMMARY_ERROR = re.compile(r"^\s*(?:FAILED|ERROR)\s+\S+\s+-\s+((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)(?::.*)?)$")
+# SWE-bench Multilingual's runtimes: PHP's fatal and parse errors and namespaced exceptions, Ruby's
+# `file.rb:N:in 'm': msg (NameError)` and namespaced errors, rspec's `Failure/Error:` line, a
+# browser's `Uncaught TypeError: ...`. Each carries its own message, and often its file and line.
+_OTHER_ERRORS = (
+    re.compile(r"^\s*(?:PHP\s+)?((?:Fatal|Parse) error:\s+.+)$"),
+    re.compile(r"^\s*((?:[A-Za-z_]\w*\\)+(?:[A-Za-z_]\w*)?(?:Error|Exception)(?::.*)?)$"),
+    re.compile(r"^\s*(\S+\.rb:\d+:(?:in .+ )?.*\((?:[A-Z]\w*::)*[A-Z]\w*(?:Error|Exception)\))\s*$"),
+    re.compile(r"^\s*(\S+\.rb:\d+: syntax errors?.*)$"),
+    re.compile(r"^\s*((?:[A-Z]\w*::)+(?:[A-Z]\w*)?(?:Error|Exception)(?::.*)?)$"),
+    re.compile(r"^\s*(Failure/Error: .+)$"),
+    re.compile(r"^\s*Uncaught\s+((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)(?::.*)?)$"),
+)
 
 
 def strip_colour(text: str) -> str:
@@ -187,6 +199,7 @@ def error_evidence(output: str, *, limit: int = 30) -> tuple[list[str], list[str
             for name, number in _PAREN_LOCATION.findall(line):
                 locate(f'File "{name}", line {number}')
         error = _EXCEPTION_LINE.match(line) or _SUMMARY_ERROR.match(line)
+        error = error or next((m for pattern in _OTHER_ERRORS if (m := pattern.match(line))), None)
         if not error:
             continue
         text = error.group(1).strip()[:300]
