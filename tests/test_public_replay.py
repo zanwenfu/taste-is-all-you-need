@@ -629,3 +629,28 @@ def test_a_retest_that_cannot_run_leaves_the_state_in_doubt(tmp_path: Path) -> N
     assert public_replay.retest_states(cell, "upstream", suite, lambda: sandbox)["infra"] == 1
     cut = json.loads((cell / "states.jsonl").read_text().splitlines()[1])
     assert cut["evidence_retested"] == "could not run" and public_replay.output_may_hide_evidence(cut)
+    # A later run tries it again; a verdict that differed is never retried (that would pick the luckier run).
+    working = ScriptedSandbox().on("run-suite", ExecResult(1, _COLOURED_FAILURE, ""))
+    assert public_replay.retest_states(cell, "upstream", suite, lambda: working)["gained"] == 1
+    assert json.loads((cell / "states.jsonl").read_text().splitlines()[1])["evidence_retested"] is True
+
+
+def test_a_state_whose_suite_reported_nothing_is_a_measurement_not_an_infrastructure_failure(tmp_path: Path) -> None:
+    from taste.execution import ExecResult, ScriptedSandbox
+
+    # A module that no longer parses: the runner reports no graded test, and the error line is the evidence.
+    output = ("\x1b[1m" + "=" * 2100 + "\n"
+              + '\x1b[31mERROR\x1b[0m tests/test_a.py -   File "/testbed/pkg/mod.py", line 169\n'
+              + "\x1b[31mE   SyntaxError: invalid syntax\x1b[0m\n" + "x\n" * 4000)
+    cell = _cut_cell(tmp_path, output)
+    path = cell / "states.jsonl"
+    clean, cut = [json.loads(line) for line in path.read_text().splitlines()]
+    cut.update(failed=[], unreported=["t::a"], infra_error="no results for any graded test")
+    path.write_text(json.dumps(clean) + "\n" + json.dumps(cut) + "\n")
+    sandbox = ScriptedSandbox().on("run-suite", ExecResult(1, output, ""))
+    suite = SuiteProbe(name="p2p", command="run-suite", members=("t::a",), parse=lambda out: {"t::other": "PASSED"})
+
+    assert public_replay.retest_states(cell, "upstream", suite, lambda: sandbox) == {
+        "states": 1, "gained": 1, "verdicts_differ": 0, "infra": 0}
+    merged = json.loads(path.read_text().splitlines()[1])
+    assert merged["evidence_retested"] is True and "SyntaxError: invalid syntax" in merged["exceptions"]

@@ -235,6 +235,10 @@ def state_record(sha: str, run: SuiteRun, raw: Any, seconds: float, tail_chars: 
     }
 
 
+# What :func:`taste.replay.verdicts_from` records when the runner reported no graded test.
+NO_GRADED_RESULTS = "no results for any graded test"
+
+
 def output_may_hide_evidence(record: dict | None) -> bool:
     """Whether a state's error lines may sit in the part of its output that was not kept.
 
@@ -282,13 +286,20 @@ def retest_states(directory: Path, base_commit: str, suite: SuiteProbe, open_san
     re-test reports the recorded verdicts, the error lines it reads are merged
     into the record, never replacing what was recorded; when it reports others
     (a flaky test) or cannot run, the record keeps its evidence and says why it
-    is still in doubt. Verdicts and stored output are never changed. The
-    original file is kept as states.before-retest.jsonl and each re-test's own
-    record in states.retest.jsonl. Idempotent.
+    is still in doubt. A suite that reported no graded test (a module that no
+    longer parses) is a measurement like any other. Verdicts and stored output
+    are never changed. The original file is kept as states.before-retest.jsonl
+    and each re-test's own record in states.retest.jsonl. Idempotent; a later
+    run tries again a state that could not run, never one whose verdicts
+    differed (that would keep the luckier run).
     """
     path = directory / "states.jsonl"
     records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    targets = sorted({r["sha"] for r in records if "evidence_retested" not in r and output_may_hide_evidence(r)})
+
+    def pending(record: dict) -> bool:
+        return record.get("evidence_retested") in (None, "could not run") and output_may_hide_evidence(record)
+
+    targets = sorted({r["sha"] for r in records if pending(r)})
     counts = {"states": 0, "gained": 0, "verdicts_differ": 0, "infra": 0}
     if not targets:
         return counts
@@ -305,10 +316,10 @@ def retest_states(directory: Path, base_commit: str, suite: SuiteProbe, open_san
     again = {r["sha"]: r for r in (json.loads(line) for line in log.read_text().splitlines() if line.strip())}
     for record in records:
         retest = again.get(record["sha"])
-        if retest is None or "evidence_retested" in record or not output_may_hide_evidence(record):
+        if retest is None or not pending(record):
             continue
         counts["states"] += 1
-        if not retest["ran"] or retest["infra_error"]:
+        if not retest["ran"] or retest["timed_out"] or retest["infra_error"] not in (None, NO_GRADED_RESULTS):
             record["evidence_retested"] = "could not run"
             counts["infra"] += 1
         elif any(retest[key] != record.get(key) for key in ("failed", "unreported", "skipped")):
