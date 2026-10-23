@@ -495,3 +495,22 @@ def test_the_guard_counts_discarded_work_to_the_runs_last_command() -> None:
     timeline, labels = _states(("run", 0, OK), ("tool", 2, OK), ("tool", 5, BROKEN_T1), ("final", 9, BROKEN_T1))
     guard = report.guard_counterfactual(timeline, labels, [False, True, False, False], 2, commands=9)
     assert guard == {"guard_keeps_work": True, "guard_solved": True, "guard_discards_cmds": 7}
+
+
+def test_planted_runs_are_checked_against_their_answers_and_never_counted(study: Path) -> None:
+    """A known-answer run is calibration, not data: it must not join any model's numbers."""
+    planted = study / "planted"
+    planted.mkdir()
+    (planted / "pkg__pkg-1.json").write_text(json.dumps({"expected": {"intervals": [
+        {"onset_cmd": 1, "repair_cmd": 2, "kind": "load"}]}}))
+    _cell(study, "planted", "pkg__pkg-1", commands=3, states=[
+        ("run", "run", rec("x", failed=[F1])),
+        ("tool", "cmd-001", rec("x", infra=NO_RESULTS, unreported=[T1, T2, T3, F1])),
+        ("tool", "cmd-002", rec("x", failed=[F1])),
+        ("final", "final", rec("x", failed=[F1])),
+    ], fidelity={"recorded_submitted": True, "same_submission": True})
+    summary = report.run(study, study / "report")
+    assert summary["checks"]["planted"] == {"pkg__pkg-1": {"expected": [(1, 2, "load")], "found": [(1, 2, "load")],
+                                                           "pass": True}}
+    assert "planted" not in {m["submission"] for m in _csv(study / "report" / "models.csv")}
+    assert summary["overall_main"]["runs"] == 2  # unchanged by the planted run

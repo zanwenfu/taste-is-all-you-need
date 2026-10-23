@@ -660,11 +660,17 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-def find_cells(root: Path) -> list[Cell]:
+PLANTED = "planted"
+
+
+def find_cells(root: Path, *, planted: bool = False) -> list[Cell]:
+    """The study's cells; with ``planted``, only the known-answer runs (never data)."""
     cells = []
     for status_path in sorted((root / "cells").glob("*/*/status.json")):
         directory = status_path.parent
         task = directory.name
+        if (directory.parent.name == PLANTED) != planted:
+            continue
         cells.append(Cell(
             submission=directory.parent.name, task=task, state=str(_read_json(status_path).get("state", "")),
             fidelity=_read_json(directory / "fidelity.json"), manifest=_read_json(directory / "manifest.json"),
@@ -1081,8 +1087,32 @@ def headline(summary: dict[str, Any]) -> str:
     ])
 
 
+def planted_checks(root: Path) -> dict[str, Any]:
+    """The known-answer runs, labelled with the study's own definitions and compared with what was planted.
+
+    ``root/planted/<task>.json`` holds ``expected.intervals`` as onset, repair and
+    kind; a planted run is its own base (it has no sibling runs to intersect).
+    """
+    members = load_members(root)
+    results: dict[str, Any] = {}
+    for cell in find_cells(root, planted=True):
+        spec_path = root / "planted" / f"{cell.task}.json"
+        if cell.state != "done" or not spec_path.exists() or cell.task not in members:
+            continue
+        expected = [(i["onset_cmd"], i["repair_cmd"], i["kind"]) for i in json.loads(spec_path.read_text())["expected"]["intervals"]]
+        commands = int(cell.manifest.get("commands_replayed") or 0)
+        timeline = load_timeline(cell.shadow, cell.states, str(cell.manifest.get("session", "")), commands)
+        p2p, f2p = members[cell.task]
+        base = base_passing(timeline[0].record, p2p)
+        labels = [label_state(state.record, base, tuple(p2p) + tuple(f2p)) for state in timeline]
+        found = [(i.onset, i.repair, i.kind) for i in break_intervals(timeline, labels, commands)]
+        results[cell.task] = {"expected": expected, "found": found, "pass": found == expected}
+    return results
+
+
 def run(root: Path, out: Path) -> dict[str, Any]:
     rows, intervals, checks = analyse(root)
+    checks["planted"] = planted_checks(root)
     state_rows = checks.pop("state_rows")
     leaderboard = leaderboard_rates(root)
     cells_by_state: dict[str, Counter] = {}
@@ -1109,6 +1139,7 @@ def run(root: Path, out: Path) -> dict[str, Any]:
             "final_duplicate": checks["final_duplicate"],
             "grade_agreement_main_submitted": checks["grade_agreement"],
             "resolved_agreement_exact": checks["resolved_agreement_exact"],
+            "planted": checks["planted"],
         },
     }
     out.mkdir(parents=True, exist_ok=True)
