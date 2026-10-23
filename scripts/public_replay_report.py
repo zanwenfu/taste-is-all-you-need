@@ -715,11 +715,22 @@ def leaderboard_rates(root: Path) -> dict[str, float]:
 
 
 def load_recorded_commands(root: Path, submission: str, task: str, version: str = "") -> list[Any]:
-    """The original run's commands, as the agent's log recorded them."""
+    """The original run's commands, as the agent's log recorded them.
+
+    The submitting command's recorded output is the submitted patch, which the
+    model never saw (the sentinel ends the run), so it is blanked: it is not
+    part of what the agent's log showed it.
+    """
+    import dataclasses
+
     from taste.benchmarks.public_trajectories import parse_trajectory
 
     raw = json.loads((root / "trajs" / submission / f"{task}.traj.json").read_text())
-    return list(parse_trajectory(raw, mini_version=version).commands)
+    trajectory = parse_trajectory(raw, mini_version=version)
+    commands = list(trajectory.commands)
+    if trajectory.submit_index is not None and trajectory.submit_index < len(commands):
+        commands[trajectory.submit_index] = dataclasses.replace(commands[trajectory.submit_index], output="")
+    return commands
 
 
 def analyse(root: Path) -> tuple[list[dict], list[dict], dict[str, Any]]:

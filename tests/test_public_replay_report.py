@@ -524,3 +524,22 @@ def test_planted_runs_are_checked_against_their_answers_and_never_counted(study:
                                                            "pass": True}}
     assert "planted" not in {m["submission"] for m in _csv(study / "report" / "models.csv")}
     assert summary["overall_main"]["runs"] == 2  # unchanged by the planted run
+
+
+def test_the_submitting_commands_output_is_not_part_of_the_log(tmp_path: Path, monkeypatch) -> None:
+    """Its recorded output is the submitted patch, which the model never saw: the sentinel ends the run."""
+    from taste.benchmarks import public_trajectories
+
+    recorded = (
+        public_trajectories.RecordedCommand(index=0, command="sed -i 's/a/b/' x.py", returncode=0, output="",
+                                            output_truncated=False, timed_out=False),
+        public_trajectories.RecordedCommand(index=1, command="echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git diff",
+                                            returncode=None, output="FAILED tests/test_mod.py::test_one",
+                                            output_truncated=False, timed_out=False),
+    )
+    fake = SimpleNamespace(commands=recorded, submit_index=1)
+    monkeypatch.setattr(public_trajectories, "parse_trajectory", lambda raw, mini_version="": fake)
+    (tmp_path / "trajs" / "s").mkdir(parents=True)
+    (tmp_path / "trajs" / "s" / "t.traj.json").write_text("{}")
+    loaded = report.load_recorded_commands(tmp_path, "s", "t")
+    assert [c.output for c in loaded] == ["", ""] and loaded[1].command.startswith("echo COMPLETE")
