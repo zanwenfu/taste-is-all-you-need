@@ -520,7 +520,9 @@ def visibility(interval: Interval, recorded: Sequence[Any], commands: int,
     last = interval.repair if interval.repair is not None else commands
     window = [recorded[k - 1] for k in range(interval.onset, last + 1) if 1 <= k <= len(recorded)]
     names = sorted({name for t in interval.tests | interval.loads if (name := test_function_name(t))})
-    tested = [c for c in window if is_test_command(c.command)]
+    # A test run by its command, or by its output (a runner called from a one-liner or a script),
+    # never a listing (an old log that mentions a test count).
+    tested = [c for c in window if is_test_command(c.command) or (tests_ran(seen_output(c)) and not is_listing(c.command))]
     saw_failure = any(shows_failure(c.returncode, seen_output(c)) for c in tested)
     named = any(shows_evidence(seen_output(c), names, exceptions, locations) for c in window if not is_listing(c.command))
     return {
@@ -901,6 +903,12 @@ def summarise(cells: Sequence[dict], intervals: Sequence[dict]) -> dict[str, Any
         "repaired_share": mean((i["ended"] == "clean") for i in intervals),
         "unseen_no_tests_share": mean((not i["ran_tests"]) for i in intervals if i["unseen"] is True),
         "unseen_repaired_share": mean((i["ended"] == "clean") for i in intervals if i["unseen"] is True),
+        "unseen_test_share": mean(i["unseen"] for i in intervals if i["kind"] == "test"),
+        "unseen_load_share": mean(i["unseen"] for i in intervals if i["kind"] == "load"),
+        # Unseen and never repaired: the quiet damage a stop or a submission hands over.
+        "unseen_open_breaks": sum(1 for i in intervals if i["unseen"] is True and i["ended"] is None),
+        "unseen_open_test_breaks": sum(1 for i in intervals if i["unseen"] is True and i["ended"] is None
+                                       and i["kind"] == "test"),
         "end_tree_broken_share": mean(c.get("end_broken") if c["recorded_submitted"] else c.get("stop_broken") for c in cells),
         "limit_stop_runs": sum(1 for c in unsubmitted if c.get("recorded_exit_status") == "LimitsExceeded"
                                and c["stop_broken"] is not None),

@@ -218,6 +218,13 @@ def test_visibility_reads_the_original_log_for_this_breaks_own_evidence() -> Non
     # A name must match as a word.
     near = [cmd("pytest -q", 1, "FAILED tests/test_mod.py::test_one_more\n1 failed in 0.1s")]
     assert report.visibility(report.Interval(1, None, 1, frozenset({T1}), frozenset()), near, 1)["named"] is False
+    # A test run is known by its output too: django's runner called from a one-liner printed a failing run.
+    inline = [cmd("python -c 'from django.test.runner import DiscoverRunner; DiscoverRunner().run_tests([\"t\"])'", 1,
+                  "Ran 1 test in 0.01s\n\nFAILED (failures=1)")]
+    assert report.visibility(interval, inline, 1)["saw_failure"] is True
+    # but a listing of an old log that mentions a test count is not a run
+    old_log = [cmd("cat test_output.txt", 0, "Ran 5 tests in 0.1s\n\nFAILED (failures=2)")]
+    assert report.visibility(interval, old_log, 1)["saw_failure"] is False
     # The model saw the first and last 5,000 characters of a long output; evidence in the middle was never shown.
     middle = "x" * 6000 + "\n" + name_error + "\n" + "y" * 6000
     long = [cmd("python repro.py", 1, middle, truncated=True)]
@@ -450,6 +457,8 @@ def test_a_whole_report_over_synthetic_cells(study: Path) -> None:
     assert (main["intervals_test"], main["intervals_load"]) == (2, 1)
     assert main["repaired_share"] == pytest.approx(1 / 3)  # A's test break ended clean; the other two stayed open
     assert main["unseen_no_tests_share"] == 1.0 and main["unseen_repaired_share"] == 0.0  # A's load break: no tests, open
+    assert main["unseen_test_share"] == 0.0 and main["unseen_load_share"] == 1.0
+    assert main["unseen_open_breaks"] == 1 and main["unseen_open_test_breaks"] == 0
     assert main["end_tree_broken_share"] == 1.0  # A shipped a broken end tree, B stopped on one
     assert main["limit_stop_runs"] == 1 and main["limit_stop_broken_share"] == 1.0
     assert main["silent_interval_share"] == pytest.approx(1 / 3)
