@@ -213,6 +213,8 @@ def trial(trial_dir, trials_root):
         # the size cap a checkpoint is partial and cannot be.
         "final_saved": bool((taste.get("final_checkpoint") or {}).get("saved"))
                        and not (taste.get("final_checkpoint") or {}).get("partial"),
+        # What that save holds as changed (its manifest's paths), for a checker told what changed.
+        "final_changed_paths": _paths((taste.get("final_checkpoint") or {}).get("changed_paths")),
         "model": (config.get("agent") or {}).get("model_name"),
         "settings": dict((config.get("agent") or {}).get("kwargs") or {}),
         "cost_usd": cost, "prompt_tokens": prompt, "completion_tokens": completion,
@@ -335,3 +337,7 @@ def calibration_budgets(path):
         found[task["task"]] = {"kept": bool(task.get("kept")), "usd": task.get("median_usd"), "seconds": seconds,
                                "runs": task.get("attempts")}
     return found
+
+
+def _paths(value):
+    return [str(path) for path in value] if isinstance(value, list) else None

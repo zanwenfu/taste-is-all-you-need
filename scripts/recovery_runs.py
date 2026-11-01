@@ -60,7 +60,15 @@ OPTIONS = {"prefix": str, "model": str, "mode": str, "calibration_report": str, 
            "trials_root": str, "work_dir": str, "tasks_dir": str, "run_harbor": str, "export_template": str,
            "concurrent": int, "min_steps": int, "large_edit_lines": int, "attempts_factor": int, "checks_from": str,
            "prior_checkpoints": str, "arm_order_seed": int, "tests_feedback_chars": int, "tests_code_chars": int,
-           "tests_full_chars": int}
+           "tests_full_chars": int, "save_final": lambda raw: truth(raw)}
+
+
+def truth(raw):
+    """A true/false flag's value as given (true, false, 1, 0)."""
+    value = str(raw).strip().lower()
+    if value not in {"true", "false", "1", "0"}:
+        raise argparse.ArgumentTypeError("give true or false")
+    return value in {"true", "1"}
 
 
 def table(summary):

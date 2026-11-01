@@ -131,7 +131,7 @@ from taste.agents.trajectory_reader import rewind_point
 from taste.benchmarks import branch_trial
 from taste.recovery_study import jobs, records, search, state, test_failures
 from taste.recovery_study.commands import gaming_flags
-from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver
+from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver, own_final
 
 RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare",
               "retry_bare", "rewind_bare", "retry_tests", "rewind_tests", "continue_tests",
@@ -209,6 +209,10 @@ DEFAULTS = {
     # Two: at one median run the time cap would stop about half of plain retries before they submit.
     "budget_runs": 2.0,
     "check_attempts": 2,
+    # Every live trial saves its own final files when it ends (final_checkpoint), and its checks and the round after
+    # it restore that save rather than rebuild the state by replay. A replay can never be faithful to a run that read
+    # a background job's log after a sleep (Sonnet 5.5, Nov 1); a trial whose own save failed is rebuilt as before.
+    "save_final": False,
     "prefix_allowance": 300.0,  # seconds a branch's deadline adds for bringing its prefix back
     "min_round_usd": 0.0,       # dollars a round needs left, at least; and at least this share of the budget:
     "min_round_share": 0.1,
@@ -309,6 +313,8 @@ class RecoveryDriver(Driver):
         env = settings["checker_env"]
         if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
             raise ValueError("checker_env must map names to values (text)")
+        if not isinstance(settings["save_final"], bool):
+            raise ValueError("save_final must be true or false")
         if settings["repeats"] < 1 or settings["check_attempts"] < 1:
             raise ValueError("repeats and check_attempts must be positive")
         if not 0 <= settings["min_round_share"] < 1:
@@ -385,7 +391,9 @@ class RecoveryDriver(Driver):
             return False
         check = run["check"]
         if check["reply"] is None:
-            source = {"token": run["base"]["token"], "steps": run["steps"], "settings": run["settings"]}
+            source = {"token": run["base"]["token"], "steps": run["steps"], "settings": run["settings"],
+                      **{key: run["base"].get(key) for key in ("final_saved", "final_checkpoint",
+                                                               "final_changed_paths")}}
             found = self._check(run_id, run, check, source, ("check",), initial=True)
             if not found:
                 if found is False:
@@ -489,10 +497,20 @@ class RecoveryDriver(Driver):
 
     # Checks ----------------------------------------------------------------
 
+    def _own_final(self, source):
+        """The checked trial's own save of its final files (checkpoint, changed paths), when it saved them whole and
+        this host keeps them; else None."""
+        if not source.get("final_saved") or not source.get("final_checkpoint"):
+            return None
+        name = self._saved(branch_trial.final_checkpoint_name(source["final_checkpoint"], source["token"]))
+        return (name, source.get("final_changed_paths")) if name else None
+
     def final_state(self, check):
         """The saved copy of a checked trial's final state: (checkpoint, changed paths); ("", changed
         paths) when it came out partial (over the size cap it cannot be restored, so it is rebuilt
         from the record); or None."""
+        if check.get("own"):
+            return tuple(check["own"])
         partial = None
         for name in self.counted(check["checkpoints"]):
             job = self.jobs[name]
@@ -523,6 +541,9 @@ class RecoveryDriver(Driver):
             return False
         script, export = self.script(source["token"])
         state = self.final_state(check)
+        if state is None and values["mode"] == "restore" and (own := self._own_final(source)) is not None:
+            check["own"] = list(own)
+            state = own
         if values["mode"] == "restore" and state is None \
                 and len(self.counted(check["checkpoints"])) < values["check_attempts"]:
             name = jobs.job_name(values["prefix"], run["key"], *label, f"s{len(check['checkpoints']) + 1}")
@@ -641,7 +662,8 @@ class RecoveryDriver(Driver):
                 return
             check = current["check"]
             if check["verdict"] is None:
-                source = {"token": agent["token"], "steps": agent["steps"], "settings": agent["settings"]}
+                source = {"token": agent["token"], "steps": agent["steps"], "settings": agent["settings"],
+                          **own_final(agent)}
                 found = self._check(run_id, run, check, source, (_slug(name), f"e{index + 1}r{len(episode['rounds'])}"),
                                     arm=name, episode=index)
                 if found is False:
@@ -775,6 +797,8 @@ class RecoveryDriver(Driver):
                                         checkpoint=checkpoint, live=True, override=override,
                                         note=self._note(job, note(recovery, told, hidden)), rewind=rewind))
         settings.update(self._caps(run["budget"]["usd"], run["budget"]["seconds"], base, branch=bool(prepare)))
+        if self.settings["save_final"]:
+            settings["final_checkpoint"] = f"{job}-final"
         self.emit(self.harbor_job(job, run, settings, attempts, prepare=prepare),
                   run=run_id, arm=name, purpose="first", recovery=recovery, step=step,
                   **_rebuilt(found, checkpoint))
@@ -852,6 +876,8 @@ class RecoveryDriver(Driver):
                                               checkpoint=checkpoint, live=True, override="reject",
                                               note=self._note(job, text), rewind=rewind), **caps}
             prepare = [export]
+        if values["save_final"]:
+            settings["final_checkpoint"] = f"{job}-final"
         self.emit(self.harbor_job(job, run, settings, 1, prepare=prepare), run=run_id, arm=name,
                   purpose="round", episode=index, round=len(episode["rounds"]), **_rebuilt(found, checkpoint))
         current["agent_jobs"].append(job)

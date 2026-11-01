@@ -259,14 +259,22 @@ class Driver:
             skipped = "no tasks directory"
         run = {"key": jobs.run_key(run_id), "task": summary["task"], "tasks_dir": tasks_dir,
                "job_dir": str(job_dir), "model": summary["model"],
-               "base": {name: summary[name] for name in ("trial", "token", "reward", "cost_usd", "seconds",
-                                                         "exit_status", "steps")}}
+               "base": {**{name: summary[name] for name in ("trial", "token", "reward", "cost_usd", "seconds",
+                                                            "exit_status", "steps")},
+                        **own_final(summary)}}
         if skipped:
             return {**run, "skipped": skipped}
         taken = view["steps"]
         script, _ = self.script(summary["token"])
         return {**run, "steps": len(taken), "settings": jobs.inherited(summary["settings"]), "script": script,
                 "rules": rules.rewind_points(taken, values["large_edit_lines"]), "features": rules.features(taken)}
+
+
+def own_final(summary):
+    """What a check needs of a trial's own final save: whether it saved whole, under what name, what it changed."""
+    return {"final_saved": summary.get("final_saved", False),
+            "final_checkpoint": (summary.get("settings") or {}).get("final_checkpoint"),
+            "final_changed_paths": summary.get("final_changed_paths")}
 
 
 def harbor_unit_active(name):

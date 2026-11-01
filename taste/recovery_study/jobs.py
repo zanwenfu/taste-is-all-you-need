@@ -50,11 +50,12 @@ SETTING = {
 MODES = ("rebuild", "restore")
 OVERRIDES = ("append", "reject", "rewind")
 CAPS = frozenset({SETTING["spend_cap"], SETTING["deadline"]})
-# A job sets these itself (run-harbor.sh sets worker_python); they are never
-# copied from the trial it branches from or repeats. A task suffix is copied:
-# a branch of a trial that had one must give the agent the same task text.
+# A job sets these itself (run-harbor.sh sets worker_python; a trial's own final
+# save is named by its job); they are never copied from the trial it branches
+# from or repeats. A task suffix is copied: a branch of a trial that had one
+# must give the agent the same task text.
 OWN = frozenset({SETTING[name] for name in ("script", "step", "mode", "checkpoint", "live", "override",
-                                            "note", "task_text", "rewind")} | {"worker_python"})
+                                            "note", "task_text", "rewind")} | {"worker_python", "final_checkpoint"})
 # A's exporter: writes a finished trial's replay script (its ordered model
 # calls and commands) from the trial's settled record.
 EXPORT_TEMPLATE = "python3 -m taste.benchmarks.replay_export --record {record} --out {out}"
