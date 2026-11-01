@@ -141,6 +141,11 @@ class ScopeSpec:
         return hashlib.sha256(_canonical(self.to_dict()).encode()).hexdigest()
 
 
+# How long a launch waits for systemd to start its service. A busy host's start queue (20 trials starting at once)
+# took ~17 s; a launch that times out is fenced as ambiguous although the service then runs.
+START_ACK_SECONDS = 120
+
+
 class SystemdManager:
     """Finite control commands; only systemd owns the execution deadline."""
 
@@ -182,7 +187,7 @@ class SystemdManager:
             argv.extend(load_credential_properties(credential_directory, spec.credentials))
         elif credential_directory is not None:
             raise ValueError("credential-free scope cannot load private files")
-        self._command([*argv, "--", *spec.argv])
+        self._command([*argv, "--", *spec.argv], timeout=START_ACK_SECONDS)
 
     def inspect(self, unit: str) -> dict[str, str] | None:
         result = self._command([
