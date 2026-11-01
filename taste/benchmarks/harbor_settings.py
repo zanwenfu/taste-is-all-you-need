@@ -31,6 +31,7 @@ from taste.brains.terminal_broker import TerminalBinding
 from taste.brains.terminal_worker_policy import TerminalWorkerPolicy
 from taste.pricing import max_call_cost_usd, table_sha
 from taste.providers.azure_openai import (
+    ANTHROPIC_MODELS,
     AZURE_LUNA6_MODEL,
     AZURE_LUNA_MODEL,
     AZURE_PLANNER_MODEL,
@@ -308,10 +309,10 @@ class TrialSettings:
         worker_cap, monitor_cap, _ = self.budgets()
         binding = TerminalBinding(owner_token, container_id, deadline_unix, self.max_commands)
         # On Azure a deployment is named after its model; on Bedrock it is the
-        # model's one admitted inference profile.
-        bedrock = route_of(endpoint) == "bedrock"
-        default = {coordinator: BEDROCK_PROFILES.get(planner, coordinator),
-                   worker_name: BEDROCK_PROFILES.get(worker, worker_name)} if bedrock else {}
+        # model's one admitted inference profile; on Anthropic its API model id.
+        names = {"bedrock": BEDROCK_PROFILES, "anthropic": ANTHROPIC_MODELS}.get(route_of(endpoint))
+        default = {coordinator: names.get(planner, coordinator),
+                   worker_name: names.get(worker, worker_name)} if names else {}
         planner_deployment = ("fixed-plan" if self.services == "none"
                               else self.deployment or default.get(coordinator, coordinator))
         # One served model has one route: a worker on the coordinator's model
@@ -395,15 +396,24 @@ def task_instruction(settings, instruction):
     return text
 
 
-def model_route(environment):
-    """(endpoint, key) of the one model route the host names: Azure's or Bedrock's.
+def model_route(environment, model=None):
+    """(endpoint, key) of the model route the host names for ``model``: Anthropic's, Azure's or Bedrock's.
 
-    Azure: AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY. Bedrock: its
-    regional runtime endpoint in TASTE_BEDROCK_URL and its API key in
-    AWS_BEARER_TOKEN_BEDROCK. A host naming both, or neither, is refused
-    rather than choosing for it. The values are checked where the route is
-    admitted; the key is never echoed.
+    Anthropic: TASTE_ANTHROPIC_URL and ANTHROPIC_API_KEY, used only for a
+    model the Anthropic route admits and only when TASTE_ANTHROPIC_URL is set
+    (a key alone changes nothing), so a study can run Claude there and its
+    GPT-6 reviewer on Bedrock. Otherwise the one other route: Azure:
+    AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY; Bedrock: its regional
+    runtime endpoint in TASTE_BEDROCK_URL and its API key in
+    AWS_BEARER_TOKEN_BEDROCK. A host naming both of those, or neither, is
+    refused rather than choosing for it. The values are checked where the
+    route is admitted; the key is never echoed.
     """
+    anthropic = environment.get("TASTE_ANTHROPIC_URL", ""), environment.get("ANTHROPIC_API_KEY", "")
+    if model in ANTHROPIC_MODELS and anthropic[0]:
+        if not anthropic[1]:
+            raise RuntimeError("TASTE_ANTHROPIC_URL is set but ANTHROPIC_API_KEY is not")
+        return anthropic[0].rstrip("/") + "/", anthropic[1]
     azure = environment.get("AZURE_OPENAI_BASE_URL", ""), environment.get("AZURE_OPENAI_API_KEY", "")
     bedrock = environment.get("TASTE_BEDROCK_URL", ""), environment.get("AWS_BEARER_TOKEN_BEDROCK", "")
     if azure[0] and bedrock[0]:

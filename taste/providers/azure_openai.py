@@ -15,6 +15,15 @@ AZURE_OPENAI_BASE_URL and AZURE_OPENAI_API_KEY, whichever route they are.
 Only global profiles are admitted: their list prices are the table's (checked
 2026-10-16 on Bedrock's own offers), while a geographic profile (``us.``) is
 billed 10% more and is not priced here.
+
+**The Anthropic route.** Claude can also be reached through Anthropic's own
+Messages API (``https://api.anthropic.com/``) with an Anthropic API key, under
+the model's API id as its deployment. Same admission, journal, budget fence and
+settlement; the adapter is ``taste.providers._anthropic_route``. Only Claude
+Sonnet 5.5 is admitted: its first-party list price is the table's (checked
+2026-11-01 on platform.claude.com: $2 / $10 / $0.10 cache hit / $2.50 5-minute
+cache write per million), while Haiku 5.5's first-party price rises for prompts
+over 100,000 tokens, a tier the table does not hold.
 """
 
 from __future__ import annotations
@@ -46,6 +55,8 @@ BEDROCK_PROFILES = {
     "claude-haiku-5-5": "global.anthropic.claude-haiku-5-5",
 }
 BEDROCK_MODELS = frozenset(BEDROCK_PROFILES)
+# The models the Anthropic route admits, under their Messages API model ids.
+ANTHROPIC_MODELS = {"claude-sonnet-5-5": "claude-sonnet-5-5"}
 # Every model some explicit route can serve. Which route serves it is checked
 # where the route is configured.
 ROUTED_MODELS = AZURE_MODELS | BEDROCK_MODELS
@@ -53,9 +64,16 @@ _MODELS = ROUTED_MODELS
 _BEDROCK_HOST = re.compile(r"bedrock-runtime\.[a-z]{2}(?:-[a-z]+)+-[0-9]\.amazonaws\.com")
 
 
+_ANTHROPIC_HOST = "api.anthropic.com"
+
+
 def route_of(endpoint: str) -> str:
-    """Which route an endpoint is: ``bedrock`` for a Bedrock runtime, else ``azure_openai``."""
-    return "bedrock" if _BEDROCK_HOST.fullmatch(urlsplit(str(endpoint)).netloc or "") else "azure_openai"
+    """Which route an endpoint is: ``bedrock`` for a Bedrock runtime, ``anthropic`` for Anthropic's API,
+    else ``azure_openai``."""
+    host = urlsplit(str(endpoint)).netloc or ""
+    if _BEDROCK_HOST.fullmatch(host):
+        return "bedrock"
+    return "anthropic" if host == _ANTHROPIC_HOST else "azure_openai"
 
 
 @dataclass(frozen=True)
@@ -89,15 +107,16 @@ class AzureOpenAIConfig:
         # compatible hosts. This path is specifically a credit route: an Azure
         # resource's v1 API, or Bedrock's runtime in one region.
         bedrock = route_of(self.base_url) == "bedrock"
+        anthropic = route_of(self.base_url) == "anthropic"
         if (
             parts.scheme != "https" or parts.query or parts.fragment
-            or not (bedrock or re.fullmatch(
+            or not (bedrock or anthropic or re.fullmatch(
                 r"[a-z0-9][a-z0-9-]*\.(?:openai\.azure\.com|services\.ai\.azure\.com)", parts.netloc))
-            or parts.path not in ({"", "/"} if bedrock else {"/openai/v1", "/openai/v1/"})
+            or parts.path not in ({"", "/"} if bedrock or anthropic else {"/openai/v1", "/openai/v1/"})
             or self.base_url != self.base_url.strip()
         ):
             raise ProtocolFailure("Azure requires a resource HTTPS /openai/v1 endpoint, "
-                                  "Bedrock its regional runtime endpoint")
+                                  "Bedrock its regional runtime endpoint, Anthropic https://api.anthropic.com/")
         if type(self.deployments) is not tuple or not self.deployments or any(type(d) is not AzureDeployment for d in self.deployments):
             raise ProtocolFailure("Azure deployments must be a nonempty immutable tuple")
         if len({d.model for d in self.deployments}) != len(self.deployments) or len({d.deployment for d in self.deployments}) != len(self.deployments):
@@ -107,13 +126,15 @@ class AzureOpenAIConfig:
             # models, and Bedrock each model through its global profile.
             if bedrock and BEDROCK_PROFILES.get(binding.model) != binding.deployment:
                 raise ProtocolFailure("Bedrock serves a model only through its verified global profile")
-            if not bedrock and binding.model not in AZURE_MODELS:
+            if anthropic and ANTHROPIC_MODELS.get(binding.model) != binding.deployment:
+                raise ProtocolFailure("Anthropic serves an admitted model only under its API model id")
+            if not bedrock and not anthropic and binding.model not in AZURE_MODELS:
                 raise ProtocolFailure("model is not served by an Azure deployment")
         object.__setattr__(self, "base_url", self.base_url.rstrip("/") + "/")
 
     @property
     def route(self) -> str:
-        """``azure_openai`` or ``bedrock``: which adapter this route is called through."""
+        """``azure_openai``, ``bedrock`` or ``anthropic``: which adapter this route is called through."""
         return route_of(self.base_url)
 
     @classmethod

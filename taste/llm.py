@@ -343,17 +343,22 @@ class LLM:
         if self._azure_openai is not None:
             self._azure_openai.deployment_for(model)
             # An explicit route is served by its own adapter: Azure's by the
-            # Responses adapter, Bedrock's by the Converse one, whichever
-            # family made the model it admits.
-            bedrock = self._azure_openai.route == "bedrock"
-            if name not in (("openai", "bedrock") if bedrock else ("openai",)):
+            # Responses adapter, Bedrock's by the Converse one, Anthropic's by
+            # the Messages one, whichever family made the model it admits.
+            route = self._azure_openai.route
+            allowed = {"bedrock": ("openai", "bedrock"), "anthropic": ("bedrock", "anthropic")}.get(route, ("openai",))
+            if name not in allowed:
                 raise ProtocolFailure("Azure-only calls cannot use another provider")
-            name = "bedrock" if bedrock else name
+            name = {"bedrock": "bedrock", "anthropic": "anthropic_api"}.get(route, name)
         if name not in self._providers:
             if self._azure_openai is not None and name == "bedrock":
                 from taste.providers._bedrock import BedrockProvider
 
                 self._providers[name] = BedrockProvider(route=self._azure_openai)
+            elif self._azure_openai is not None and name == "anthropic_api":
+                from taste.providers._anthropic_route import AnthropicRouteProvider
+
+                self._providers[name] = AnthropicRouteProvider(route=self._azure_openai)
             elif self._azure_openai is not None:
                 from taste.providers._openai import OpenAIProvider
 

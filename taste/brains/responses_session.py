@@ -152,8 +152,8 @@ class ResponsesSession:
             raise ResponsesConflict("session binding differs from the Azure route")
         self.binding = binding
         # The adapter that wrote this route's receipts: Azure's Responses one,
-        # or Bedrock's Converse one.
-        self._provider = "bedrock" if azure.route == "bedrock" else "openai"
+        # Bedrock's Converse one, or Anthropic's Messages one.
+        self._provider = {"bedrock": "bedrock", "anthropic": "anthropic_api"}.get(azure.route, "openai")
         self.directory = Path(directory).absolute()
         self._pid = os.getpid()
         self._thread = threading.get_ident()

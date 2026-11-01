@@ -183,7 +183,9 @@ class TasteAgent(BaseAgent):
         instruction = branch_trial.branch_instruction(branch, task_instruction(settings, instruction))
         deadline, container_deadline = settings.deadlines(
             started, agent_timeout_seconds(self._task_toml, self.timeout_override))
-        endpoint, key = model_route(os.environ)
+        # The route the host names for this trial's own model (Claude may be on Anthropic's API while a
+        # reviewer's GPT-6 model stays on Bedrock).
+        endpoint, key = model_route(os.environ, model=settings.models[3])
         backend = await asyncio.to_thread(
             DockerTerminalBackend.admit, self.docker_socket, self._container, token, container_deadline,
             output_limit=MAX_TERMINAL_OUTPUT_BYTES, compose_project=self._project,
