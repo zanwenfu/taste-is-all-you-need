@@ -340,3 +340,36 @@ def test_an_agent_run_alone_on_the_anthropic_route_uses_its_api_model_id():
     assert (policy.planner_deployment, policy.worker_deployment) == ("fixed-plan", "claude-sonnet-5-5")
     config = policy.azure_config({"AZURE_OPENAI_BASE_URL": policy.endpoint, "AZURE_OPENAI_API_KEY": KEY})
     assert config.route == "anthropic"
+
+
+# ---------------------------------------------------------------- an organization key names its workspace
+
+WORKSPACE = "wrkspc_013testWorkspace0001"
+
+
+def test_an_organization_key_names_its_workspace_in_the_endpoint_and_each_request_carries_it(wire):
+    config = route(base_url=f"{ENDPOINT}/workspaces/{WORKSPACE}")
+    assert config.route == "anthropic" and config.anthropic_workspace == WORKSPACE
+    assert config.base_url == f"{ENDPOINT}/workspaces/{WORKSPACE}/"
+    assert route().anthropic_workspace is None
+    sent = wire(ok())
+    completion = ask(LLM(azure_openai=config))
+    assert str(sent[0].url) == ENDPOINT + "/v1/messages"
+    assert sent[0].headers["anthropic-workspace-id"] == WORKSPACE
+    assert completion.provenance["endpoint"] == config.base_url
+    # Without a workspace in the endpoint, no workspace header is sent.
+    sent.clear()
+    ask(LLM(azure_openai=route()))
+    assert "anthropic-workspace-id" not in sent[0].headers
+
+
+@pytest.mark.parametrize("path", ["/workspaces/", "/workspaces/default", "/workspaces/wrkspc_bad-id",
+                                  f"/workspaces/{WORKSPACE}/v1", f"/workspace/{WORKSPACE}"])
+def test_only_a_well_formed_workspace_path_is_admitted(path):
+    with pytest.raises(ProtocolFailure):
+        route(base_url=ENDPOINT + path)
+
+
+def test_the_host_names_the_workspace_in_taste_anthropic_url():
+    environment = {"TASTE_ANTHROPIC_URL": f"{ENDPOINT}/workspaces/{WORKSPACE}", "ANTHROPIC_API_KEY": KEY}
+    assert model_route(environment, model=SONNET) == (f"{ENDPOINT}/workspaces/{WORKSPACE}/", KEY)

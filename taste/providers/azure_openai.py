@@ -65,6 +65,9 @@ _BEDROCK_HOST = re.compile(r"bedrock-runtime\.[a-z]{2}(?:-[a-z]+)+-[0-9]\.amazon
 
 
 _ANTHROPIC_HOST = "api.anthropic.com"
+# An organization-level Anthropic key must name the workspace each request is billed to; the route names it in its
+# endpoint (https://api.anthropic.com/workspaces/<id>/), which every reply's provenance records.
+_ANTHROPIC_WORKSPACE_PATH = re.compile(r"/workspaces/(wrkspc_[A-Za-z0-9]{8,64})/?")
 
 
 def route_of(endpoint: str) -> str:
@@ -112,7 +115,8 @@ class AzureOpenAIConfig:
             parts.scheme != "https" or parts.query or parts.fragment
             or not (bedrock or anthropic or re.fullmatch(
                 r"[a-z0-9][a-z0-9-]*\.(?:openai\.azure\.com|services\.ai\.azure\.com)", parts.netloc))
-            or parts.path not in ({"", "/"} if bedrock or anthropic else {"/openai/v1", "/openai/v1/"})
+            or (parts.path not in ({"", "/"} if bedrock or anthropic else {"/openai/v1", "/openai/v1/"})
+                and not (anthropic and _ANTHROPIC_WORKSPACE_PATH.fullmatch(parts.path)))
             or self.base_url != self.base_url.strip()
         ):
             raise ProtocolFailure("Azure requires a resource HTTPS /openai/v1 endpoint, "
@@ -131,6 +135,14 @@ class AzureOpenAIConfig:
             if not bedrock and not anthropic and binding.model not in AZURE_MODELS:
                 raise ProtocolFailure("model is not served by an Azure deployment")
         object.__setattr__(self, "base_url", self.base_url.rstrip("/") + "/")
+
+    @property
+    def anthropic_workspace(self) -> str | None:
+        """The workspace an Anthropic route's requests are billed to, when its endpoint names one."""
+        if self.route != "anthropic":
+            return None
+        match = _ANTHROPIC_WORKSPACE_PATH.fullmatch(urlsplit(self.base_url).path)
+        return match.group(1) if match else None
 
     @property
     def route(self) -> str:

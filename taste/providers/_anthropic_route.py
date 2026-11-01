@@ -19,6 +19,11 @@ Messages API's usage buckets are disjoint: ``input_tokens`` excludes the cached
 reads (``cache_read_input_tokens``) and writes (``cache_creation_input_tokens``).
 Every bucket must be reported; absent is never taken as zero.
 
+**Workspace.** An organization-level key must name the workspace a request is
+billed to (Anthropic refuses it otherwise); the route's endpoint names it
+(``https://api.anthropic.com/workspaces/<id>/``) and it is sent as the
+``anthropic-workspace-id`` header.
+
 **Waits.** A request is sent again only when that is provably free: a 429 (rate
 limited) or a 529 (overloaded), both declined before processing, or a
 connection that was never made. Every other failure may hide a billed reply and
@@ -147,9 +152,12 @@ class AnthropicRouteProvider:
         import httpx
 
         client = self._ensure_client()
-        url = f"{self._route.base_url}v1/messages"
+        url = "https://api.anthropic.com/v1/messages"
         headers = {"x-api-key": self._route.api_key, "anthropic-version": API_VERSION,
                    "content-type": "application/json", "accept": "application/json"}
+        if self._route.anthropic_workspace:
+            # An organization key bills the workspace its route names.
+            headers["anthropic-workspace-id"] = self._route.anthropic_workspace
         content = json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
         deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
         waits: list[float] = []
