@@ -175,12 +175,13 @@ class Driver:
         name, trial = reference
         return next(summary for summary in self.jobs[name]["results"] if summary["trial"] == trial)
 
-    def harbor_job(self, name, run, settings, attempts, *, model=None, prepare=()):
+    def harbor_job(self, name, run, settings, attempts, *, model=None, prepare=(), env=None):
+        """``env``: environment this job adds to (or overrides in) the study's ``env``."""
         values = self.settings
         return jobs.harbor_job(name, tasks_dir=run["tasks_dir"], task=run["task"], attempts=attempts,
                                settings=settings, model=model or values["model"], jobs_dir=values["jobs_dir"],
                                run_harbor=values["run_harbor"], concurrent=values["concurrent"],
-                               env=values["env"], prepare=prepare)
+                               env={**values["env"], **(env or {})}, prepare=prepare)
 
     def script(self, token):
         """Where a trial's replay script is written, and the command that writes it."""
@@ -199,7 +200,7 @@ class Driver:
             for directory in dirs:
                 if str(directory) not in sources[kind]:
                     sources[kind].append(str(directory))
-        fresh = self.data["fresh"]
+        fresh, failed = self.data["fresh"], []
         for kind in ("calibration", "base"):
             for directory in sources[kind]:
                 for path in sorted(Path(directory).glob("*/result.json")):
@@ -215,7 +216,11 @@ class Driver:
                                                                       "seconds", "model", "exit_status",
                                                                       "agent_started")}}
                     if kind == "base" and summary["reward"] is not None and not summary["solved"]:
-                        self._add_run(summary, directory)
+                        failed.append((summary, directory))
+        # Runs are added once every run read here is in: a run's budget is the medians of all its task's runs read
+        # with it, not of those that came before it in name order (the main study's budgets were, 1-4 runs each).
+        for summary, directory in failed:
+            self._add_run(summary, directory)
 
     def fresh(self, task, kinds=("calibration", "base")):
         return [run for run in self.data["fresh"].values()

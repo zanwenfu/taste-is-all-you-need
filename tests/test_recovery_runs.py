@@ -547,5 +547,6 @@ def test_every_setting_of_the_driver_can_be_given_on_the_command_line():
         "recovery_runs_cli", Path(__file__).resolve().parents[1] / "scripts" / "recovery_runs.py")
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
-    handled = set(cli.OPTIONS) | {"recoveries", "rewind_sources", "ak", "checker_ak", "env", "prefetch"}
+    handled = set(cli.OPTIONS) | {"recoveries", "rewind_sources", "first_only", "ak", "checker_ak", "env",
+                                     "checker_env", "prefetch"}
     assert set(DEFAULTS) <= handled, sorted(set(DEFAULTS) - handled)

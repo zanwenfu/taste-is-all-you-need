@@ -7,6 +7,7 @@
         [--oracle highest_v|latest] [--repeats 3] [--prefix rec1] [--model gpt-6-luna] \\
         [--checker-model gpt-6-sol] [--checker-effort medium] [--mode restore|rebuild] \\
         [--budget-runs 2] [--checks-from /root/study/recoveries-first.json] \\
+        [--first-only retry_bare,continue_bare] [--checker-env SECRETS=/root/taste-secrets/azure.env] \\
         [--jobs-dir /root/study/jobs] [--trials /var/lib/taste-trials] \\
         [--launcher /root/study/rec-next.sh] [--max-trials 24] [--json /root/study/rec-summary.json]
 
@@ -80,6 +81,11 @@ def table(summary):
     return "\n".join(lines) + "\n"
 
 
+def names(raw):
+    """A comma-separated list as given: None when the flag is absent (the stored list stands), [] when it is empty."""
+    return None if raw is None else [name for name in raw.split(",") if name]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--state", required=True, type=Path, help="the study's state file (JSON)")
@@ -90,10 +96,14 @@ def main(argv=None):
     for name, kind in OPTIONS.items():
         flag = "--trials" if name == "trials_root" else "--" + name.replace("_", "-")
         parser.add_argument(flag, dest=name, type=kind, default=None)
-    parser.add_argument("--recoveries", help="comma-separated: " + ", ".join(RECOVERIES))
+    parser.add_argument("--recoveries", help="comma-separated: " + ", ".join(RECOVERIES) + " (\"\": none, a state that "
+                        "only checks the base runs)")
     parser.add_argument("--rewind-sources", help="comma-separated: " + ", ".join(SOURCES))
+    parser.add_argument("--first-only", help="comma-separated: arms whose episodes are round one only")
     parser.add_argument("--ak", action="append", help="NAME=VALUE: a setting every agent trial adds or overrides")
     parser.add_argument("--checker-ak", action="append", help="NAME=VALUE: a setting every checker trial adds")
+    parser.add_argument("--checker-env", action="append",
+                        help="NAME=VALUE: environment every checker job adds to --env (the reviewer's model route)")
     parser.add_argument("--env", action="append", help="NAME=VALUE: environment for run-harbor.sh")
     parser.add_argument("--close", action="append", default=[], help="take this job as finished with what it has")
     parser.add_argument("--launcher", type=Path, help="write the jobs to start to this shell script")
@@ -104,9 +114,9 @@ def main(argv=None):
     arguments = parser.parse_args(argv)
     given = {name: getattr(arguments, name) for name in OPTIONS}
     given.update(ak=pairs(arguments.ak), checker_ak=pairs(arguments.checker_ak), env=pairs(arguments.env),
-                 recoveries=arguments.recoveries.split(",") if arguments.recoveries else None,
-                 rewind_sources=arguments.rewind_sources.split(",") if arguments.rewind_sources else None)
-    unknown = set(given["recoveries"] or ()) - set(RECOVERIES)
+                 checker_env=pairs(arguments.checker_env), recoveries=names(arguments.recoveries),
+                 rewind_sources=names(arguments.rewind_sources), first_only=names(arguments.first_only))
+    unknown = (set(given["recoveries"] or ()) | set(given["first_only"] or ())) - set(RECOVERIES)
     unknown |= set(given["rewind_sources"] or ()) - set(SOURCES)
     if unknown:
         parser.error("unknown recoveries or rewind sources: " + ", ".join(sorted(unknown)))

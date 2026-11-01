@@ -84,6 +84,16 @@ another round (a round needs a tenth of the budget left, ``min_round_share``).
 A plain retry stays plain: its next round is another fresh trial, told
 nothing (``retry_rounds=continue`` continues it with feedback instead).
 
+An arm listed in ``first_only`` is the first attempt after the message and
+nothing more: its episode ends after round one ("first_only", or "done" when
+the reviewer accepts or, for a tests arm, the hidden tests pass), with no
+later round. A reviewer arm's round one is checked all the same, whatever
+budget is left, so that its verdicts can be compared with the other arms'.
+
+The checker's trials take ``checker_env`` over the study's ``env``: the
+reviewer can run on another model route than the agent (its own secrets file
+for run-harbor.sh).
+
 The budget is the agent's: its trials' dollars and time are charged to it,
 round after round. The checker's are added up beside it and reported, never
 charged: the same checker serves every recovery, and with a cheap agent model
@@ -178,7 +188,7 @@ HANDOFF_SECONDS, REPLY_RESERVE_SECONDS, PLAN_SECONDS = 150.0, 210.0, 90.0
 # Why a branch rebuilds a state an earlier study saved (prior_checkpoints "rebuild").
 PRIOR_CHECKPOINT = ("the checkpoint was saved by an earlier study, on a host that kept it, and this host does not "
                     "keep it, so the state is rebuilt from the record")
-ENDS = ("done", "budget", "no_submission", "agent_failed", "check_failed", "rewind_unfaithful")
+ENDS = ("done", "budget", "no_submission", "agent_failed", "check_failed", "rewind_unfaithful", "first_only")
 
 DEFAULTS = {
     **COMMON,
@@ -188,7 +198,10 @@ DEFAULTS = {
     "checker_model": jobs.CHECKER_MODEL,
     "checker_effort": "medium",
     "checker_ak": {},           # settings every checker trial adds or overrides
+    "checker_env": {},          # environment every checker job adds to or overrides in env (its model route)
     "recoveries": ["retry", "retry_feedback", "rewind", "continue"],
+    # Arms whose episodes are round one only (the first attempt after the message); a reviewer arm's is checked.
+    "first_only": [],
     "rewind_sources": list(SOURCES),
     "oracle": "highest_v",      # or "latest": which of the map's r* the oracle rewinds to
     "repeats": 3,
@@ -289,6 +302,13 @@ class RecoveryDriver(Driver):
         unknown = (set(settings["recoveries"]) - set(RECOVERIES)) | (set(settings["rewind_sources"]) - set(SOURCES))
         if unknown:
             raise ValueError("unknown recoveries or rewind sources: " + ", ".join(sorted(unknown)))
+        # The rewind-tools arms go on after a commit by design: round one only would cut their method short.
+        wrong = sorted(set(settings["first_only"]) - (set(RECOVERIES) - REWIND_ARMS))
+        if wrong:
+            raise ValueError("first_only names arms that are unknown or the rewind-tools arms: " + ", ".join(wrong))
+        env = settings["checker_env"]
+        if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+            raise ValueError("checker_env must map names to values (text)")
         if settings["repeats"] < 1 or settings["check_attempts"] < 1:
             raise ValueError("repeats and check_attempts must be positive")
         if not 0 <= settings["min_round_share"] < 1:
@@ -520,7 +540,8 @@ class RecoveryDriver(Driver):
         files = jobs.branch(script, source["steps"], mode="restore" if checkpoint else "rebuild",
                             checkpoint=checkpoint, live=False)
         settings = {**jobs.checker_trial(path, files, effort=values["checker_effort"]), **values["checker_ak"]}
-        self.emit(self.harbor_job(name, run, settings, 1, model=values["checker_model"], prepare=[export]),
+        self.emit(self.harbor_job(name, run, settings, 1, model=values["checker_model"], prepare=[export],
+                                  env=values["checker_env"]),
                   run=run_id, purpose="check", **meta, **_rebuilt(found, checkpoint))
         check["jobs"].append(name)
         return None
@@ -600,17 +621,22 @@ class RecoveryDriver(Driver):
             if agent["exit_status"] != "Submitted":
                 episode["end"] = "no_submission"
                 return
+            # Round one only: no later round, but a reviewer arm's round one is checked whatever budget is left.
+            first_only = arm["recovery"] in self.settings["first_only"]
             if MESSAGE[arm["recovery"]] == "tests":
                 # No checker: the hidden tests decide, and the next round is told what they failed.
                 if agent["solved"]:
                     episode["end"] = "done"
+                    return
+                if first_only:
+                    episode["end"] = "first_only"
                     return
                 if not self._room(run, episode, agent["settings"]):
                     episode["end"] = "budget"
                     return
                 episode["rounds"].append({"agent": None, "agent_jobs": [], "check": new_check()})
                 continue
-            if not self._room(run, episode, agent["settings"]):
+            if not first_only and not self._room(run, episode, agent["settings"]):
                 episode["end"] = "budget"
                 return
             check = current["check"]
@@ -626,6 +652,9 @@ class RecoveryDriver(Driver):
                 continue
             if self.trial(check["verdict"])["checker"]["verdict"] == "done":
                 episode["end"] = "done"
+                return
+            if first_only:
+                episode["end"] = "first_only"
                 return
             if not self._room(run, episode, agent["settings"]):
                 episode["end"] = "budget"
