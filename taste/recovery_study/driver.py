@@ -211,10 +211,11 @@ class Driver:
                     if not isinstance(result, dict) or not records.finished(result):
                         continue
                     summary = records.trial(path.parent, self.settings["trials_root"])
-                    fresh[key] = {"kind": kind, "job_dir": str(directory),
+                    fresh[key] = {"kind": kind, "job_dir": str(directory), "token": summary["token"],
                                   **{name: summary[name] for name in ("trial", "task", "reward", "solved", "cost_usd",
                                                                       "seconds", "model", "exit_status",
-                                                                      "agent_started")}}
+                                                                      "agent_started")},
+                                  **own_final(summary)}
                     if kind == "base" and summary["reward"] is not None and not summary["solved"]:
                         failed.append((summary, directory))
         # Runs are added once every run read here is in: a run's budget is the medians of all its task's runs read

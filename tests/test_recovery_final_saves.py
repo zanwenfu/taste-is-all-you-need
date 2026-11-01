@@ -110,3 +110,92 @@ def test_the_command_line_takes_save_final(tmp_path):
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
     assert cli.OPTIONS["save_final"]("true") is True and cli.OPTIONS["save_final"]("False") is False
+
+
+# Bounded disk: runs in waves, saves released once nothing will restore them -------------------------------------------
+
+def two_runs(tmp_path, **settings):
+    from tests.recovery_fakes import agent_steps, base_jobs
+
+    jobs_dir, trials = tmp_path / "jobs", tmp_path / "trials"
+    runs = base_jobs(jobs_dir, trials, [agent_steps(6, tests_pass_at=(3,)), agent_steps(7, tests_pass_at=(3,))],
+                     calibration=[(1.0, 0.5, 300.0), (0.0, 0.7, 600.0), (0.0, 0.9, 900.0)])
+    for run_id in runs:
+        base_saved(jobs_dir, run_id, name=f"base-final-{run_id[-6:]}")
+    given = {"jobs_dir": str(jobs_dir), "trials_root": str(trials), "run_harbor": "/opt/taste/run-harbor.sh",
+             "repeats": 2, "rewind_sources": ["rules"], "budget_runs": 1.0, "recoveries": ["retry", "continue"],
+             "save_final": True, **settings}
+    return jobs_dir, trials, given, runs
+
+
+def test_at_most_max_active_runs_runs_have_arms_in_progress(tmp_path):
+    from tests.test_recovery_runs import step
+
+    jobs_dir, trials, given, _ = two_runs(tmp_path, max_active_runs=1)
+    harbor, path = FakeHarbor(trials, saving(graded_recoveries())), tmp_path / "rec.json"
+    seen = []
+    for _ in range(60):
+        driver, emitted = step(path, given, jobs_dir)
+        active = [run_id for run_id, run in driver.runs.items()
+                  if run.get("arms") and not driver._run_done(run)]
+        seen.append(len(active))
+        if not emitted:
+            break
+        harbor.run(emitted)
+    assert max(seen) == 1
+    # Both runs were recovered in the end, one after the other.
+    assert all(driver._run_done(run) for run in driver.runs.values())
+
+
+def test_saves_are_released_when_their_episode_ends_and_a_base_save_when_its_run_ends(tmp_path):
+    from tests.test_recovery_runs import step
+
+    jobs_dir, trials, given, _ = two_runs(tmp_path, max_active_runs=1)
+    harbor, path = FakeHarbor(trials, saving(graded_recoveries())), tmp_path / "rec.json"
+    released_while = []
+    for _ in range(60):
+        driver, emitted = step(path, given, jobs_dir)
+        released = set(driver.released_saves())
+        ended = {name for run in driver.runs.values() for arm in (run.get("arms") or {}).values()
+                 for episode in arm["episodes"] if episode["end"] for name in driver._round_saves(episode)}
+        in_progress = {name for run in driver.runs.values() for arm in (run.get("arms") or {}).values()
+                       for episode in arm["episodes"] if not episode["end"] for name in driver._round_saves(episode)}
+        assert ended <= released and not (in_progress & released)
+        for run in driver.runs.values():
+            base = driver._base_save(run)
+            if base and run.get("arms") and not driver._run_done(run):
+                assert base not in released
+        released_while.append(released)
+        if not emitted:
+            break
+        harbor.run(emitted)
+    final = released_while[-1]
+    assert {driver._base_save(run) for run in driver.runs.values()} <= final
+    assert any("-final-" in name for name in final)
+
+
+def test_the_command_line_deletes_released_saves_under_the_checkpoints_root_once(tmp_path):
+    import importlib.util
+    from pathlib import Path
+
+    jobs_dir, trials, given, _ = two_runs(tmp_path)
+    root = tmp_path / "checkpoints"
+    given = {**given, "env": {"TASTE_CHECKPOINTS_ROOT": str(root)}}
+    harbor, path = FakeHarbor(trials, saving(graded_recoveries())), tmp_path / "rec.json"
+    from tests.test_recovery_runs import step
+    for _ in range(60):
+        driver, emitted = step(path, given, jobs_dir)
+        for name in driver.released_saves() + [n for r in driver.runs.values() for n in [driver._base_save(r)] if n]:
+            (root / name).mkdir(parents=True, exist_ok=True)
+        if not emitted:
+            break
+        harbor.run(emitted)
+    spec = importlib.util.spec_from_file_location(
+        "recovery_runs_cli_prune", Path(__file__).resolve().parents[1] / "scripts" / "recovery_runs.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    (root / "other-study-checkpoint").mkdir()
+    cli.main(["--state", str(path), "--prune-saves"])
+    assert sorted(p.name for p in root.iterdir()) == ["other-study-checkpoint"]
+    # A second pass finds nothing left to delete and fails on nothing.
+    cli.main(["--state", str(path), "--prune-saves"])

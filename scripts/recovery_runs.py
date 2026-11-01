@@ -44,11 +44,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from taste.benchmarks import branch_trial
 from taste.recovery_study import state
 from taste.recovery_study.driver import MAX_TRIALS, finish, harbor_unit_active, pairs, progress
 from taste.recovery_study.map_driver import MapDriver
@@ -60,7 +62,7 @@ OPTIONS = {"prefix": str, "model": str, "mode": str, "calibration_report": str, 
            "trials_root": str, "work_dir": str, "tasks_dir": str, "run_harbor": str, "export_template": str,
            "concurrent": int, "min_steps": int, "large_edit_lines": int, "attempts_factor": int, "checks_from": str,
            "prior_checkpoints": str, "arm_order_seed": int, "tests_feedback_chars": int, "tests_code_chars": int,
-           "tests_full_chars": int, "save_final": lambda raw: truth(raw)}
+           "tests_full_chars": int, "save_final": lambda raw: truth(raw), "max_active_runs": int}
 
 
 def truth(raw):
@@ -87,6 +89,22 @@ def table(summary):
         lines.append(f"| {run_id} | {run['task']} | {run['status']} | {budget['usd']:.3f} / {budget['seconds']:.0f} | "
                      f"{json.dumps(run['sources'], sort_keys=True)} | {'; '.join(arms)} |")
     return "\n".join(lines) + "\n"
+
+
+def prune(driver):
+    """Delete the released saves' directories under the state's checkpoints root, each once (recorded as pruned)."""
+    root = Path(driver.settings["env"].get("TASTE_CHECKPOINTS_ROOT") or branch_trial.CHECKPOINTS_ROOT)
+    pruned = driver.data.setdefault("pruned", [])
+    done = set(pruned)
+    for name in driver.released_saves():
+        if name in done:
+            continue
+        directory = branch_trial.checkpoint_directory(name, root)
+        if directory.parent == root and directory.is_dir() and not directory.is_symlink():
+            shutil.rmtree(directory)
+        pruned.append(name)
+    driver.save()
+    print(f"saves pruned: {len(pruned) - len(done)} now, {len(pruned)} in all", file=sys.stderr)
 
 
 def names(raw):
@@ -119,6 +137,9 @@ def main(argv=None):
     parser.add_argument("--max-trials", type=int, default=MAX_TRIALS,
                         help="the launcher's limit on the study's running trials (each running job's -n)")
     parser.add_argument("--json", type=Path, help="also write every run's summary here")
+    parser.add_argument("--prune-saves", action="store_true",
+                        help="delete the saved final states nothing in this state will restore again "
+                             "(released_saves), under its checkpoints root; each once")
     arguments = parser.parse_args(argv)
     given = {name: getattr(arguments, name) for name in OPTIONS}
     given.update(ak=pairs(arguments.ak), checker_ak=pairs(arguments.checker_ak), env=pairs(arguments.env),
@@ -140,6 +161,8 @@ def main(argv=None):
         status = finish(driver, arguments.launcher, arguments.max_trials,
                         f"recoveries {arguments.state}: {len(driver.new)} new jobs, {state.now()}",
                         spool=arguments.spool)
+        if arguments.prune_saves:
+            prune(driver)
         summary = driver.summary()
     if arguments.json:
         arguments.json.write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")

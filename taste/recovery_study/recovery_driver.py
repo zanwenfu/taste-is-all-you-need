@@ -213,6 +213,9 @@ DEFAULTS = {
     # it restore that save rather than rebuild the state by replay. A replay can never be faithful to a run that read
     # a background job's log after a sleep (Sonnet 5.5, Nov 1); a trial whose own save failed is rebuilt as before.
     "save_final": False,
+    # At most this many runs have arms in progress (0: every rejected run at once). Runs start in turn as others end;
+    # with released saves deleted (released_saves), the saved final states on disk stay bounded by it.
+    "max_active_runs": 0,
     "prefix_allowance": 300.0,  # seconds a branch's deadline adds for bringing its prefix back
     "min_round_usd": 0.0,       # dollars a round needs left, at least; and at least this share of the budget:
     "min_round_share": 0.1,
@@ -313,6 +316,9 @@ class RecoveryDriver(Driver):
         env = settings["checker_env"]
         if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
             raise ValueError("checker_env must map names to values (text)")
+        if isinstance(settings["max_active_runs"], bool) or not isinstance(settings["max_active_runs"], int) \
+                or settings["max_active_runs"] < 0:
+            raise ValueError("max_active_runs must be a whole number, 0 for no limit")
         if not isinstance(settings["save_final"], bool):
             raise ValueError("save_final must be true or false")
         if settings["repeats"] < 1 or settings["check_attempts"] < 1:
@@ -374,9 +380,19 @@ class RecoveryDriver(Driver):
     def advance(self):
         """Decide each run's next jobs and record them; the job specs this call started."""
         before = len(self.new)
-        for run_id, run in sorted(self.runs.items()):
+        limit = self.settings["max_active_runs"]
+        # Runs in progress first: one that ends here frees its place for a run waiting to start.
+        ordered = sorted(self.runs.items(), key=lambda item: (not item[1].get("arms"), item[0]))
+        active = None
+        for run_id, run in ordered:
             if run.get("skipped") or not self._initial_check(run_id, run):
                 continue
+            if not run["arms"]:
+                if active is None:
+                    active = sum(1 for other in self.runs.values() if other.get("arms") and not self._run_done(other))
+                if limit and active >= limit:
+                    continue  # its turn comes when a run in progress ends
+                active += 1
             self._sources(run_id, run)
             for name, recovery, step in self._ordered(run_id, run, self._arms(run)):
                 arm = run["arms"].setdefault(name, {
@@ -494,6 +510,54 @@ class RecoveryDriver(Driver):
         if checkpoint and values["prior_checkpoints"] == "rebuild" and not checkpoint.startswith(values["prefix"] + "-"):
             return None
         return checkpoint
+
+    # Saved final states ------------------------------------------------------
+
+    def _run_done(self, run):
+        """Every arm of the run has started and every episode of it has ended."""
+        arms = run.get("arms") or {}
+        return bool(arms) and len(arms) >= len(self._arms(run)) \
+            and all(episode["end"] for arm in arms.values() for episode in arm["episodes"])
+
+    @staticmethod
+    def _save_name(saved, setting, token):
+        return branch_trial.final_checkpoint_name(setting, token) if saved and setting and token else None
+
+    def _base_save(self, run):
+        base = run.get("base") or {}
+        return self._save_name(base.get("final_saved"), base.get("final_checkpoint"), base.get("token"))
+
+    def _round_saves(self, episode):
+        """The saves an episode's rounds made: each live trial's own, and any rebuilt for its check."""
+        names = []
+        for step in episode["rounds"]:
+            if step.get("agent"):
+                agent = self.trial(step["agent"])
+                names.append(self._save_name(agent.get("final_saved"), (agent.get("settings") or {})
+                                             .get("final_checkpoint"), agent.get("token")))
+            names += list(step["check"]["checkpoints"])
+        return [name for name in names if name]
+
+    def released_saves(self):
+        """The saved final states (checkpoint IDs) that nothing in this state will restore again: those of ended
+        episodes; a base run's once its run has ended or will start nothing (out, accepted, unchecked); a solved
+        base run's. A save still named by an episode or run in progress is never among them."""
+        released, needed = set(), set()
+        for run in self.runs.values():
+            ended = bool(run.get("skipped")) or run.get("status") in ("accepted", "check_failed") \
+                or self._run_done(run)
+            base = self._base_save(run)
+            if base:
+                (released if ended else needed).add(base)
+            for arm in (run.get("arms") or {}).values():
+                for episode in arm["episodes"]:
+                    (released if episode["end"] else needed).update(self._round_saves(episode))
+        for entry in self.data["fresh"].values():
+            if entry["kind"] == "base" and entry.get("solved"):
+                name = self._save_name(entry.get("final_saved"), entry.get("final_checkpoint"), entry.get("token"))
+                if name:
+                    released.add(name)
+        return sorted(released - needed)
 
     # Checks ----------------------------------------------------------------
 
