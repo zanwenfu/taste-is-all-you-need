@@ -228,3 +228,27 @@ def test_without_equal_allowance_only_branch_trials_get_the_extra_time(tmp_path)
              if job["purpose"] == "first"}
     deadline = {arm: int(settings[SETTING["deadline"]]) for arm, settings in first.items()}
     assert deadline["continue"] - deadline["retry"] == int(driver.settings["prefix_allowance"])
+
+
+# Keeping base saves (study S grid, Nov 2): a run whose every episode ended at once (its agent calls refused while
+# the account had no credit) counted as done, and the prune deleted its base save; the run was then started again and
+# could not restore it. With keep_base_saves no base save is released while the state lasts; episodes' saves still are.
+
+def test_with_keep_base_saves_no_base_save_is_released_but_episode_saves_are(tmp_path):
+    from tests.test_recovery_runs import step
+
+    jobs_dir, trials, given, _ = two_runs(tmp_path, keep_base_saves=True)
+    harbor, path = FakeHarbor(trials, saving(graded_recoveries())), tmp_path / "rec.json"
+    released = set()
+    for _ in range(60):
+        driver, emitted = step(path, given, jobs_dir)
+        released = set(driver.released_saves())
+        bases = {driver._base_save(run) for run in driver.runs.values()} - {None}
+        assert not (bases & released)
+        if not emitted:
+            break
+        harbor.run(emitted)
+    assert all(driver._run_done(run) for run in driver.runs.values() if run.get("arms"))
+    ended = {name for run in driver.runs.values() for arm in (run.get("arms") or {}).values()
+             for episode in arm["episodes"] for name in driver._round_saves(episode)}
+    assert ended and ended <= released

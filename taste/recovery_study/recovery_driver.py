@@ -221,6 +221,9 @@ DEFAULTS = {
     # extra time for carry-on arms, and on tasks solved in under a minute a fresh trial's deadline fell below the
     # harness's least (study S grid, Nov 2). Dollars still bind; time stays a generous, equal safety.
     "equal_allowance": False,
+    # No base run's save is released while the state lasts: a run that ended may be started again (study S grid,
+    # Nov 2: runs whose agent calls were all refused counted as done, lost their base saves, then were restarted).
+    "keep_base_saves": False,
     "min_round_usd": 0.0,       # dollars a round needs left, at least; and at least this share of the budget:
     "min_round_share": 0.1,
     "min_round_seconds": 0.0,   # 0: the trial's reply reserve and plan time, and a minute of work
@@ -323,6 +326,8 @@ class RecoveryDriver(Driver):
         if isinstance(settings["max_active_runs"], bool) or not isinstance(settings["max_active_runs"], int) \
                 or settings["max_active_runs"] < 0:
             raise ValueError("max_active_runs must be a whole number, 0 for no limit")
+        if not isinstance(settings["keep_base_saves"], bool):
+            raise ValueError("keep_base_saves must be true or false")
         if not isinstance(settings["equal_allowance"], bool):
             raise ValueError("equal_allowance must be true or false")
         if not isinstance(settings["save_final"], bool):
@@ -554,7 +559,7 @@ class RecoveryDriver(Driver):
                 or self._run_done(run)
             base = self._base_save(run)
             if base:
-                (released if ended else needed).add(base)
+                (released if ended and not self.settings["keep_base_saves"] else needed).add(base)
             for arm in (run.get("arms") or {}).values():
                 for episode in arm["episodes"]:
                     (released if episode["end"] else needed).update(self._round_saves(episode))
