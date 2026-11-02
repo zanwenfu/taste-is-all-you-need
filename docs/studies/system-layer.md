@@ -182,3 +182,23 @@ worker's file whole and the target's other files intact, 3 refused to repeat, an
 git found no damage. With the planner, checkpoint, terminal and worker paths,
 that is 280 points on a stand-in model and 156 on the real one.
 
+**Question 5 (2026-11-02).** 189 runs, 187 with both verdicts. Accuracy against
+the verifier: record critic 83.4%, live critic 84.0%, a difference of +0.6 points,
+task-clustered 95% interval [-5.3, +6.1], exact paired test p = 1.0. False
+rejections 15.0% and 11.3%, false acceptances 17.8% and 19.6%. All 189 saved
+states restored exactly. The live critic cost $0.37 in all.
+
+The planner's own decision to close, on the same runs, is right 84.5% of the time,
+so neither critic improves on it overall. The record critic agrees with that
+decision on 179 of 187 runs and the live critic on 160. Of 18 goals closed as
+complete that failed the verifier, the record critic caught 2 and the live critic
+7. Of 11 runs left open that passed, it recognised 1 and the live critic 6. The
+live critic pays for this with 10 false acceptances among 89 open failed runs,
+against 3, and 4 false rejections among 69 closed passed runs, against 2.
+
+**Amendment 7, added after seeing Question 5.** The record critic reads the
+planner's conclusions, so its agreement with the planner may be repetition. A
+third critic, exploratory and decided after the results, gets the same runs with
+the planner's reasons and assessments removed: what each worker was asked and the
+latest report.
+

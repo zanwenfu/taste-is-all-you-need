@@ -33,8 +33,8 @@ You review a coding agent's work. The agent was given a task, worked on it in a 
 whether its work does what the task asks.
 
 You cannot reach the container. All you have is the record kept in the run's git memory: the plans, what each worker \
-was asked to do, the planner's assessment of each criterion, and the workers' reports. The agent's and the planner's \
-statements are claims, not proof: weigh what they show.
+was asked to do, the planner's reasons and assessments where the record holds them, and the workers' reports. The \
+agent's and the planner's statements are claims, not proof: weigh what they show.
 
 Judge the task as written: do not add requirements it does not state, and do not reject work for its style. Where the \
 wording allows more than one reasonable reading, work that meets one of them meets it.
@@ -70,14 +70,19 @@ def last_report(repository):
     return _git(repository, "show", f"{refs[0]}:report.md") if len(refs) == 1 else ""
 
 
-def record_text(plans, report, limit=RECORD_CHARS):
-    """The run as git memory holds it, oldest plan first; cut from the front, so the latest work stays."""
+def record_text(plans, report, limit=RECORD_CHARS, conclusions=True):
+    """The run as git memory holds it, oldest plan first; cut from the front, so the latest work stays.
+
+    Without ``conclusions`` the planner's reasons and assessments are left out:
+    what was asked and what was reported remain.
+    """
     parts = []
     for plan in plans:
-        lines = [f"Plan {plan.get('generation')}: {plan.get('rationale', '')}"]
+        lines = [f"Plan {plan.get('generation')}: {plan.get('rationale', '')}" if conclusions
+                 else f"Plan {plan.get('generation')}"]
         for item in plan.get("assignments") or []:
             lines.append(f"  Assigned {item.get('assignment_id')}: {((item.get('contract') or {}).get('task') or '')}")
-        for item in plan.get("assessment") or []:
+        for item in (plan.get("assessment") or []) if conclusions else []:
             lines.append(f"  Assessed {item.get('verdict') or item.get('status')}: {item.get('evidence', '')}")
         parts.append("\n".join(lines))
     parts.append("Latest report:\n" + (report or "(none)"))
@@ -107,8 +112,8 @@ def inputs(arguments):
         plans = plans_of(repository)
         report = last_report(repository)
         instruction = (Path(arguments.tasks) / row["task"] / "instruction.md").read_text(encoding="utf-8")
-        final = plans[-1].get("rationale", "") if plans else ""
-        record = record_text(plans, report)
+        final = plans[-1].get("rationale", "") if plans and not arguments.facts_only else ""
+        record = record_text(plans, report, conclusions=not arguments.facts_only)
         task = checker_task(instruction, final, record)
         name = re.sub(r"[^A-Za-z0-9_-]", "-", row["trial"])
         (out / f"{name}.task.txt").write_text(task, encoding="utf-8")
@@ -241,6 +246,7 @@ def main(argv=None):
     make = commands.add_parser("inputs")
     for name in ("job", "trials", "tasks", "graded", "out"):
         make.add_argument("--" + name, required=True)
+    make.add_argument("--facts-only", action="store_true", help="leave out the planner's reasons and assessments")
     record = commands.add_parser("record")
     record.add_argument("--in", dest="input", required=True)
     record.add_argument("-n", type=int, default=16)

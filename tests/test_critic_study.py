@@ -20,6 +20,14 @@ def test_a_record_keeps_the_latest_work_when_it_must_be_cut():
     assert "Plan 1" in critic_study.record_text(plans, "the report")
 
 
+def test_a_facts_only_record_leaves_out_every_planner_conclusion():
+    plans = [{"generation": 1, "rationale": "the planner's view", "assignments": [{"assignment_id": "a", "contract": {"task": "do it"}}],
+              "assessment": [{"verdict": "met", "evidence": "the planner's evidence"}]}]
+    text = critic_study.record_text(plans, "the report", conclusions=False)
+    assert "do it" in text and "the report" in text
+    assert "the planner's view" not in text and "the planner's evidence" not in text
+
+
 def test_only_runs_whose_files_show_what_the_verifier_saw_are_sampled():
     rows = [{"trial": "kept", "kind": "final", "reward": 1.0, "state_reward": 1.0},
             {"trial": "live-process", "kind": "final", "reward": 1.0, "state_reward": 0.0},
