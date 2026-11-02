@@ -264,6 +264,23 @@ def test_the_store_is_bounded_per_checkpoint_and_in_total(tmp_path, monkeypatch)
     run(owner, scenario)
 
 
+def test_a_study_that_grades_each_save_may_raise_both_bounds(tmp_path, monkeypatch):
+    monkeypatch.setattr(terminal_broker, "CHECKPOINT_STORE_BYTES", 2000)
+    monkeypatch.setattr(terminal_broker, "CHECKPOINT_CAP_BYTES", 1500)
+    env = Checkpointing()
+    env.tar_bytes = 1000
+    owner = broker(tmp_path, env)
+    owner.checkpoint_cap_bytes, owner.checkpoint_store_bytes = 5000, 8000
+
+    async def scenario():
+        for number in (1, 2, 3):
+            await owner.execute(request(f"step_{number}", command=str(number)))
+            await owner.checkpoint(f"cp{number}")
+        assert [manifest.cap_bytes for manifest in env.taken] == [5000, 5000, 5000]
+
+    run(owner, scenario)
+
+
 def test_checkpoint_files_are_discarded_only_once_no_restore_can_follow(tmp_path):
     env = Checkpointing()
     env.tar_bytes = 500

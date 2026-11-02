@@ -169,6 +169,34 @@ def test_luna_is_asked_through_converse_with_its_tools_and_reasoning_effort(wire
     assert llm.stats.total_cost_usd == pytest.approx(billed)
 
 
+def test_a_reply_asked_for_as_json_is_held_to_one_object_with_its_reasoning_kept(wire):
+    # The planner asks for one JSON object. A forced tool would do it too, but
+    # Luna then answers without reasoning, which is a different planner.
+    sent = wire(ok({"text": '{"plan": []}'}))
+    completion = ask(LLM(azure_openai=route(), max_attempts=1), tools=None, json_output=True)
+
+    sent_body = body(sent[0])
+    assert completion.text_blocks == ('{"plan": []}',)
+    assert sent_body["additionalModelRequestFields"] == {"reasoning": {"effort": "medium"}}
+    text_format = sent_body["outputConfig"]["textFormat"]
+    assert text_format["type"] == "json_schema"
+    assert json.loads(text_format["structure"]["jsonSchema"]["schema"]) == {"type": "object"}
+    assert "toolConfig" not in sent_body
+
+
+def test_a_reply_not_asked_for_as_json_is_left_free(wire):
+    sent = wire(ok())
+    ask(LLM(azure_openai=route(), max_attempts=1), tools=None)
+    assert "outputConfig" not in body(sent[0])
+
+
+def test_claude_is_not_asked_for_a_json_reply_this_route_has_not_been_shown_to_give(wire):
+    sent = wire(ok())
+    with pytest.raises(ProtocolFailure, match="JSON"):
+        ask(LLM(azure_openai=route(), max_attempts=1), model=SONNET, tools=None, json_output=True)
+    assert sent == []
+
+
 def test_a_hosted_agents_responses_items_become_alternating_converse_turns(wire):
     # What mini-swe-agent sends after two steps on the Azure route: its
     # system and task messages, then each reply's items (reasoning encrypted

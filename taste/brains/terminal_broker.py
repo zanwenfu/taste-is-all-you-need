@@ -207,6 +207,10 @@ class TerminalBroker:
     def open(cls, directory: Path, binding: TerminalBinding, backend: TerminalBackend):
         return cls(Path(directory), binding, backend, fresh=False)
 
+    # None: the module's bounds. A study that grades every save raises them.
+    checkpoint_cap_bytes = None
+    checkpoint_store_bytes = None
+
     def __init__(self, directory, binding, backend, *, fresh):
         directory = directory.absolute()
         self.binding, self.backend = binding, backend
@@ -664,7 +668,8 @@ class TerminalBroker:
         self._ready_for_transport()
         used = sum(entry.stat().st_size for entry in store.iterdir()
                    if re.fullmatch(r"[0-9a-f]{64}\.tar", entry.name))
-        cap = min(CHECKPOINT_CAP_BYTES, CHECKPOINT_STORE_BYTES - used)
+        cap = min(self.checkpoint_cap_bytes or CHECKPOINT_CAP_BYTES,
+                  (self.checkpoint_store_bytes or CHECKPOINT_STORE_BYTES) - used)
         if cap <= 0:
             raise CheckpointStoreFull("the controller's checkpoint store is full")
         manifest = self.backend.checkpoint(store, cap_bytes=cap)

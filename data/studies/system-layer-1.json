@@ -1,0 +1,8 @@
+{
+  "study": "system-layer-1",
+  "protocol": "docs/studies/system-layer.md",
+  "registered": "2026-11-01",
+  "split_sha256": "363f6265d2b2ae1e412f8591877b22e5af29f49f4311dc0aebc8d0abc8669504",
+  "part": "test",
+  "trials_per_task_per_arm": 3
+}

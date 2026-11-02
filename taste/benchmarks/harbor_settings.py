@@ -87,6 +87,9 @@ class TrialSettings:
     # before the first worker or after a run, when the evidence shows later
     # work broke them (taste.brains.environment_records).
     rollback: str = "off"
+    # "on": a trial's checkpoint files outlive it, so that each can be graded
+    # later by the task's own verifier (taste.benchmarks.saved_state_agent).
+    keep_checkpoints: str = "off"
     # A branch of an earlier run of the agent alone (taste.brains.branch_replay):
     # the replay script (scripts/replay_script.py) and the step k it starts
     # from. "rebuild" runs the recorded commands 1..k again in the fresh task
@@ -217,6 +220,10 @@ class TrialSettings:
             raise ValueError("alone=continue runs the agent alone: it needs services none")
         if self.rollback not in ("off", "on"):
             raise ValueError("rollback must be off or on")
+        if self.keep_checkpoints not in ("off", "on"):
+            raise ValueError("keep_checkpoints must be off or on")
+        if self.keep_checkpoints == "on" and self.rollback != "on":
+            raise ValueError("keep_checkpoints=on needs rollback=on: only then are checkpoints taken")
         if self.rollback == "on" and self.services != "all":
             raise ValueError("rollback=on is decided by the coordinator: it needs services all")
         if self.planner_effort not in ("", *WORKER_EFFORTS):
@@ -337,7 +344,7 @@ class TrialSettings:
             terminal=TerminalWorkerPolicy(binding, self.command_seconds, workdir),
             planner_model=planner, worker_model=worker, worker_effort=self.worker_effort,
             worker_agent=self.agent, worker_uname=self.agent_uname, services=self.services,
-            rollback=self.rollback == "on",
+            rollback=self.rollback == "on", keep_checkpoints=self.keep_checkpoints == "on",
             planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
@@ -362,6 +369,7 @@ class TrialSettings:
                 **({"agent_uname": uname_override(self.agent_uname)} if self.agent_uname else {}),
                 **({"alone": self.alone} if self.services == "none" else {}),
                 **({"rollback": self.rollback} if self.rollback != "off" else {}),
+                **({"keep_checkpoints": self.keep_checkpoints} if self.keep_checkpoints != "off" else {}),
                 **({"branch": {"script": self.branch, "step": self.branch_step, "mode": self.branch_mode,
                                "live": self.branch_live, "tolerance": self.branch_tolerance,
                                **({"replay": self.branch_replay} if self.branch_replay != "auto" else {}),

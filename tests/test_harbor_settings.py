@@ -114,6 +114,17 @@ def test_the_continue_control_has_the_supervised_arms_generations():
     assert again.disclosure()["alone"] == "continue" and "alone" not in replace(once, services="all").disclosure()
 
 
+def test_saved_states_are_kept_for_later_grading_only_when_asked():
+    supervised = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent", "rollback": "on"})
+    keeping = replace(supervised, keep_checkpoints="on")
+    deadline = time.time() + 1500
+    on, off = policy_for(keeping, deadline), policy_for(supervised, deadline)
+    assert on.keep_checkpoints is True and off.keep_checkpoints is False
+    assert keeping.disclosure()["keep_checkpoints"] == "on" and "keep_checkpoints" not in supervised.disclosure()
+    assert "keep_checkpoints" not in off.to_dict() and on.to_dict()["keep_checkpoints"] is True
+    assert type(on).from_dict(on.to_dict()) == on
+
+
 def test_rollback_reaches_the_policy_and_the_disclosure_only_when_on():
     supervised = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent"})
     rolling = replace(supervised, rollback="on")
@@ -191,6 +202,8 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
     ({"agent": "mini-swe-agent", "alone": "twice"}, "alone must be once or continue"),
     ({"agent": "mini-swe-agent", "alone": "continue"}, "needs services none"),
     ({"rollback": "maybe"}, "rollback must be off or on"),
+    ({"keep_checkpoints": "maybe"}, "keep_checkpoints must be off or on"),
+    ({"keep_checkpoints": "on"}, "keep_checkpoints=on needs rollback=on"),
     ({"agent": "mini-swe-agent", "services": "none", "rollback": "on"}, "needs services all"),
     ({"worker_model": "claude"}, "model must be one of"),
     ({"spend_cap_usd": "0"}, "must be positive"),

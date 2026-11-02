@@ -77,6 +77,10 @@ _STOP_REASONS = {
 _CACHE_POINT = {"cachePoint": {"type": "default"}}
 
 
+_JSON_OBJECT_REPLY = {"textFormat": {"type": "json_schema", "structure": {"jsonSchema": {
+    "name": "reply", "schema": json.dumps({"type": "object"})}}}}
+
+
 class BedrockError(RuntimeError):
     """Bedrock answered with an error status: its type and message, never the request."""
 
@@ -123,10 +127,10 @@ class BedrockProvider:
     def complete(self, request: CompletionRequest) -> Completion:
         if type(request.max_tokens) is not int or request.max_tokens < 1:
             raise ProtocolFailure("max_tokens must be a positive integer")
-        if request.sampling.json_output:
-            raise ProtocolFailure("the Bedrock route has no JSON reply mode")
         binding = self._route.deployment_for(request.model)
         claude = binding.deployment.split(".")[1] == "anthropic"
+        if request.sampling.json_output and claude:
+            raise ProtocolFailure("this route has not been shown to hold Claude to a JSON reply")
         system, messages, dropped_items = _to_converse(request.system, request.messages)
         if claude:
             if system:
@@ -138,6 +142,11 @@ class BedrockProvider:
             body["system"] = system
         if request.tools:
             body["toolConfig"] = {"tools": [_to_tool(tool) for tool in request.tools]}
+        if request.sampling.json_output:
+            # Converse's own way to hold a reply to one JSON object. A forced
+            # tool does it too, but Luna then answers without reasoning (seen
+            # on the real service, 2026-11-01), which would be another planner.
+            body["outputConfig"] = _JSON_OBJECT_REPLY
         # temperature is never sent: the GPT-6 models refuse it beside a
         # reasoning effort, Claude Opus refuses it outright, and the hosted
         # agents' sessions send none. A drop is recorded, never hidden.

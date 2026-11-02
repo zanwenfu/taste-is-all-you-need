@@ -221,6 +221,25 @@ def test_release_discards_checkpoint_tars_and_keeps_their_manifests(trial):
     run_scenario(trial, scenario())
 
 
+def test_a_study_grading_each_saved_state_keeps_its_tars(trial):
+    async def scenario():
+        await trial.run(api_key="private-test-key")
+        store = trial.root / "controller/terminal/checkpoints"
+        store.mkdir(mode=0o700)
+        tar = "a" * 64 + ".tar"
+        (store / tar).write_bytes(b"x" * 100)
+        (store / "initial.json").write_text("{}")
+        trial.policy = replace(trial.policy, rollback=True, keep_checkpoints=True)
+        await trial.release()
+        assert sorted(item.name for item in store.iterdir()) == [tar, "initial.json"]
+    run_scenario(trial, scenario())
+
+
+def test_saves_a_study_will_grade_get_room_to_be_whole():
+    from taste.benchmarks.azure_terminal_trial import KEPT_CHECKPOINT_BYTES, KEPT_STORE_BYTES
+    assert KEPT_CHECKPOINT_BYTES == 4 * 1024 ** 3 and KEPT_STORE_BYTES == 32 * 1024 ** 3
+
+
 def test_release_of_an_unsealed_trial_stops_its_container(trial):
     async def scenario():
         await trial.release()

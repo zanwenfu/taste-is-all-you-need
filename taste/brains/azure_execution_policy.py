@@ -32,7 +32,7 @@ POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
                      "planner_effort": "", "request_seconds": None, "planner_model": AZURE_PLANNER_MODEL,
-                     "worker_agent": "", "worker_uname": "", "services": "all", "rollback": False, "branch": None}
+                     "worker_agent": "", "worker_uname": "", "services": "all", "rollback": False, "keep_checkpoints": False, "branch": None}
 SERVICES = ("all", "none")
 
 
@@ -87,6 +87,8 @@ class AzureExecutionPolicy:
     # The coordinator may return the task's files to a checkpoint taken before
     # the first worker or after a run (taste.brains.environment_records).
     rollback: bool = False
+    # A trial's checkpoint files outlive it, for grading each one afterwards.
+    keep_checkpoints: bool = False
     # The agent run alone continues an earlier run of it from step k
     # (taste.brains.branch_replay): the replay script, k, and what changes.
     branch: BranchPolicy | None = None
@@ -110,6 +112,8 @@ class AzureExecutionPolicy:
             raise ValueError("rollback must be true or false")
         if self.rollback and (self.terminal is None or self.services != "all"):
             raise ValueError("rollback needs a task terminal and a coordinator that plans")
+        if type(self.keep_checkpoints) is not bool or (self.keep_checkpoints and not self.rollback):
+            raise ValueError("keep_checkpoints must be true or false, and true only with rollback")
         if isinstance(self.branch, Mapping):
             object.__setattr__(self, "branch", BranchPolicy.from_dict(self.branch))
         if self.branch is not None and (not isinstance(self.branch, BranchPolicy)

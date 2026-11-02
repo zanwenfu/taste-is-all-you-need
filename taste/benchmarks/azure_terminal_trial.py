@@ -223,6 +223,13 @@ def cleanup_trial(directory, *, manager=None):
         os.close(fd)
 
 
+# A save over its bound is partial and cannot be graded, and the first study's
+# saves ran over the usual 512 MiB eight times in 31. Only a study that keeps
+# its saves to grade them pays for this room.
+KEPT_CHECKPOINT_BYTES = 4 * 1024 ** 3
+KEPT_STORE_BYTES = 32 * 1024 ** 3
+
+
 class AzureTerminalTrial:
     """One controller lifetime; recovery drains instead of restarting execution."""
 
@@ -325,6 +332,9 @@ class AzureTerminalTrial:
             config = prepared.value
             digest = self._input("goal.json", config.to_bytes())
             self.broker = TerminalBroker.create(self.root / "controller/terminal", self.policy.terminal.binding, self.backend)
+            if self.policy.keep_checkpoints:
+                self.broker.checkpoint_cap_bytes = KEPT_CHECKPOINT_BYTES
+                self.broker.checkpoint_store_bytes = KEPT_STORE_BYTES
             issuer = TerminalIssuerCredential(str(self.root / "rpc/terminal.sock"), os.geteuid(),
                 self.config["service_uid"], digest, self.policy.terminal, secrets.token_hex(32))
             self.service = TerminalService(self.broker, issuer=issuer)
@@ -425,6 +435,11 @@ class AzureTerminalTrial:
                 raise BaseExceptionGroup("terminal goal and cleanup failed", [original, failure]) from None
             raise
 
+    def _discard_checkpoint_files(self):
+        """Free a finished trial's checkpoint tars, unless a study keeps them to grade each one."""
+        if not self.policy.keep_checkpoints:
+            self.broker.discard_checkpoint_files()
+
     async def release(self):
         """Free this owner's resources and leave the sealed container to its grader.
 
@@ -444,7 +459,7 @@ class AzureTerminalTrial:
         await self.service.release()
         # Sealed: the container is never restored again, so its checkpoint
         # tars only fill the disk. The ledger keeps every checkpoint's record.
-        self.broker.discard_checkpoint_files()
+        self._discard_checkpoint_files()
         _write(self.fd, "handoff.json", _json_bytes({
             "schema": "taste.benchmarks/TerminalTrialHandoff/1",
             "container_id": self.backend.environment_id, "container_stopped": False,
@@ -498,7 +513,7 @@ class AzureTerminalTrial:
                 # Stopped: nothing will be restored. See release(). A broker
                 # whose service never started was never asked for a checkpoint.
                 if self.broker.phase in ("sealed", "stopped", "fenced"):
-                    self.broker.discard_checkpoint_files()
+                    self._discard_checkpoint_files()
                 self.broker.close()
             os.close(self.fd)
             self.closed = True
