@@ -23,7 +23,7 @@ def test_a_very_short_task_still_gets_time_to_start():
 
 
 def row(task, reward, before, **crash):
-    return {"task": task, "reward": reward, "before": before, "exception": None, "crash": crash}
+    return {"task": task, "reward": reward, "before": before, "exception": None, "stop": "complete", "crash": crash}
 
 
 def test_only_a_kill_that_landed_counts_as_a_recovery():
@@ -57,3 +57,16 @@ def test_the_comparison_is_per_task_against_the_runs_that_were_not_killed():
     assert summary["landed_tasks"]["mean_difference"] == -0.25
     assert summary["landed_tasks"]["better"] == 1 and summary["landed_tasks"]["worse"] == 1
     assert summary["all_tasks"]["tasks"] == 3
+
+
+def test_a_pass_from_work_done_before_the_kill_is_not_a_recovery():
+    died = row("a", 1.0, 1.0, landed=True, resumed=True, commands_repeated=0, paid_calls_repeated=0,
+               paid_calls_cut_off=1, recovery_seconds=0.1)
+    died["stop"] = None
+    kept = row("b", 1.0, 1.0, landed=True, resumed=True, commands_repeated=0, paid_calls_repeated=0,
+               paid_calls_cut_off=0, recovery_seconds=0.1)
+    kept["stop"] = "complete"
+    summary = crash_study.summarize([died, kept], resamples=200)
+    assert summary["failed_recoveries"] == 1 and summary["passed_without_recovering"] == 1
+    assert summary["solved_after_a_kill"] == 1
+

@@ -270,3 +270,20 @@ def test_complete_does_not_override_unsettled_or_over_budget_accounting(goal, ch
         budget[field] = ["unsettled"]
     outcome = settled_outcome(raw, SimpleNamespace(goal=goal))
     assert outcome.complete and not grading_ready(outcome)
+
+
+def test_a_failed_goal_leaves_its_reason_where_only_the_operator_reads_it(tmp_path, monkeypatch, capsys):
+    from taste.brains import azure_goal_handoff as handoff
+
+    def fails(*args, **kwargs):
+        raise RuntimeError("the reason it failed")
+
+    monkeypatch.setattr(handoff, "perform", fails)
+    output = tmp_path / "exchange"
+    output.mkdir(mode=0o700)
+    code = handoff.main(["--input", str(tmp_path / "in"), "--sha256", "0" * 64, "--output", str(output),
+                         "--operation", "run"])
+    assert code == 70 and "the reason it failed" not in capsys.readouterr().err
+    written = output / "failure.txt"
+    assert "the reason it failed" in written.read_text() and written.stat().st_mode & 0o077 == 0
+

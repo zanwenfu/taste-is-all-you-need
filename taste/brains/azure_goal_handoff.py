@@ -18,6 +18,7 @@ import re
 import stat
 import sys
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from taste.memstore.store import _check_name
 MAX_RESULT_BYTES = 1024 * 1024
 _PREPARATION_SCHEMA = "taste.brains/AzureGoalPreparation/1"
 _RESULT_SCHEMA = "taste.brains/AzureGoalHandoff/1"
+MAX_FAILURE_CHARS = 8000
 
 
 def preparation_bytes(repo_root, session, goal, policy, *, max_generations, wall_clock_seconds,
@@ -293,6 +295,17 @@ def perform(input_path, digest, output_dir, *, operation):
         os.close(fd)
 
 
+def _record_failure(directory, failure):
+    """Why the goal failed, for the operator: the journal keeps to the generic line above."""
+    try:
+        text = "".join(traceback.format_exception(failure))[-MAX_FAILURE_CHARS:]
+        fd = os.open(directory / "failure.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as written:
+            written.write(text)
+    except OSError:
+        pass  # Never let the record of a failure replace the failure.
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
@@ -304,8 +317,9 @@ def main(argv=None):
         perform(args.input, args.sha256, args.output, operation=args.operation)
     except (KeyboardInterrupt, asyncio.CancelledError):
         return 130
-    except BaseException:
+    except BaseException as failure:
         print("Azure goal handoff incomplete; retain state for recovery", file=sys.stderr)
+        _record_failure(args.output, failure)
         return 70
     return 0
 

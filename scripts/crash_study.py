@@ -106,16 +106,23 @@ def _difference(rows, resamples):
             "same": sum(value == 0 for value in differences)}
 
 
+def recovered(row):
+    """A new process started, the goal reached an end of its own, and the task was graded."""
+    return bool(row["crash"].get("resumed")) and row["stop"] is not None and row["reward"] is not None
+
+
 def summarize(rows, resamples=10_000):
     landed = [row for row in rows if row["crash"].get("landed")]
     resumed = [row for row in landed if row["crash"].get("resumed")]
     ungraded = [row for row in landed if row["reward"] is None]
+    failed = [row for row in landed if not recovered(row)]
     with_evidence = [row for row in landed if row["crash"].get("paid_calls_repeated") is not None]
     seconds = [row["crash"]["recovery_seconds"] for row in resumed if row["crash"].get("recovery_seconds") is not None]
     return {"runs": len(rows), "kills_landed": len(landed), "ended_before_the_kill": len(rows) - len(landed),
             "resumed": len(resumed), "not_resumed": len(landed) - len(resumed), "ungraded": len(ungraded),
-            "failed_recoveries": sum(not row["crash"].get("resumed") or row["reward"] is None for row in landed),
-            "solved_after_a_kill": sum(row["reward"] == 1.0 for row in landed),
+            "failed_recoveries": len(failed),
+            "passed_without_recovering": sum(row["reward"] == 1.0 for row in failed),
+            "solved_after_a_kill": sum(row["reward"] == 1.0 and recovered(row) for row in landed),
             "evidence_missing": len(landed) - len(with_evidence),
             "commands_repeated": sum(row["crash"].get("commands_repeated") or 0 for row in with_evidence),
             "paid_calls_repeated": sum(row["crash"].get("paid_calls_repeated") or 0 for row in with_evidence),
@@ -132,7 +139,8 @@ def report(arguments):
         rows.append({"task": row["task"], "before": row["before"], "reward": _reward(result),
                      "exception": (result.get("exception_info") or {}).get("exception_type"),
                      "cost": (result.get("agent_result") or {}).get("cost_usd"),
-                     "stop": _taste(result).get("stop_reason"), "crash": _taste(result).get("crash") or {}})
+                     "stop": _taste(result).get("stop_reason"), "flags": _taste(result).get("audit_flags"),
+                     "crash": _taste(result).get("crash") or {}})
     summary = summarize(rows)
     summary["model_usd"] = sum(row["cost"] or 0 for row in rows)
     Path(arguments.out).write_text(json.dumps({"summary": summary, "rows": rows}, indent=0))
