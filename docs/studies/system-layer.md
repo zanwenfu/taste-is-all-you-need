@@ -94,3 +94,21 @@ below with their date and reason, and none is made after looking at a test
 task's outcome except to report a defect in the run itself.
 
 ## Record
+
+**Amendments before any trial on these tasks (2026-11-01).**
+
+1. Each kept save may reach 4 GiB and a trial's store 32 GiB
+   (`KEPT_CHECKPOINT_BYTES`, `KEPT_STORE_BYTES`, and `--ak checkpoint_mib=4096`
+   for the final save), because a partial save cannot be graded. In the
+   rollback pilot 8 of 31 saves were partial at the usual bound.
+2. Question 2's measure is named: a lost win is a run that ended failed and held
+   an earlier saved state the verifier passes. It is reported separately from
+   a mid-run break, which a verifier-level check of saved states cannot see.
+3. Question 4 also reports the supervising layer's errors in both directions,
+   from the same trials: certifications of work the verifier failed, and
+   refusals of work it passed.
+4. Power. The interval over 20 tasks in the go/no-go implies a standard
+   deviation of about 0.29 for the per-task difference in share solved. Over 69
+   tasks that gives a 95% interval of about +-7 points, and about 80% power for
+   a gap near 10 points. A gap of 6 to 9 points may not be distinguishable.
+   Question 1 is reported as an interval for this reason.
