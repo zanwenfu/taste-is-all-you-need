@@ -23,19 +23,22 @@ power cut does to writes still in the page cache.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-PATHS = ("planner", "checkpoint")
+PATHS = ("planner", "checkpoint", "terminal")
 GIT_STEPS = ("commit_tree", "note_set", "cas_update_ref")
 
 
@@ -67,6 +70,10 @@ def install(boundaries):
     os.replace = boundaries.around(os.replace)
     for name in GIT_STEPS:
         setattr(backend.GitBackend, name, boundaries.around(getattr(backend.GitBackend, name)))
+    from taste.brains.terminal_broker import TerminalBroker
+
+    TerminalBroker._event = boundaries.around(TerminalBroker._event)
+    TerminalBroker._execute_backend = boundaries.around(TerminalBroker._execute_backend)
 
 
 class CountingModel:
@@ -152,7 +159,64 @@ def checkpoint_effect(root):
     return {"outcome": "saved", "read_back": saved}
 
 
-EFFECTS = {"planner": planner_effect, "checkpoint": checkpoint_effect}
+def terminal_effect(root):
+    from taste.brains.terminal_broker import (
+        TerminalBinding,
+        TerminalBroker,
+        TerminalConflict,
+        TerminalFenced,
+        TerminalRequest,
+        TerminalResult,
+    )
+
+    class Container:
+        """A task container whose command leaves one effect, logged durably before it answers."""
+
+        environment_id = "container_instance_123"
+
+        def execute(self, request):
+            with (root / "calls.log").open("a") as written:
+                written.write("command\n")
+                written.flush()
+                os.fsync(written.fileno())
+            return TerminalResult(0, b"done\n", b"")
+
+        def stop_and_confirm(self):
+            return self.environment_id
+
+    deadline = root / "deadline"
+    if not deadline.exists():
+        deadline.write_text(str(time.time() + 3600))
+    binding = TerminalBinding("trial_1", Container.environment_id, float(deadline.read_text()), 100)
+    directory = root / "terminal"
+    fresh = not (directory / "terminal.sqlite3").exists()
+    if fresh and directory.exists():
+        shutil.rmtree(directory)  # killed before the ledger existed: nothing was admitted
+    open_broker = TerminalBroker.create if fresh else TerminalBroker.open
+    try:
+        owner = open_broker(directory, binding, Container())
+    except (TerminalConflict, sqlite3.OperationalError) as refused:
+        # A ledger whose creation was cut short admitted no command. The trial
+        # owner never reopens one: it ends the trial, and so does the refusal.
+        return {"outcome": "refused_to_repeat", "why": f"unfinished ledger: {type(refused).__name__}"}
+
+    async def scenario():
+        request = TerminalRequest("effect_1", "worker_A", "write persistent effect", "/task", 3)
+        try:
+            result = await owner.execute(request)
+        except TerminalFenced as stopped:
+            # The owner confirms the container is stopped; only then may it close.
+            await owner.abort()
+            return {"outcome": "refused_to_repeat", "why": str(stopped)[:80], "phase": owner.phase}
+        return {"outcome": "completed", "exit": result.return_code, "phase": owner.phase}
+
+    try:
+        return asyncio.run(scenario())
+    finally:
+        owner.close()
+
+
+EFFECTS = {"planner": planner_effect, "checkpoint": checkpoint_effect, "terminal": terminal_effect}
 
 
 def child(path, root, kill_at):
