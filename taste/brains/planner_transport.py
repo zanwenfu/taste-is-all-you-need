@@ -58,6 +58,7 @@ PLANNER_TELEMETRY_SCHEMA = "taste.brains/PlannerTelemetry/1"
 PLANNER_RECEIPT_INTENT_SCHEMA = "taste.brains/PlannerReceiptIntent/1"
 PLANNER_RECEIPT_SCHEMA = "taste.brains/PlannerReceipt/2"
 PLANNER_RECEIPT_BRANCH = "planner-receipts"
+_ROUTE_PROVIDERS = {"bedrock": "bedrock", "anthropic": "anthropic_api"}
 PLANNER_TRANSPORT_ROOT = ".taste/planner/transport"
 
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
@@ -1196,7 +1197,10 @@ class LLMPlannerTransport:
             )
         try:
             price = ensure_priced(actual_model)
-            if provider != price.provider:
+            # The table names who sells a model, a reply who served it. On a
+            # routed model the route, checked exactly above, says who may.
+            served_by = _ROUTE_PROVIDERS.get((route or {}).get("route"))
+            if provider not in (price.provider, served_by):
                 return PlannerTelemetry.unknown(
                     source="provider_model_mismatch",
                     requested_model=self.model,

@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +18,7 @@ from taste.agents import HostedStop, ModelReply, ShellResult
 from taste.benchmarks.harbor_settings import TrialSettings, model_route
 from taste.brains.branch_replay import ReplayHost, request_sha
 from taste.brains.hosted_worker import _reply
+from taste.brains.planner_transport import LLMPlannerTransport
 from taste.brains.responses_session import ResponsesBinding, ResponsesSession
 from taste.llm import LLM, InfraFailure
 from taste.pricing import PRICES, call_cost, max_call_cost_usd
@@ -195,6 +198,26 @@ def test_claude_is_not_asked_for_a_json_reply_this_route_has_not_been_shown_to_g
     with pytest.raises(ProtocolFailure, match="JSON"):
         ask(LLM(azure_openai=route(), max_attempts=1), model=SONNET, tools=None, json_output=True)
     assert sent == []
+
+
+def test_a_planner_reply_on_this_route_has_a_known_cost(wire):
+    # The price table names who sells the model, the reply names who served it.
+    # The route they share is what makes the two agree; the planner's audit must
+    # not read that as a reply of unknown cost.
+    wire(ok({"text": '{"plan": []}'}))
+    llm = LLM(azure_openai=route(), max_attempts=1)
+    completion = ask(llm, tools=None, json_output=True)
+    telemetry = LLMPlannerTransport._telemetry(SimpleNamespace(llm=llm, model=AZURE_LUNA6_MODEL), completion)
+    assert telemetry.cost_known is True and telemetry.provider == "bedrock"
+    assert telemetry.billed_usd > 0
+
+
+def test_a_planner_reply_from_outside_its_route_stays_of_unknown_cost(wire):
+    wire(ok({"text": '{"plan": []}'}))
+    llm = LLM(azure_openai=route(), max_attempts=1)
+    completion = replace(ask(llm, tools=None, json_output=True), provider="somewhere-else")
+    telemetry = LLMPlannerTransport._telemetry(SimpleNamespace(llm=llm, model=AZURE_LUNA6_MODEL), completion)
+    assert telemetry.cost_known is False
 
 
 def test_a_hosted_agents_responses_items_become_alternating_converse_turns(wire):
