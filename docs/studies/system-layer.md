@@ -112,3 +112,14 @@ task's outcome except to report a defect in the run itself.
    tasks that gives a 95% interval of about +-7 points, and about 80% power for
    a gap near 10 points. A gap of 6 to 9 points may not be distinguishable.
    Question 1 is reported as an interval for this reason.
+5. The pilot's control disagreed once: a run the verifier passed scored 0 when
+   its final save was restored and graded (kv-store-grpc). The files came back
+   exact; the two tests that failed need a server still running, and a save
+   holds no processes. So a passing state is seen only where passing depends on
+   files. Question 2 is therefore a lower bound, and how many runs the control
+   shows depended on a live process is reported as a measure in its own right.
+6. Pilot results, tuning tasks, one trial per arm: 2 of 3 solved in each arm,
+   no exceptions or flags, 7 checkpoints with none failed or partial,
+   $0.003 per attempt alone and $0.05 supervised. Grading the 10 saved states
+   took 69 seconds. A first pilot found the planner refusing Bedrock's replies
+   as of unknown cost; fixed before this one.
