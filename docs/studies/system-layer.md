@@ -123,3 +123,31 @@ task's outcome except to report a defect in the run itself.
    $0.003 per attempt alone and $0.05 supervised. Grading the 10 saved states
    took 69 seconds. A first pilot found the planner refusing Bedrock's replies
    as of unknown cost; fixed before this one.
+
+**Run (2026-11-02, 12:06 to 6:30 am ET, code ce02a58).** All 414 trials graded
+but one; 1 trial raised (a verifier timeout on `mailman`). Model spend $18.78.
+
+Question 1. Solved 81 of 207 alone and 94 of 207 supervised: a mean per-task
+difference of +6.3 points, bootstrap 95% interval [0.0, +13.0], permutation
+p = 0.093, better on 16 tasks, worse on 7, same on 46. $0.0030 and $0.0877 per
+trial, about 29 times the cost. Leaving out the 4 tasks whose reference solution
+failed (`caffe-cifar-10`, `protein-assembly`, `qemu-alpine-ssh`, `qemu-startup`,
+which neither arm solved): +6.7 points, [0.0, +13.8].
+
+Question 2. 1,294 saves graded, 3 could not be. Control over 204 final saves:
+189 agree; 12 runs the verifier passed scored 0 from their files alone, on five
+service tasks (`git-multibranch`, `hf-model-inference`, `pypi-server`,
+`configure-git-webserver`, `mailman`); 2 failed runs scored 1 (`largest-eigenval`,
+a verifier that does not repeat); 1 run had no reward. Of 113 runs failed at
+their end, 3 held an earlier passing save. One of those also passes at its final
+save, so it is the same non-repeating verifier. That leaves 2 lost wins, 1.8% of
+failed runs (`model-extraction-relu-logits`, `sparql-university`), a lower bound.
+
+Question 4. 1,095 checkpoints, none failed, 5 partial. 5 trials rolled back, 6
+restores, all exact, the longest 8 seconds; 2 of the 5 trials ended solved. 21
+of 103 goals closed as complete failed the verifier; 75 submissions were refused
+in trials the verifier passed. 29 supervised trials and 6 alone are flagged, from
+about 35 worker model calls whose outcome is unknown, each kept on record as such.
+
+Question 3 and the hand check are not done yet.
+
