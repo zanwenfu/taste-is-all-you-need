@@ -59,7 +59,7 @@ def install(counter, mode):
                 assert number == 1, "fixture must not reissue undelivered work"
                 assignment = result["assignments"][0]
                 assignment["assignment_id"] = "terminal-result" if plans == 1 else f"terminal-result-{plans}"
-                assignment["contract"].update(identity="terminal-worker",
+                assignment["contract"].update(identity="terminal-worker" if plans == 1 else f"terminal-worker-{plans}",
                     task="Use terminal_exec to write correct to /tmp/agent-result, then write output.txt containing correct",
                     outputs=["output.txt"], success_criteria=["terminal result and evidence contain correct"])
                 assignment["outputs"][0].update(artifact_id="terminal-evidence", path="output.txt")

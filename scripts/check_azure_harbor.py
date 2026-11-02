@@ -242,10 +242,12 @@ async def check(args):
         ("sleep 35\n" if args.mode == "late-verifier" else "") +
         "python3 - <<'PY'\nfrom pathlib import Path\nimport json\n"
         "assert Path('/tmp/agent-result').read_bytes() == b'correct'\n"
-        "trace = json.loads(Path('/logs/agent/trajectory.json').read_bytes())\n"
-        "assert trace['extra']['evidence_complete']\n"
-        "assert trace['steps'][-1]['message'] == 'Wrote correct to /tmp/agent-result and retained the terminal evidence.'\n"
-        "assert len(trace['subagent_trajectories']) == 3\n"
+        "trace = json.loads(Path('/logs/agent/trajectory.json').read_bytes())\n" +
+        # A killed worker's own record ends where it died; the owner's checks read the crash's evidence.
+        ("" if args.mode == "crashed-goal" else
+         "assert trace['extra']['evidence_complete']\n"
+         "assert trace['steps'][-1]['message'] == 'Wrote correct to /tmp/agent-result and retained the terminal evidence.'\n"
+         "assert len(trace['subagent_trajectories']) == 3\n") +
         "Path('/logs/verifier/reward.txt').write_text('1\\n')\nPY\n")
     overlay = directory / "compose.json"
     overlay.write_text(json.dumps({"services": {"main": {
@@ -282,9 +284,12 @@ async def check(args):
         elif args.mode == "crashed-goal":
             # The whole goal died with a worker's paid call in flight. The container, its
             # terminal and its ledger lived on, and a new goal process finished from the records.
+            crash = trial.agent.owner.crash
+            report.update(crash=crash, request_counts=dict(counts), goal_outcome=trial.agent.owner.outcome.to_dict())
+            with sqlite3.connect((root / "controller/terminal/terminal.sqlite3").as_uri() + "?mode=ro", uri=True) as ledger:
+                report["terminal_requests"] = ledger.execute("SELECT id,status FROM requests").fetchall()
             assert result.exception_info is None, result.exception_info
             assert result.verifier_result.rewards == {"reward": 1.0}
-            crash = trial.agent.owner.crash
             assert crash["landed"] and crash["resumed"], crash
             assert crash["paid_calls_repeated"] == 0 and crash["paid_calls_cut_off"] >= 1, crash
             assert crash["commands_before"] == 1 and crash["commands_repeated"] == 1, crash
