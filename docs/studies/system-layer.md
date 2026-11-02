@@ -280,3 +280,28 @@ none wrong" held only for a world that stands still. The same fault fixed in
 October's terms in `_world_movement` covered a reply already received, not a call
 still out.
 
+**Crash study, first run (2026-11-02, 3:18 to 4:39 pm ET, code df1f90a).** 69 tasks
+once, 24 at a time, $4.09 of model time. Kills landed in 53 runs. 6 runs ended
+before their kill. 10 broke with no kill landed, all in the first 25 minutes:
+service manager timeouts while containers started and stopped, and a terminal that
+was not ready. Launching each task as its own job loaded the machine in a way the
+first study's single job did not, so these say nothing about recovery. The design
+counts them as ungraded and they are left out of what follows.
+
+Of the 53 landed kills, a new process started in every case, a median of 2.4 seconds
+later (longest 41), and 50 went on to end by themselves. 3 failed to recover, each by
+stopping and not by going on wrong: a `git` lock left by the kill, which needs a
+person to remove it (`headless-terminal`); a restarted process lost to a broken pipe,
+then a settlement refused because the control branch still looked held
+(`pytorch-model-cli`); and a coordinator record that changed identity on replay
+(`password-recovery`).
+
+Solved: 19 of the 50 that recovered, where those tasks' unkilled runs predict 20.3, a
+per-task difference of -2.7 points, 95% [-13.3, +8.0]. Over all 53, with the 3 failed
+recoveries counted as failures, -6.3 points, [-17.6, +5.0]. No paid call was sent
+twice. 45 were cut off in 39 runs, their answers lost and the question asked again. In
+26 of the 53 runs a new worker ran a command the killed one had run, 61 times in all:
+the record never repeats a command by itself, but a planner that has lost a worker's
+progress assigns the work again, and a command that is unsafe to repeat is not
+protected from that.
+
