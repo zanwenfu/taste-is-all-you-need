@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -214,6 +215,17 @@ def test_lost_compare_and_swap_publishes_nothing(store: Store) -> None:
         a.publish_state(built)
     assert a.head == winner
     assert a.head.read("f") == "1"
+
+
+def test_git_itself_finds_nothing_wrong_with_a_store(store: Store) -> None:
+    # A store holds more than a branch: its root commit is on the empty tree,
+    # which git answers for without storing and fsck then calls missing.
+    branch = store.branch("a")
+    branch.write("f", "1")
+    branch.checkpoint("one")
+    checked = subprocess.run(["git", "-C", str(store.root), "fsck", "--no-dangling", "--no-progress"],
+                             capture_output=True, text=True, check=False)
+    assert checked.returncode == 0, checked.stderr
 
 
 @pytest.mark.parametrize("fail_at", ["commit_tree", "note_meta", "note_manifest", "note_transcript", "cas"])

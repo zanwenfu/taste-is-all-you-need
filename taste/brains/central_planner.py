@@ -1861,6 +1861,14 @@ class CentralPlanner:
                 if branch in {self.control_branch, self.integration_branch}:
                     identity.pop("live", None)
                     identity.pop("holder", None)
+                if branch == self.control_branch:
+                    # So too the coordinator's own uncommitted files, such as
+                    # the request being written when the world was observed: a
+                    # restart reopens its branch without them, and that is not
+                    # a change in the world. Refusing here wrote "not called"
+                    # over a reply that had been paid for (scripts/kill_drill.py).
+                    identity.pop("dirty_paths", None)
+                    identity.pop("pending_diff", None)
             if observed_identity != expected_identity:
                 movement.append(
                     f"{branch}:observation:{expected_observation.observation_digest}"

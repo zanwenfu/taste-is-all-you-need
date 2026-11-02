@@ -1058,7 +1058,10 @@ class LLMPlannerTransport:
             raise PlannerReceiptError(
                 f"immutable planner transport record {path!r} disappeared from current state"
             )
-        if branch.dirty_paths():
+        # The one file allowed is this record: a process killed between writing
+        # it and committing it leaves exactly that, and the checkpoint below
+        # writes it again in full. Anything else could be smuggled into the commit.
+        if set(branch.dirty_paths()) - {path}:
             raise PlannerReceiptError(
                 f"planner transport cannot checkpoint dirty shared branch {branch.name!r}"
             )

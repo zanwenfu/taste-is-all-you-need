@@ -461,6 +461,10 @@ class GitBackend:
         return self.repo.git.write_tree()
 
     def commit_tree(self, tree: str, parents: list[str], message: str) -> str:
+        if tree == EMPTY_TREE:
+            # git answers for the empty tree without storing it, and fsck then
+            # reports the commit's tree as missing.
+            self.repo.git.hash_object("-t", "tree", "-w", os.devnull)
         args: list[str] = [tree]
         for p in parents:
             args += ["-p", p]
