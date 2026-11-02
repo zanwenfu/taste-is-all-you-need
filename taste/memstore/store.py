@@ -527,6 +527,11 @@ class Branch:
             self.backend = store._open_worktree(name, repair=repair)
             self._assert_same_repo()
             self._require_attached_worktree()
+            # A holder that was killed may have left git's lock files. Ours is
+            # the lease now, and its git commands kept it alive, so none lives.
+            self.backend.hold_lease(self._lease.fileno())
+            with self.backend.lock():
+                self.backend.clear_abandoned_locks(self.ref)
         except BaseException:
             self.release()
             if hasattr(self, "backend"):
@@ -558,6 +563,8 @@ class Branch:
         lock rather than a record in the store.
         """
         if self._lease is not None:
+            if hasattr(self, "backend"):
+                self.backend.hold_lease(None)
             # Clear the label but keep the file: unlinking it would let the
             # next process flock a different inode and believe it held the
             # same lease.
@@ -955,6 +962,19 @@ class Branch:
                 attempt=attempt,
             )
             return self.publish_state(built)
+
+    @_serialized_branch_mutation
+    def discard_uncommitted(self) -> list[str]:
+        """Drop whatever is not committed, and return the paths.
+
+        Only for a ledger, a branch whose every record is committed as it is
+        written: what such a branch holds uncommitted was never recorded, and is
+        the debris of a writer that died. The next ``stage_all`` would otherwise
+        carry it into a commit of someone else's. A worker's uncommitted files
+        are its work, and are never dropped.
+        """
+        with self.backend.lock():
+            return self.backend.discard_uncommitted()
 
     @_serialized_branch_mutation
     def build(

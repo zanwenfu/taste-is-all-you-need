@@ -29,7 +29,9 @@ import contextlib
 import fcntl
 import hashlib
 import os
+import shutil
 import stat
+import subprocess
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
@@ -37,9 +39,9 @@ from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import IO, Concatenate, ParamSpec, TypeVar, cast
+from typing import IO, Any, Concatenate, ParamSpec, TypeVar, cast
 
-from git import Repo
+from git import Git, Repo
 from git.exc import BadName, BadObject, GitCommandError
 from git.objects import Blob, Commit, Tree
 from git.refs import SymbolicReference
@@ -131,9 +133,59 @@ def _serialized_object_read(
     @wraps(method)
     def wrapped(self: GitBackend, *args: _P.args, **kwargs: _P.kwargs) -> _R:
         with self._object_lock:
-            return method(self, *args, **kwargs)
+            try:
+                return method(self, *args, **kwargs)
+            except BrokenPipeError:
+                # Stopping a service signals every process in it, so the
+                # persistent reader can die before the code that is still
+                # writing the service's last records. A new one answers.
+                self._drop_object_readers()
+                return method(self, *args, **kwargs)
 
     return wrapped
+
+
+class _LockKeepingGit(Git):
+    """Git commands that keep their caller's kernel locks for as long as they live.
+
+    ``flock`` belongs to the open file description, so a child that inherits it
+    holds the lock until it exits, even if its parent is killed first. That
+    turns "we hold the lock" into proof that no git started under it is still
+    running, which is what makes it safe to remove a lock file git left behind.
+
+    Persistent readers are left out: they hold no lock files and outlive their
+    parent for a moment, which would read as a busy branch.
+    """
+
+    held_fds: Callable[[], tuple[int, ...]] | None = None
+
+    def execute(self, command: Any, *args: Any, **kwargs: Any) -> Any:
+        fds = self.held_fds() if self.held_fds is not None and not kwargs.get("as_process") else ()
+        if fds:
+            kwargs["pass_fds"] = fds
+        return super().execute(command, *args, **kwargs)
+
+
+class _Repo(Repo):
+    GitCommandWrapperType = _LockKeepingGit
+
+
+def _open_elsewhere(path: Path) -> bool:
+    """Whether a process may have ``path`` open. True when that cannot be told."""
+    target = str(path.resolve())
+    if Path("/proc/self/fd").is_dir():
+        for process in Path("/proc").iterdir():
+            if process.name.isdigit():
+                with contextlib.suppress(OSError):  # Gone already, or another user's.
+                    for fd in (process / "fd").iterdir():
+                        with contextlib.suppress(OSError):
+                            if os.readlink(fd) == target:
+                                return True
+        return False
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        return True
+    return subprocess.run([lsof, "-t", "--", target], capture_output=True, check=False).returncode == 0
 
 
 def _is_full_object_id(value: str) -> bool:
@@ -191,13 +243,19 @@ class GitBackend:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path).resolve()
-        self.repo = Repo(self.path)
+        self.repo = _Repo(self.path)
+        self._lease_fd: int | None = None
+        self.repo.git.held_fds = self._held_fds
         if self.repo.bare:
             raise ValueError(f"{self.path} is bare; the memory layer needs a working tree")
         # A full object id must mean its hashed bytes.  Git normally lets a
         # mutable refs/replace entry reinterpret even an explicit SHA, which
         # would invalidate every exact-id cache below.
         self.repo.git.update_environment(GIT_NO_REPLACE_OBJECTS="1")
+        # ``status`` and ``diff`` otherwise take index.lock to refresh the index
+        # when they happen to be able to. A reader of another brain's worktree
+        # would then hold a lock file without holding that branch's lease.
+        self.repo.git.update_environment(GIT_OPTIONAL_LOCKS="0")
         # GitPython multiplexes object reads through one persistent
         # ``cat-file --batch`` stream per Repo.  Concurrent reads otherwise
         # consume one another's headers and corrupt the protocol.
@@ -236,7 +294,61 @@ class GitBackend:
 
     def close(self) -> None:
         with self._object_lock:
+            self._drop_object_readers()
             self.repo.close()
+
+    def _drop_object_readers(self) -> None:
+        """Forget the persistent readers. One that has died cannot be flushed and closed."""
+        git = self.repo.git
+        readers = (git.cat_file_all, git.cat_file_header)
+        git.cat_file_all = git.cat_file_header = None
+        for reader in readers:
+            if reader is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    reader.__del__()
+
+    # ---------------------------------------------------------------- crash debris
+
+    def hold_lease(self, fd: int | None) -> None:
+        """Have every git command run here keep this branch's lease alive."""
+        self._lease_fd = fd
+
+    def _held_fds(self) -> tuple[int, ...]:
+        fds = [] if self._lease_fd is None else [self._lease_fd]
+        common = getattr(self, "_common_dir", None)
+        held = None if common is None else _HELD.get((common / "memstore.lock", threading.get_ident()))
+        if held is not None:
+            fds.append(held[0].fileno())
+        return tuple(fds)
+
+    def clear_abandoned_locks(self, ref: str) -> list[str]:
+        """Remove the lock files a killed git left, and return them.
+
+        The caller holds this working tree's lease and the repository lock.
+        Every git started here inherits whichever of those it ran under (see
+        ``_LockKeepingGit``), so holding them proves none of ours is alive; the
+        index, this branch's head and ref are written only under the lease, and
+        notes only under the repository lock. No other lock file has that
+        proof, so no other is touched. A file something still has open stays,
+        and git goes on refusing it as it would have.
+        """
+        admin = Path(self.repo.git_dir)
+        candidates = [admin / "index.lock", admin / "HEAD.lock", self.common_dir / f"{ref}.lock",
+                      *(self.common_dir / "refs" / "notes").glob("**/*.lock")]
+        cleared = []
+        for path in candidates:
+            if path.exists() and not _open_elsewhere(path):
+                path.unlink()
+                cleared.append(str(path))
+        return cleared
+
+    def discard_uncommitted(self) -> list[str]:
+        """Put index and working tree back to HEAD, and return what was dropped."""
+        dirty = self.dirty_paths()
+        if dirty:
+            self.repo.git.reset("--hard")
+            self.repo.git.clean("-ffdx")
+        return dirty
 
     @property
     def common_dir(self) -> Path:

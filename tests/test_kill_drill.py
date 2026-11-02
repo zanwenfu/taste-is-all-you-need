@@ -76,3 +76,25 @@ def test_after_a_moved_world_every_paid_call_must_be_on_the_record():
     assert kill_drill.verdict({**asked_again, "calls": 3}) == ["a paid call is missing from the record"]
     assert kill_drill.verdict({**asked_again, "world_moves": False}) == ["a paid call was made twice"]
 
+
+@pytest.mark.parametrize("path", ["git-index", "git-ref", "git-notes"])
+def test_a_kill_inside_a_git_command_leaves_nothing_that_stops_the_restart(path):
+    record = kill_drill.one_point(path, 1)
+    assert record["reached"], "the child must die by the signal at this point"
+    assert kill_drill.verdict(record) == [], record.get("recovery")
+    assert record["recovery"]["outcome"] == "saved"
+
+
+@pytest.mark.parametrize("kill_at", range(1, 40, 3))
+def test_a_record_caught_between_its_write_and_its_commit_does_not_ride_into_a_later_commit(kill_at):
+    record = kill_drill.one_point("record", kill_at)
+    assert record["reached"], "the child must die by the signal at this point"
+    assert kill_drill.verdict(record) == [], record.get("recovery")
+
+
+@pytest.mark.parametrize("read_back, wrong", [("the work", False), ("the work\n", False), ("the wor", True), (None, True)])
+def test_saved_work_is_compared_with_what_was_written(read_back, wrong):
+    record = {"reached": True, "recovery_exit": 0, "calls": 0, "git": "clean",
+              "recovery": {"outcome": "saved", "read_back": read_back}}
+    assert bool(kill_drill.verdict(record)) is wrong
+

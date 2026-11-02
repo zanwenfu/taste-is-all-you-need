@@ -305,3 +305,48 @@ the record never repeats a command by itself, but a planner that has lost a work
 progress assigns the work again, and a command that is unsafe to repeat is not
 protected from that.
 
+**Correction to the first run's restart time.** `recovery_seconds` measures how soon
+the owner asked for the new process, not how soon it ran: on one task it was 2.3
+seconds and the process took 146. So "a median of 2.4 seconds" above is the request
+and not the restart. The first command after a kill came a median of 77.5 seconds
+later, the longest 906.
+
+**Amendment 9, what those failures were and what changed (2026-11-02).** Each was
+reproduced first, by `scripts/kill_drill.py` or from the run's retained records.
+
+A kill inside git. `headless-terminal` died inside `git add`, which left
+`index.lock`, and recovery stopped at "remove the file manually". The same holds for
+the ref and notes locks (`git-index`, `git-ref`, `git-notes`, killed from inside the
+command by a clean filter and a reference-transaction hook). Every git command now
+inherits the kernel locks its caller holds, the branch lease and the repository
+lock, so an orphaned git keeps them until it exits. Whoever then holds them can prove
+no git of ours is alive, and removes the index, head and own-ref locks under the
+lease and the notes locks under the repository lock, unless a process still has the
+file open. Optional locks are off, so a reader's `git status` cannot hold one. No
+other lock file is touched. A git that outlives its parent now holds up the restart
+until it exits; that is the price of the proof.
+
+A dead writer's file in a later commit. `password-recovery` was killed with cycle
+14's result written but not committed. The restart's next `git add --all` carried
+that file into a commit of its own, and when the restart finished the cycle with its
+own result the ledger refused it as "changed identity". The check was right and is
+unchanged. The coordinator's branches now drop anything uncommitted when opened
+(`open_coordinator_branch`), since a record is durable only once committed. A
+worker's uncommitted files are its work and are kept.
+
+Settlement beside a living goal. `pytorch-model-cli` was not a dead holder that
+looked alive. The service manager was overloaded, so the new goal took 146 seconds
+to start, its launch timed out, and the owner settled while it was still running:
+its failure path proved only the first goal drained. The owner now proves the resumed
+goal drained, asking again if the manager is slow, and if it cannot, does not settle.
+The broken pipe was a symptom. Stopping a service signals every process in it,
+including the persistent git reader, and the goal's own closing records then failed.
+Reads now start a new reader, and closing no longer fails on a dead one.
+
+The report and the launch. The report counted a broken run as "ended before the
+kill" and a goal stopped by a fault as recovered. It now puts each run in exactly one
+of four classes, and only a goal that reached an end of its own, with no fault
+recorded, is clean. Starts are spaced 10 seconds apart, wait while the service manager
+is slow to answer, run one host check, and default to 16 at once. The cause of the
+overload was not measured; the rate of starts is what differed from the first study.
+

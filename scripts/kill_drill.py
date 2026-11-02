@@ -39,7 +39,23 @@ from pathlib import Path
 from types import SimpleNamespace
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-PATHS = ("planner", "planner-moved", "checkpoint", "terminal", "worker", "delivery")
+PATHS = ("planner", "planner-moved", "checkpoint", "terminal", "worker", "delivery", "record",
+         "git-index", "git-ref", "git-notes")
+# Killed from inside the git command, with its locks held, not at a step of ours.
+GIT_PATHS = {"git-index": "", "git-ref": "refs/heads/", "git-notes": "refs/notes/"}
+RECORD = "cycles/00000014/result.json"
+DIE = '''die() {
+    left=$(cat "$KILL_DRILL_COUNT" 2>/dev/null)
+    [ -n "$left" ] || return 0
+    if [ "$left" -le 1 ]; then
+        rm -f "$KILL_DRILL_COUNT"
+        kill -9 "$KILL_DRILL_PID" "$PPID"
+        sleep 5
+    else
+        echo $((left - 1)) > "$KILL_DRILL_COUNT"
+    fi
+}
+'''
 DELIVERED = "NEW = 1\n"
 KEPT = "base file\n"
 BEDROCK_URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
@@ -129,6 +145,7 @@ def live_model(root):
 
 def planner_effect(root, world_moves=False):
     """``world_moves``: as in a real run, the restarted runtime writes to control before it plans again."""
+    from taste.brains.central_host import open_coordinator_branch
     from taste.brains.central_planner import (
         PLANNER_SYSTEM,
         CentralPlanner,
@@ -147,8 +164,8 @@ def planner_effect(root, world_moves=False):
     integration = store.branch("integration", producer="central-integration")
     integration.close()
     lock = threading.RLock()
-    control = store.branch("central-control", producer="drill")
-    journal = store.branch(PLANNER_RECEIPT_BRANCH, producer="drill")
+    control = open_coordinator_branch(store, "central-control", producer="drill")
+    journal = open_coordinator_branch(store, PLANNER_RECEIPT_BRANCH, producer="drill")
     if os.environ.get("KILL_DRILL_LIVE"):
         # The real planner on the real model: recovery runs against a live reply.
         transport = LLMPlannerTransport(live_model(root), store=store, control=control, journal=journal,
@@ -346,15 +363,83 @@ def delivery_effect(root):
         store.close()
 
 
+def record_effect(root):
+    """A cycle's result caught between its write and its commit, then the restart's next record.
+
+    The restart finishes the unfinished cycle, as ``_begin_cycle`` does, with an
+    answer of its own. The dead process's file must not ride into a later commit.
+    """
+    from taste.brains.central_host import open_coordinator_branch
+    from taste.brains.central_runtime import CentralRuntime
+    from taste.memstore import Store
+
+    store = Store.open(root / "repo", "drill")
+    control = open_coordinator_branch(store, "central-control", producer="central-runtime")
+    runtime = SimpleNamespace(control=control, control_lock=threading.RLock(), store=store)
+    try:
+        if control.head.read(RECORD) is not None:
+            return {"outcome": "recorded", "by": "the first process"}
+        status = "replanned" if RECOVERING else "running"
+        if RECOVERING:
+            CentralRuntime._immutable(runtime, "cycles/00000014/decision.json", {"after": "restart"}, "a decision")
+        CentralRuntime._immutable(runtime, RECORD, {"status": status}, "central cycle")
+        return {"outcome": "recorded", "by": "the restart" if RECOVERING else "the first process"}
+    finally:
+        store.close()
+
+
+def git_prepare(root):
+    """A branch to work on, and the means to die inside git with its locks held."""
+    from taste.memstore import Store
+
+    store = Store.open(root / "repo", "drill")
+    store.branch("worker", producer="drill").close()
+    common = store.backend.common_dir
+    (common / "info").mkdir(exist_ok=True)
+    (common / "info" / "attributes").write_text("*.die filter=drill\n")
+    hooks = root / "hooks"
+    hooks.mkdir()
+    clean = root / "clean"
+    # A clean filter runs while ``git add`` holds index.lock.
+    clean.write_text(f"#!/bin/sh\n{DIE}[ -z \"$KILL_DRILL_REF\" ] && die\ncat\n")
+    # This hook runs with the transaction's ref locks held.
+    hook = hooks / "reference-transaction"
+    hook.write_text(f"#!/bin/sh\n{DIE}[ \"$1\" = prepared ] || exit 0\n[ -n \"$KILL_DRILL_REF\" ] || exit 0\n"
+                    "grep -q \"$KILL_DRILL_REF\" && die\nexit 0\n")
+    clean.chmod(0o755)
+    hook.chmod(0o755)
+    store.backend.repo.git.config("filter.drill.clean", str(clean))
+    store.backend.repo.git.config("core.hooksPath", str(hooks))
+    store.close()
+
+
+def git_effect(root, ref, kill_at):
+    from taste.memstore import Store
+
+    if kill_at:
+        (root / "armed").write_text(str(kill_at))
+        os.environ.update(KILL_DRILL_COUNT=str(root / "armed"), KILL_DRILL_PID=str(os.getpid()), KILL_DRILL_REF=ref)
+    store = Store.open(root / "repo", "drill")
+    branch = store.branch("worker", producer="drill")
+    branch.write("work.die", "the work\n")
+    branch.checkpoint("the work is done")
+    saved = branch.head.read("work.die")
+    store.close()
+    return {"outcome": "saved", "read_back": saved}
+
+
 EFFECTS = {"planner": planner_effect, "planner-moved": lambda root: planner_effect(root, world_moves=True),
            "checkpoint": checkpoint_effect, "terminal": terminal_effect, "worker": worker_effect,
-           "delivery": delivery_effect}
-PREPARE = {"delivery": delivery_prepare}
+           "delivery": delivery_effect, "record": record_effect}
+PREPARE = {"delivery": delivery_prepare, **dict.fromkeys(GIT_PATHS, git_prepare)}
 
 
 def child(path, root, kill_at):
     global RECOVERING
     RECOVERING = not kill_at
+    if path in GIT_PATHS:
+        print(json.dumps(git_effect(Path(root), GIT_PATHS[path], kill_at)), flush=True)
+        return
     if kill_at:
         install(Boundaries(kill_at))
     print(json.dumps(EFFECTS[path](Path(root))), flush=True)
@@ -423,6 +508,9 @@ def verdict(record):
     if record["git"] not in ("clean", "no store yet", "no repository yet"):
         wrong.append("git found damage")
     recovery = record.get("recovery")
+    if isinstance(recovery, dict) and recovery["outcome"] == "saved" and (
+            (recovery.get("read_back") or "").rstrip("\n") != "the work"):
+        wrong.append("the saved work is not what was written")
     if isinstance(recovery, dict) and recovery["outcome"] in ("delivered", "conflict", "refused_to_repeat"):
         if recovery["outcome"] == "conflict":
             wrong.append("a clean delivery ended in a conflict")

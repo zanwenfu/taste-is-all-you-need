@@ -553,6 +553,55 @@ def test_a_resumed_goal_that_cannot_start_is_settled_and_still_graded(trial, mon
     run_scenario(trial, scenario())
 
 
+def failing_to_resume(trial, monkeypatch, *, stops_that_fail):
+    """Launching the new goal timed out, and stopping it times out too, while it is alive."""
+    crashing(trial)
+    monkeypatch.setattr("taste.benchmarks.azure_terminal_trial.DRAIN_RETRY_SECONDS", 0)
+    original = trial._operation
+    failing = {"left": stops_that_fail}
+    order = []
+
+    def operation(name, *args, **kwargs):
+        service = original(name, *args, **kwargs)
+        order.append((name, failing["left"]))
+        if name == "resume":
+            async def run(*, timeout_seconds):
+                raise RuntimeError("the manager never acknowledged the launch")
+
+            async def stop_async(reason):
+                if failing["left"]:
+                    failing["left"] -= 1
+                    raise RuntimeError("stopping the service timed out")
+                return {"processes_stopped": True}
+            service.run = run
+            service.scope.stop_async = stop_async
+        return service
+    monkeypatch.setattr(trial, "_operation", operation)
+    return order
+
+
+def test_settlement_waits_until_a_resumed_goal_is_proved_drained(trial, monkeypatch):
+    """Settlement opens the same branches. On a real task it started beside the living goal,
+    found the branch held, and the run's record was lost."""
+    order = failing_to_resume(trial, monkeypatch, stops_that_fail=2)
+
+    async def scenario():
+        outcome = await trial.run(api_key="private-test-key")
+        assert outcome.complete and trial.sealed and "goal_service_failed" in trial.audit_flags
+        assert dict(order)["settle"] == 0, "settlement began only once the resumed scope had drained"
+    run_scenario(trial, scenario())
+
+
+def test_a_resumed_goal_that_cannot_be_proved_drained_is_never_settled_beside(trial, monkeypatch):
+    order = failing_to_resume(trial, monkeypatch, stops_that_fail=99)
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="timed out"):
+            await trial.run(api_key="private-test-key")
+        assert "settle" not in dict(order)
+    run_scenario(trial, scenario())
+
+
 def test_a_crash_record_that_cannot_be_written_does_not_cost_the_handoff(trial, monkeypatch):
     crashing(trial)
     monkeypatch.setattr("taste.benchmarks.crash_evidence.read_evidence",

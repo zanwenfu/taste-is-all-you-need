@@ -318,6 +318,23 @@ class CentralRuntimeHost:
         self.close()
 
 
+def open_coordinator_branch(store: Store, name: str, *, producer: str) -> Branch:
+    """Open a branch of records, each of which is committed as it is written.
+
+    A record is durable once committed and not before. So what a dead process
+    left in the working tree was never recorded, and must not ride into this
+    process's next commit: there it became a record the restart had not written,
+    which the ledger then refused as "changed identity" (scripts/kill_drill.py).
+    """
+    branch = store.branch(name, producer=producer)
+    try:
+        branch.discard_uncommitted()
+    except BaseException:
+        branch.close()
+        raise
+    return branch
+
+
 def compose_central_runtime(
     repo_root: Path | str,
     session: str,
@@ -435,7 +452,7 @@ def compose_central_runtime(
         if opened_store is None:
             opened_store = Store.open(root, session)
         if opened_control is None:
-            opened_control = opened_store.branch(control_branch, producer="central-runtime")
+            opened_control = open_coordinator_branch(opened_store, control_branch, producer="central-runtime")
         if opened_integration is None:
             opened_integration = opened_store.branch(
                 integration_branch, producer="central-integration"
@@ -446,9 +463,8 @@ def compose_central_runtime(
         concrete_transport = transport
         if concrete_transport is None:
             if opened_planner_journal is None:
-                opened_planner_journal = opened_store.branch(
-                    planner_journal_branch,
-                    producer="central-planner-receipts",
+                opened_planner_journal = open_coordinator_branch(
+                    opened_store, planner_journal_branch, producer="central-planner-receipts"
                 )
                 owns_planner_journal = True
             if concrete_llm is None:

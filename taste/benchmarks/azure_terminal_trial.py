@@ -49,6 +49,7 @@ _SCHEMA = "taste.benchmarks/AzureTerminalTrial/1"
 _OPERATIONS = ("prepare", "run", "resume", "settle")
 # Credential-free settlement: reopening the goal and exporting its evidence.
 SETTLE_SECONDS = 90
+DRAIN_RETRY_SECONDS = 5
 # How long the hand-off to grading waits for a command still being ended (#49).
 GRADING_IDLE_SECONDS = COMMAND_SETTLE_SECONDS + 10
 # Preparation is a few seconds of local work. Measured at 7 s alone, it shares
@@ -232,6 +233,17 @@ KEPT_CHECKPOINT_BYTES = 4 * 1024 ** 3
 KEPT_STORE_BYTES = 32 * 1024 ** 3
 
 
+async def _prove_drained(scope, reason, attempts=3):
+    """Stop a scope, asking again if its manager is too slow to say, which does not mean it is gone."""
+    for left in range(attempts - 1, -1, -1):
+        try:
+            return await scope.stop_async(reason)
+        except Exception:
+            if not left:
+                raise
+            await asyncio.sleep(DRAIN_RETRY_SECONDS)
+
+
 async def _finished(task, seconds=None):
     """Whether a goal service ended within ``seconds``. A cancellation drains it, then is reported."""
     try:
@@ -303,7 +315,7 @@ class AzureTerminalTrial:
             instance.outcome = None
             instance.trajectory_path = None
             instance.audit_flags = ()
-            instance.crash = instance._crash_mark = None
+            instance.crash = instance._crash_mark = instance.resumed = None
             instance.preparation_sha = instance._input("prepare.json", raw)
             return instance
         except BaseException:
@@ -385,6 +397,11 @@ class AzureTerminalTrial:
                 # Never start settlement until original-scope drainage is
                 # proved. A missing launch acknowledgement cannot pass here.
                 await runner.scope.stop_async("settle terminal goal after execution failure")
+                if self.resumed is not None:
+                    # Settlement opens the same branches, so it never starts
+                    # beside a goal that may be alive: if drainage cannot be
+                    # proved, this ends the trial.
+                    await _prove_drained(self.resumed.scope, "settle a resumed goal after execution failure")
                 flags.append("goal_service_failed")
             try:
                 trajectory_sha, settled_sha = None, None
@@ -496,20 +513,17 @@ class AzureTerminalTrial:
         self.crash.update(landed=True, killed_unix=killed)
         if asyncio.current_task().cancelling():
             raise asyncio.CancelledError  # Its time limit arrived during the kill: nothing left to resume.
-        second = self._operation("resume", "goal.json", digest, credential=credential, operation="run")
+        second = self.resumed = self._operation("resume", "goal.json", digest, credential=credential,
+                                                operation="run")
         resumed = time.time()
         self.crash.update(resumed=True, resumed_unix=resumed, recovery_seconds=round(resumed - killed, 3),
                           first_command_seconds=None)
         again = asyncio.ensure_future(second.run(timeout_seconds=self._goal_seconds()))
-        try:
-            while not await _finished(again, 1.0):
-                if (self.crash["first_command_seconds"] is None
-                        and crash_evidence.commands_since(ledger, self._crash_mark)):
-                    self.crash["first_command_seconds"] = round(time.time() - killed, 3)
-            return again.result()
-        except Exception:
-            await second.scope.stop_async("settle a resumed goal after execution failure")
-            raise
+        while not await _finished(again, 1.0):
+            if (self.crash["first_command_seconds"] is None
+                    and crash_evidence.commands_since(ledger, self._crash_mark)):
+                self.crash["first_command_seconds"] = round(time.time() - killed, 3)
+        return again.result()
 
     def _record_crash(self):
         """What a report reads. After the seal, with no await, so it can neither delay nor cost the handoff."""
