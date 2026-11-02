@@ -485,3 +485,32 @@ def test_a_script_records_its_schema_and_submission():
     value = recorder.script().to_dict()
     assert value["schema"] == SCRIPT_SCHEMA and value["submission_step"] == 3
     assert value["steps"][2]["runs"][0]["output"] == f"{SENTINEL}\n"
+
+
+# A save's size cap (study S, Nov 1): Sonnet's Go runs leave 0.6-1.4 GB of build cache, over the 512 MiB default, so
+# their saves came out partial and could not be restored. A study may raise the cap for its saves (checkpoint_mib).
+
+def test_a_trial_may_raise_its_saves_size_cap_within_bounds():
+    assert TrialSettings.from_options(ALONE).checkpoint_mib == 0
+    assert branch_trial.cap_bytes(TrialSettings.from_options(ALONE)) is None
+    raised = TrialSettings.from_options({**ALONE, "checkpoint_mib": "3072"})
+    assert branch_trial.cap_bytes(raised) == 3072 * 1024 * 1024
+    for bad in ("-1", "32", "9000"):
+        with pytest.raises(ValueError, match="checkpoint_mib"):
+            TrialSettings.from_options({**ALONE, "checkpoint_mib": bad})
+
+
+def test_a_final_save_passes_the_cap_to_the_backend_only_when_one_is_set(tmp_path):
+    manifest = CheckpointManifest("c" * 64, "sha256:" + "d" * 64, "e" * 64 + ".tar", "e" * 64, 10,
+                                  (("/app/x", "added"),), ("/app/x",), (), (), (), 1.0)
+    calls = []
+
+    class Backend:
+        def checkpoint(self, target, **options):
+            calls.append(options)
+            (target / manifest.tar).write_bytes(b"tar")
+            return manifest
+
+    assert branch_trial.save_final_checkpoint(Backend(), tmp_path / "a", "t")["saved"]
+    assert branch_trial.save_final_checkpoint(Backend(), tmp_path / "b", "t", cap_bytes=2 ** 31)["saved"]
+    assert calls == [{}, {"cap_bytes": 2 ** 31}]

@@ -272,11 +272,11 @@ class TasteAgent(BaseAgent):
                 and settings.branch_mode == "rebuild" and settings.branch_live == "off"):
             saves.append((summary["branch"], "saved_checkpoint", lambda: branch_trial.save_checkpoint(
                 backend, self._checkpoint(settings.branch_checkpoint), branch, settings.branch_step,
-                summary["branch"].get("account"), token)))
+                summary["branch"].get("account"), token, cap_bytes=branch_trial.cap_bytes(settings))))
         if settings.final_checkpoint:
             saves.append((summary, "final_checkpoint", lambda: branch_trial.save_final_checkpoint(
                 backend, self._checkpoint(branch_trial.final_checkpoint_name(settings.final_checkpoint, token)),
-                token)))
+                token, cap_bytes=branch_trial.cap_bytes(settings))))
         for where, key, save in saves:
             try:
                 where[key] = await asyncio.to_thread(save)

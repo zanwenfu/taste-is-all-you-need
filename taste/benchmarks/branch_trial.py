@@ -195,23 +195,28 @@ def restore_checkpoint(backend, directory, inputs, step):
     return {**receipt.summary(), "directory": str(directory), **changed_paths(manifest)}
 
 
-def save_checkpoint(backend, directory, inputs, step, replay, trial):
+def cap_bytes(settings):
+    """A trial's save size cap in bytes (checkpoint_mib), or None for the backend's default (512 MiB)."""
+    return settings.checkpoint_mib * 1024 * 1024 if settings.checkpoint_mib else None
+
+
+def save_checkpoint(backend, directory, inputs, step, replay, trial, *, cap_bytes=None):
     """Save the container's files, which are those of step k after a faithful rebuild with live off."""
     if not (isinstance(replay, dict) and replay.get("faithful") is True):
         return {"saved": False, "reason": "the branch was not faithful"}
-    return _save(backend, Path(directory), {**_identity(inputs, step), "trial": trial, "replay": replay})
+    return _save(backend, Path(directory), {**_identity(inputs, step), "trial": trial, "replay": replay}, cap_bytes)
 
 
-def save_final_checkpoint(backend, directory, trial):
+def save_final_checkpoint(backend, directory, trial, *, cap_bytes=None):
     """Save the container's files as the trial left them, before its verifier runs."""
-    return _save(backend, Path(directory), {"schema": IDENTITY_SCHEMA, "trial": trial, "final": True})
+    return _save(backend, Path(directory), {"schema": IDENTITY_SCHEMA, "trial": trial, "final": True}, cap_bytes)
 
 
-def _save(backend, directory, identity):
+def _save(backend, directory, identity, cap_bytes=None):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if (directory / MANIFEST).exists() or (directory / IDENTITY).exists():
         return {"saved": False, "reason": "the directory already holds a checkpoint"}
-    manifest = backend.checkpoint(directory)
+    manifest = backend.checkpoint(directory, cap_bytes=cap_bytes) if cap_bytes else backend.checkpoint(directory)
     _write(directory / IDENTITY, {**identity, "image": manifest.image})
     # The manifest last: a directory with one holds a whole checkpoint.
     _write(directory / MANIFEST, manifest.to_dict())

@@ -128,6 +128,9 @@ class TrialSettings:
     # a checker's trial restores (branch_mode=restore, branch_step = the run's
     # last step).
     final_checkpoint: str = ""
+    # A save's size cap in MiB (0: the 512 MiB default). Over it a save is partial and cannot be restored; a study
+    # whose runs leave large build caches (Sonnet's Go runs: 0.6-1.4 GB) raises it. 64-8192.
+    checkpoint_mib: int = 0
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
     # little: 47 to 70 reasoning tokens on one small puzzle from low to high,
@@ -194,6 +197,8 @@ class TrialSettings:
                 raise ValueError(f"{name} must be positive and finite")
         if self.lost_workers < 0 or self.max_assignments < 1:
             raise ValueError("lost_workers and max_assignments must be nonnegative and positive")
+        if self.checkpoint_mib and not 64 <= self.checkpoint_mib <= 8192:
+            raise ValueError("checkpoint_mib must be 0 (the 512 MiB default) or 64-8192")
         # Refused when the agent is built, not when the first plan is made.
         if self.worker_effort not in WORKER_EFFORTS:
             raise ValueError("worker reasoning effort must be low, medium or high")
