@@ -34,11 +34,12 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-PATHS = ("planner", "checkpoint", "terminal")
+PATHS = ("planner", "checkpoint", "terminal", "worker")
 GIT_STEPS = ("commit_tree", "note_set", "cas_update_ref")
 
 
@@ -74,6 +75,10 @@ def install(boundaries):
 
     TerminalBroker._event = boundaries.around(TerminalBroker._event)
     TerminalBroker._execute_backend = boundaries.around(TerminalBroker._execute_backend)
+    from taste.brains.responses_session import ResponsesSession
+
+    ResponsesSession._save_receipt = boundaries.around(ResponsesSession._save_receipt)
+    ResponsesSession._dispatch = boundaries.around(ResponsesSession._dispatch)
 
 
 class CountingModel:
@@ -216,7 +221,60 @@ def terminal_effect(root):
         owner.close()
 
 
-EFFECTS = {"planner": planner_effect, "checkpoint": checkpoint_effect, "terminal": terminal_effect}
+def worker_effect(root):
+    """Two turns of a worker's model journal, on the Bedrock route, against a provider that logs each call."""
+    import httpx
+
+    from taste.brains.responses_session import ResponsesBinding, ResponsesFenced, ResponsesSession
+    from taste.providers.azure_openai import AZURE_LUNA6_MODEL
+    from tests.test_bedrock_provider import ENDPOINT, converse, route
+
+    def provider(wire):
+        turn = json.loads(wire.content)["messages"][-1]["content"][0]["text"]
+        with (root / "calls.log").open("a") as written:
+            written.write(turn + "\n")
+            written.flush()
+            os.fsync(written.fileno())
+        return httpx.Response(200, json=converse({"text": "Done."}), headers={"x-amzn-requestid": "req-drill"})
+
+    real = httpx.Client
+
+    class Client(real):
+        def __init__(self, **options):
+            super().__init__(**options, transport=httpx.MockTransport(provider))
+
+    httpx.Client = Client
+    deadline = root / "deadline"
+    if not deadline.exists():
+        deadline.write_text(str(time.time() + 3600))
+    limits = ResponsesBinding(run_id="worker-run.drill", model=AZURE_LUNA6_MODEL, endpoint=ENDPOINT + "/",
+                              deployment="global.openai.gpt-6-luna", budget_usd=30, max_calls=4,
+                              max_output_tokens=128, deadline_unix=float(deadline.read_text()))
+    directory = root / "session"
+    fresh = not (directory / "calls.sqlite3").exists()
+    if fresh and directory.exists():
+        shutil.rmtree(directory)  # killed before the journal existed: no call was admitted
+    session = (ResponsesSession.create if fresh else ResponsesSession.open)(directory, limits, route())
+
+    async def scenario():
+        answers = []
+        for turn in ("turn-1", "turn-2"):
+            try:
+                await session.complete(turn, system="Read precisely.", messages=[{"role": "user", "content": turn}])
+                answers.append("answered")
+            except ResponsesFenced as stopped:
+                return {"outcome": "refused_to_repeat", "why": str(stopped)[:70], "answers": answers,
+                        "unsettled": session.unsettled}
+        return {"outcome": "completed", "answers": answers, "unsettled": session.unsettled}
+
+    try:
+        return asyncio.run(scenario())
+    finally:
+        session.close()
+
+
+EFFECTS = {"planner": planner_effect, "checkpoint": checkpoint_effect, "terminal": terminal_effect,
+           "worker": worker_effect}
 
 
 def child(path, root, kill_at):
@@ -259,7 +317,8 @@ def one_point(path, kill_at, keep=None):
             recovery_exit=recovered.returncode,
             recovery=json.loads(recovered.stdout.splitlines()[-1]) if recovered.returncode == 0 else
             recovered.stderr[-400:],
-            calls=len(calls.read_text().splitlines()) if calls.exists() else 0, git=fsck(root))
+            calls=max(Counter(calls.read_text().splitlines()).values(), default=0) if calls.exists() else 0,
+            git=fsck(root))
         return record
     finally:
         if not keep:
