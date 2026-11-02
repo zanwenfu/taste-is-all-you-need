@@ -249,3 +249,20 @@ with a paid call in flight on a mocked wire, which then ran again and settled.
 with a real worker and mock model. It has not been run. No crash study runs before
 it passes.
 
+**Amendment 8, design, fixed 2026-11-02 before any real task was killed.** Each of
+the 69 test tasks runs once under the supervised arm's settings and model, with
+no retries, so that a run a kill left broken is counted and not run again. The
+kill comes at a point drawn for that task from a fixed seed, between 20% and 80%
+of the median length of its three earlier runs, and never before 30 seconds. A
+run that ends before its kill point was not killed and is reported apart.
+
+Reported: kills that landed; runs that resumed; failed recoveries, meaning a
+landed kill with no new process or no grade; commands and paid calls repeated;
+calls cut off; time to resume. The comparison is per task: the killed run's result
+against the share solved in that task's three unkilled runs, with a bootstrap 95%
+interval, over tasks whose kill landed and over all 69. If recovery works, the
+interval covers zero and leans on no task in particular. The unkilled runs came
+earlier on the same machine and model, not alongside, and the killed run has one
+attempt on each task. A free check with a stand-in model on real Docker comes
+first, then three tuning tasks with the real model.
+
