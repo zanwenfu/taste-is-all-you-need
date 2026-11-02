@@ -169,3 +169,10 @@ about 35 worker model calls whose outcome is unknown, each kept on record as suc
 
 Question 3 and the hand check are not done yet.
 
+**Kill test with the real model (2026-11-02).** The same 156 planner kill points,
+the planner and its recovery running on GPT-6 Luna instead of a stand-in. Every
+kill landed and every recovery exited cleanly. None was wrong: no point made more
+than one paid call. 128 recovered and planned from a live reply; 28 refused to
+repeat because they could not tell whether a call had gone out, 15 of those with
+no call made. Refusing is safe but leaves the run for someone to restart.
+
