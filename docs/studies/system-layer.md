@@ -202,3 +202,26 @@ third critic, exploratory and decided after the results, gets the same runs with
 the planner's reasons and assessments removed: what each worker was asked and the
 latest report.
 
+Result of Amendment 7. With the planner's reasons and assessments removed, the
+record critic is right on 79.7% of the 187 runs, agrees with the planner's close
+on 170, and catches 3 of the 18 false completions, against the live critic's 7
+(paired exact p = 0.125, on small numbers). What the record holds does not show
+which claims are false.
+
+**Why runs failed (2026-11-02).** Two independent readers classed the 92 failed
+runs that ended by a limit from their plan-by-plan history, and agreed on 86
+(kappa 0.88): stuck on one blocker 55, blocked by a resource the agent names 17,
+real progress cut off by the limit 14. They split on 6. With the 21 failed goals
+closed as complete, of 113 failed runs: stuck 49%, closed wrongly 19%, blocked
+15%, cut off 12%, split 5%. Blocked rests on the agent's claim. One reader calls
+one run a regression, the other none; a regression that left no trace in the
+plans would not show. Only the first and last five plans of a long run were read.
+
+**Worker calls of unknown outcome.** 35 calls in 29 supervised trials and 6 in 6
+alone trials stopped a worker as "model unavailable"; each was the last call in
+its journal, and each is on record as unknown. The one error text that reached a
+log is a Bedrock refusal on usage-policy grounds; the others left none. All 6
+alone trials failed, since that arm has no one to restart a worker; 9 of the 25
+supervised trials hit by this solved. Leaving out the 6 alone trials: +6.0 points,
+[-0.2, +12.6].
+
