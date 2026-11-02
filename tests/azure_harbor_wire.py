@@ -49,6 +49,9 @@ def install(counter, mode):
             plans = written.read().count('"role": "planner"')
         if mode == "crashed-goal" and role == "worker" and number == 2 and plans == 1:
             time.sleep(300)
+        # Or a planner call, as on the real task where a restart wrote "not called" over it.
+        if mode == "crashed-planner" and role == "planner" and plans == 2:
+            time.sleep(300)
         if role == "planner":
             payload = json.loads(request["input"][0]["content"])
             result = payload["required_output_shape"]

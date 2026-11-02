@@ -39,11 +39,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-PATHS = ("planner", "checkpoint", "terminal", "worker", "delivery")
+PATHS = ("planner", "planner-moved", "checkpoint", "terminal", "worker", "delivery")
 DELIVERED = "NEW = 1\n"
 KEPT = "base file\n"
 BEDROCK_URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
 GIT_STEPS = ("commit_tree", "note_set", "cas_update_ref")
+RECOVERING = False
 
 
 class Boundaries:
@@ -126,7 +127,8 @@ def live_model(root):
     return Counted(azure_openai=route, max_attempts=1)
 
 
-def planner_effect(root):
+def planner_effect(root, world_moves=False):
+    """``world_moves``: as in a real run, the restarted runtime writes to control before it plans again."""
     from taste.brains.central_planner import (
         PLANNER_SYSTEM,
         CentralPlanner,
@@ -158,11 +160,15 @@ def planner_effect(root):
     central = CentralPlanner(store, transport=transport, control=control, mutation_lock=lock)
     goal = Goal(goal_id="ship-parser", task="Build and validate a parser",
                 success_criteria=("parser.py exists", "the parser tests pass"), budget_usd=12.5)
+    if world_moves and RECOVERING and control.head is not None:
+        with lock:
+            control.write(".taste/central-runtime/after-restart.json", "{}\n")
+            control.checkpoint("central decision after a restart")
     outcome, stale = None, 0
-    # The runtime answers a stale world by asking again on its next cycle.
+    # The runtime answers a stale world by asking again on its next cycle, as a new operation.
     for _ in range(4):
         try:
-            plan = central.plan(goal)
+            plan = central.plan(goal, operation_id=f"epoch-{stale}" if stale else "initial")
         except StalePlanningWorld:
             stale += 1
         except InvalidPlannerOutput as refused:
@@ -340,12 +346,15 @@ def delivery_effect(root):
         store.close()
 
 
-EFFECTS = {"planner": planner_effect, "checkpoint": checkpoint_effect, "terminal": terminal_effect,
-           "worker": worker_effect, "delivery": delivery_effect}
+EFFECTS = {"planner": planner_effect, "planner-moved": lambda root: planner_effect(root, world_moves=True),
+           "checkpoint": checkpoint_effect, "terminal": terminal_effect, "worker": worker_effect,
+           "delivery": delivery_effect}
 PREPARE = {"delivery": delivery_prepare}
 
 
 def child(path, root, kill_at):
+    global RECOVERING
+    RECOVERING = not kill_at
     if kill_at:
         install(Boundaries(kill_at))
     print(json.dumps(EFFECTS[path](Path(root))), flush=True)
@@ -380,7 +389,7 @@ def one_point(path, kill_at, keep=None):
         if killed.returncode == 0:
             return {"at": kill_at, "reached": False}
         record = {"at": kill_at, "reached": killed.returncode == -signal.SIGKILL,
-                  "kill_exit": killed.returncode}
+                  "kill_exit": killed.returncode, "world_moves": path == "planner-moved"}
         recovered = spawn(path, root, 0)
         calls = root / "calls.log"
         record.update(
@@ -404,7 +413,12 @@ def verdict(record):
         wrong.append("recovery failed")
     if isinstance(record.get("recovery"), dict) and record["recovery"]["outcome"] == "stale_every_time":
         wrong.append("the goal stayed stuck after the restart")
-    if record["calls"] > 1:
+    if record.get("world_moves"):
+        # The old answer is stale, so the question is asked afresh: each call must be on the record.
+        attempts = record["recovery"].get("attempts", []) if isinstance(record.get("recovery"), dict) else []
+        if record["calls"] > max(1, len(attempts)):
+            wrong.append("a paid call is missing from the record")
+    elif record["calls"] > 1:
         wrong.append("a paid call was made twice")
     if record["git"] not in ("clean", "no store yet", "no repository yet"):
         wrong.append("git found damage")

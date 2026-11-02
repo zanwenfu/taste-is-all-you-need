@@ -57,3 +57,22 @@ def test_a_killed_command_or_worker_call_is_not_repeated(path, kill_at):
     assert record["reached"], "the child must die by the signal at this point"
     assert kill_drill.verdict(record) == [], record.get("recovery")
 
+
+@pytest.mark.parametrize("kill_at", [85, 104, 120, 140])
+def test_a_restart_into_a_moved_world_keeps_what_the_interrupted_call_may_have_cost(kill_at):
+    """A real runtime writes to control before it plans again. A call that had gone out must stay on
+    record as uncertain: writing "not called, cost zero" over it stopped the goal at its next audit."""
+    record = kill_drill.one_point("planner-moved", kill_at)
+    assert record["reached"], "the child must die by the signal at this point"
+    assert kill_drill.verdict(record) == [], record.get("recovery")
+    assert record["recovery"]["outcome"] in ("planned", "refused_to_repeat")
+
+
+def test_after_a_moved_world_every_paid_call_must_be_on_the_record():
+    recovery = {"outcome": "planned", "attempts": [{"status": "rejected"}, {"status": "accepted"}]}
+    asked_again = {"reached": True, "recovery_exit": 0, "calls": 2, "git": "clean", "recovery": recovery,
+                   "world_moves": True}
+    assert kill_drill.verdict(asked_again) == []
+    assert kill_drill.verdict({**asked_again, "calls": 3}) == ["a paid call is missing from the record"]
+    assert kill_drill.verdict({**asked_again, "world_moves": False}) == ["a paid call was made twice"]
+

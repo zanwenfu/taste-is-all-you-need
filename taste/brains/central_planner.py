@@ -3010,15 +3010,27 @@ class CentralPlanner:
             movement = self._world_movement(request, root, expected_control, attempt_id)
             if movement:
                 detail = "world changed before planning call: " + "; ".join(movement)
+                # A restart can land here with this attempt's call already out,
+                # so its receipt decides: "not called" would be a false zero.
+                evidence = next(
+                    (
+                        item
+                        for item in self._authoritative_operation_attempts(goal.goal_id, operation_id)
+                        if item.request_id == attempt_id
+                    ),
+                    None,
+                )
                 self._reject(
                     request,
                     root,
                     attempt,
                     attempt_id,
-                    "",
+                    (evidence.response or "") if evidence is not None else "",
                     "stale_world",
                     detail,
-                    PlannerTelemetry.synthetic_zero("not_called_zero"),
+                    evidence.telemetry
+                    if evidence is not None
+                    else PlannerTelemetry.synthetic_zero("not_called_zero"),
                 )
                 raise StalePlanningWorld(detail)
             prompt = self._prompt(request)

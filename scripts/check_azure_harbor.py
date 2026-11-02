@@ -135,7 +135,7 @@ class AzureTerminalAgent(BaseAgent):
             worker_budget_usd=20, monitor_budget_usd=20, worker_max_calls=8, monitor_max_calls=16,
             worker_max_output_tokens=256, monitor_max_output_tokens=512, planner_max_output_tokens=512,
             monitor_batch_size=1, pricing_sha=table_sha(), terminal=TerminalWorkerPolicy(binding, 5),
-            crash_after_seconds=CRASH_SECONDS if self.mode == "crashed-goal" else None)
+            crash_after_seconds=CRASH_SECONDS if self.mode.startswith("crashed-") else None)
         root = owner_directory(self.owner_token)
         manager = FixtureManager(root / "exchange/calls.jsonl", self.mode)
         self.owner = AzureTerminalTrial.create(root, self.backend,
@@ -143,7 +143,8 @@ class AzureTerminalAgent(BaseAgent):
                  success_criteria=("/tmp/agent-result contains the exact bytes correct",), budget_usd=100,
                  metadata={benchmark_reply.KEY: benchmark_reply.SCHEMA}),
             policy, service_uid=self.worker_uid, python_executable=self.worker_python,
-            max_generations=3, wall_clock_seconds=self.agent_seconds, max_planner_failures=1, manager=manager)
+            max_generations=4 if self.mode == "crashed-planner" else 3, wall_clock_seconds=self.agent_seconds,
+            max_planner_failures=3 if self.mode == "crashed-planner" else 1, manager=manager)
         environment.taste_owner = self.owner
         self._owner_death_cancelled = False
         death = asyncio.create_task(self._kill_owner_during_command()) if self.mode == "killed-owner" else None
@@ -161,7 +162,7 @@ class AzureTerminalAgent(BaseAgent):
             # the guest log directory; keep the controller copy authoritative.
             assert self.owner.trajectory_path is not None
             trace = Trajectory.model_validate_json(self.owner.trajectory_path.read_bytes())
-            if self.mode != "crashed-goal":  # The killed worker's own trajectory ends where it died.
+            if not self.mode.startswith("crashed-"):  # The killed worker's own trajectory ends where it died.
                 assert trace.extra["evidence_complete"] and len(trace.subagent_trajectories) == 3
             await environment.upload_file(self.owner.trajectory_path, "/logs/agent/trajectory.json")
         finally:
@@ -244,7 +245,7 @@ async def check(args):
         "assert Path('/tmp/agent-result').read_bytes() == b'correct'\n"
         "trace = json.loads(Path('/logs/agent/trajectory.json').read_bytes())\n" +
         # A killed worker's own record ends where it died; the owner's checks read the crash's evidence.
-        ("" if args.mode == "crashed-goal" else
+        ("" if args.mode.startswith("crashed-") else
          "assert trace['extra']['evidence_complete']\n"
          "assert trace['steps'][-1]['message'] == 'Wrote correct to /tmp/agent-result and retained the terminal evidence.'\n"
          "assert len(trace['subagent_trajectories']) == 3\n") +
@@ -281,7 +282,7 @@ async def check(args):
             assert (trial.agent.logs_dir / "trajectory.json").read_bytes() == trial.agent.owner.trajectory_path.read_bytes()
             if args.mode == "late-verifier":
                 assert time.time() > trial.agent.agent_deadline
-        elif args.mode == "crashed-goal":
+        elif args.mode.startswith("crashed-"):
             # The whole goal died with a worker's paid call in flight. The container, its
             # terminal and its ledger lived on, and a new goal process finished from the records.
             crash = trial.agent.owner.crash
@@ -292,9 +293,16 @@ async def check(args):
             assert result.verifier_result.rewards == {"reward": 1.0}
             assert crash["landed"] and crash["resumed"], crash
             assert crash["paid_calls_repeated"] == 0 and crash["paid_calls_cut_off"] >= 1, crash
-            assert crash["commands_before"] == 1 and crash["commands_repeated"] == 1, crash
-            assert counts["planner"] == 3 and trial.agent.owner.outcome.complete
-            assert trial.agent.owner.outcome.delivered_assignment_ids == ("terminal-result-2",)
+            assert trial.agent.owner.outcome.complete, trial.agent.owner.outcome
+            if args.mode == "crashed-goal":
+                assert crash["commands_before"] == 1 and crash["commands_repeated"] == 1, crash
+                assert counts["planner"] == 3
+                assert trial.agent.owner.outcome.delivered_assignment_ids == ("terminal-result-2",)
+            else:
+                # The work was already delivered: only the decision to close is asked again.
+                assert crash["commands_before"] == 1 and crash["commands_repeated"] == 0, crash
+                assert counts["planner"] >= 3
+                assert trial.agent.owner.outcome.delivered_assignment_ids == ("terminal-result",)
             report["crash"] = crash
         else:
             assert result.exception_info is not None and result.verifier_result is None
@@ -340,7 +348,7 @@ def main():
     parser.add_argument("--image")
     parser.add_argument("--worker-user", default="bugbash")
     parser.add_argument("--worker-python")
-    parser.add_argument("--mode", choices=("complete", "killed-worker", "lost-planner", "crashed-goal", "late-verifier", "killed-owner"), default="complete")
+    parser.add_argument("--mode", choices=("complete", "killed-worker", "lost-planner", "crashed-goal", "crashed-planner", "late-verifier", "killed-owner"), default="complete")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--cleanup-only", action="store_true")
     parser.add_argument("--observe-owner-death", action="store_true")

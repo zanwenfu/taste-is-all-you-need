@@ -266,3 +266,17 @@ earlier on the same machine and model, not alongside, and the killed run has one
 attempt on each task. A free check with a stand-in model on real Docker comes
 first, then three tuning tasks with the real model.
 
+**A recovery bug the kill test had missed (2026-11-02).** On a practice task a kill
+landed during a planner call and the restarted goal died within seconds. The
+restart found the world changed and wrote "not called, cost zero" over a call
+whose receipt said it had gone out, and the goal's own audit stopped it. The kill
+test had shown no fault here because nothing moved between its kill and its
+restart, and in a real run the restarted runtime writes to control first. The test
+now does the same (`planner-moved`). Before the fix 41 of its 156 kill points
+crashed on recovery; after it none is wrong, on both planner paths. 138 plan again
+and 18 refuse to repeat. At 17 points the interrupted decision is asked afresh, so
+that call may be paid for twice; each is on the record. The earlier "156 points,
+none wrong" held only for a world that stands still. The same fault fixed in
+October's terms in `_world_movement` covered a reply already received, not a call
+still out.
+
