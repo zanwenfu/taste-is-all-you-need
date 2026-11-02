@@ -51,7 +51,7 @@ def test_a_torn_delivery_counts_as_wrong(recovery, problem):
     assert kill_drill.verdict(record) == [problem]
 
 
-@pytest.mark.parametrize("path, kill_at", [("terminal", 9), ("terminal", 21), ("worker", 7), ("worker", 18)])
+@pytest.mark.parametrize("path, kill_at", [("terminal", 5), ("terminal", 12), ("worker", 7), ("worker", 14)])
 def test_a_killed_command_or_worker_call_is_not_repeated(path, kill_at):
     record = kill_drill.one_point(path, kill_at)
     assert record["reached"], "the child must die by the signal at this point"
