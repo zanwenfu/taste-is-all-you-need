@@ -217,6 +217,10 @@ DEFAULTS = {
     # with released saves deleted (released_saves), the saved final states on disk stay bounded by it.
     "max_active_runs": 0,
     "prefix_allowance": 300.0,  # seconds a branch's deadline adds for bringing its prefix back
+    # Every trial's deadline adds prefix_allowance, not only a branch's: a restore takes seconds, so the allowance was
+    # extra time for carry-on arms, and on tasks solved in under a minute a fresh trial's deadline fell below the
+    # harness's least (study S grid, Nov 2). Dollars still bind; time stays a generous, equal safety.
+    "equal_allowance": False,
     "min_round_usd": 0.0,       # dollars a round needs left, at least; and at least this share of the budget:
     "min_round_share": 0.1,
     "min_round_seconds": 0.0,   # 0: the trial's reply reserve and plan time, and a minute of work
@@ -319,6 +323,8 @@ class RecoveryDriver(Driver):
         if isinstance(settings["max_active_runs"], bool) or not isinstance(settings["max_active_runs"], int) \
                 or settings["max_active_runs"] < 0:
             raise ValueError("max_active_runs must be a whole number, 0 for no limit")
+        if not isinstance(settings["equal_allowance"], bool):
+            raise ValueError("equal_allowance must be true or false")
         if not isinstance(settings["save_final"], bool):
             raise ValueError("save_final must be true or false")
         if settings["repeats"] < 1 or settings["check_attempts"] < 1:
@@ -826,7 +832,8 @@ class RecoveryDriver(Driver):
 
     def _caps(self, usd, seconds, settings, branch):
         """Taste's equal caps for a trial with this much budget left."""
-        extra = handoff_seconds(settings) + (self.settings["prefix_allowance"] if branch else 0.0)
+        allowance = branch or self.settings["equal_allowance"]
+        extra = handoff_seconds(settings) + (self.settings["prefix_allowance"] if allowance else 0.0)
         return jobs.caps(usd, seconds + extra)
 
     def _emit_first(self, run_id, run, name, arm, job, attempts):

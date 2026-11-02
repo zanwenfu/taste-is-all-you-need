@@ -199,3 +199,32 @@ def test_the_command_line_deletes_released_saves_under_the_checkpoints_root_once
     assert sorted(p.name for p in root.iterdir()) == ["other-study-checkpoint"]
     # A second pass finds nothing left to delete and fails on nothing.
     cli.main(["--state", str(path), "--prune-saves"])
+
+
+# Equal time allowance (study S grid, Nov 2): a branch trial's deadline adds prefix_allowance (300 s) to bring its
+# prefix back, but a restore takes seconds, so carry-on arms got ~5 extra minutes, and on tasks Sonnet solves in under
+# a minute a fresh trial's deadline was below the harness's least (no fresh trial could start). With equal_allowance
+# every trial's deadline adds the allowance.
+
+def test_with_equal_allowance_fresh_and_branch_trials_get_the_same_extra_time(tmp_path):
+    from taste.recovery_study.jobs import SETTING
+
+    jobs_dir, trials, given, _ = messages_study(tmp_path, recoveries=["retry", "continue"], equal_allowance=True)
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries()))
+    first = {job["recovery"]: JobSpec.from_dict(job["spec"]).settings() for job in driver.jobs.values()
+             if job["purpose"] == "first"}
+    deadline = {arm: int(settings[SETTING["deadline"]]) for arm, settings in first.items()}
+    assert deadline["retry"] == deadline["continue"]
+    run = next(iter(driver.runs.values()))
+    assert deadline["retry"] >= run["budget"]["seconds"] + driver.settings["prefix_allowance"]
+
+
+def test_without_equal_allowance_only_branch_trials_get_the_extra_time(tmp_path):
+    from taste.recovery_study.jobs import SETTING
+
+    jobs_dir, trials, given, _ = messages_study(tmp_path, recoveries=["retry", "continue"])
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries()))
+    first = {job["recovery"]: JobSpec.from_dict(job["spec"]).settings() for job in driver.jobs.values()
+             if job["purpose"] == "first"}
+    deadline = {arm: int(settings[SETTING["deadline"]]) for arm, settings in first.items()}
+    assert deadline["continue"] - deadline["retry"] == int(driver.settings["prefix_allowance"])
