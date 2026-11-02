@@ -320,6 +320,8 @@ class TasteAgent(BaseAgent):
         os.replace(temporary, target)
 
         summary = context.metadata["taste"]
+        if getattr(owner, "crash", None) is not None:
+            summary["crash"] = owner.crash
         summary.update(audit_flags=record["extra"]["audit_flags"], sealed=owner.sealed,
                        seconds=round(time.time() - started, 1),
                        final_reply=bool(record["extra"].get("final_reply_present")),

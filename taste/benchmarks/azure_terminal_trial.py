@@ -29,6 +29,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from taste.benchmarks import crash_evidence
 from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import AzureExecutionPolicy
 from taste.brains.azure_goal_credentials import encode_azure_goal_credentials
@@ -45,7 +46,7 @@ from taste.brains.terminal_issuer import TerminalIssuerCredential
 from taste.brains.terminal_service import TerminalService
 
 _SCHEMA = "taste.benchmarks/AzureTerminalTrial/1"
-_OPERATIONS = ("prepare", "run", "settle")
+_OPERATIONS = ("prepare", "run", "resume", "settle")
 # Credential-free settlement: reopening the goal and exporting its evidence.
 SETTLE_SECONDS = 90
 # How long the hand-off to grading waits for a command still being ended (#49).
@@ -162,19 +163,20 @@ def _drain_record(fd, config_sha, container_id, receipts):
 def _remove_launch_material(root):
     # All original scopes must be drained before this is called. Retain their
     # public descriptors and durable journals, but remove the private key copy.
-    directory = root / "controller/run/credentials"
-    if directory.exists():
-        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            info = os.fstat(fd)
-            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
-                raise GoalInputError("private launch material ownership changed")
-            for name in os.listdir(fd):
-                os.unlink(name, dir_fd=fd)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        directory.rmdir()
+    for operation in ("run", "resume"):
+        directory = root / "controller" / operation / "credentials"
+        if directory.exists():
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                info = os.fstat(fd)
+                if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                    raise GoalInputError("private launch material ownership changed")
+                for name in os.listdir(fd):
+                    os.unlink(name, dir_fd=fd)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            directory.rmdir()
     rpc = root / "rpc"
     if rpc.exists():
         info = rpc.lstat()
@@ -230,8 +232,31 @@ KEPT_CHECKPOINT_BYTES = 4 * 1024 ** 3
 KEPT_STORE_BYTES = 32 * 1024 ** 3
 
 
+async def _finished(task, seconds=None):
+    """Whether a goal service ended within ``seconds``. A cancellation drains it, then is reported."""
+    try:
+        await asyncio.wait((task,), timeout=seconds)
+    except asyncio.CancelledError:
+        task.cancel()
+        while not task.done():  # run_async drains its scope before it ends.
+            try:
+                await asyncio.wait((task,))
+            except asyncio.CancelledError:
+                task.cancel()
+        failure = None if task.cancelled() else task.exception()
+        if isinstance(failure, BaseExceptionGroup):
+            raise failure from None  # Drainage itself failed: the goal cannot be settled.
+        raise
+    return task.done()
+
+
 class AzureTerminalTrial:
-    """One controller lifetime; recovery drains instead of restarting execution."""
+    """One controller lifetime; recovery drains instead of restarting execution.
+
+    The one exception is a study of recovery (``policy.crash_after_seconds``):
+    the owner, which holds the terminal and the deadline, kills the goal itself
+    and runs it once more from its records. A crash of the owner still only drains.
+    """
 
     @classmethod
     def create(cls, directory, backend, goal, policy, *, service_uid, python_executable,
@@ -278,6 +303,7 @@ class AzureTerminalTrial:
             instance.outcome = None
             instance.trajectory_path = None
             instance.audit_flags = ()
+            instance.crash = instance._crash_mark = None
             instance.preparation_sha = instance._input("prepare.json", raw)
             return instance
         except BaseException:
@@ -305,11 +331,11 @@ class AzureTerminalTrial:
             raise GoalInputError("a trial input is one new plain file name, added before the run")
         return self._input(name, raw, maximum=maximum)
 
-    def _operation(self, name, input_name, digest, *, credential=None):
+    def _operation(self, name, input_name, digest, *, credential=None, operation=None):
         runtime = SETTLE_SECONDS if name == "settle" else min(PREPARE_SECONDS if name == "prepare" else 604800,
                                                               max(0.001, self.policy.deadline_unix - time.time()))
         return AzureGoalService.create(self.root / "controller" / name, self.root / input_name,
-            digest, self.root / "exchange" / name, operation=name, uid=self.config["service_uid"],
+            digest, self.root / "exchange" / name, operation=operation or name, uid=self.config["service_uid"],
             python_executable=self.config["python_executable"], runtime_seconds=runtime,
             grace_seconds=3, credential=credential, manager=self.manager)
 
@@ -339,12 +365,14 @@ class AzureTerminalTrial:
                 self.config["service_uid"], digest, self.policy.terminal, secrets.token_hex(32))
             self.service = TerminalService(self.broker, issuer=issuer)
             await self.service.start(worker_gid=self.config["service_gid"])
-            runner = self._operation("run", "goal.json", digest,
-                credential=encode_azure_goal_credentials(config, api_key, terminal_issuer=issuer))
+            credential = encode_azure_goal_credentials(config, api_key, terminal_issuer=issuer)
+            runner = self._operation("run", "goal.json", digest, credential=credential)
             result = None
             try:
-                result = await runner.run(timeout_seconds=min(604800,
-                    max(0.001, self.policy.deadline_unix - time.time()) + 15))
+                if self.policy.crash_after_seconds is None:
+                    result = await runner.run(timeout_seconds=self._goal_seconds())
+                else:
+                    result = await self._crash_and_resume(runner, digest, credential)
             except asyncio.CancelledError as exc:
                 # run_async drained the scope before raising. Finish the
                 # handoff with this cancellation set aside, then report it.
@@ -419,6 +447,8 @@ class AzureTerminalTrial:
             self.service.seal_for_grading()
             self.sealed = True
             self.audit_flags = tuple(dict.fromkeys(flags))
+            if self.crash is not None:
+                self._record_crash()
             _write(self.fd, "grading.json", _json_bytes({"input_sha256": digest,
                 "result_sha256": settled_sha, "binding": asdict(self.broker.binding),
                 "audit_flags": list(self.audit_flags),
@@ -434,6 +464,62 @@ class AzureTerminalTrial:
             except BaseException as failure:
                 raise BaseExceptionGroup("terminal goal and cleanup failed", [original, failure]) from None
             raise
+
+    def _goal_seconds(self):
+        return min(604800, max(0.001, self.policy.deadline_unix - time.time()) + 15)
+
+    async def _crash_and_resume(self, runner, digest, credential):
+        """Kill the goal at the study's moment, prove it drained, run it once more from its records.
+
+        The container, the terminal and its ledger belong to this owner and
+        outlive the goal, whose whole process tree dies: coordinator, monitors
+        and workers. The new service is a new scope with the same input, so the
+        same deadline and limits, and its own exchange: nothing is reused or
+        overwritten. It launches only after the first scope's drainage is proved.
+        """
+        self.crash = {"after_seconds": self.policy.crash_after_seconds, "landed": False, "resumed": False}
+        ledger = self.root / "controller/terminal/terminal.sqlite3"
+        first = asyncio.ensure_future(runner.run(timeout_seconds=self._goal_seconds()))
+        if await _finished(first, self.policy.crash_after_seconds):
+            return first.result()
+        killed = time.time()
+        self._crash_mark = crash_evidence.ledger_mark(ledger)
+        signalled = await _settle(start_owned_thread(_owned_call, runner.scope.kill))
+        await _finished(first)
+        if not signalled:
+            return first.result()  # It ended of its own accord just before the kill.
+        try:
+            return first.result()  # Or the signal never reached it, and it finished its work.
+        except Exception:
+            pass  # No result: the goal died before it could publish one.
+        await runner.scope.stop_async("killed by a study of recovery")
+        self.crash.update(landed=True, killed_unix=killed)
+        if asyncio.current_task().cancelling():
+            raise asyncio.CancelledError  # Its time limit arrived during the kill: nothing left to resume.
+        second = self._operation("resume", "goal.json", digest, credential=credential, operation="run")
+        resumed = time.time()
+        self.crash.update(resumed=True, resumed_unix=resumed, recovery_seconds=round(resumed - killed, 3),
+                          first_command_seconds=None)
+        again = asyncio.ensure_future(second.run(timeout_seconds=self._goal_seconds()))
+        try:
+            while not await _finished(again, 1.0):
+                if (self.crash["first_command_seconds"] is None
+                        and crash_evidence.commands_since(ledger, self._crash_mark)):
+                    self.crash["first_command_seconds"] = round(time.time() - killed, 3)
+            return again.result()
+        except Exception:
+            await second.scope.stop_async("settle a resumed goal after execution failure")
+            raise
+
+    def _record_crash(self):
+        """What a report reads. After the seal, with no await, so it can neither delay nor cost the handoff."""
+        try:
+            if self.crash["landed"]:
+                self.crash.update(crash_evidence.read_evidence(self.root / "controller/terminal/terminal.sqlite3",
+                                                               self.root / "agent-state/workspace", self._crash_mark))
+            _write(self.fd, "crash.json", _json_bytes(self.crash))
+        except Exception as failure:
+            self.crash["evidence_failed"] = type(failure).__name__
 
     def _discard_checkpoint_files(self):
         """Free a finished trial's checkpoint tars, unless a study keeps them to grade each one."""

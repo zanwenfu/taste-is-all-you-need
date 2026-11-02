@@ -206,6 +206,11 @@ class SystemdManager:
     def stop(self, unit: str, grace_seconds: float) -> None:
         self._command(["systemctl", "stop", unit], timeout=grace_seconds + 15)
 
+    def kill(self, unit: str) -> None:
+        # Unchecked: a unit that has just ended cannot be signalled, and whether
+        # the kill landed is read from the service's own result, not from here.
+        self._command(["systemctl", "kill", "--kill-who=all", "--signal=SIGKILL", unit], check=False)
+
     def empty(self, unit: str) -> bool:
         path = Path("/sys/fs/cgroup/system.slice") / unit / "cgroup.events"
         try:
@@ -453,6 +458,22 @@ class OwnedProcessScope:
                 return termination
             except BaseException as exc:
                 raise self._failure(fd, state, "stop", exc) from exc
+
+    def kill(self) -> bool:
+        """SIGKILL every process of this scope, as a crash would, with no chance to clean up.
+
+        For a study of recovery, by the owner only: the scope's records are left
+        exactly as they stood. It sends the signal and changes nothing here, so
+        ``wait`` then observes the ending and ``stop`` still proves drainage.
+        Whether anything was running to kill: False once the scope has stopped.
+        """
+        with self._locked() as fd:
+            state = self._read(fd)
+            if state["phase"] != "running":
+                return False
+            self._verify(state, self.manager.inspect(self.unit))
+            self.manager.kill(self.unit)
+            return True
 
     def wait(self, *, timeout_seconds: float, _cancel_wait: threading.Event | None = None) -> dict[str, Any]:
         deadline = time.monotonic() + _positive(timeout_seconds, "timeout_seconds")

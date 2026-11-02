@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 
 def install(counter, mode):
@@ -43,6 +44,11 @@ def install(counter, mode):
             os.kill(os.getpid(), 9)
         if mode == "lost-planner" and role == "planner":
             os.kill(os.getpid(), 9)
+        # The first goal's worker holds a paid call open until its owner kills the goal.
+        with open(counter) as written:
+            plans = written.read().count('"role": "planner"')
+        if mode == "crashed-goal" and role == "worker" and number == 2 and plans == 1:
+            time.sleep(300)
         if role == "planner":
             payload = json.loads(request["input"][0]["content"])
             result = payload["required_output_shape"]
@@ -52,7 +58,7 @@ def install(counter, mode):
             else:
                 assert number == 1, "fixture must not reissue undelivered work"
                 assignment = result["assignments"][0]
-                assignment["assignment_id"] = "terminal-result"
+                assignment["assignment_id"] = "terminal-result" if plans == 1 else f"terminal-result-{plans}"
                 assignment["contract"].update(identity="terminal-worker",
                     task="Use terminal_exec to write correct to /tmp/agent-result, then write output.txt containing correct",
                     outputs=["output.txt"], success_criteria=["terminal result and evidence contain correct"])

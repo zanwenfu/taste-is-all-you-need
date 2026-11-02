@@ -354,3 +354,45 @@ def test_invalid_launch_configuration_is_rejected_before_durable_admission(tmp_p
     values = {"argv": ("/bin/true",), "cwd": str(tmp_path), "uid": 1000, "runtime_seconds": 6}
     with pytest.raises(ValueError):
         ScopeSpec(**(values | changes))
+
+
+def test_the_owner_can_kill_a_running_scope_outright_and_still_proves_its_drainage(scope):
+    killed = []
+
+    def kill(unit):
+        killed.append(unit)
+        scope.manager.units[unit].update(ActiveState="failed", Result="signal", ControlGroup="")
+        scope.manager.populated.discard(unit)
+
+    scope.manager.kill = kill
+    scope.start()
+    assert scope.kill() is True and killed == [scope.unit]
+    receipt = scope.wait(timeout_seconds=1)
+    assert receipt["processes_stopped"] and receipt["manager_result"] == "signal"
+    assert restore(scope).kill() is False, "a stopped scope has nothing left to kill"
+    assert killed == [scope.unit]
+
+
+def test_a_scope_that_never_launched_is_not_killed(scope):
+    scope.manager.kill = lambda unit: pytest.fail("nothing is running")
+    assert scope.kill() is False
+
+
+def test_a_scope_whose_service_differs_is_never_killed(scope):
+    scope.manager.kill = lambda unit: pytest.fail("not this scope's service")
+    scope.start()
+    scope.manager.units[scope.unit]["User"] = "0"
+    with pytest.raises(RuntimeError, match="differs"):
+        scope.kill()
+
+
+def test_systemd_kills_every_process_of_the_unit():
+    from taste.brains.process_scope import SystemdManager
+
+    sent = []
+    manager = SystemdManager()
+    manager._command = lambda argv, **options: sent.append((argv, options))
+    manager.kill("taste-goal-x.service")
+    assert sent == [(["systemctl", "kill", "--kill-who=all", "--signal=SIGKILL", "taste-goal-x.service"],
+                     {"check": False})]
+

@@ -225,3 +225,27 @@ alone trials failed, since that arm has no one to restart a worker; 9 of the 25
 supervised trials hit by this solved. Leaving out the 6 alone trials: +6.0 points,
 [-0.2, +12.6].
 
+**Amendment 8, added 2026-11-02, code ready, not yet run: a crash on real tasks.**
+The kill tests stop at single steps on a drill goal. A trial can now take
+`crash_after_seconds`: its owner sends SIGKILL to the goal's whole process tree
+(coordinator, monitors and workers) at that moment, proves the tree drained, and
+starts one new goal process from the same records, with the same deadline and
+limits. The container, the terminal and its ledger belong to the owner and live
+on. The owner's own death still only drains. A run that ends first is not killed
+and says so. Each trial records whether the kill landed, how long the new process
+took to start and to run its first command, the commands on each side of the kill,
+the same command run again, requests paid twice, and calls cut off in flight.
+
+A cut-off call went out and may be billed, and its answer is lost, so the
+decision is asked again in a new request. That is counted as cut off, not as
+repeated. A worker's interrupted command is ended by the terminal and receipted,
+and is not resumed: work in that worker's head is gone and the planner plans again
+from what the records and the task's files show. This measures recovery of a run,
+not recovery of a worker's thought.
+
+Tests cover the owner's path with stub services, and a real goal process killed
+with a paid call in flight on a mocked wire, which then ran again and settled.
+`scripts/check_azure_harbor.py --mode crashed-goal` is the proof on a real machine
+with a real worker and mock model. It has not been run. No crash study runs before
+it passes.
+

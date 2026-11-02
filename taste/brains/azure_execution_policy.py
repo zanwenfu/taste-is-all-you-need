@@ -6,6 +6,7 @@ deadline. Credentials are read separately from the trusted host environment.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 
@@ -32,7 +33,7 @@ POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
                      "planner_effort": "", "request_seconds": None, "planner_model": AZURE_PLANNER_MODEL,
-                     "worker_agent": "", "worker_uname": "", "services": "all", "rollback": False, "keep_checkpoints": False, "branch": None}
+                     "worker_agent": "", "worker_uname": "", "services": "all", "rollback": False, "keep_checkpoints": False, "crash_after_seconds": None, "branch": None}
 SERVICES = ("all", "none")
 
 
@@ -89,6 +90,9 @@ class AzureExecutionPolicy:
     rollback: bool = False
     # A trial's checkpoint files outlive it, for grading each one afterwards.
     keep_checkpoints: bool = False
+    # A study of recovery: the trial's owner kills the goal this long after it
+    # starts and runs it once more from its records.
+    crash_after_seconds: float | None = None
     # The agent run alone continues an earlier run of it from step k
     # (taste.brains.branch_replay): the replay script, k, and what changes.
     branch: BranchPolicy | None = None
@@ -114,6 +118,10 @@ class AzureExecutionPolicy:
             raise ValueError("rollback needs a task terminal and a coordinator that plans")
         if type(self.keep_checkpoints) is not bool or (self.keep_checkpoints and not self.rollback):
             raise ValueError("keep_checkpoints must be true or false, and true only with rollback")
+        if self.crash_after_seconds is not None and (
+                type(self.crash_after_seconds) not in (int, float) or not math.isfinite(self.crash_after_seconds)
+                or self.crash_after_seconds <= 0):
+            raise ValueError("crash_after_seconds must be a positive number of seconds")
         if isinstance(self.branch, Mapping):
             object.__setattr__(self, "branch", BranchPolicy.from_dict(self.branch))
         if self.branch is not None and (not isinstance(self.branch, BranchPolicy)

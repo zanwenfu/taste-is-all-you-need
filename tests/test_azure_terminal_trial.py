@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -384,3 +385,189 @@ def test_corrupt_scope_still_stops_container_and_retains_cleanup_failure(trial):
         assert not (trial.root / "controller/drain.json").exists()
     finally:
         path.write_bytes(original)
+
+
+class CrashingManager(InProcessManager):
+    """The first run works until it is killed, as a real goal process would; any later one finishes."""
+
+    def __init__(self):
+        super().__init__()
+        self.kills = []
+        self.kill_is_lost = False
+
+    def start(self, unit, description, spec, *, credential_directory=None):
+        if spec.argv[12] != "run" or "run" in self.operations:
+            return super().start(unit, description, spec, credential_directory=credential_directory)
+        Manager.start(self, unit, description, spec)
+        self.units[unit].update(RuntimeMaxUSec=f"{math.ceil(spec.runtime_seconds * 1e6)}us",
+                                TimeoutStopUSec=f"{math.ceil(spec.grace_seconds * 1e6)}us")
+        self.operations.append("run")
+
+    def kill(self, unit):
+        self.kills.append(unit)
+        if self.kill_is_lost:
+            return
+        self.units[unit].update(ActiveState="failed", Result="signal", ControlGroup="")
+        self.populated.discard(unit)
+
+
+def crashing(trial, after=0.05):
+    trial.manager = CrashingManager()
+    trial.policy = replace(trial.policy, crash_after_seconds=after)
+    return trial.manager
+
+
+def test_a_killed_goal_runs_again_from_its_records_and_its_task_is_still_graded(trial):
+    manager = crashing(trial)
+
+    async def scenario():
+        before = time.time()
+        outcome = await trial.run(api_key="private-test-key")
+        assert outcome.complete and trial.sealed and trial.broker.phase == "sealed"
+        assert manager.operations == ["prepare", "run", "run", "settle"] and len(manager.kills) == 1
+        assert trial.test_modes == ["run", "settle"], "only the second run reached the goal's work"
+        assert not trial.test_stops, "the task's container outlives the goal process"
+        assert not manager.populated and "goal_service_failed" not in trial.audit_flags
+        crash = json.loads((trial.root / "controller/crash.json").read_text())
+        assert crash == trial.crash and crash["landed"] is True and crash["resumed"] is True
+        assert crash["after_seconds"] == 0.05 and before < crash["killed_unix"] <= crash["resumed_unix"]
+        assert crash["recovery_seconds"] == round(crash["resumed_unix"] - crash["killed_unix"], 3)
+        assert crash["commands_repeated"] == 0 and crash["paid_calls_repeated"] == 0
+        for name in ("run", "resume"):
+            assert (trial.root / "controller" / name / "credentials").exists()
+            assert "private-test-key" not in (trial.root / "controller" / name / "state.json").read_text()
+        await trial.release()
+        assert not (trial.root / "controller/run/credentials").exists()
+        assert not (trial.root / "controller/resume/credentials").exists()
+        handoff = json.loads((trial.root / "controller/handoff.json").read_text())
+        assert len(handoff["scopes"]) == 4
+        record = cleanup_trial(trial.root, manager=trial.manager)
+        assert len(record["scopes"]) == 4, "the outside watchdog also proves the resumed scope drained"
+    run_scenario(trial, scenario())
+
+
+def test_a_goal_that_ends_before_its_kill_is_never_killed_and_says_so(trial):
+    trial.policy = replace(trial.policy, crash_after_seconds=30.0)
+
+    async def scenario():
+        outcome = await trial.run(api_key="private-test-key")
+        assert outcome.complete and trial.manager.operations == ["prepare", "run", "settle"]
+        assert trial.crash["landed"] is False and trial.crash["resumed"] is False
+        assert json.loads((trial.root / "controller/crash.json").read_text()) == trial.crash
+    run_scenario(trial, scenario())
+
+
+def test_a_kill_that_did_not_land_leaves_the_goal_running_and_says_so(trial):
+    manager = crashing(trial)
+    manager.kill_is_lost = True
+
+    async def scenario():
+        task = asyncio.create_task(trial.run(api_key="private-test-key"))
+        while not manager.kills:
+            await asyncio.sleep(0.005)
+        unit = manager.kills[0]
+        await asyncio.sleep(0.02)
+        assert not task.done() and manager.operations == ["prepare", "run"]
+        (trial.root / "exchange/run").mkdir(mode=0o700)
+        from taste.brains.azure_goal_handoff import _write
+
+        digest = hashlib.sha256((trial.root / "goal.json").read_bytes()).hexdigest()
+        binding = {"schema": "taste.brains/AzureGoalHandoff/1", "input_sha256": digest, "operation": "run"}
+        goal_id = trial.config["goal"]["goal_id"]
+        budget = trial.config["goal"]["budget_usd"]
+        result = GoalOutcome(goal_id, "complete", True, 1, 1,
+                             budget=BudgetState(budget, 1, 0, planner_spent_usd=1)).to_dict()
+        fd = os.open(trial.root / "exchange/run", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _write(fd, "intent.json", (json.dumps(binding) + "\n").encode())
+            _write(fd, "result.json", (json.dumps({**binding, "result": result}) + "\n").encode())
+        finally:
+            os.close(fd)
+        manager.units[unit].update(ActiveState="inactive", ControlGroup="")
+        manager.populated.discard(unit)
+        outcome = await task
+        assert outcome.complete and trial.crash["landed"] is False and trial.crash["resumed"] is False
+        assert manager.operations == ["prepare", "run", "settle"]
+    run_scenario(trial, scenario())
+
+
+def test_the_benchmark_time_limit_before_the_kill_drains_and_hands_over_as_usual(trial):
+    manager = crashing(trial, after=30.0)
+
+    async def scenario():
+        task = asyncio.create_task(trial.run(api_key="private-test-key"))
+        while "run" not in manager.operations:
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert trial.sealed and trial.audit_flags == ("owner_cancelled",) and not manager.kills
+        assert manager.operations == ["prepare", "run", "settle"] and not manager.populated
+        assert trial.crash["landed"] is False
+    run_scenario(trial, scenario())
+
+
+def test_the_benchmark_time_limit_during_the_resumed_run_drains_both_and_hands_over(trial, monkeypatch):
+    manager = crashing(trial)
+    entered, release = threading.Event(), threading.Event()
+
+    async def blocked(config, mode, **_kwargs):
+        if mode == "run":
+            entered.set()
+            assert release.wait(5)
+        return GoalOutcome(config.goal.goal_id, "wall_clock", False, 1, 1,
+                           budget=BudgetState(config.goal.budget_usd, 0, 0))
+    monkeypatch.setattr("taste.brains.azure_goal_handoff._run", blocked)
+
+    async def scenario():
+        task = asyncio.create_task(trial.run(api_key="private-test-key"))
+        while not entered.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert trial.sealed and "owner_cancelled" in trial.audit_flags and not manager.populated
+        assert manager.operations == ["prepare", "run", "run", "settle"] and trial.crash["resumed"] is True
+    run_scenario(trial, scenario())
+
+
+def test_a_resumed_goal_that_cannot_start_is_settled_and_still_graded(trial, monkeypatch):
+    crashing(trial)
+    original = trial._operation
+
+    def refused(name, *args, **kwargs):
+        if name == "resume":
+            raise GoalInputError("goal service cannot renew an expired deadline")
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(trial, "_operation", refused)
+
+    async def scenario():
+        outcome = await trial.run(api_key="private-test-key")
+        assert outcome.complete and trial.sealed and not trial.test_stops
+        assert "goal_service_failed" in trial.audit_flags
+        assert trial.crash["landed"] is True and trial.crash["resumed"] is False
+        assert trial.test_modes == ["settle"], "nothing ran the goal after the kill"
+    run_scenario(trial, scenario())
+
+
+def test_a_crash_record_that_cannot_be_written_does_not_cost_the_handoff(trial, monkeypatch):
+    crashing(trial)
+    monkeypatch.setattr("taste.benchmarks.crash_evidence.read_evidence",
+                        lambda *_: (_ for _ in ()).throw(OSError("unreadable")))
+
+    async def scenario():
+        outcome = await trial.run(api_key="private-test-key")
+        assert outcome.complete and trial.sealed and trial.crash["evidence_failed"] == "OSError"
+    run_scenario(trial, scenario())
+
+
+def test_no_crash_is_recorded_unless_a_study_asked_for_one(trial):
+    async def scenario():
+        await trial.run(api_key="private-test-key")
+        assert trial.crash is None and not (trial.root / "controller/crash.json").exists()
+        assert "crash_after_seconds" not in trial.policy.to_dict()
+    run_scenario(trial, scenario())
+

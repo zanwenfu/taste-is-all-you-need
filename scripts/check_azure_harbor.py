@@ -70,6 +70,10 @@ def cleanup_fixture(token):
     return result
 
 
+# Long enough for the first worker to reach its second call.
+CRASH_SECONDS = 15
+
+
 class FixtureManager(SystemdManager):
     def __init__(self, counter, mode):
         self.code = f"from tests.azure_harbor_wire import install_goal; install_goal({str(counter)!r}, {mode!r}); "
@@ -130,7 +134,8 @@ class AzureTerminalAgent(BaseAgent):
             planner_deployment="gpt-6-astra", worker_deployment="gpt-6-sol", deadline_unix=self.agent_deadline,
             worker_budget_usd=20, monitor_budget_usd=20, worker_max_calls=8, monitor_max_calls=16,
             worker_max_output_tokens=256, monitor_max_output_tokens=512, planner_max_output_tokens=512,
-            monitor_batch_size=1, pricing_sha=table_sha(), terminal=TerminalWorkerPolicy(binding, 5))
+            monitor_batch_size=1, pricing_sha=table_sha(), terminal=TerminalWorkerPolicy(binding, 5),
+            crash_after_seconds=CRASH_SECONDS if self.mode == "crashed-goal" else None)
         root = owner_directory(self.owner_token)
         manager = FixtureManager(root / "exchange/calls.jsonl", self.mode)
         self.owner = AzureTerminalTrial.create(root, self.backend,
@@ -156,7 +161,8 @@ class AzureTerminalAgent(BaseAgent):
             # the guest log directory; keep the controller copy authoritative.
             assert self.owner.trajectory_path is not None
             trace = Trajectory.model_validate_json(self.owner.trajectory_path.read_bytes())
-            assert trace.extra["evidence_complete"] and len(trace.subagent_trajectories) == 3
+            if self.mode != "crashed-goal":  # The killed worker's own trajectory ends where it died.
+                assert trace.extra["evidence_complete"] and len(trace.subagent_trajectories) == 3
             await environment.upload_file(self.owner.trajectory_path, "/logs/agent/trajectory.json")
         finally:
             if death is not None:
@@ -273,6 +279,18 @@ async def check(args):
             assert (trial.agent.logs_dir / "trajectory.json").read_bytes() == trial.agent.owner.trajectory_path.read_bytes()
             if args.mode == "late-verifier":
                 assert time.time() > trial.agent.agent_deadline
+        elif args.mode == "crashed-goal":
+            # The whole goal died with a worker's paid call in flight. The container, its
+            # terminal and its ledger lived on, and a new goal process finished from the records.
+            assert result.exception_info is None, result.exception_info
+            assert result.verifier_result.rewards == {"reward": 1.0}
+            crash = trial.agent.owner.crash
+            assert crash["landed"] and crash["resumed"], crash
+            assert crash["paid_calls_repeated"] == 0 and crash["paid_calls_cut_off"] >= 1, crash
+            assert crash["commands_before"] == 1 and crash["commands_repeated"] == 1, crash
+            assert counts["planner"] == 3 and trial.agent.owner.outcome.complete
+            assert trial.agent.owner.outcome.delivered_assignment_ids == ("terminal-result-2",)
+            report["crash"] = crash
         else:
             assert result.exception_info is not None and result.verifier_result is None
             assert trial.agent.owner.outcome is not None
@@ -286,7 +304,7 @@ async def check(args):
         database = root / "controller/terminal/terminal.sqlite3"
         with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
             effects = connection.execute("SELECT id,status FROM requests").fetchall()
-        assert len(effects) == (0 if args.mode == "lost-planner" else 1)
+        assert len(effects) == {"lost-planner": 0, "crashed-goal": 2}.get(args.mode, 1)
         report.update(status="passed", official_rewards=result.verifier_result.rewards if result.verifier_result else None,
             goal_outcome=trial.agent.owner.outcome.to_dict(), request_counts=dict(counts), terminal_effects=effects,
             goal_services_drained=True, original_container_cgroup_empty=True, cached_image_retained=True,
@@ -317,7 +335,7 @@ def main():
     parser.add_argument("--image")
     parser.add_argument("--worker-user", default="bugbash")
     parser.add_argument("--worker-python")
-    parser.add_argument("--mode", choices=("complete", "killed-worker", "lost-planner", "late-verifier", "killed-owner"), default="complete")
+    parser.add_argument("--mode", choices=("complete", "killed-worker", "lost-planner", "crashed-goal", "late-verifier", "killed-owner"), default="complete")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--cleanup-only", action="store_true")
     parser.add_argument("--observe-owner-death", action="store_true")

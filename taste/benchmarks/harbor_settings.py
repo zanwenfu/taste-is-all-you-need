@@ -93,6 +93,9 @@ class TrialSettings:
     # A checkpoint's manifest file: its files are put back before the trial's
     # agent starts, as a reviewer of an earlier run's saved state needs.
     saved_state: str = ""
+    # A study of recovery: seconds after the goal starts at which its owner
+    # kills it, to run it once more from its records. 0 is off.
+    crash_after_seconds: float = 0.0
     # A branch of an earlier run of the agent alone (taste.brains.branch_replay):
     # the replay script (scripts/replay_script.py) and the step k it starts
     # from. "rebuild" runs the recorded commands 1..k again in the fresh task
@@ -223,6 +226,8 @@ class TrialSettings:
             raise ValueError("alone=continue runs the agent alone: it needs services none")
         if self.rollback not in ("off", "on"):
             raise ValueError("rollback must be off or on")
+        if not self.crash_after_seconds >= 0 or math.isinf(self.crash_after_seconds):
+            raise ValueError("crash_after_seconds must not be negative")
         if self.saved_state and not self.saved_state.startswith("/"):
             raise ValueError("saved_state must be an absolute path")
         if self.keep_checkpoints not in ("off", "on"):
@@ -350,6 +355,7 @@ class TrialSettings:
             planner_model=planner, worker_model=worker, worker_effort=self.worker_effort,
             worker_agent=self.agent, worker_uname=self.agent_uname, services=self.services,
             rollback=self.rollback == "on", keep_checkpoints=self.keep_checkpoints == "on",
+            crash_after_seconds=self.crash_after_seconds or None,
             planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
             # A worker may use all the working time; the runtime clamps it to what is left.
@@ -376,6 +382,7 @@ class TrialSettings:
                 **({"rollback": self.rollback} if self.rollback != "off" else {}),
                 **({"keep_checkpoints": self.keep_checkpoints} if self.keep_checkpoints != "off" else {}),
                 **({"saved_state": self.saved_state} if self.saved_state else {}),
+                **({"crash_after_seconds": self.crash_after_seconds} if self.crash_after_seconds else {}),
                 **({"branch": {"script": self.branch, "step": self.branch_step, "mode": self.branch_mode,
                                "live": self.branch_live, "tolerance": self.branch_tolerance,
                                **({"replay": self.branch_replay} if self.branch_replay != "auto" else {}),

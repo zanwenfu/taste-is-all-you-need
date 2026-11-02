@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import time
 from dataclasses import replace
@@ -113,6 +114,55 @@ def test_real_azure_goal_process_and_settlement_never_fall_back_or_repeat_paid_r
         assert counter.read_text().splitlines() == ["one Azure planner request"]
         assert "personal-do-not-use" not in result.stdout + result.stderr
     assert "azure-test-only" not in raw.decode()
+
+
+def test_a_real_goal_process_killed_during_a_paid_call_runs_again_from_its_records(tmp_path, goal, policy, sdk_transport):
+    """A study's crash: the goal dies outright with a model call in flight and a new process takes over."""
+    sent, _ = sdk_transport(lambda wire: pytest.fail("preparation cannot dispatch"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    prepared = prepare_azure_goal_process(
+        root, "azure-entrypoint", goal, policy=replace(policy, deadline_unix=time.time() + 25), environment=environment(),
+        max_generations=2, wall_clock_seconds=30, max_planner_failures=3)
+    assert not sent
+    raw = prepared.to_bytes()
+    path = tmp_path / "input.json"
+    path.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    counter = tmp_path / "wire-count"
+    env = {**os.environ, **environment(), "TASTE_TEST_WIRE_COUNT": str(counter)}
+    hanging = BOOTSTRAP.replace("    return httpx.Response(200, json={",
+                                "    __import__('time').sleep(60)\n    return httpx.Response(200, json={", 1)
+
+    def command(mode, bootstrap):
+        argv = azure_goal_command(path, digest, mode=mode)
+        argv[3] = argv[3].replace("from taste.brains.azure_goal_entrypoint", bootstrap + "\nfrom taste.brains.azure_goal_entrypoint", 1)
+        return argv
+
+    first = subprocess.Popen(command("run", hanging), cwd=tmp_path, env=env, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 15
+    while not counter.exists():
+        assert time.time() < deadline and first.poll() is None, "the first process never reached its paid call"
+        time.sleep(0.02)
+    time.sleep(0.2)
+    os.killpg(first.pid, signal.SIGKILL)
+    assert first.wait(10) == -signal.SIGKILL
+
+    second = subprocess.run(command("run", BOOTSTRAP), cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20)
+    assert second.returncode == 0, second.stderr
+    env.pop("AZURE_OPENAI_API_KEY", None)
+    env.pop("AZURE_OPENAI_BASE_URL", None)
+    settled = subprocess.run(command("settle", BOOTSTRAP), cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20)
+    assert settled.returncode == 0, settled.stderr
+    # The lost request went out and may be billed; the new process could not know, and said so
+    # by asking once, under a new operation. It never asks again after a settled answer.
+    assert len(counter.read_text().splitlines()) == 2
+    from taste.benchmarks.crash_evidence import read_evidence
+
+    found = read_evidence(tmp_path / "no-ledger", root, 0)
+    assert found["planner_calls_read"] is True and found["paid_calls"] == 2
+    assert found["paid_calls_cut_off"] == 1 and found["paid_calls_repeated"] == 0
 
 
 @pytest.mark.parametrize("damage", ["missing", "mode", "hardlink", "symlink", "fifo", "large", "input",

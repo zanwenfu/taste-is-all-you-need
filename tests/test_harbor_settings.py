@@ -131,6 +131,17 @@ def test_a_saved_state_is_named_in_the_disclosure_only_when_a_trial_restores_one
     assert restoring.disclosure()["saved_state"] == "/saves/cp1.json" and "saved_state" not in plain.disclosure()
 
 
+def test_a_crash_reaches_the_policy_and_the_disclosure_only_when_a_study_asks_for_one():
+    plain = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent"})
+    crashing = replace(plain, crash_after_seconds=300.0)
+    deadline = time.time() + 1500
+    on, off = policy_for(crashing, deadline), policy_for(plain, deadline)
+    assert on.crash_after_seconds == 300.0 and off.crash_after_seconds is None
+    assert crashing.disclosure()["crash_after_seconds"] == 300.0 and "crash_after_seconds" not in plain.disclosure()
+    assert "crash_after_seconds" not in off.to_dict() and on.to_dict()["crash_after_seconds"] == 300.0
+    assert type(on).from_dict(on.to_dict()) == on
+
+
 def test_rollback_reaches_the_policy_and_the_disclosure_only_when_on():
     supervised = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent"})
     rolling = replace(supervised, rollback="on")
@@ -209,6 +220,8 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
     ({"agent": "mini-swe-agent", "alone": "continue"}, "needs services none"),
     ({"rollback": "maybe"}, "rollback must be off or on"),
     ({"keep_checkpoints": "maybe"}, "keep_checkpoints must be off or on"),
+    ({"crash_after_seconds": "-5"}, "crash_after_seconds must not be negative"),
+    ({"crash_after_seconds": "nan"}, "crash_after_seconds must not be negative"),
     ({"agent": "checker", "services": "none", "saved_state": "cp1.json"}, "saved_state must be an absolute path"),
     ({"keep_checkpoints": "on"}, "keep_checkpoints=on needs rollback=on"),
     ({"agent": "mini-swe-agent", "services": "none", "rollback": "on"}, "needs services all"),
