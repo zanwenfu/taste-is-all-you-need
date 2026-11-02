@@ -199,6 +199,11 @@ class TasteAgent(BaseAgent):
             # The task text this trial gave, when it is not the benchmark's own.
             summary["task_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
         self._restore_seconds = 0.0
+        if settings.saved_state:
+            restoring = time.monotonic()
+            summary["saved_state"] = await asyncio.to_thread(
+                branch_trial.restore_saved_state, backend, settings.saved_state)
+            self._restore_seconds = time.monotonic() - restoring
         if branch is not None:
             summary["branch"] = branch_trial.disclosure(settings, branch)
             if settings.branch_mode == "restore":

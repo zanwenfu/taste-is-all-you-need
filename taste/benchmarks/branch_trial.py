@@ -195,6 +195,26 @@ def restore_checkpoint(backend, directory, inputs, step):
     return {**receipt.summary(), "directory": str(directory), **changed_paths(manifest)}
 
 
+def load_saved_state(path):
+    """The manifest in ``path`` and the directory holding its tar. Refuses what cannot be graded."""
+    from taste.brains.docker_checkpoint import CheckpointManifest
+
+    path = Path(path)
+    manifest = CheckpointManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    if manifest.partial:
+        raise ValueError("a partial save left files out: its state cannot be graded")
+    return manifest, path.parent
+
+
+def restore_saved_state(backend, path):
+    """Put a saved state's files back; its account. Raises unless the files match it exactly."""
+    manifest, directory = load_saved_state(path)
+    receipt = backend.restore(manifest, directory, any_container=True)
+    if not receipt.exact:
+        raise RuntimeError(f"the restored files differ from the saved state at {len(receipt.mismatches)} paths")
+    return {**receipt.summary(), "saved_state": str(path), "tar_sha256": manifest.tar_sha256}
+
+
 def cap_bytes(settings):
     """A trial's save size cap in bytes (checkpoint_mib), or None for the backend's default (512 MiB)."""
     return settings.checkpoint_mib * 1024 * 1024 if settings.checkpoint_mib else None

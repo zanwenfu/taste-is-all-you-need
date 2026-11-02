@@ -87,6 +87,24 @@ including the saved-state grading, comes first. Any defect it shows is fixed
 and recorded here before a test task runs. Nothing else runs on the machine
 during the measurement.
 
+## Question 5, added 2026-11-02 before any critic ran
+
+Can a critic judge a run from its git record, or does it need the live
+environment? Both critics get the task and the same record: the plans, what each
+worker was asked, the planner's assessments and the latest report. Both use
+GPT-6 Luna at medium effort. The record critic gets nothing else and answers in
+one reply. The live critic (`checker-v2`) can also run commands in a fresh
+container holding the run's final files. The verifier's result on the run is the
+truth; neither critic sees it.
+
+Sample: runs with a usable final save whose control agreed, so their files show
+what the verifier saw. Runs that depended on a live process are out by
+construction, which favours the live critic less, not more. Reported: each
+critic's false rejections and false acceptances, in both directions, and how
+often the two disagree on the same run. Code: `scripts/critic_study.py`. A
+six-run pilot comes first. The solved/failed split is known to the analysis
+only, not to either critic.
+
 ## Reporting
 
 Every clean result is reported, whatever its direction. Amendments are added

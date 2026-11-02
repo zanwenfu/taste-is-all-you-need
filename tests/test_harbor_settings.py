@@ -125,6 +125,12 @@ def test_saved_states_are_kept_for_later_grading_only_when_asked():
     assert type(on).from_dict(on.to_dict()) == on
 
 
+def test_a_saved_state_is_named_in_the_disclosure_only_when_a_trial_restores_one():
+    plain = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "checker", "services": "none"})
+    restoring = replace(plain, saved_state="/saves/cp1.json")
+    assert restoring.disclosure()["saved_state"] == "/saves/cp1.json" and "saved_state" not in plain.disclosure()
+
+
 def test_rollback_reaches_the_policy_and_the_disclosure_only_when_on():
     supervised = TrialSettings.from_options({"model": "gpt-5.6-luna", "agent": "mini-swe-agent"})
     rolling = replace(supervised, rollback="on")
@@ -203,6 +209,7 @@ def test_agent_time_is_the_task_published_value_unless_overridden(tmp_path):
     ({"agent": "mini-swe-agent", "alone": "continue"}, "needs services none"),
     ({"rollback": "maybe"}, "rollback must be off or on"),
     ({"keep_checkpoints": "maybe"}, "keep_checkpoints must be off or on"),
+    ({"agent": "checker", "services": "none", "saved_state": "cp1.json"}, "saved_state must be an absolute path"),
     ({"keep_checkpoints": "on"}, "keep_checkpoints=on needs rollback=on"),
     ({"agent": "mini-swe-agent", "services": "none", "rollback": "on"}, "needs services all"),
     ({"worker_model": "claude"}, "model must be one of"),

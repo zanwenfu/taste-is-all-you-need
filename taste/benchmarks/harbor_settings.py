@@ -90,6 +90,9 @@ class TrialSettings:
     # "on": a trial's checkpoint files outlive it, so that each can be graded
     # later by the task's own verifier (taste.benchmarks.saved_state_agent).
     keep_checkpoints: str = "off"
+    # A checkpoint's manifest file: its files are put back before the trial's
+    # agent starts, as a reviewer of an earlier run's saved state needs.
+    saved_state: str = ""
     # A branch of an earlier run of the agent alone (taste.brains.branch_replay):
     # the replay script (scripts/replay_script.py) and the step k it starts
     # from. "rebuild" runs the recorded commands 1..k again in the fresh task
@@ -220,6 +223,8 @@ class TrialSettings:
             raise ValueError("alone=continue runs the agent alone: it needs services none")
         if self.rollback not in ("off", "on"):
             raise ValueError("rollback must be off or on")
+        if self.saved_state and not self.saved_state.startswith("/"):
+            raise ValueError("saved_state must be an absolute path")
         if self.keep_checkpoints not in ("off", "on"):
             raise ValueError("keep_checkpoints must be off or on")
         if self.keep_checkpoints == "on" and self.rollback != "on":
@@ -370,6 +375,7 @@ class TrialSettings:
                 **({"alone": self.alone} if self.services == "none" else {}),
                 **({"rollback": self.rollback} if self.rollback != "off" else {}),
                 **({"keep_checkpoints": self.keep_checkpoints} if self.keep_checkpoints != "off" else {}),
+                **({"saved_state": self.saved_state} if self.saved_state else {}),
                 **({"branch": {"script": self.branch, "step": self.branch_step, "mode": self.branch_mode,
                                "live": self.branch_live, "tolerance": self.branch_tolerance,
                                **({"replay": self.branch_replay} if self.branch_replay != "auto" else {}),

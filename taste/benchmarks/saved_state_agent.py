@@ -28,32 +28,14 @@ from harbor.agents.base import BaseAgent
 from harbor.agents.capabilities import AgentCapabilities
 
 from taste import __version__
+from taste.benchmarks.branch_trial import load_saved_state, restore_saved_state  # noqa: F401
 from taste.benchmarks.harbor_agent import _docker
 from taste.benchmarks.harbor_settings import compose_project
-from taste.brains.docker_checkpoint import CheckpointManifest
 from taste.brains.docker_terminal import COMPOSE_PROJECT_LABEL, DockerTerminalBackend
 from taste.brains.terminal_broker import MAX_TERMINAL_OUTPUT_BYTES
 
 # A restore is copies through the Docker API; this bounds one that hangs.
 RESTORE_SECONDS = 1800
-
-
-def load_saved_state(path):
-    """The manifest in ``path`` and the directory holding its tar. Refuses what cannot be graded."""
-    path = Path(path)
-    manifest = CheckpointManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
-    if manifest.partial:
-        raise ValueError("a partial save left files out: its state cannot be graded")
-    return manifest, path.parent
-
-
-def restore_saved_state(backend, path):
-    """Put a saved state's files back; its account. Raises unless the files match it exactly."""
-    manifest, directory = load_saved_state(path)
-    receipt = backend.restore(manifest, directory, any_container=True)
-    if not receipt.exact:
-        raise RuntimeError(f"the restored files differ from the saved state at {len(receipt.mismatches)} paths")
-    return {**receipt.summary(), "saved_state": str(path), "tar_sha256": manifest.tar_sha256}
 
 
 class SavedStateAgent(BaseAgent):

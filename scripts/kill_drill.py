@@ -40,6 +40,7 @@ from types import SimpleNamespace
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 PATHS = ("planner", "checkpoint", "terminal", "worker")
+BEDROCK_URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
 GIT_STEPS = ("commit_tree", "note_set", "cas_update_ref")
 
 
@@ -105,17 +106,37 @@ class CountingModel:
                                text_blocks=(self.respond(prompt),), tool_calls=(), stop_reason="end_turn")
 
 
+def live_model(root):
+    """The model facade on the real Bedrock route, logging each call before it is sent."""
+    from taste.llm import LLM
+    from taste.providers.azure_openai import AZURE_LUNA6_MODEL, AzureDeployment, AzureOpenAIConfig
+
+    class Counted(LLM):
+        def call(self, **kwargs):
+            with (root / "calls.log").open("a") as written:
+                written.write("call\n")
+                written.flush()
+                os.fsync(written.fileno())
+            return super().call(**kwargs)
+
+    route = AzureOpenAIConfig(base_url=BEDROCK_URL, api_key=os.environ["AWS_BEARER_TOKEN_BEDROCK"],
+                              deployments=(AzureDeployment(AZURE_LUNA6_MODEL, "global.openai.gpt-6-luna"),))
+    return Counted(azure_openai=route, max_attempts=1)
+
+
 def planner_effect(root):
     from taste.brains.central_planner import (
         PLANNER_SYSTEM,
         CentralPlanner,
         Goal,
+        InvalidPlannerOutput,
         PlannerTransportError,
         RejectedPlannerOperation,
         StalePlanningWorld,
     )
     from taste.brains.planner_transport import PLANNER_RECEIPT_BRANCH, LLMPlannerTransport
     from taste.memstore import Store
+    from taste.providers.azure_openai import AZURE_LUNA6_MODEL
     from tests.test_brains_central_planner import one_assignment_response
 
     store = Store.open(root / "repo", "drill")
@@ -123,9 +144,15 @@ def planner_effect(root):
     integration.close()
     lock = threading.RLock()
     control = store.branch("central-control", producer="drill")
-    model = CountingModel(root / "calls.log", lambda prompt: one_assignment_response("drill", PLANNER_SYSTEM, prompt))
-    transport = LLMPlannerTransport(model, store=store, control=control,
-                                    journal=store.branch(PLANNER_RECEIPT_BRANCH, producer="drill"), mutation_lock=lock)
+    journal = store.branch(PLANNER_RECEIPT_BRANCH, producer="drill")
+    if os.environ.get("KILL_DRILL_LIVE"):
+        # The real planner on the real model: recovery runs against a live reply.
+        transport = LLMPlannerTransport(live_model(root), store=store, control=control, journal=journal,
+                                        mutation_lock=lock, model=AZURE_LUNA6_MODEL, effort="medium")
+    else:
+        model = CountingModel(root / "calls.log",
+                              lambda prompt: one_assignment_response("drill", PLANNER_SYSTEM, prompt))
+        transport = LLMPlannerTransport(model, store=store, control=control, journal=journal, mutation_lock=lock)
     central = CentralPlanner(store, transport=transport, control=control, mutation_lock=lock)
     goal = Goal(goal_id="ship-parser", task="Build and validate a parser",
                 success_criteria=("parser.py exists", "the parser tests pass"), budget_usd=12.5)
@@ -136,6 +163,9 @@ def planner_effect(root):
             plan = central.plan(goal)
         except StalePlanningWorld:
             stale += 1
+        except InvalidPlannerOutput as refused:
+            outcome = {"outcome": "reply_refused", "why": str(refused)[:120]}
+            break
         except (PlannerTransportError, RejectedPlannerOperation) as stopped:
             outcome = {"outcome": "refused_to_repeat", "why": type(stopped).__name__}
             break
@@ -350,6 +380,8 @@ def main(argv=None):
     parser.add_argument("--child", choices=PATHS)
     parser.add_argument("--root")
     parser.add_argument("--limit", type=int, default=2000)
+    parser.add_argument("--start", type=int, default=1, help="first kill point")
+    parser.add_argument("--step", type=int, default=1, help="walk every Nth point, to split a slow walk across shards")
     arguments = parser.parse_args(argv)
     if arguments.child:
         child(arguments.child, arguments.root, arguments.at)
@@ -360,7 +392,7 @@ def main(argv=None):
     total = wrong = 0
     outcomes = {}
     with (arguments.out.open("w") if arguments.out else open(os.devnull, "w")) as written:
-        for kill_at in range(1, arguments.limit + 1):
+        for kill_at in range(arguments.start, arguments.limit + 1, arguments.step):
             record = one_point(arguments.path, kill_at)
             if not record["reached"] and "kill_exit" not in record:
                 break
