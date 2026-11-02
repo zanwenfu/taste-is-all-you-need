@@ -176,3 +176,9 @@ than one paid call. 128 recovered and planned from a live reply; 28 refused to
 repeat because they could not tell whether a call had gone out, 15 of those with
 no call made. Refusing is safe but leaves the run for someone to restart.
 
+**Kill test on delivery (2026-11-02).** 48 kill points inside the step that hands
+a worker's result to the integration branch. None was wrong: 45 finished with the
+worker's file whole and the target's other files intact, 3 refused to repeat, and
+git found no damage. With the planner, checkpoint, terminal and worker paths,
+that is 280 points on a stand-in model and 156 on the real one.
+

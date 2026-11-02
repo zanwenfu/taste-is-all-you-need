@@ -39,7 +39,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-PATHS = ("planner", "checkpoint", "terminal", "worker")
+PATHS = ("planner", "checkpoint", "terminal", "worker", "delivery")
+DELIVERED = "NEW = 1\n"
+KEPT = "base file\n"
 BEDROCK_URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
 GIT_STEPS = ("commit_tree", "note_set", "cas_update_ref")
 
@@ -303,8 +305,44 @@ def worker_effect(root):
         session.close()
 
 
+def delivery_prepare(root):
+    """Set up before the kill walk, so that every kill point falls in the delivery itself."""
+    from taste.memstore import Store
+
+    store = Store.open(root / "repo", "drill")
+    integration = store.branch("integration", producer="central")
+    integration.write("kept.txt", KEPT)
+    base = integration.checkpoint("base")
+    worker = store.branch("worker", from_state=base, producer="worker")
+    worker.write("new.py", DELIVERED)
+    final = worker.checkpoint("worker output")
+    (root / "states.json").write_text(json.dumps({"base": base.id, "final": final.id}))
+    store.close()
+
+
+def delivery_effect(root):
+    from taste.brains.delivery import DeliveryRecoveryRequired, deliver_product
+    from taste.memstore import Store
+
+    states = json.loads((root / "states.json").read_text())
+    store = Store.open(root / "repo", "drill")
+    target = store.branch("integration", producer="central")
+    try:
+        try:
+            result = deliver_product(store, target, delivery_id="drill", final_state_id=states["final"],
+                                     base_state_id=states["base"], artifact_paths=("new.py",))
+        except DeliveryRecoveryRequired as stopped:
+            return {"outcome": "refused_to_repeat", "why": type(stopped).__name__,
+                    "file": target.head.read("new.py"), "kept": target.head.read("kept.txt")}
+        return {"outcome": "delivered" if result.ok else "conflict", "reused": bool(result.reused_outcome),
+                "file": target.head.read("new.py"), "kept": target.head.read("kept.txt")}
+    finally:
+        store.close()
+
+
 EFFECTS = {"planner": planner_effect, "checkpoint": checkpoint_effect, "terminal": terminal_effect,
-           "worker": worker_effect}
+           "worker": worker_effect, "delivery": delivery_effect}
+PREPARE = {"delivery": delivery_prepare}
 
 
 def child(path, root, kill_at):
@@ -336,6 +374,8 @@ def one_point(path, kill_at, keep=None):
     root = Path(keep) if keep else Path(tempfile.mkdtemp(prefix="drill-"))
     root.mkdir(parents=True, exist_ok=True)
     try:
+        if path in PREPARE:
+            PREPARE[path](root)
         killed = spawn(path, root, kill_at)
         if killed.returncode == 0:
             return {"at": kill_at, "reached": False}
@@ -368,6 +408,15 @@ def verdict(record):
         wrong.append("a paid call was made twice")
     if record["git"] not in ("clean", "no store yet", "no repository yet"):
         wrong.append("git found damage")
+    recovery = record.get("recovery")
+    if isinstance(recovery, dict) and recovery["outcome"] in ("delivered", "conflict", "refused_to_repeat"):
+        if recovery["outcome"] == "conflict":
+            wrong.append("a clean delivery ended in a conflict")
+        allowed = (DELIVERED,) if recovery["outcome"] == "delivered" else (DELIVERED, None)
+        if "file" in recovery and recovery["file"] not in allowed:
+            wrong.append("the delivered file is not what the worker made")
+        if "kept" in recovery and recovery["kept"] != KEPT:
+            wrong.append("delivery lost a file the target already held")
     return wrong
 
 

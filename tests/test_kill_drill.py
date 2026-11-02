@@ -30,3 +30,30 @@ def test_a_goal_that_stays_stale_after_a_restart_counts_as_wrong():
     record = {"reached": True, "recovery_exit": 0, "calls": 0, "git": "clean",
               "recovery": {"outcome": "stale_every_time"}}
     assert kill_drill.verdict(record) == ["the goal stayed stuck after the restart"]
+
+
+@pytest.mark.parametrize("kill_at", [3, 12, 25, 40])
+def test_a_killed_delivery_leaves_the_result_whole_or_refused(kill_at):
+    record = kill_drill.one_point("delivery", kill_at)
+    assert record["reached"], "the child must die by the signal at this point"
+    assert kill_drill.verdict(record) == [], record.get("recovery")
+    assert record["recovery"]["outcome"] in ("delivered", "refused_to_repeat")
+
+
+@pytest.mark.parametrize("recovery, problem", [
+    ({"outcome": "delivered", "file": "half\n", "kept": kill_drill.KEPT},
+     "the delivered file is not what the worker made"),
+    ({"outcome": "delivered", "file": kill_drill.DELIVERED, "kept": None},
+     "delivery lost a file the target already held"),
+])
+def test_a_torn_delivery_counts_as_wrong(recovery, problem):
+    record = {"reached": True, "recovery_exit": 0, "calls": 0, "git": "clean", "recovery": recovery}
+    assert kill_drill.verdict(record) == [problem]
+
+
+@pytest.mark.parametrize("path, kill_at", [("terminal", 9), ("terminal", 21), ("worker", 7), ("worker", 18)])
+def test_a_killed_command_or_worker_call_is_not_repeated(path, kill_at):
+    record = kill_drill.one_point(path, kill_at)
+    assert record["reached"], "the child must die by the signal at this point"
+    assert kill_drill.verdict(record) == [], record.get("recovery")
+
