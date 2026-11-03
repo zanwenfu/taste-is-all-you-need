@@ -62,8 +62,25 @@ def test_private_snapshots_survive_reopen_and_do_not_enter_metadata_or_arguments
     assert admitted[1][descriptor.name].decode() not in repr(scope.manager.properties)
     # Shutdown/recovery needs process identity, not credential bytes. A missing
     # secret must never prevent containment after a successful launch.
-    source.unlink()
+    assert not source.exists()
     assert OwnedProcessScope(scope.directory, manager=scope.manager).stop()["processes_stopped"]
+
+
+def test_the_private_copy_is_gone_once_the_service_is_launched(tmp_path, admitted):
+    # systemd loaded it when it started the service; an owner killed later, or a cleanup that fails, must not leave
+    # it in the trial's record (238 records of Oct 20 - Nov 3 kept it).
+    scope = create(tmp_path, admitted)
+    scope.start()
+    assert scope.manager.properties and scope.manager.starts
+    assert not (scope.directory / "credentials").exists()
+
+
+def test_the_private_copy_is_gone_when_the_launch_fails(tmp_path, admitted):
+    scope = create(tmp_path, admitted)
+    scope.manager.start_error = RuntimeError("systemd-run failed (1): no")
+    with pytest.raises(ResourceCleanupError):
+        scope.start()
+    assert not (scope.directory / "credentials").exists()
 
 
 @pytest.mark.parametrize("values", [None, {}, {"wrong": b"dummy"}, {"azure.json": b"wrong"},

@@ -39,6 +39,7 @@ from taste.brains.process_credentials import (
     ScopeCredential,
     credential_values,
     load_credential_properties,
+    remove_credentials,
     write_credentials,
 )
 from taste.resources import resource_error
@@ -411,6 +412,10 @@ class OwnedProcessScope:
                 self._write(fd, state)
             except BaseException as exc:
                 raise self._failure(fd, state, "start", exc) from exc
+            finally:
+                # A service of type exec is acknowledged after its exec, its credentials already in systemd's own
+                # mount; the copy here is of no further use, and an owner killed later must not leave it behind.
+                remove_credentials(fd)
 
     def stop(self, reason: str = "external cancellation") -> dict[str, Any]:
         if not isinstance(reason, str) or not reason or "\x00" in reason or len(reason) > 2048:

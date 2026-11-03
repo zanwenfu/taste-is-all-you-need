@@ -1,9 +1,9 @@
 """Private systemd launch material, separate from durable scope metadata.
 
 Only names and content digests enter a ScopeSpec. The outside controller keeps
-the bytes in its private scope directory; systemd copies them into a read-only
-credential mount for the service. No credential value enters argv or the unit
-environment. These are trusted runtime credentials, never task-provided files.
+the bytes in its private scope directory until the launch; systemd copies them
+into a read-only credential mount for the service. No credential value enters
+argv or the unit environment. These are trusted runtime credentials, never task-provided files.
 """
 
 from __future__ import annotations
@@ -75,6 +75,31 @@ def write_credentials(parent_fd, values):
         os.fsync(parent_fd)
     finally:
         os.close(directory)
+
+
+def remove_credentials(parent_fd):
+    """Delete the private copies once their launch was attempted; systemd has loaded them or never will.
+
+    Only regular files are removed and no link is followed. What cannot be
+    removed that way (a link or directory in its place, which only the trusted
+    root controller could make) is left, and the launch's own outcome stands.
+    """
+    try:
+        directory = os.open("credentials", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError:
+        return
+    try:
+        for name in os.listdir(directory):
+            if stat.S_ISREG(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
+                os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    try:
+        os.rmdir("credentials", dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except OSError:
+        pass
 
 
 def load_credential_properties(directory: Path, descriptors):
