@@ -216,12 +216,16 @@ class Driver:
                                                                       "seconds", "model", "exit_status",
                                                                       "agent_started")},
                                   **own_final(summary)}
-                    if kind == "base" and summary["reward"] is not None and not summary["solved"]:
+                    if kind == "base" and summary["reward"] is not None and self.takes(summary):
                         failed.append((summary, directory))
         # Runs are added once every run read here is in: a run's budget is the medians of all its task's runs read
         # with it, not of those that came before it in name order (the main study's budgets were, 1-4 runs each).
         for summary, directory in failed:
             self._add_run(summary, directory)
+
+    def takes(self, summary):
+        """Whether a graded base run becomes a study run: one that failed the hidden tests."""
+        return not summary["solved"]
 
     def fresh(self, task, kinds=("calibration", "base")):
         return [run for run in self.data["fresh"].values()
@@ -242,7 +246,7 @@ class Driver:
         self.runs[run_id] = self.base_run(run_id, summary, job_dir)
 
     def base_run(self, run_id, summary, job_dir):
-        """A failed base run as a study run, or a record of why it is left out."""
+        """A base run the state takes (``takes``) as a study run, or a record of why it is left out."""
         values = self.settings
         nested = records.settled(summary["token"], values["trials_root"])
         view = records.agent_view(nested)

@@ -244,7 +244,11 @@ DEFAULTS = {
     # A seed: each run's arms are emitted in an order shuffled by it and the run's id (kept as the run's
     # arm_order), so no arm is always first in the spool. None: the order of `recoveries`.
     "arm_order_seed": None,
+    # The base runs taken, by what the hidden tests said of them: "failed" (the study), "passed" (what the reviewer
+    # and the recoveries do to work that was already right: its net effect), or "any".
+    "base_outcome": "failed",
 }
+BASE_OUTCOMES = ("failed", "passed", "any")
 
 
 def readings(path):
@@ -313,12 +317,16 @@ class RecoveryDriver(Driver):
             raise ValueError("checker_model must name a model")
         for name, allowed in (("mode", jobs.MODES), ("checker_effort", jobs.EFFORTS),
                               ("oracle", ("highest_v", "latest")), ("retry_rounds", ("continue", "retry")),
-                              ("prior_checkpoints", ("restore", "rebuild"))):
+                              ("prior_checkpoints", ("restore", "rebuild")), ("base_outcome", BASE_OUTCOMES)):
             if settings[name] not in allowed:
                 raise ValueError(f"{name} must be one of: " + ", ".join(allowed))
         unknown = (set(settings["recoveries"]) - set(RECOVERIES)) | (set(settings["rewind_sources"]) - set(SOURCES))
         if unknown:
             raise ValueError("unknown recoveries or rewind sources: " + ", ".join(sorted(unknown)))
+        # These arms tell the agent what the hidden tests failed in the run it goes on from: nothing, for a passed one.
+        told_tests = sorted(name for name in settings["recoveries"] if MESSAGE[name] in ("tests", "both"))
+        if settings["base_outcome"] != "failed" and told_tests:
+            raise ValueError("arms told the hidden tests' failures need failed base runs: " + ", ".join(told_tests))
         # The rewind-tools arms go on after a commit by design: round one only would cut their method short.
         wrong = sorted(set(settings["first_only"]) - (set(RECOVERIES) - REWIND_ARMS))
         if wrong:
@@ -355,11 +363,18 @@ class RecoveryDriver(Driver):
             self._calibrated = records.calibration_budgets(path) if path else {}
         return self._calibrated
 
+    def takes(self, summary):
+        wanted = self.settings["base_outcome"]
+        return wanted == "any" or (summary["solved"] if wanted == "passed" else not summary["solved"])
+
     def _add_run(self, summary, job_dir):
         before = set(self.runs)
         super()._add_run(summary, job_dir)
         for run_id in set(self.runs) - before:
             run = self.runs[run_id]
+            if self.settings["base_outcome"] != "failed":
+                run["taken"] = (f"{'passed' if summary['solved'] else 'failed'} the hidden tests "
+                                f"(base_outcome: {self.settings['base_outcome']})")
             if not run.get("skipped") and run["base"]["exit_status"] != "Submitted":
                 run["skipped"] = f"the base run did not submit ({run['base']['exit_status']})"
             if run.get("skipped"):
