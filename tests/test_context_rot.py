@@ -1,0 +1,343 @@
+"""Judges, cleaner and bridge for the context-rot reproduction runs (studies/context_rot).
+
+Nothing here calls a model: Bedrock is replaced by a mock transport. The tests that
+read the upstream code (LongMemEval's prompts, the conpact package) run only where
+that code is on disk, named by LME_REPO and CONPACT_SRC.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import os
+import sys
+import types
+from pathlib import Path
+
+import httpx
+import pytest
+
+from studies.context_rot import bedrock, conpact_bridge, lme_clean, lme_judge, lme_metrics
+
+# -- the Bedrock client ---------------------------------------------------------------
+
+
+def _reply(text, *, inputs=100, outputs=7, reasoning=None, status=200):
+    content = ([{"reasoningContent": {"reasoningText": {"text": reasoning}}}] if reasoning else [])
+    content.append({"text": text})
+    return httpx.Response(status, json={
+        "output": {"message": {"role": "assistant", "content": content}},
+        "stopReason": "end_turn",
+        "usage": {"inputTokens": inputs, "outputTokens": outputs, "totalTokens": inputs + outputs}},
+        headers={"x-amzn-requestid": "req-1"})
+
+
+def _client(handler, model="global.openai.gpt-5.4", **options):
+    return bedrock.Converse(model, token="test-only", transport=httpx.MockTransport(handler), **options)
+
+
+def test_a_converse_call_sends_the_effort_and_reads_only_the_text_block():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        seen["auth"] = request.headers["authorization"]
+        return _reply("yes", reasoning="thinking it over")
+
+    reply = _client(handler, effort="low", max_tokens=256).ask("Is it?", system="Judge.")
+    assert reply.text == "yes" and reply.input_tokens == 100 and reply.output_tokens == 7
+    assert seen["url"].endswith("/model/global.openai.gpt-5.4/converse")
+    assert seen["auth"] == "Bearer test-only"
+    body = seen["body"]
+    assert body["system"] == [{"text": "Judge."}]
+    assert body["messages"] == [{"role": "user", "content": [{"text": "Is it?"}]}]
+    assert body["inferenceConfig"] == {"maxTokens": 256}
+    assert body["additionalModelRequestFields"] == {"reasoning": {"effort": "low"}}
+
+
+def test_a_throttled_call_is_sent_again_and_a_refused_one_is_not():
+    calls = []
+
+    def throttled_once(request):
+        calls.append(1)
+        return httpx.Response(429, json={"message": "slow down"}) if len(calls) == 1 else _reply("no")
+
+    assert _client(throttled_once, wait_seconds=0).ask("q").text == "no" and len(calls) == 2
+
+    def refused(request):
+        return httpx.Response(400, json={"message": "bad request"})
+
+    with pytest.raises(bedrock.BedrockError):
+        _client(refused, wait_seconds=0).ask("q")
+
+
+def test_the_token_is_never_part_of_what_a_reply_or_an_error_shows():
+    def refused(request):
+        return httpx.Response(403, json={"message": "denied"})
+
+    with pytest.raises(bedrock.BedrockError) as caught:
+        _client(refused, wait_seconds=0).ask("q")
+    assert "test-only" not in str(caught.value) and "test-only" not in repr(_client(refused))
+
+
+# -- the LongMemEval judge ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text, label", [
+    ("yes", True), ("Yes.", True), ("**No**", False), ("no", False), (" YES ", True), ('"no"', False),
+    ("yes, the response is correct", None), ("Yes or no", None), ("", None), ("maybe", None),
+    ("I would say yes", None)])
+def test_a_verdict_must_be_a_clear_yes_or_no(text, label):
+    assert lme_judge.parse_verdict(text) is label
+
+
+def test_the_official_rule_is_kept_beside_the_strict_one():
+    assert lme_judge.official_label("I would say yes") is True
+    assert lme_judge.official_label("No, yesterday is wrong") is True  # the substring test the paper used
+    assert lme_judge.official_label("no") is False
+
+
+def test_abstention_questions_get_the_abstention_prompt_whatever_their_type():
+    prompt = lme_judge.anscheck_prompt("multi-session", "Q?", "None given.", "I don't know.", abstention=True)
+    assert prompt.startswith("I will give you an unanswerable question")
+    with pytest.raises(NotImplementedError):
+        lme_judge.anscheck_prompt("no-such-type", "q", "a", "r")
+
+
+@pytest.mark.skipif(not os.environ.get("LME_REPO"), reason="needs LongMemEval's code, named by LME_REPO")
+def test_the_prompts_are_the_official_ones_byte_for_byte(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(os.environ["LME_REPO"]) / "src" / "evaluation"))
+    stubs = {name: types.ModuleType(name) for name in ("backoff", "openai", "tqdm", "numpy")}
+    stubs["backoff"].on_exception = lambda *a, **k: (lambda f: f)
+    stubs["backoff"].expo = None
+    stubs["openai"].RateLimitError = stubs["openai"].APIError = Exception
+    stubs["openai"].OpenAI = object
+    stubs["tqdm"].tqdm = iter
+    for name, module in stubs.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.delitem(sys.modules, "evaluate_qa", raising=False)
+    evaluate_qa = importlib.import_module("evaluate_qa")
+
+    cases = [(task, False) for task in lme_judge.TYPES] + [("multi-session", True)]
+    for task, abstention in cases:
+        assert lme_judge.anscheck_prompt(task, "Q", "A", "R", abstention) == \
+            evaluate_qa.get_anscheck_prompt(task, "Q", "A", "R", abstention)
+
+
+REFS = [
+    {"question_id": "a1", "question_type": "single-session-user", "question": "Where?", "answer": "Paris"},
+    {"question_id": "a2", "question_type": "temporal-reasoning", "question": "When?", "answer": 3},
+    {"question_id": "a3_abs", "question_type": "multi-session", "question": "Who?", "answer": "Not said."},
+]
+
+
+def _write(path, rows):
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return path
+
+
+def test_judging_writes_the_official_file_and_keeps_every_unclear_verdict(tmp_path):
+    hyp = _write(tmp_path / "hyp.jsonl", [{"question_id": q, "hypothesis": h} for q, h in
+                                          (("a1", "Paris"), ("a2", "five"), ("a3_abs", "unknown"))])
+    ref = tmp_path / "ref.json"
+    ref.write_text(json.dumps(REFS))
+    answers = {"Paris": "yes", "five": "no", "unknown": "It depends"}
+
+    def handler(request):
+        prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
+        return _reply(next(v for k, v in answers.items() if f"Model Response: {k}" in prompt))
+
+    out = lme_judge.judge_file(hyp, ref, _client(handler), short_name="gpt-5.4", workers=2)
+    assert out.name == "hyp.jsonl.eval-results-gpt-5.4"
+    rows = {row["question_id"]: row for row in map(json.loads, out.read_text().splitlines())}
+    assert rows["a1"]["autoeval_label"]["label"] is True
+    assert rows["a2"]["autoeval_label"]["label"] is False
+    unclear = rows["a3_abs"]["autoeval_label"]
+    assert unclear["label"] is None and unclear["parse"] == "unparseable"
+    assert unclear["judge_output"] == "It depends" and unclear["model"] == "global.openai.gpt-5.4"
+    assert unclear["input_tokens"] == 100 and unclear["effort"] == "low"
+
+
+def test_judging_again_skips_what_is_done(tmp_path):
+    hyp = _write(tmp_path / "hyp.jsonl", [{"question_id": "a1", "hypothesis": "Paris"}])
+    ref = tmp_path / "ref.json"
+    ref.write_text(json.dumps(REFS))
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return _reply("yes")
+
+    lme_judge.judge_file(hyp, ref, _client(handler), short_name="j")
+    lme_judge.judge_file(hyp, ref, _client(handler), short_name="j")
+    assert len(calls) == 1
+
+
+def _row(qid, label):
+    return {"question_id": qid, "autoeval_label": {"model": "m", "label": label}}
+
+
+def test_metrics_follow_the_official_aggregates_and_count_what_could_not_be_judged():
+    refs = {r["question_id"]: r for r in REFS}
+    summary = lme_metrics.summarize([_row("a1", True), _row("a2", None), _row("a3_abs", True)], refs)
+    assert summary["judged"] == 3 and summary["unparseable"] == 1 and summary["missing"] == 0
+    assert summary["overall_as_wrong"] == pytest.approx(2 / 3)
+    assert summary["overall_excluding"] == pytest.approx(1.0)
+    assert summary["abstention"] == pytest.approx(1.0)
+    # The official task average: the mean over the six type means, each over its own questions.
+    assert summary["task_averaged_as_wrong"] == pytest.approx((1.0 + 0.0 + 1.0) / 3)
+
+
+def test_metrics_say_how_many_questions_have_no_verdict():
+    refs = {r["question_id"]: r for r in REFS}
+    assert lme_metrics.summarize([_row("a1", True)], refs)["missing"] == 2
+
+
+def test_two_judges_are_compared_question_by_question():
+    a = [_row("a1", True), _row("a2", False), _row("a3_abs", True)]
+    b = [_row("a1", True), _row("a2", True), _row("a3_abs", None)]
+    agreement = lme_metrics.agreement(a, b)
+    assert agreement["compared"] == 2 and agreement["agree"] == 1 and agreement["either_unparseable"] == 1
+
+
+# -- the LongMemEval cleaner ---------------------------------------------------------
+
+RAW = [{
+    "question_id": "7d1a_abs", "question_type": "knowledge-update", "question": "What car?",
+    "answer": "A red one", "question_date": "2023/05/30 (Tue) 10:00",
+    "haystack_session_ids": ["answer_7d1a_1", "sharegpt_9", "noans_4"],
+    "haystack_dates": ["2023/05/22 (Mon) 09:00", "2023/05/20 (Sat) 08:00", "2023/05/25 (Thu) 12:00"],
+    "haystack_sessions": [
+        [{"role": "user", "content": "I bought a red car", "has_answer": True},
+         {"role": "assistant", "content": "Nice!"}],
+        [{"role": "user", "content": "Write a poem"}, {"role": "assistant", "content": "Roses"}],
+        [{"role": "user", "content": "Weather?", "has_answer": False}]],
+    "answer_session_ids": ["answer_7d1a_1"]}]
+
+
+def _strings(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+    elif isinstance(value, str):
+        yield value
+
+
+def test_nothing_that_marks_the_answer_reaches_the_memory():
+    cleaned, private = lme_clean.clean(RAW)
+    seen = list(_strings(cleaned))
+    for marker in ("has_answer", "answer_session_ids", "question_type", "knowledge-update", "A red one",
+                   "7d1a", "_abs", "answer_", "noans_", "sharegpt"):
+        assert not any(marker in text for text in seen), marker
+    assert set(cleaned[0]) == {"qid", "question", "question_date", "sessions"}
+    assert all(set(turn) == {"role", "content"} for s in cleaned[0]["sessions"] for turn in s["turns"])
+    assert private[cleaned[0]["qid"]]["question_id"] == "7d1a_abs"
+
+
+def test_sessions_come_in_date_order_and_map_back_to_their_original_ids():
+    cleaned, private = lme_clean.clean(RAW)
+    sessions = cleaned[0]["sessions"]
+    assert [s["date"] for s in sessions] == sorted(s["date"] for s in sessions)
+    back = private[cleaned[0]["qid"]]["sessions"]
+    assert [back[s["sid"]] for s in sessions] == ["sharegpt_9", "answer_7d1a_1", "noans_4"]
+    assert sessions[1]["turns"][0]["content"] == "I bought a red car"
+
+
+def test_neutral_ids_do_not_depend_on_file_order():
+    first, _ = lme_clean.clean(RAW)
+    again, _ = lme_clean.clean([*RAW[:0], *RAW])
+    assert first[0]["qid"] == again[0]["qid"] == lme_clean.neutral("q", "7d1a_abs")
+
+
+# -- the rule-loss bridge ------------------------------------------------------------
+
+
+def test_the_retention_verdict_follows_their_rule_and_an_unclear_one_is_counted():
+    replies = iter(["maybe", "Probably", "YES, it is there"])
+
+    def handler(request):
+        return _reply(next(replies))
+
+    judge = conpact_bridge.RetentionJudge(_client(handler))
+    assert judge.verdict("System.", "User.") is True and judge.calls == 3
+    never = conpact_bridge.RetentionJudge(_client(lambda request: _reply("unsure")))
+    assert never.verdict("S", "U") is None and never.unparseable == 1
+
+
+def test_counts_show_what_their_summary_drops():
+    results = [
+        {"source": "hermes", "sc_type": "Action", "retention": True, "full_with_sc_compliant": True,
+         "full_without_sc_compliant": None, "compaction_compliant": False, "upper_bound_compliant": True,
+         "compaction_output": "A\nB"},
+        {"source": "hermes", "sc_type": "Action", "retention": None, "full_with_sc_compliant": None,
+         "full_without_sc_compliant": False, "compaction_compliant": True, "upper_bound_compliant": True,
+         "compaction_output": "B"},
+    ]
+    counts = conpact_bridge.unparseable_counts(results)
+    assert counts == {"retention": 1, "full_with_sc": 1, "full_without_sc": 1, "compaction": 0,
+                      "upper_bound": 0, "instances": 2}
+
+
+@pytest.mark.parametrize("output, letter, graded", [("B", "B", True), ("A", "B", False), ("A\nB", "B", None),
+                                                    (" b ", "B", True), ("B.", "B", None)])
+def test_the_paper_rule_grades_only_an_exact_single_letter(output, letter, graded):
+    assert conpact_bridge.paper_grade(output, letter) is graded
+
+
+def test_the_first_contexts_are_chosen_whole():
+    rows = [types.SimpleNamespace(haystack_id=h, id=f"{h}-{i}") for h in ("h3", "h1", "h2") for i in range(15)]
+    chosen = conpact_bridge.first_contexts(rows, 2)
+    assert len(chosen) == 30 and {row.haystack_id for row in chosen} == {"h3", "h1"}
+
+
+@pytest.mark.skipif(not os.environ.get("CONPACT_SRC"), reason="needs the conpact package, named by CONPACT_SRC")
+def test_their_scoring_runs_with_the_bedrock_judge_in_place_of_theirs(tmp_path, monkeypatch):
+    stubs = {name: types.ModuleType(name) for name in ("datasets", "openai", "tqdm", "tqdm.auto")}
+    stubs["datasets"].load_dataset = None
+    stubs["tqdm.auto"].tqdm = lambda iterable, **kwargs: iterable
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=self)
+
+        def create(self, **kwargs):
+            message = types.SimpleNamespace(content="A")
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
+
+    stubs["openai"].OpenAI = FakeOpenAI
+    for name, module in stubs.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.syspath_prepend(os.environ["CONPACT_SRC"])
+    # The package's __init__ re-exports a function named evaluate over the submodule.
+    evaluation = importlib.import_module("conpact.evaluate")
+    Instance = importlib.import_module("conpact.instance").Instance
+
+    instance = Instance(
+        id="h1-1", source="hermes", haystack_id="h1", target_length=100000, token_length=10, position="top",
+        repeat=1, strict=False, direct=True, sc_id=1, sc_type="Action", sc_text="Use metric units.",
+        sc_rendered="For the rest of this session. use metric units.", sc_message_indices=[0],
+        system_prompt="s", developer_prompt="d", messages=[{"role": "user", "content": "hi"}],
+        messages_without_sc=[{"role": "user", "content": "hi"}], probe="p", correct_answer="c",
+        incorrect_answer="i", swap_seed=1, compliant_letter="A", probe_prompt="pp", post_sc_probe_prompt="pp2",
+        meta="{}")
+    prompts = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        prompts.append((body["system"][0]["text"], body["messages"][0]["content"][0]["text"]))
+        return _reply("NO")
+
+    judge = conpact_bridge.RetentionJudge(_client(handler))
+    with conpact_bridge.bedrock_judge(judge):
+        results = evaluation.score([instance], [[{"role": "assistant", "content": "summary"}]],
+                                   out_dir=tmp_path, probe=evaluation.Endpoint("m", "u", "k"),
+                                   judge=evaluation.Endpoint("unused", api_key="unused"), workers=1)
+    assert results[0]["retention"] is False and results[0]["compaction_compliant"] is True
+    expected = evaluation.judge_prompts("Use metric units.", [{"role": "assistant", "content": "summary"}])
+    assert prompts == [expected]
+    assert evaluation._judge.__module__ == "conpact.evaluate"  # put back afterwards

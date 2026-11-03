@@ -35,3 +35,7 @@ docs/banner/package-lock.json
 # Dataset snapshots: 8MB of JSONL, pinned by digest in data/*.sha256
 data/*.jsonl
 .claude/worktrees/
+
+# Context-rot study inputs and outputs: large, regenerated from public data
+studies/context_rot/runs/
+studies/context_rot/data/
