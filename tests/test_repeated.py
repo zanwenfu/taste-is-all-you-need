@@ -99,6 +99,26 @@ def test_each_round_carries_the_summary_forward_and_every_round_is_judged(tmp_pa
     json.dumps(row)
 
 
+def test_the_served_judge_asks_each_summary_once_and_resumes(tmp_path):
+    from studies.context_rot import served_judge
+
+    rows = [{"id": f"h1:sc0{i}", "compacted": [{"role": "assistant", "content": f"S{i}"}]} for i in range(3)]
+    (tmp_path / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (tmp_path / "judge_inputs.jsonl").write_text(
+        "".join(json.dumps({"id": row["id"], "sc_text": "rule"}) + "\n" for row in rows))
+    asked = []
+
+    def verdict(sc_text, compacted):
+        asked.append(compacted[0]["content"])
+        return compacted[0]["content"] == "S1"
+
+    assert served_judge.judge_folder(tmp_path, verdict, workers=1) == 3
+    assert served_judge.judge_folder(tmp_path, verdict, workers=1) == 0 and len(asked) == 3
+    written = {item["id"]: item["retention"] for item in
+               map(json.loads, (tmp_path / "verdicts.served.jsonl").read_text().splitlines())}
+    assert written == {"h1:sc00": False, "h1:sc01": True, "h1:sc02": False}
+
+
 def test_finished_cases_are_not_run_again(tmp_path):
     (tmp_path / "results.jsonl").write_text(json.dumps({"id": "h1:sc01", "k": 2}) + "\n")
     assert repeated.done_keys(tmp_path) == {("h1:sc01", 2)}
