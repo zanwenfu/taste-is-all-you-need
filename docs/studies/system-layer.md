@@ -350,3 +350,19 @@ recorded, is clean. Starts are spaced 10 seconds apart, wait while the service m
 is slow to answer, run one host check, and default to 16 at once. The cause of the
 overload was not measured; the rate of starts is what differed from the first study.
 
+**Crash study, second run, on the fixed code (2026-11-02, 5:44 to 6:59 pm ET, code
+d90fea3).** The same 69 tasks with the same kill points, 16 at a time, one start every
+10 seconds, no retries, $5.14 of model time. No run raised an exception or broke.
+Kills landed in 60 runs and all 60 recovered: each new process ran, the goal ended by
+itself and the task was graded. 9 runs ended before their kill. In 58 of the 60 the
+first new command came a median of 44 seconds after the kill, the longest 198; the
+other 2 ran no further command. No paid call was sent twice. 50 were cut off, in 44
+runs. In 36 runs a new worker ran a command the killed one had run, 83 times in all.
+
+Solved: 30 of 69, where the same tasks' unkilled runs predict 31.3, a per-task
+difference of -1.9 points, 95% [-10.1, +5.8], better on 10 tasks and worse on 11. That
+is the estimate to use, since every task is in it. Over the 60 whose kill landed it is
+-6.1 points, [-14.4, +1.7], 22 solved against 25.7, but that group is selected: the 9
+runs that beat their kill point are mostly wins, 8 solved against 5.7 predicted. The
+first run is not pooled with this one. It is the record of what real kills found.
+
