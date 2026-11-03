@@ -366,3 +366,13 @@ is the estimate to use, since every task is in it. Over the 60 whose kill landed
 runs that beat their kill point are mostly wins, 8 solved against 5.7 predicted. The
 first run is not pooled with this one. It is the record of what real kills found.
 
+**Matched control for the crash study (2026-11-02, 8:00 to 9:21 pm ET, code d90fea3).**
+Added after a search found a concurrent project with a matched no-kill group, and
+because the unkilled runs above came earlier, on older code and at another pace. The
+same 69 tasks once, with the same code, pace and settings, and no kill: 32 of 69
+solved, no exceptions, $5.19. Against the second kill run, task by task: 30 of 69
+solved with a kill, 32 of 69 without, -2.9 points, 95% [-13.0, +5.8], better on 5
+tasks, worse on 7, same on 57, exact sign test p = 0.77. Over the 60 tasks whose kill
+landed, 22 against 25, -5.0 points, [-16.7, +5.0]. Median run length was 519 seconds
+with a kill and 505 without.
+
