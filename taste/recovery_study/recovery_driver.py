@@ -188,6 +188,9 @@ HANDOFF_SECONDS, REPLY_RESERVE_SECONDS, PLAN_SECONDS = 150.0, 210.0, 90.0
 # Why a branch rebuilds a state an earlier study saved (prior_checkpoints "rebuild").
 PRIOR_CHECKPOINT = ("the checkpoint was saved by an earlier study, on a host that kept it, and this host does not "
                     "keep it, so the state is rebuilt from the record")
+# A check whose hosted agent never started in this many jobs running gives up before check_attempts runs out: the
+# same fault, retried, cost about 50 minutes an attempt (study S grid, Nov 2).
+NOT_STARTED_CHECKS = 2
 ENDS = ("done", "budget", "no_submission", "agent_failed", "check_failed", "rewind_unfaithful", "first_only")
 
 DEFAULTS = {
@@ -609,7 +612,12 @@ class RecoveryDriver(Driver):
             return list(found[0])
         if self.pending(check["jobs"]) or self.pending(check["checkpoints"]):
             return None
-        if len(self.counted(check["jobs"])) >= values["check_attempts"]:
+        counted = self.counted(check["jobs"])
+        if len(counted) >= values["check_attempts"]:
+            return False
+        last = [self.jobs[name]["results"] for name in counted[-NOT_STARTED_CHECKS:]]
+        if len(last) == NOT_STARTED_CHECKS and all(results and all(summary["agent_started"] is False
+                                                                   for summary in results) for results in last):
             return False
         view = records.agent_view(records.settled(source["token"], values["trials_root"]))
         if view is None or not view["task"].strip():

@@ -472,6 +472,22 @@ def test_jobs_harbor_ended_before_any_trial_are_not_attempts_and_the_episodes_go
     assert ends == ["budget", "budget"]
 
 
+def test_a_check_whose_agent_never_starts_twice_running_is_given_up_before_its_attempts_run_out(tmp_path):
+    # Study S grid, Nov 2: a check's hosted agent never started, six times over, each attempt about 50 minutes
+    # (a rebuild, then the checker): the same fault does not get every attempt the check is allowed.
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["retry"], check_attempts=6)
+    made = recoveries()
+
+    def outcome(spec, task, settings, harbor):
+        if settings.get("agent") == "checker":
+            return {"reward": None, "steps": [], "exception": "HostedAgentNotStarted", "seconds": None, "cost": 0.0}
+        return made(spec, task, settings, harbor)
+
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, outcome))
+    assert [spec.name.rsplit("-", 1)[-1] for spec in specs_of(driver, "check")] == ["c1", "c2"]
+    assert driver.runs[run_id]["status"] == "check_failed"
+
+
 def test_a_final_state_whose_save_failed_is_not_checked_and_is_saved_again(tmp_path):
     jobs_dir, trials, given, _ = study(tmp_path)
     made, failed = recoveries(), []
