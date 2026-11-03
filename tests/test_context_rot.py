@@ -295,6 +295,68 @@ def test_the_first_contexts_are_chosen_whole():
     assert len(chosen) == 30 and {row.haystack_id for row in chosen} == {"h3", "h1"}
 
 
+def test_a_history_range_is_chosen_whole_in_file_order():
+    rows = [types.SimpleNamespace(haystack_id=h, id=f"{h}-{i}") for h in ("h3", "h1", "h2", "h4") for i in range(15)]
+    chosen = conpact_bridge.history_range(rows, 1, 3)
+    assert len(chosen) == 30 and {row.haystack_id for row in chosen} == {"h1", "h2"}
+    assert conpact_bridge.history_range(rows, 0, 2) == conpact_bridge.first_contexts(rows, 2)
+
+
+def _slice(folder, rows):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (folder / "judge_inputs.jsonl").write_text(
+        "".join(json.dumps({"id": row["id"], "sc_text": "rule " + row["id"]}) + "\n" for row in rows))
+
+
+def test_slices_merge_into_one_run_with_earlier_verdicts_kept(tmp_path):
+    _slice(tmp_path / "a", [{"id": "h1-1", "retention": None}, {"id": "h1-2", "retention": None}])
+    _slice(tmp_path / "b", [{"id": "h2-1", "retention": None}])
+    judged = tmp_path / "earlier.jsonl"
+    judged.write_text(json.dumps({"id": "h1-2", "retention": True}) + "\n")
+    rows = conpact_bridge.merge_slices([tmp_path / "a", tmp_path / "b"], tmp_path / "all", verdicts_from=judged,
+                                       expected=3)
+    assert [(row["id"], row["retention"]) for row in rows] == [("h1-1", None), ("h1-2", True), ("h2-1", None)]
+    inputs = [json.loads(line)["id"] for line in (tmp_path / "all" / "judge_inputs.jsonl").read_text().splitlines()]
+    assert inputs == ["h1-1", "h1-2", "h2-1"]
+    with pytest.raises(SystemExit, match="3 cases, expected 4"):
+        conpact_bridge.merge_slices([tmp_path / "a", tmp_path / "b"], tmp_path / "x", expected=4)
+    _slice(tmp_path / "c", [{"id": "h2-1", "retention": None}])
+    with pytest.raises(SystemExit, match="twice"):
+        conpact_bridge.merge_slices([tmp_path / "b", tmp_path / "c"], tmp_path / "y")
+
+
+def _deferred(folder, count):
+    rows = [{"id": f"h1-{i}", "retention": None, "compacted": [{"role": "assistant", "content": "kept"}]}
+            for i in range(count)]
+    _slice(folder, rows)
+
+
+def test_judging_that_stops_part_way_resumes_without_asking_again(tmp_path):
+    _deferred(tmp_path, 3)
+    asked = []
+
+    def handler(request):
+        asked.append(1)
+        return _reply("YES")
+
+    prompts = lambda sc_text, compacted: ("System.", sc_text)  # noqa: E731
+    conpact_bridge.judge_deferred(tmp_path, conpact_bridge.RetentionJudge(_client(handler)), prompts, workers=1)
+    assert len(asked) == 3 and len((tmp_path / "verdicts.jsonl").read_text().splitlines()) == 3
+    again = conpact_bridge.judge_deferred(tmp_path, conpact_bridge.RetentionJudge(_client(handler)), prompts,
+                                          workers=1)
+    assert len(asked) == 3 and [row["retention"] for row in again] == [True, True, True]
+
+
+def test_judging_stops_at_the_spend_cap(tmp_path):
+    _deferred(tmp_path, 5)
+    # each call: 1,000,000 input tokens at $2.50/M = $2.50
+    judge = conpact_bridge.RetentionJudge(_client(lambda request: _reply("NO", inputs=1_000_000, outputs=0)))
+    rows = conpact_bridge.judge_deferred(tmp_path, judge, lambda s, c: ("S", s), workers=1, spend_cap=5.0)
+    assert [row["retention"] for row in rows] == [False, False, None, None, None]
+    assert judge.cost() == pytest.approx(5.0)
+
+
 def test_a_prompt_too_long_for_the_window_is_found_before_any_call():
     rows = [types.SimpleNamespace(id="h1-1", text=100), types.SimpleNamespace(id="h1-2", text=126_977)]
     over = conpact_bridge.over_window(rows, {"compaction": lambda row: row.text,

@@ -37,6 +37,7 @@ from studies.context_rot.bedrock import Converse
 
 CONDITIONS = ("full_with_sc", "full_without_sc", "compaction", "upper_bound")
 JUDGE_MODEL = "global.openai.gpt-5.4"
+JUDGE_PRICE = (2.50, 15.00)  # US dollars per million input and output tokens, OpenAI's list price for GPT-5.4
 
 
 class RetentionJudge:
@@ -69,6 +70,10 @@ class RetentionJudge:
         with self._lock:
             self.unparseable += 1
         return None
+
+    def cost(self) -> float:
+        """Spend so far, in US dollars, at ``JUDGE_PRICE``."""
+        return (self.input_tokens * JUDGE_PRICE[0] + self.output_tokens * JUDGE_PRICE[1]) / 1e6
 
 
 @contextlib.contextmanager
@@ -104,20 +109,35 @@ def deferred_judge():
         evaluate._judge = original
 
 
-def judge_deferred(out: Path, judge: RetentionJudge, prompts, workers: int = 8) -> list[dict]:
+def judge_deferred(out: Path, judge: RetentionJudge, prompts, workers: int = 8,
+                   spend_cap: float | None = None) -> list[dict]:
     """Ask the verdicts a deferred run left empty; keep results.jsonl as written.
 
     ``prompts(sc_text, compacted)`` is the package's ``judge_prompts``. Rows that already
-    hold a verdict are not asked again. Writes results.judged.jsonl in the original order.
+    hold a verdict are not asked again, nor rows whose verdict an earlier, interrupted
+    call wrote to verdicts.jsonl. Once ``judge.cost()`` reaches ``spend_cap`` no new row is
+    asked; those stay empty. Writes results.judged.jsonl in the original order.
     """
     out = Path(out)
     rows = [json.loads(line) for line in (out / "results.jsonl").read_text().splitlines()]
     texts = {item["id"]: item["sc_text"]
              for item in map(json.loads, (out / "judge_inputs.jsonl").read_text().splitlines())}
+    ledger = out / "verdicts.jsonl"
+    earlier = {}
+    if ledger.exists():
+        earlier = {item["id"]: item["retention"] for item in map(json.loads, ledger.read_text().splitlines())}
+    for row in rows:
+        if row.get("retention") is None and earlier.get(row["id"]) is not None:
+            row["retention"] = earlier[row["id"]]
     todo = [row for row in rows if row.get("retention") is None]
+    lock = threading.Lock()
 
     def ask(row: dict) -> None:
+        if spend_cap is not None and judge.cost() >= spend_cap:
+            return
         row["retention"] = judge.verdict(*prompts(texts[row["id"]], row["compacted"]))
+        with lock, ledger.open("a") as written:
+            written.write(json.dumps({"id": row["id"], "retention": row["retention"]}) + "\n")
 
     with ThreadPoolExecutor(workers) as pool:
         list(pool.map(ask, todo))
@@ -167,14 +187,48 @@ def paper_rule_rates(results: list[dict]) -> dict:
     return out
 
 
-def first_contexts(instances, count: int):
-    """The instances of the first ``count`` histories, in file order (their configs' test mode)."""
+def history_range(instances, start: int, end: int):
+    """The instances of histories ``start`` to ``end`` (end excluded), counted in file order."""
     order = []
     for row in instances:
         if row.haystack_id not in order:
             order.append(row.haystack_id)
-    keep = set(order[:count])
+    keep = set(order[start:end])
     return [row for row in instances if row.haystack_id in keep]
+
+
+def first_contexts(instances, count: int):
+    """The instances of the first ``count`` histories, in file order (their configs' test mode)."""
+    return history_range(instances, 0, count)
+
+
+def merge_slices(folders, out: Path, verdicts_from: Path | None = None, expected: int | None = None) -> list[dict]:
+    """One run folder from runs over separate history ranges, each case once.
+
+    Verdicts already asked for a case (``verdicts_from``, a judged results file) are kept,
+    so judging the merged run asks only the new cases.
+    """
+    rows, inputs, seen = [], [], set()
+    for folder in map(Path, folders):
+        for row in map(json.loads, (folder / "results.jsonl").read_text().splitlines()):
+            if row["id"] in seen:
+                raise SystemExit(f"case {row['id']} is in two slices or twice in {folder}")
+            seen.add(row["id"])
+            rows.append(row)
+        inputs += (folder / "judge_inputs.jsonl").read_text().splitlines()
+    if expected is not None and len(rows) != expected:
+        raise SystemExit(f"{len(rows)} cases, expected {expected}")
+    if verdicts_from is not None:
+        known = {item["id"]: item["retention"] for item in map(json.loads, Path(verdicts_from).read_text().splitlines())}
+        for row in rows:
+            if row.get("retention") is None and known.get(row["id"]) is not None:
+                row["retention"] = known[row["id"]]
+    kept = {json.loads(line)["id"]: line for line in inputs}
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (out / "judge_inputs.jsonl").write_text("".join(kept[row["id"]] + "\n" for row in rows))
+    return rows
 
 
 DATA_REVISION = "9381c98d6fe131a7e622986389800502a9ad055b"  # the Hugging Face release read for this study
@@ -227,8 +281,10 @@ def judge_later(arguments) -> dict:
     out = Path(arguments.out)
     judge = RetentionJudge(Converse(JUDGE_MODEL, effort="low", max_tokens=arguments.judge_max_tokens),
                            log=out / "judge_calls.jsonl")
-    rows = judge_deferred(out, judge, judge_prompts, workers=arguments.workers)
-    return _report(out, rows, _judge_settings(judge), "summary.judged.csv")
+    rows = judge_deferred(out, judge, judge_prompts, workers=arguments.workers, spend_cap=arguments.spend_cap)
+    settings = {**_judge_settings(judge), "spent_usd": round(judge.cost(), 4), "spend_cap_usd": arguments.spend_cap,
+                "left_unjudged": sum(row.get("retention") is None for row in rows) - judge.unparseable}
+    return _report(out, rows, settings, "summary.judged.csv")
 
 
 def run(arguments) -> dict:
@@ -237,7 +293,10 @@ def run(arguments) -> dict:
     out = Path(arguments.out)
     out.mkdir(parents=True, exist_ok=True)
     instances = load_static(arguments.source, revision=arguments.revision)
-    if arguments.contexts:
+    if arguments.histories:
+        start, end = (int(part) for part in arguments.histories.split(":"))
+        instances = history_range(instances, start, end)
+    elif arguments.contexts:
         instances = first_contexts(instances, arguments.contexts)
     if arguments.tokenizer:
         from conpact.prompts import summarization_prompt
@@ -288,6 +347,7 @@ def main(argv=None) -> int:
     parser.add_argument("--source", default="hermes", choices=("hermes", "openresearcher", "wildchat",
                                                                  "swe_natural"))
     parser.add_argument("--contexts", type=int, default=5, help="first N histories x 15 rules; 0 for all 50")
+    parser.add_argument("--histories", help="START:END, histories in file order, end excluded (overrides --contexts)")
     parser.add_argument("--prompt", default="pi_mono", choices=("pi_mono", "anthropic"))
     parser.add_argument("--probe-url", help="the served summarizer and probe model; not needed with --judge-later")
     parser.add_argument("--probe-model", default="openai/gpt-oss-120b")
@@ -299,9 +359,17 @@ def main(argv=None) -> int:
     parser.add_argument("--window", type=int, default=131072)
     parser.add_argument("--check-only", action="store_true", help="with --tokenizer: check the window, call nothing")
     parser.add_argument("--judge-max-tokens", type=int, default=2048)
+    parser.add_argument("--spend-cap", type=float, help="with --judge-later: stop asking once this many dollars spent")
+    parser.add_argument("--merge", nargs="+", help="run folders over separate history ranges, merged into --out")
+    parser.add_argument("--expected", type=int, help="with --merge: the number of cases the merged run must hold")
+    parser.add_argument("--verdicts-from", help="with --merge: a judged results file whose verdicts are kept")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
+    if arguments.merge:
+        rows = merge_slices(arguments.merge, Path(arguments.out), arguments.verdicts_from, arguments.expected)
+        print(json.dumps({"cases": len(rows), "judged_already": sum(row.get("retention") is not None for row in rows)}))
+        return 0
     if not (arguments.judge_later or arguments.check_only) and not arguments.probe_url:
         parser.error("--probe-url is needed unless --judge-later or --check-only")
     if arguments.check_only and not arguments.tokenizer:
