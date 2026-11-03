@@ -600,6 +600,10 @@ class RecoveryDriver(Driver):
                     partial = partial or ("", summary["changed_paths"])
         return partial
 
+    def checker_text(self, run, view, paths):
+        """What a check is told: the task as the checked agent got it, and the agent's own account of its work."""
+        return checker_task(view["task"], view["final_message"], view["submission"], changed_paths=paths)
+
     def _check(self, run_id, run, check, source, label, **meta):
         """Advance one check of a trial's final state: [job, trial] of its verdict, None while it is
         being made, False when it cannot be.
@@ -639,8 +643,7 @@ class RecoveryDriver(Driver):
         found, paths = state or (None, None)
         checkpoint = self._saved(found)
         name = jobs.job_name(values["prefix"], run["key"], *label, f"c{len(check['jobs']) + 1}")
-        text = checker_task(view["task"], view["final_message"], view["submission"], changed_paths=paths)
-        path = jobs.write_text(self.work_dir() / "checker" / f"{name}.md", text)
+        path = jobs.write_text(self.work_dir() / "checker" / f"{name}.md", self.checker_text(run, view, paths))
         files = jobs.branch(script, source["steps"], mode="restore" if checkpoint else "rebuild",
                             checkpoint=checkpoint, live=False)
         settings = {**jobs.checker_trial(path, files, effort=values["checker_effort"]), **values["checker_ak"]}
