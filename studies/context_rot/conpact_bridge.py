@@ -146,18 +146,26 @@ def judge_deferred(out: Path, judge: RetentionJudge, prompts, workers: int = 8,
 
 
 def over_window(instances, counters: dict, window: int, output_cap: int) -> list[tuple[str, str, int]]:
-    """Prompts whose tokens plus the output cap pass the served window, found before any call.
+    """Prompts that do not fit the served window at all, found before any call.
 
-    vLLM refuses such a request, and one refused summary stops the package's whole run.
+    vLLM refuses only these, and one refused summary stops the package's whole run. A prompt
+    that fits but leaves less than ``output_cap`` is served with the cap cut to the room left
+    (vLLM 0.32, entrypoints/serve/utils/api_utils.py get_max_tokens); see ``short_room``.
     ``counters`` maps a call kind to a function giving its prompt tokens for an instance.
     """
     over = []
     for row in instances:
         for kind, count in counters.items():
             tokens = count(row)
-            if tokens + output_cap > window:
+            if tokens >= window:
                 over.append((row.id, kind, tokens))
     return over
+
+
+def short_room(counts: dict, window: int, output_cap: int) -> list[tuple[str, str, int]]:
+    """Calls the server will answer with less than ``output_cap`` tokens of room: (id, kind, room)."""
+    return [(case, kind, window - tokens) for case, kinds in counts.items() for kind, tokens in kinds.items()
+            if tokens < window and tokens + output_cap > window]
 
 
 def paper_grade(output: str, compliant_letter: str) -> bool | None:
@@ -311,14 +319,16 @@ def run(arguments) -> dict:
         over = over_window(instances, {kind: (lambda row, kind=kind: counts[row.id][kind]) for kind in counters},
                            arguments.window, OUTPUT_CAP)
         largest = {kind: max(each[kind] for each in counts.values()) for kind in counters}
+        short = short_room(counts, arguments.window, OUTPUT_CAP)
         (out / "window.json").write_text(json.dumps({"window": arguments.window, "output_cap": OUTPUT_CAP,
                                                      "largest_prompt_tokens": largest, "over": over,
-                                                     "prompt_tokens": counts}, indent=1))
+                                                     "short_room": short, "prompt_tokens": counts}, indent=1))
         if over:
-            raise SystemExit(f"{len(over)} prompts pass the {arguments.window}-token window with a "
-                             f"{OUTPUT_CAP}-token cap; see {out / 'window.json'}")
+            raise SystemExit(f"{len(over)} prompts do not fit the {arguments.window}-token window; "
+                             f"see {out / 'window.json'}")
         if arguments.check_only:
-            return {"instances": len(instances), "largest_prompt_tokens": largest, "over": over}
+            return {"instances": len(instances), "largest_prompt_tokens": largest, "over": over,
+                    "short_room_calls": len(short), "smallest_room": min((r for *_, r in short), default=None)}
     (out / "judge_inputs.jsonl").write_text(
         "".join(json.dumps({"id": row.id, "sc_text": row.sc_text}) + "\n" for row in instances))
     oss = Endpoint(arguments.probe_model, arguments.probe_url, "EMPTY",

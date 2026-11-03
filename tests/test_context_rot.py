@@ -358,11 +358,18 @@ def test_judging_stops_at_the_spend_cap(tmp_path):
 
 
 def test_a_prompt_too_long_for_the_window_is_found_before_any_call():
-    rows = [types.SimpleNamespace(id="h1-1", text=100), types.SimpleNamespace(id="h1-2", text=126_977)]
+    rows = [types.SimpleNamespace(id="h1-1", text=100), types.SimpleNamespace(id="h1-2", text=131_073)]
     over = conpact_bridge.over_window(rows, {"compaction": lambda row: row.text,
                                              "full_with_sc": lambda row: row.text - 50},
                                       window=131_072, output_cap=4_096)
-    assert over == [("h1-2", "compaction", 126_977)]
+    assert over == [("h1-2", "compaction", 131_073)]  # the server refuses only a prompt that cannot fit
+
+
+def test_a_prompt_that_fits_with_less_than_the_cap_is_counted_not_refused():
+    counts = {"h1-1": {"compaction": 100}, "h1-2": {"compaction": 126_977, "full_with_sc": 130_688},
+              "h1-3": {"compaction": 131_072}}
+    assert conpact_bridge.short_room(counts, window=131_072, output_cap=4_096) == \
+        [("h1-2", "compaction", 4_095), ("h1-2", "full_with_sc", 384)]
 
 
 def test_prompt_tokens_are_counted_from_the_rendered_text_not_the_encoding_object():
