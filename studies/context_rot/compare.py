@@ -79,7 +79,7 @@ def cluster_interval(rows, key: str, cluster: str = "haystack_id", draws: int = 
     return round(rates[int(0.025 * draws)], 1), round(rates[min(draws - 1, int(0.975 * draws))], 1)
 
 
-ARMS = ("compaction", "user_record", "recent_control")
+ARMS = ("compaction", "user_record", "recent_control", "criteria")
 
 
 def repeated_table(rows, baseline: dict) -> dict:
@@ -102,7 +102,7 @@ def repeated_table(rows, baseline: dict) -> dict:
             floor = rate([baseline[g["id"]] for g in group], "full_without_sc_compliant")["pct"]
             entry = {"cases": len(group), "kept_by_round_pct": kept_by_round,
                      "kept_after_last_round_pct": kept_by_round[-1], "floor_pct": floor}
-            for arm in ARMS:
+            for arm in [a for a in ARMS if f"{a}_compliant" in group[0]]:
                 compliant = rate(group, f"{arm}_compliant")
                 upper = rate(group, f"{arm}_upper_compliant")
                 entry[f"{arm}_pct"] = compliant["pct"]

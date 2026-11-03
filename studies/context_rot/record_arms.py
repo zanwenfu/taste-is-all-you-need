@@ -11,6 +11,9 @@ Arms:
                   user's own words are the request record, never summarized.
   recent_control  the newest text of the history, cut to the same token count as the
                   user record of that instance: the same extra budget, without the record.
+  criteria        the standing instructions a reader wrote down, verbatim, as each user message
+                  arrived (criteria.py); one model call per distinct user message.
+  criteria_control  the newest text, cut to the token count of the criteria block.
 
 The added block sits in the same single assistant message as the summary, where the
 package's compactors put their output. Verdicts are left for ``conpact_bridge
@@ -30,7 +33,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HEADERS = {"user_record": "The user's own messages in this session, verbatim, from the record:",
-           "recent_control": "The most recent part of the session, verbatim:"}
+           "recent_control": "The most recent part of the session, verbatim:",
+           "criteria": "Standing instructions the user gave in this session, verbatim, from the record:",
+           "criteria_control": "The most recent part of the session, verbatim:"}
 
 
 def _render(message: dict) -> str:
@@ -126,15 +131,29 @@ def main(argv=None) -> int:
     rows = [json.loads(line) for line in (Path(arguments.baseline) / "results.jsonl").read_text().splitlines()]
     baseline = {row["id"]: row for row in rows}
     instances = [inst for inst in load_static(arguments.source, revision=DATA_REVISION) if inst.id in baseline]
+    out = Path(arguments.out)
+    out.mkdir(parents=True, exist_ok=True)
+    records = {}
+    if arguments.arm.startswith("criteria"):
+        from openai import OpenAI
+
+        from studies.context_rot.criteria import records_block, records_for, served_reader
+
+        log: list = []
+        reader = served_reader(OpenAI(base_url=arguments.probe_url, api_key="EMPTY"), arguments.probe_model, log)
+        records = records_for(instances, reader, workers=arguments.workers)
+        (out / "records.json").write_text(json.dumps({"records": records, "reads": log}, indent=1))
     contexts, sizes = {}, {}
     for inst in instances:
-        record = user_record(inst.messages)
-        block = record if arguments.arm == "user_record" else recent_block(inst.messages, count(record), count)
+        if arguments.arm.startswith("criteria"):
+            record = records_block(records[inst.id])
+        else:
+            record = user_record(inst.messages)
+        block = record if arguments.arm in ("user_record", "criteria") else recent_block(inst.messages, count(record),
+                                                                                         count)
         contexts[inst.id] = arm_context(baseline[inst.id]["compacted"], block, HEADERS[arguments.arm])
         sizes[inst.id] = {"block_tokens": count(block), "context_tokens": count(contexts[inst.id][0]["content"]),
                           "summary_tokens": count("\n\n".join(m["content"] for m in baseline[inst.id]["compacted"]))}
-    out = Path(arguments.out)
-    out.mkdir(parents=True, exist_ok=True)
     (out / "sizes.json").write_text(json.dumps(sizes, indent=1))
     endpoint = Endpoint(arguments.probe_model, arguments.probe_url, "EMPTY",
                         {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP})

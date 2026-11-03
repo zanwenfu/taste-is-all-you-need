@@ -12,9 +12,10 @@ later round summarizes the previous summary together with the next part:
              package's prompt summarizes it with the new part, as compaction does when it runs
              again over a history that already holds a compaction.
 
-After round k the package's probes run on three contexts: the last summary alone; the summary
-plus every user turn verbatim from the record; and the summary plus the same number of tokens
-of the newest text (the blocks of record_arms). Every round's summary is judged for retention
+After round k the package's probes run on four contexts: the last summary alone; the summary
+plus every user turn verbatim from the record; the summary plus the same number of tokens of
+the newest text (the blocks of record_arms); and the summary plus the criterion records
+(criteria.py), the user's standing instructions written down verbatim as each message arrived. Every round's summary is judged for retention
 with the package's judge prompt, asked of the served model (free; its agreement with the
 paper's GPT-5.4 judge is measured on the single-compaction run). k = 1 is the published single
 compaction and comes from the baseline run.
@@ -103,8 +104,12 @@ def round_prompt(option: str, previous: str | None, part: list[dict], package_pr
     raise ValueError(option)
 
 
-def run_one(inst, k: int, option: str, sizes: list[int], summarize, judge, probe, count, package_prompt) -> dict:
-    """k rounds on one case, every round judged, then the probes on the three contexts."""
+def run_one(inst, k: int, option: str, sizes: list[int], summarize, judge, probe, count, package_prompt,
+            blocks: dict | None = None) -> dict:
+    """k rounds on one case, every round judged, then the probes on each context.
+
+    ``blocks`` adds contexts: name -> (block text, header), each placed after the last summary.
+    """
     parts = split_parts(inst.messages, sizes, k)
     summaries, retention, previous = [], [], None
     for part in parts:
@@ -117,6 +122,8 @@ def run_one(inst, k: int, option: str, sizes: list[int], summarize, judge, probe
                 "user_record": arm_context(summary, record, HEADERS["user_record"]),
                 "recent_control": arm_context(summary, recent_block(inst.messages, count(record), count),
                                               HEADERS["recent_control"])}
+    for name, (block, header) in (blocks or {}).items():
+        contexts[name] = arm_context(summary, block, header)
     part_tokens, offset = [], 0
     for part in parts:
         part_tokens.append(sum(sizes[offset:offset + len(part)]))
@@ -166,6 +173,8 @@ def main(argv=None) -> int:
     parser.add_argument("--probe-model", default="openai/gpt-oss-120b")
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--workers", type=int, default=15)
+    parser.add_argument("--no-criteria", dest="criteria", action="store_false",
+                        help="skip the summary plus criterion records (read once per distinct user message)")
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
 
@@ -198,6 +207,15 @@ def main(argv=None) -> int:
 
     out = Path(arguments.out)
     out.mkdir(parents=True, exist_ok=True)
+    blocks_by_case: dict = {}
+    if arguments.criteria:
+        from studies.context_rot.criteria import records_block, records_for, served_reader
+
+        log: list = []
+        records = records_for(instances, served_reader(client, arguments.probe_model, log), arguments.workers)
+        (out / "records.json").write_text(json.dumps({"records": records, "reads": log}, indent=1))
+        blocks_by_case = {case: {"criteria": (records_block(found), HEADERS["criteria"])}
+                          for case, found in records.items()}
     done, lock = done_keys(out), threading.Lock()
     sizes_by_text: dict[str, int] = {}
 
@@ -216,7 +234,7 @@ def main(argv=None) -> int:
                 continue
             row = run_one(inst, k, arguments.prompt, sizes, summarize, judge_one,
                           lambda i, context, turn: _probe(client, endpoint, i, context, turn), count,
-                          summarization_prompt)
+                          summarization_prompt, blocks_by_case.get(inst.id))
             with lock, (out / "results.jsonl").open("a") as written:
                 written.write(json.dumps(row) + "\n")
 
