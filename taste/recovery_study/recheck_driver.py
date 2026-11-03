@@ -27,8 +27,15 @@ from taste.agents.checker import checker_task
 from taste.benchmarks import branch_trial
 from taste.recovery_study import jobs, records, state
 from taste.recovery_study.driver import own_final
-from taste.recovery_study.recovery_driver import (AGENTREWIND, DEFAULTS as RECOVERY_DEFAULTS, MESSAGE, NORESTORE,
-                                                  RecoveryDriver, _slug, new_check)
+from taste.recovery_study.recovery_driver import (
+    AGENTREWIND,
+    MESSAGE,
+    NORESTORE,
+    RecoveryDriver,
+    _slug,
+    new_check,
+)
+from taste.recovery_study.recovery_driver import DEFAULTS as RECOVERY_DEFAULTS
 
 # The arms told the reviewer's reasons, and the arm told nothing.
 REASONS = ["retry_feedback", "rewind", "continue", "continue_both", AGENTREWIND, NORESTORE]
@@ -72,8 +79,9 @@ class RecheckDriver(RecoveryDriver):
         first = {name: theirs["settings"][name] for name in INHERITED if name in theirs["settings"]}
         driver = super().open(path, {**first, **given})
         driver.data["source_sha256"] = hashlib.sha256(Path(source).read_bytes()).hexdigest()
-        driver.data["restated"] = {name: {"first": first[name], "now": given[name]} for name in sorted(first)
-                                   if name in given and given[name] != first[name]}
+        # A setting the recovery state never held (one older than the setting) was None to its checks.
+        driver.data["restated"] = {name: {"first": first.get(name), "now": given[name]} for name in INHERITED
+                                   if name in given and given[name] != first.get(name)}
         driver.build(theirs)
         return driver
 

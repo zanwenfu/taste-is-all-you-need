@@ -164,6 +164,21 @@ def test_a_route_restated_at_creation_is_kept_and_reported(tmp_path, finished):
     assert all(dict(spec.env)["SECRETS"] == other["SECRETS"] for _, spec in specs(driver, "check"))
 
 
+def test_a_route_the_recovery_state_never_set_is_reported_as_restated(tmp_path, finished):
+    import json
+
+    source, theirs, trials = finished
+    # States from before the route setting existed hold no checker_env at all.
+    data = json.loads(source.read_text())
+    del data["settings"]["checker_env"]
+    older = tmp_path / "older-rec.json"
+    older.write_text(json.dumps(data))
+    driver = recheck(tmp_path, FakeHarbor(trials, recoveries(verdict=lambda spec: "done")), source=str(older),
+                     kept_saves=str(kept_file(tmp_path, theirs)), prefix="bl1", control_sample=0, checker_env=ROUTE)
+    assert driver.data["restated"] == {"checker_env": {"first": None, "now": ROUTE}}
+    assert all(dict(spec.env)["SECRETS"] == ROUTE["SECRETS"] for _, spec in specs(driver, "check"))
+
+
 @pytest.mark.parametrize("given, message", [
     ({"source": None}, "source"),
     ({"kept_saves": "missing"}, "kept_saves"),
