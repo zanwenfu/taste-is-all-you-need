@@ -295,6 +295,44 @@ def test_the_first_contexts_are_chosen_whole():
     assert len(chosen) == 30 and {row.haystack_id for row in chosen} == {"h3", "h1"}
 
 
+def test_a_prompt_too_long_for_the_window_is_found_before_any_call():
+    rows = [types.SimpleNamespace(id="h1-1", text=100), types.SimpleNamespace(id="h1-2", text=126_977)]
+    over = conpact_bridge.over_window(rows, {"compaction": lambda row: row.text,
+                                             "full_with_sc": lambda row: row.text - 50},
+                                      window=131_072, output_cap=4_096)
+    assert over == [("h1-2", "compaction", 126_977)]
+
+
+def test_deferred_verdicts_are_judged_later_and_only_once(tmp_path):
+    rows = [{"id": "h1-1", "source": "hermes", "sc_type": "Action", "retention": None,
+             "compacted": [{"role": "assistant", "content": "use metric units"}]},
+            {"id": "h1-2", "source": "hermes", "sc_type": "Action", "retention": None,
+             "compacted": [{"role": "assistant", "content": "nothing"}]},
+            {"id": "h1-3", "source": "hermes", "sc_type": "Action", "retention": True,
+             "compacted": [{"role": "assistant", "content": "kept"}]}]
+    (tmp_path / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (tmp_path / "judge_inputs.jsonl").write_text(
+        "".join(json.dumps({"id": i, "sc_text": "Use metric units."}) + "\n" for i in ("h1-1", "h1-2", "h1-3")))
+    asked = []
+
+    def handler(request):
+        user = json.loads(request.content)["messages"][0]["content"][0]["text"]
+        asked.append(user)
+        return _reply("YES" if "use metric units" in user else "NO")
+
+    def prompts(sc_text, compacted):
+        return "System.", sc_text + " | " + compacted[0]["content"]
+
+    judge = conpact_bridge.RetentionJudge(_client(handler))
+    judged = conpact_bridge.judge_deferred(tmp_path, judge, prompts, workers=2)
+    assert [row["retention"] for row in judged] == [True, False, True]
+    assert len(asked) == 2  # the row judged already is not asked again
+    written = [json.loads(line) for line in (tmp_path / "results.judged.jsonl").read_text().splitlines()]
+    assert [row["retention"] for row in written] == [True, False, True]
+    assert [json.loads(line)["retention"] for line in (tmp_path / "results.jsonl").read_text().splitlines()] == \
+        [None, None, True]  # the raw file is kept as the GPU run wrote it
+
+
 @pytest.mark.skipif(not os.environ.get("CONPACT_SRC"), reason="needs the conpact package, named by CONPACT_SRC")
 def test_their_scoring_runs_with_the_bedrock_judge_in_place_of_theirs(tmp_path, monkeypatch):
     stubs = {name: types.ModuleType(name) for name in ("datasets", "openai", "tqdm", "tqdm.auto")}
@@ -341,3 +379,10 @@ def test_their_scoring_runs_with_the_bedrock_judge_in_place_of_theirs(tmp_path, 
     expected = evaluation.judge_prompts("Use metric units.", [{"role": "assistant", "content": "summary"}])
     assert prompts == [expected]
     assert evaluation._judge.__module__ == "conpact.evaluate"  # put back afterwards
+    with conpact_bridge.deferred_judge():
+        later = evaluation.score([instance.__class__(**{**instance.to_dict(), "id": "h1-2"})],
+                                 [[{"role": "assistant", "content": "summary"}]],
+                                 out_dir=tmp_path, probe=evaluation.Endpoint("m", "u", "k"),
+                                 judge=evaluation.Endpoint("unused", api_key="unused"), workers=1)
+    assert later[0]["retention"] is None and later[0]["compaction_compliant"] is True
+    assert evaluation._judge.__module__ == "conpact.evaluate"
