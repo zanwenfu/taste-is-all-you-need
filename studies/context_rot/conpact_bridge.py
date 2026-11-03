@@ -181,16 +181,18 @@ DATA_REVISION = "9381c98d6fe131a7e622986389800502a9ad055b"  # the Hugging Face r
 OUTPUT_CAP = 4096  # the package's probe and summary setting
 
 
-def _window_counters(tokenizer_path: str, prompt: str) -> dict:
-    from conpact.prompts import summarization_prompt
-    from transformers import AutoTokenizer
+def window_counters(tokenizer, compaction_messages) -> dict:
+    """Prompt-token counters per call kind, from the chat template's rendered text.
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    Counting the text, not ``apply_chat_template(tokenize=True)``, because transformers 5
+    returns an encoding object there whose length is its number of keys.
+    """
 
     def tokens(messages):
-        return len(tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True))
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        return len(tokenizer(text, add_special_tokens=False)["input_ids"])
 
-    return {"compaction": lambda row: tokens(summarization_prompt(prompt, row.messages)),
+    return {"compaction": lambda row: tokens(compaction_messages(row.messages)),
             "full_with_sc": lambda row: tokens([{"role": "system", "content": row.system_prompt},
                                                 {"role": "developer", "content": row.developer_prompt},
                                                 *row.messages, {"role": "user", "content": row.probe_prompt}]),
@@ -238,7 +240,14 @@ def run(arguments) -> dict:
     if arguments.contexts:
         instances = first_contexts(instances, arguments.contexts)
     if arguments.tokenizer:
-        counters = _window_counters(arguments.tokenizer, arguments.prompt)
+        from conpact.prompts import summarization_prompt
+        from transformers import AutoTokenizer
+
+        counters = window_counters(AutoTokenizer.from_pretrained(arguments.tokenizer),
+                                   lambda messages: summarization_prompt(arguments.prompt, messages))
+        # A summary or probe this small means the count is broken, not that the prompt fits.
+        if min(each for row in instances[:1] for each in (count(row) for count in counters.values())) < 1000:
+            raise SystemExit("prompt token count is implausibly small; the window check is not working")
         counts = {row.id: {kind: count(row) for kind, count in counters.items()} for row in instances}
         over = over_window(instances, {kind: (lambda row, kind=kind: counts[row.id][kind]) for kind in counters},
                            arguments.window, OUTPUT_CAP)

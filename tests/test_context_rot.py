@@ -303,6 +303,25 @@ def test_a_prompt_too_long_for_the_window_is_found_before_any_call():
     assert over == [("h1-2", "compaction", 126_977)]
 
 
+def test_prompt_tokens_are_counted_from_the_rendered_text_not_the_encoding_object():
+    class Tokenizer:  # transformers 5 returns a two-key encoding from apply_chat_template(tokenize=True)
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+            assert tokenize is False and add_generation_prompt is True
+            return " ".join(m["role"] + " " + m["content"] for m in messages) + " assistant"
+
+        def __call__(self, text, add_special_tokens=True):
+            assert add_special_tokens is False
+            return {"input_ids": text.split(), "attention_mask": [1] * len(text.split())}
+
+    row = types.SimpleNamespace(system_prompt="sys", developer_prompt="dev", probe_prompt="which one",
+                                messages=[{"role": "user", "content": "one two three"}],
+                                messages_without_sc=[{"role": "user", "content": "two three"}])
+    counters = conpact_bridge.window_counters(Tokenizer(), lambda messages: [{"role": "user", "content": "x"}])
+    assert counters["compaction"](row) == 3
+    assert counters["full_with_sc"](row) == 12
+    assert counters["full_without_sc"](row) == 11
+
+
 def test_deferred_verdicts_are_judged_later_and_only_once(tmp_path):
     rows = [{"id": "h1-1", "source": "hermes", "sc_type": "Action", "retention": None,
              "compacted": [{"role": "assistant", "content": "use metric units"}]},
