@@ -175,3 +175,19 @@ def test_the_cap_is_the_one_the_planner_transport_enforces():
 
     default = inspect.signature(LLMPlannerTransport.__init__).parameters["max_prompt_bytes"].default
     assert default == retention.MAX_PROMPT_BYTES
+
+
+def test_a_run_that_ended_without_a_report_is_counted_not_fatal():
+    data = trial()
+    ended = {"record_path": "runs/ccc.json", "record_blob_id": "b-ccc", "report": None}
+    data["requests"][2]["request"]["world"]["outcomes"].append(ended)
+    result = retention.analyze(data)
+    assert result["outcomes_without_report"] == 1
+    assert result["by_type"]["report"] == retention.analyze(trial())["by_type"]["report"]
+
+
+def test_sizes_are_shared_against_the_cap_the_trial_ran_with():
+    result = retention.analyze({**trial(), "cap": 1_048_576})
+    assert result["calls"][2]["share_of_cap_lower_bound"] == round(3000 / 1_048_576, 4)
+    assert result["cap_bytes"] == 1_048_576
+    assert retention.analyze(trial())["cap_bytes"] == retention.MAX_PROMPT_BYTES  # no policy: the transport default

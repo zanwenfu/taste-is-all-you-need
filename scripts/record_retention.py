@@ -154,6 +154,8 @@ def analyze(trial):
     ages, first_held = Counter(), {}
     superseded = Counter()
     calls, criteria_everywhere, shown_at = [], True, {}
+    cap = trial.get("cap") or MAX_PROMPT_BYTES
+    without_report = 0
     for number, item in enumerate(requests, 1):
         request = item["request"]
         moment = _moment(item.get("captured_at") or item["created_at"])
@@ -189,7 +191,10 @@ def analyze(trial):
                 superseded["plans_held"] += 1
                 superseded["plans_sent"] += is_sent
 
-        outcomes = {o["report"]["report_id"]: o for o in (request.get("world") or {}).get("outcomes") or ()}
+        listed = (request.get("world") or {}).get("outcomes") or ()
+        # A run that ended without a report (killed, or out of budget) is listed with report None.
+        without_report += sum(o.get("report") is None for o in listed)
+        outcomes = {o["report"]["report_id"]: o for o in listed if o.get("report") is not None}
         held_reports = [report for report in reports if _moment(report["at"]) < moment]
         latest = {}
         for report in held_reports:
@@ -227,7 +232,7 @@ def analyze(trial):
         refusals = [found for found in (size_refusal(a.get("detail")) for a in item.get("attempts") or ()) if found]
         calls.append({"call": number, "generation": request.get("generation"), "operation_id": item["operation_id"],
                       "request_bytes": item["bytes"],
-                      "share_of_cap_lower_bound": round(item["bytes"] / MAX_PROMPT_BYTES, 4),
+                      "share_of_cap_lower_bound": round(item["bytes"] / cap, 4),
                       "attempts": len(item.get("attempts") or ()),
                       "prompt_tokens": [a.get("prompt_tokens") for a in item.get("attempts") or ()],
                       "size_refusals": refusals, "held": dict(held), "sent": dict(sent),
@@ -256,7 +261,7 @@ def analyze(trial):
         repeats["distinct"] += len({_normal(strip_wrapper(c["command"])) for c in hits})
         repeats["assignments"] += bool(hits)
 
-    return {"calls": calls,
+    return {"calls": calls, "cap_bytes": cap, "outcomes_without_report": without_report,
             "by_type": {kind: {"held": totals[kind]["held"], "sent": totals[kind]["sent"],
                                "undecided": totals[kind]["undecided"]} for kind in TYPES},
             "criteria_kept_at_every_call": criteria_everywhere if calls else None,
@@ -373,7 +378,8 @@ def load_trial(directory):
     reports = {}
     for item in requests:
         for outcome in (item["request"].get("world") or {}).get("outcomes") or ():
-            reports.setdefault(outcome["report"]["report_id"], outcome["report"])
+            if outcome.get("report") is not None:
+                reports.setdefault(outcome["report"]["report_id"], outcome["report"])
     for ref in refs:
         found = git("show", f"{ref}:worker-report.json")
         if found:
@@ -403,7 +409,16 @@ def load_trial(directory):
 
     goals = [read(path) for path in tree if path.startswith(".taste/planner/goals/")]
     criteria = [read(path) for path in tree if path.startswith(".taste/planner/criteria/")]
-    return {"goal": goals[0] if goals else {}, "criteria": criteria,
+    # The planner's prompt cap is the run policy's max_request_bytes when the trial set one
+    # (taste/brains/central_host.py passes it to LLMPlannerTransport), else the transport default.
+    cap = MAX_PROMPT_BYTES
+    for source in (directory / "controller" / "trial.json", directory / "prepare.json"):
+        if source.exists():
+            policy = json.loads(source.read_text()).get("policy") or {}
+            if policy.get("max_request_bytes"):
+                cap = int(policy["max_request_bytes"])
+                break
+    return {"goal": goals[0] if goals else {}, "criteria": criteria, "cap": cap,
             "plans": [read(path) for path in tree if path.startswith(".taste/planner/plans/")],
             "requests": requests, "reports": list(reports.values()), "runs": runs, "commands": commands,
             "model_planner": receipts is not None}
@@ -413,11 +428,14 @@ def summarize(rows):
     """Totals over many trials."""
     out = {"trials": len(rows), "calls": 0, "by_type": {k: Counter() for k in TYPES}, "repeats": Counter(),
            "superseded": Counter(), "criteria_kept_at_every_call": 0, "size_refusals": 0,
-           "largest_request_bytes": 0, "ages": Counter()}
+           "largest_request_bytes": 0, "ages": Counter(), "share_of_cap_lower_bound_max": 0.0,
+           "caps_bytes": Counter(), "outcomes_without_report": 0}
     for row in rows:
         result = row["result"]
         out["calls"] += len(result["calls"])
         out["criteria_kept_at_every_call"] += bool(result["criteria_kept_at_every_call"])
+        out["caps_bytes"][str(result.get("cap_bytes"))] += 1
+        out["outcomes_without_report"] += result.get("outcomes_without_report", 0)
         for kind, numbers in result["by_type"].items():
             out["by_type"][kind].update(numbers)
         out["repeats"].update(result["repeats"])
@@ -425,9 +443,10 @@ def summarize(rows):
         for call in result["calls"]:
             out["size_refusals"] += len(call["size_refusals"])
             out["largest_request_bytes"] = max(out["largest_request_bytes"], call["request_bytes"])
+            out["share_of_cap_lower_bound_max"] = max(out["share_of_cap_lower_bound_max"],
+                                                      call["share_of_cap_lower_bound"])
         for age in result["ages"]:
             out["ages"][f"{age['type']}|{age['age']}|{'sent' if age['sent'] else 'left out'}"] += age["count"]
-    out["share_of_cap_lower_bound_max"] = round(out["largest_request_bytes"] / MAX_PROMPT_BYTES, 4)
     return json.loads(json.dumps(out))
 
 
