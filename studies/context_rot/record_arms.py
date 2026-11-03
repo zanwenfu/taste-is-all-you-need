@@ -155,8 +155,10 @@ def main(argv=None) -> int:
         sizes[inst.id] = {"block_tokens": count(block), "context_tokens": count(contexts[inst.id][0]["content"]),
                           "summary_tokens": count("\n\n".join(m["content"] for m in baseline[inst.id]["compacted"]))}
     (out / "sizes.json").write_text(json.dumps(sizes, indent=1))
-    endpoint = Endpoint(arguments.probe_model, arguments.probe_url, "EMPTY",
-                        {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP})
+    from studies.context_rot.conpact_bridge import guarded_endpoint
+
+    endpoint = guarded_endpoint(arguments.probe_model, arguments.probe_url,
+                                {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP}, out / "not_served.jsonl")
     client = endpoint.client()
     results = score_paired(instances, baseline, contexts,
                            lambda inst, context, turn: _probe(client, endpoint, inst, context, turn),

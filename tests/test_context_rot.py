@@ -474,3 +474,76 @@ def test_their_scoring_runs_with_the_bedrock_judge_in_place_of_theirs(tmp_path, 
                                  judge=evaluation.Endpoint("unused", api_key="unused"), workers=1)
     assert later[0]["retention"] is None and later[0]["compaction_compliant"] is True
     assert evaluation._judge.__module__ == "conpact.evaluate"
+
+
+# -- calls the server refuses as longer than its window -------------------------------
+
+
+class _FakeCompletions:
+    def __init__(self, error=None):
+        self.error, self.calls = error, 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(
+            message=types.SimpleNamespace(content="A"), finish_reason="stop")],
+            usage=types.SimpleNamespace(prompt_tokens=10, completion_tokens=1))
+
+
+def _fake_client(error=None):
+    completions = _FakeCompletions(error)
+    return types.SimpleNamespace(chat=types.SimpleNamespace(completions=completions)), completions
+
+
+def _too_long():
+    import openai
+
+    response = httpx.Response(400, request=httpx.Request("POST", "http://server/v1/chat/completions"))
+    return openai.BadRequestError("Error code: 400 - {'error': {'message': \"Input length (133595) exceeds model's "
+                                  "maximum context length (131072).\"}}", response=response, body=None)
+
+
+def test_a_prompt_the_server_refuses_as_too_long_is_recorded_as_not_served(tmp_path):
+    inner, completions = _fake_client(_too_long())
+    log = tmp_path / "not_served.jsonl"
+    client = conpact_bridge.WindowGuard(inner, log)
+    reply = client.chat.completions.create(model="m", messages=[{"role": "user", "content": "long"}])
+    assert reply.choices[0].message.content == conpact_bridge.NOT_SERVED
+    assert json.loads(log.read_text())["input_tokens"] == 133595
+
+
+def test_another_refusal_still_stops_the_run(tmp_path):
+    import openai
+
+    response = httpx.Response(400, request=httpx.Request("POST", "http://server/v1/chat/completions"))
+    inner, _ = _fake_client(openai.BadRequestError("bad model name", response=response, body=None))
+    with pytest.raises(openai.BadRequestError):
+        conpact_bridge.WindowGuard(inner, tmp_path / "log").chat.completions.create(model="m", messages=[])
+
+
+def test_nothing_is_asked_on_a_context_built_from_an_unserved_summary(tmp_path):
+    inner, completions = _fake_client()
+    client = conpact_bridge.WindowGuard(inner, tmp_path / "log")
+    reply = client.chat.completions.create(model="m", messages=[
+        {"role": "assistant", "content": conpact_bridge.NOT_SERVED + "\n\nkept block"}, {"role": "user", "content": "P?"}])
+    assert completions.calls == 0 and reply.choices[0].message.content == conpact_bridge.NOT_SERVED
+    client.chat.completions.create(model="m", messages=[{"role": "user", "content": "fine"}])
+    assert completions.calls == 1
+
+
+def test_unserved_cases_are_counted_and_never_sent_to_the_judge(tmp_path):
+    rows = [{"id": "h1-1", "retention": None, "compacted": [{"role": "assistant", "content": conpact_bridge.NOT_SERVED}],
+             "full_with_sc_output": conpact_bridge.NOT_SERVED, "compaction_output": conpact_bridge.NOT_SERVED},
+            {"id": "h1-2", "retention": None, "compacted": [{"role": "assistant", "content": "kept"}],
+             "full_with_sc_output": "A", "compaction_output": "B"}]
+    (tmp_path / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (tmp_path / "judge_inputs.jsonl").write_text(
+        "".join(json.dumps({"id": row["id"], "sc_text": "rule"}) + "\n" for row in rows))
+    asked = []
+    judge = conpact_bridge.RetentionJudge(_client(lambda request: asked.append(1) or _reply("YES")))
+    judged = conpact_bridge.judge_deferred(tmp_path, judge, lambda s, c: ("S", s), workers=1)
+    assert len(asked) == 1 and [row["retention"] for row in judged] == [None, True]
+    counts = conpact_bridge.not_served_counts(rows)
+    assert counts["compaction"] == 1 and counts["full_with_sc"] == 1 and counts["summary"] == 1

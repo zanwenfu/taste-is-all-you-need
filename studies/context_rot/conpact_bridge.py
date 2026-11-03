@@ -28,14 +28,74 @@ import contextlib
 import csv
 import importlib
 import json
+import re
 import sys
 import threading
+import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from studies.context_rot.bedrock import Converse
 
 CONDITIONS = ("full_with_sc", "full_without_sc", "compaction", "upper_bound")
+NOT_SERVED = "[not served: the prompt is longer than the model's window]"
+
+
+class WindowGuard:
+    """An OpenAI client whose calls the server refuses as too long come back as NOT_SERVED.
+
+    The package stops its whole run at one refused call. The server renders a chat about 2%
+    longer than the Hugging Face template the window check counts with, so the few prompts
+    within 2% of the window are found only when sent. Such a call is answered with NOT_SERVED
+    and logged; a call whose messages already hold NOT_SERVED (a probe on an unserved
+    summary) is not sent at all. Every other error still stops the run.
+    """
+
+    def __init__(self, inner, log: Path | None = None) -> None:
+        self._inner, self._log, self._lock = inner, log, threading.Lock()
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kwargs):
+        if any(NOT_SERVED in str(m.get("content") or "") for m in kwargs.get("messages") or ()):
+            return self._not_served(None, "built on an unserved summary")
+        import openai
+
+        try:
+            return self._inner.chat.completions.create(**kwargs)
+        except openai.BadRequestError as error:
+            found = re.search(r"Input length \((\d+)\) exceeds model's maximum context length", str(error))
+            if not found:
+                raise
+            return self._not_served(int(found.group(1)), "input longer than the window")
+
+    def _not_served(self, tokens, why):
+        if self._log is not None:
+            with self._lock, Path(self._log).open("a") as written:
+                written.write(json.dumps({"input_tokens": tokens, "why": why}) + "\n")
+        message = types.SimpleNamespace(content=NOT_SERVED, role="assistant")
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason="not_served")],
+                                     usage=types.SimpleNamespace(prompt_tokens=0, completion_tokens=0))
+
+
+def guarded_endpoint(model: str, url: str, params: dict, log: Path | None):
+    """conpact's Endpoint whose client is wrapped in WindowGuard."""
+    from conpact import Endpoint
+
+    class Guarded(Endpoint):
+        def client(self):
+            return WindowGuard(super().client(), log)
+
+    return Guarded(model, url, "EMPTY", params)
+
+
+def not_served_counts(results: list[dict]) -> dict:
+    """Cases whose summary, or whose probe in each condition, the server could not take."""
+    counts = {"summary": sum(any(NOT_SERVED in str(m.get("content")) for m in row.get("compacted") or ())
+                             for row in results)}
+    for condition in CONDITIONS:
+        counts[condition] = sum(row.get(f"{condition}_output") == NOT_SERVED for row in results)
+    return counts
 JUDGE_MODEL = "global.openai.gpt-5.4"
 JUDGE_PRICE = (2.50, 15.00)  # US dollars per million input and output tokens, OpenAI's list price for GPT-5.4
 
@@ -129,7 +189,8 @@ def judge_deferred(out: Path, judge: RetentionJudge, prompts, workers: int = 8,
     for row in rows:
         if row.get("retention") is None and earlier.get(row["id"]) is not None:
             row["retention"] = earlier[row["id"]]
-    todo = [row for row in rows if row.get("retention") is None]
+    todo = [row for row in rows if row.get("retention") is None
+            and not any(NOT_SERVED in str(m.get("content")) for m in row.get("compacted") or ())]
     lock = threading.Lock()
 
     def ask(row: dict) -> None:
@@ -273,6 +334,7 @@ def _report(out: Path, rows: list[dict], judge: dict, summary_file: str) -> dict
         writer.writeheader()
         writer.writerows(summary)
     report = {"instances": len(rows), "package_summary": summary, "unparseable": unparseable_counts(rows),
+              "not_served": not_served_counts(rows),
               "paper_rule": paper_rule_rates(rows), "judge": judge}
     (out / "report.json").write_text(json.dumps(report, indent=1))
     return report
@@ -331,8 +393,8 @@ def run(arguments) -> dict:
                     "short_room_calls": len(short), "smallest_room": min((r for *_, r in short), default=None)}
     (out / "judge_inputs.jsonl").write_text(
         "".join(json.dumps({"id": row.id, "sc_text": row.sc_text}) + "\n" for row in instances))
-    oss = Endpoint(arguments.probe_model, arguments.probe_url, "EMPTY",
-                   {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP})
+    oss = guarded_endpoint(arguments.probe_model, arguments.probe_url,
+                           {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP}, out / "not_served.jsonl")
     summarizer = LLMSummarize(oss, prompt=arguments.prompt)
     unused = Endpoint("bedrock-judge", api_key="unused")
     if arguments.judge == "defer":
