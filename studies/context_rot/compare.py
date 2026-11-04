@@ -29,10 +29,21 @@ def wilson(hits: int, n: int, z: float = 1.96) -> tuple[float | None, float | No
 
 
 def rate(rows, key: str) -> dict:
+    """A rate for display ("pct", one decimal) and its exact value ("exact") for any further arithmetic."""
     values = [row[key] for row in rows if row.get(key) is not None]
     hits = sum(bool(v) for v in values)
-    return {"pct": round(100 * hits / len(values), 1) if values else None, "n": len(values),
+    exact = 100 * hits / len(values) if values else None
+    return {"pct": None if exact is None else round(exact, 1), "exact": exact, "n": len(values),
             "unreadable": len(rows) - len(values), "wilson": wilson(hits, len(values))}
+
+
+def median(values) -> float | None:
+    """The usual median: the mean of the two middle values when the count is even."""
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def effective_retention(compacted: float, floor: float, ceiling: float) -> float | None:
@@ -99,9 +110,10 @@ def repeated_table(rows, baseline: dict) -> dict:
             for r in range(rounds):
                 verdicts = [g["retention"][r] for g in group if g["retention"][r] is not None]
                 kept_by_round.append(round(100 * sum(verdicts) / len(verdicts), 1) if verdicts else None)
-            floor = rate([baseline[g["id"]] for g in group], "full_without_sc_compliant")["pct"]
+            floor_rate = rate([baseline[g["id"]] for g in group], "full_without_sc_compliant")
+            floor = floor_rate["exact"]
             entry = {"cases": len(group), "kept_by_round_pct": kept_by_round,
-                     "kept_after_last_round_pct": kept_by_round[-1], "floor_pct": floor}
+                     "kept_after_last_round_pct": kept_by_round[-1], "floor_pct": floor_rate["pct"]}
             for arm in [a for a in ARMS if f"{a}_compliant" in group[0]]:
                 compliant = rate(group, f"{arm}_compliant")
                 upper = rate(group, f"{arm}_upper_compliant")
@@ -109,8 +121,8 @@ def repeated_table(rows, baseline: dict) -> dict:
                 entry[f"{arm}_wilson"] = compliant["wilson"]
                 entry[f"{arm}_unreadable"] = compliant["unreadable"]
                 entry[f"{arm}_upper_pct"] = upper["pct"]
-                er = effective_retention(compliant["pct"], floor, upper["pct"]) if None not in (
-                    compliant["pct"], floor, upper["pct"]) else None
+                er = effective_retention(compliant["exact"], floor, upper["exact"]) if None not in (
+                    compliant["exact"], floor, upper["exact"]) else None
                 entry[f"{arm}_effective_retention"] = None if er is None else round(er, 1)
             out.setdefault(prompt, {})[k] = entry
     return out

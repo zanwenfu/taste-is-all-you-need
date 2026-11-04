@@ -23,6 +23,8 @@ import json
 import sys
 from pathlib import Path
 
+from studies.context_rot.compare import median
+
 
 def probe_messages(inst, context: list[dict], turn: str) -> list[dict]:
     """The package's probe: system, developer, the context, then the user turn (conpact.evaluate._probe)."""
@@ -160,7 +162,7 @@ def main(argv=None) -> int:
                 entry["server_package_rule"] = _rate([r["server_package"] for r in chosen])
             report[f"{step}|{prompt}|{condition}"] = entry
     lengths = sorted(len(text) for text in summaries)
-    report["engine_summary_chars"] = {"min": lengths[0], "median": lengths[len(lengths) // 2], "max": lengths[-1],
+    report["engine_summary_chars"] = {"min": lengths[0], "median": median(lengths), "max": lengths[-1],
                                       "empty": sum(not text.strip() for text in summaries)}
     (out / "report.json").write_text(json.dumps(report, indent=1))
     print(json.dumps(report, indent=1))

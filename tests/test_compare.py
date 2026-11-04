@@ -18,6 +18,29 @@ def test_effective_retention_is_the_share_of_the_gap_recovered():
     assert compare.effective_retention(50.0, 50.0, 50.0) is None
 
 
+def test_a_rate_keeps_its_exact_value_for_later_arithmetic():
+    rows = [{"x": True}] * 2 + [{"x": False}] + [{"x": None}]
+    result = compare.rate(rows, "x")
+    assert result["pct"] == 66.7 and result["exact"] == pytest.approx(200 / 3)
+    assert compare.rate([], "x")["exact"] is None
+
+
+def test_effective_retention_in_the_tables_uses_exact_rates_not_rounded_ones():
+    # Arm 4/6, floor 1/6, ceiling 5/6: exactly 75.0; from rates rounded to 66.7, 16.7 and 83.3 it would be 75.1.
+    baseline = {f"c{i}": {"id": f"c{i}", "full_without_sc_compliant": i < 1} for i in range(6)}
+    rows = [{"id": f"c{i}", "haystack_id": "h", "prompt": "p", "k": 2, "retention": [True, True],
+             "compaction_compliant": i < 4, "compaction_upper_compliant": i < 5} for i in range(6)]
+    entry = compare.repeated_table(rows, baseline)["p"][2]
+    exact = 100 * (4 / 6 - 1 / 6) / (5 / 6 - 1 / 6)
+    assert entry["compaction_effective_retention"] == round(exact, 1) == 75.0
+
+
+def test_the_median_of_an_even_count_is_the_mean_of_the_middle_two():
+    assert compare.median([4, 1, 3, 2]) == 2.5
+    assert compare.median([5, 1, 3]) == 3
+    assert compare.median([]) is None
+
+
 def _row(i, hay, base, arm):
     return ({"id": i, "haystack_id": hay, "compaction_compliant": base},
             {"id": i, "haystack_id": hay, "compaction_compliant": arm})

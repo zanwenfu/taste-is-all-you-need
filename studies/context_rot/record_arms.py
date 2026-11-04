@@ -32,6 +32,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from studies.context_rot.compare import median
+
 HEADERS = {"user_record": "The user's own messages in this session, verbatim, from the record:",
            "recent_control": "The most recent part of the session, verbatim:",
            "criteria": "Standing instructions the user gave in this session, verbatim, from the record:",
@@ -177,7 +179,7 @@ def main(argv=None) -> int:
                            lambda inst, context, turn: _probe(client, endpoint, inst, context, turn),
                            out, workers=arguments.workers)
     print(json.dumps({"arm": arguments.arm, "instances": len(results),
-                      "block_tokens_median": sorted(s["block_tokens"] for s in sizes.values())[len(sizes) // 2]}))
+                      "block_tokens_median": median(s["block_tokens"] for s in sizes.values())}))
     return 0
 
 
