@@ -115,6 +115,7 @@ def main(argv=None) -> int:
     parser.add_argument("--source", default="hermes")
     parser.add_argument("--build-length", type=int, help="instances built from the long haystacks (as the baseline)")
     parser.add_argument("--no-cue", action="store_true")
+    parser.add_argument("--drop-cue", action="store_true", help="the published cases without the session cue")
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
@@ -132,7 +133,7 @@ def main(argv=None) -> int:
     rows = [json.loads(line) for line in (Path(arguments.baseline) / "results.jsonl").read_text().splitlines()]
     baseline = {row["id"]: row for row in rows}
     instances = [inst for inst in load_instances(arguments.source, DATA_REVISION, arguments.build_length,
-                                                 not arguments.no_cue) if inst.id in baseline]
+                                                 not arguments.no_cue, arguments.drop_cue) if inst.id in baseline]
     out = Path(arguments.out)
     out.mkdir(parents=True, exist_ok=True)
     records = {}

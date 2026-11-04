@@ -170,7 +170,7 @@ def deferred_judge():
 
 
 @contextlib.contextmanager
-def reuse_full_history(stored: dict):
+def reuse_full_history(stored: dict, conditions=("full_with_sc", "full_without_sc")):
     """Answer the two full-history probes from an earlier run of the same cases.
 
     They do not depend on the summary prompt, so a second prompt's run need not ask them
@@ -182,9 +182,9 @@ def reuse_full_history(stored: dict):
 
     def _probe(client, endpoint, inst, context, user_turn):
         row = stored.get(inst.id)
-        if row is not None and context is inst.messages:
+        if row is not None and "full_with_sc" in conditions and context is inst.messages:
             return row["full_with_sc_output"], row["full_with_sc_compliant"]
-        if row is not None and context is inst.messages_without_sc:
+        if row is not None and "full_without_sc" in conditions and context is inst.messages_without_sc:
             return row["full_without_sc_output"], row["full_without_sc_compliant"]
         return original(client, endpoint, inst, context, user_turn)
 
@@ -195,7 +195,36 @@ def reuse_full_history(stored: dict):
         evaluate._probe = original
 
 
-def load_instances(source: str, revision: str, length: int | None = None, direct: bool = True):
+def drop_cue(instances):
+    """The same cases with the rule stated without "For the rest of this session.".
+
+    The rule is re-rendered by the package's own render_sc (direct=False) and swapped in only
+    where it was injected: the turns in sc_message_indices and the restated probe. History,
+    probes and the rule-free history stay the same objects, so a no-cue run pairs case by case
+    with the published run and can reuse its probe on the rule-free history.
+    """
+    import dataclasses
+
+    from conpact.constraints import render_sc
+
+    out = []
+    for inst in instances:
+        plain = render_sc(inst.sc_text, inst.strict, False)
+        messages = list(inst.messages)
+        for index in inst.sc_message_indices:
+            content = messages[index]["content"]
+            if not content.startswith(inst.sc_rendered + "\n"):
+                raise SystemExit(f"{inst.id}: rule not found where it was injected (message {index})")
+            messages[index] = {**messages[index], "content": plain + content[len(inst.sc_rendered):]}
+        if not inst.post_sc_probe_prompt.startswith(inst.sc_rendered):
+            raise SystemExit(f"{inst.id}: restated probe does not start with the rule")
+        out.append(dataclasses.replace(inst, direct=False, sc_rendered=plain, messages=messages,
+                                       post_sc_probe_prompt=plain + inst.post_sc_probe_prompt[len(inst.sc_rendered):]))
+    return out
+
+
+def load_instances(source: str, revision: str, length: int | None = None, direct: bool = True,
+                   no_cue: bool = False):
     """The paper's static set, or (with ``length``) instances built from its long haystacks.
 
     Built instances follow the package's own builder (conpact.generate.ConPact); with
@@ -203,6 +232,8 @@ def load_instances(source: str, revision: str, length: int | None = None, direct
     """
     from conpact import load_static
 
+    if no_cue:
+        return drop_cue(load_static(source, revision=revision))
     if length is None:
         if not direct:
             raise SystemExit("--no-cue needs --build-length (the static set always carries the cue)")
@@ -405,7 +436,8 @@ def run(arguments) -> dict:
 
     out = Path(arguments.out)
     out.mkdir(parents=True, exist_ok=True)
-    instances = load_instances(arguments.source, arguments.revision, arguments.build_length, not arguments.no_cue)
+    instances = load_instances(arguments.source, arguments.revision, arguments.build_length, not arguments.no_cue,
+                               arguments.drop_cue)
     if arguments.histories:
         start, end = (int(part) for part in arguments.histories.split(":"))
         instances = history_range(instances, start, end)
@@ -444,7 +476,8 @@ def run(arguments) -> dict:
     if arguments.reuse_full:
         stored = {row["id"]: row for row in map(json.loads,
                                                  (Path(arguments.reuse_full) / "results.jsonl").read_text().splitlines())}
-        reuse = reuse_full_history(stored)
+        reuse = reuse_full_history(stored, ("full_without_sc",) if arguments.reuse_without_only
+                                   else ("full_with_sc", "full_without_sc"))
     if arguments.judge == "defer":
         with reuse, deferred_judge():
             evaluate(instances, summarizer, out_dir=out, probe=oss, judge=unused,
@@ -470,6 +503,10 @@ def main(argv=None) -> int:
     parser.add_argument("--histories", help="START:END, histories in file order, end excluded (overrides --contexts)")
     parser.add_argument("--build-length", type=int, help="build instances of this many tokens from the long haystacks")
     parser.add_argument("--no-cue", action="store_true", help="with --build-length: rules without the session cue")
+    parser.add_argument("--drop-cue", action="store_true",
+                        help="the published cases with the rule's session cue removed (paired with the published run)")
+    parser.add_argument("--reuse-without-only", action="store_true",
+                        help="with --reuse-full: reuse only the rule-free history probe (the rule text changed)")
     parser.add_argument("--reuse-full", help="results folder of an earlier run of the same cases whose full-history "
                                              "probes are reused (another summary prompt)")
     parser.add_argument("--prompt", default="pi_mono", choices=("pi_mono", "anthropic"))

@@ -575,3 +575,39 @@ def test_a_case_missing_from_the_earlier_run_is_probed_in_full(monkeypatch):
     monkeypatch.setattr(evaluate, "_probe", lambda client, endpoint, i, context, turn: ("A", True))
     with conpact_bridge.reuse_full_history({}):
         assert evaluate._probe(None, None, inst, inst.messages, "P?") == ("A", True)
+
+
+def test_dropping_the_cue_changes_only_the_rule_text_where_it_was_injected():
+    pytest.importorskip("conpact")
+    from conpact.instance import Instance
+
+    rendered = "For the rest of this session. use metric units."
+    fields = {f: None for f in Instance.__dataclass_fields__}
+    fields.update(id="h1:sc01", source="hermes", haystack_id="h1", target_length=100000, token_length=9,
+                  position="top", repeat=1, strict=False, direct=True, sc_id=1, sc_type="Output",
+                  sc_text="Use metric units.", sc_rendered=rendered, sc_message_indices=[1],
+                  system_prompt="S", developer_prompt="D",
+                  messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": f"{rendered}\nBook a room."},
+                            {"role": "assistant", "content": rendered}],
+                  messages_without_sc=[{"role": "system", "content": "sys"}, {"role": "user", "content": "Book a room."}],
+                  probe="p", correct_answer="a", incorrect_answer="b", swap_seed=1, compliant_letter="A",
+                  probe_prompt="P?", post_sc_probe_prompt=f"{rendered}\n\nP?", meta="{}")
+    inst = Instance(**fields)
+    [plain] = conpact_bridge.drop_cue([inst])
+    assert plain.direct is False and plain.sc_rendered == "Use metric units."
+    assert plain.messages[1]["content"] == "Use metric units.\nBook a room."
+    assert plain.messages[2]["content"] == rendered  # only the injected turn changes
+    assert plain.post_sc_probe_prompt == "Use metric units.\n\nP?" and plain.probe_prompt == "P?"
+    assert plain.messages_without_sc is inst.messages_without_sc and plain.id == inst.id
+
+
+def test_only_the_named_full_history_probe_is_reused(monkeypatch):
+    evaluate = pytest.importorskip("conpact.evaluate")
+    inst = types.SimpleNamespace(id="h1:sc01", messages=[{"role": "user", "content": "with"}],
+                                 messages_without_sc=[{"role": "user", "content": "without"}])
+    stored = {"h1:sc01": {"full_with_sc_output": "A", "full_with_sc_compliant": True,
+                          "full_without_sc_output": "B", "full_without_sc_compliant": False}}
+    monkeypatch.setattr(evaluate, "_probe", lambda client, endpoint, i, context, turn: ("fresh", None))
+    with conpact_bridge.reuse_full_history(stored, conditions=("full_without_sc",)):
+        assert evaluate._probe(None, None, inst, inst.messages, "P?") == ("fresh", None)
+        assert evaluate._probe(None, None, inst, inst.messages_without_sc, "P?") == ("B", False)
