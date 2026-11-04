@@ -122,3 +122,13 @@ def test_the_served_judge_asks_each_summary_once_and_resumes(tmp_path):
 def test_finished_cases_are_not_run_again(tmp_path):
     (tmp_path / "results.jsonl").write_text(json.dumps({"id": "h1:sc01", "k": 2}) + "\n")
     assert repeated.done_keys(tmp_path) == {("h1:sc01", 2)}
+
+
+def test_why_each_summary_ended_is_recorded():
+    inst = types.SimpleNamespace(id="h1:sc01", haystack_id="h1", sc_id=1, sc_type="Action", sc_text="r",
+                                 messages=TRANSCRIPT, probe_prompt="P?", post_sc_probe_prompt="r P?", compliant_letter="A")
+    ends = iter([("S1", "stop"), ("S2", "length")])
+    row = repeated.run_one(inst, k=2, option="pi_mono", sizes=[words(m["content"]) for m in TRANSCRIPT],
+                           summarize=lambda messages: next(ends), judge=lambda sc, summary: True,
+                           probe=lambda i, c, t: ("A", True), count=words, package_prompt=_package_prompt)
+    assert row["summaries"] == ["S1", "S2"] and row["summary_finish"] == ["stop", "length"]

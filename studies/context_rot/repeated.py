@@ -111,10 +111,12 @@ def run_one(inst, k: int, option: str, sizes: list[int], summarize, judge, probe
     ``blocks`` adds contexts: name -> (block text, header), each placed after the last summary.
     """
     parts = split_parts(inst.messages, sizes, k)
-    summaries, retention, previous = [], [], None
+    summaries, retention, finishes, previous = [], [], [], None
     for part in parts:
-        previous = summarize(round_prompt(option, previous, part, package_prompt))
+        result = summarize(round_prompt(option, previous, part, package_prompt))
+        previous, finish = result if isinstance(result, tuple) else (result, None)
         summaries.append(previous)
+        finishes.append(finish)
         retention.append(judge(inst.sc_text, previous))
     summary = [{"role": "assistant", "content": previous}]
     record = user_record(inst.messages)
@@ -130,7 +132,8 @@ def run_one(inst, k: int, option: str, sizes: list[int], summarize, judge, probe
         offset += len(part)
     row = {"id": inst.id, "haystack_id": inst.haystack_id, "sc_id": inst.sc_id, "sc_type": inst.sc_type,
            "compliant_letter": inst.compliant_letter, "prompt": option, "k": k, "part_tokens": part_tokens,
-           "summaries": summaries, "retention": retention, "record_tokens": count(record)}
+           "summaries": summaries, "summary_finish": finishes, "retention": retention,
+           "record_tokens": count(record)}
     for arm, context in contexts.items():
         row[f"{arm}_output"], row[f"{arm}_compliant"] = probe(inst, context, inst.probe_prompt)
         row[f"{arm}_upper_output"], row[f"{arm}_upper_compliant"] = probe(inst, context, inst.post_sc_probe_prompt)
@@ -198,9 +201,9 @@ def main(argv=None) -> int:
     client = endpoint.client()
     judge = RetentionJudge(ServedChat(client, arguments.probe_model))
 
-    def summarize(messages: list[dict]) -> str:
+    def summarize(messages: list[dict]) -> tuple[str, str]:
         reply = client.chat.completions.create(model=arguments.probe_model, messages=messages, **endpoint.params)
-        return reply.choices[0].message.content or ""
+        return reply.choices[0].message.content or "", reply.choices[0].finish_reason
 
     def judge_one(sc_text: str, summary: str):
         return judge.verdict(*judge_prompts(sc_text, [{"role": "assistant", "content": summary}]))

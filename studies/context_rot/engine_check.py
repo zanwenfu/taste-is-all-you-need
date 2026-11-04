@@ -56,6 +56,8 @@ def main(argv=None) -> int:
     parser.add_argument("--full", required=True, help="our full-run folder: hermes-<prompt>/hSS-EE/results.jsonl")
     parser.add_argument("--histories", default="0:10")
     parser.add_argument("--cache", required=True, help="HF and vLLM cache folder")
+    parser.add_argument("--arms-only", action="store_true",
+                        help="probe only the record arms' contexts (user_record, recent_control) of the full run")
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
     sys.path.insert(0, arguments.paper_src)
@@ -89,6 +91,37 @@ def main(argv=None) -> int:
         return [response.text for response in runtime.batch_generate(batch)]
 
     report, records = {"cases": len(instances)}, []
+    if arguments.arms_only:
+        for prompt in ("pi_mono", "anthropic"):
+            for arm in ("user_record", "recent_control"):
+                contexts = {}
+                for part in sorted(Path(arguments.full, f"hermes-{prompt}").glob(f"h??-??-{arm}")):
+                    for line in (part / "results.jsonl").read_text().splitlines():
+                        row = json.loads(line)
+                        if row["id"] in ids:
+                            contexts[row["id"]] = row
+                batch, keys = [], []
+                for inst in instances:
+                    for condition, turn in (("compaction", inst.probe_prompt),
+                                            ("upper_bound", inst.post_sc_probe_prompt)):
+                        batch.append(probe_messages(inst, contexts[inst.id]["compacted"], turn))
+                        keys.append((inst, condition))
+                for (inst, condition), text in zip(keys, ask(batch)):
+                    package, paper = grade(text, inst.compliant_letter)
+                    records.append({"id": inst.id, "step": f"arm_{arm}", "prompt": prompt, "condition": condition,
+                                    "output": text, "package": package, "paper": paper,
+                                    "server_package": contexts[inst.id][f"{condition}_compliant"]})
+                for condition in ("compaction", "upper_bound"):
+                    chosen = [r for r in records if r["step"] == f"arm_{arm}" and r["prompt"] == prompt
+                              and r["condition"] == condition]
+                    report[f"arm_{arm}|{prompt}|{condition}"] = {
+                        "engine_package_rule": _rate([r["package"] for r in chosen]),
+                        "engine_paper_rule": _rate([r["paper"] for r in chosen]),
+                        "server_package_rule": _rate([r["server_package"] for r in chosen])}
+        (out / "arms_records.jsonl").write_text("".join(json.dumps(record) + "\n" for record in records))
+        (out / "arms_report.json").write_text(json.dumps(report, indent=1))
+        print(json.dumps(report, indent=1))
+        return 0
     # 1. our server-made summaries, probed through the paper's engine
     for prompt in ("pi_mono", "anthropic"):
         batch, keys = [], []
