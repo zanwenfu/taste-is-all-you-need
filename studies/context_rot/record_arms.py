@@ -105,6 +105,11 @@ def score_paired(instances, baseline: dict, contexts: dict, probe, out: Path, wo
     return [json.loads(line) for line in (out / "results.jsonl").read_text().splitlines()]
 
 
+def stored_records(path: Path) -> dict:
+    """The per-case records an earlier criteria arm wrote, so arm and control share one reading."""
+    return json.loads(Path(path).read_text())["records"]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--arm", required=True, choices=tuple(HEADERS))
@@ -116,6 +121,8 @@ def main(argv=None) -> int:
     parser.add_argument("--build-length", type=int, help="instances built from the long haystacks (as the baseline)")
     parser.add_argument("--no-cue", action="store_true")
     parser.add_argument("--drop-cue", action="store_true", help="the published cases without the session cue")
+    parser.add_argument("--records-from", help="records.json of an earlier criteria arm: reuse its reading of the "
+                                                "user messages (the records do not depend on the summary prompt)")
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
@@ -142,10 +149,13 @@ def main(argv=None) -> int:
 
         from studies.context_rot.criteria import records_block, records_for, served_reader
 
-        log: list = []
-        reader = served_reader(OpenAI(base_url=arguments.probe_url, api_key="EMPTY"), arguments.probe_model, log)
-        records = records_for(instances, reader, workers=arguments.workers)
-        (out / "records.json").write_text(json.dumps({"records": records, "reads": log}, indent=1))
+        if arguments.records_from:
+            records = stored_records(arguments.records_from)
+        else:
+            log: list = []
+            reader = served_reader(OpenAI(base_url=arguments.probe_url, api_key="EMPTY"), arguments.probe_model, log)
+            records = records_for(instances, reader, workers=arguments.workers)
+            (out / "records.json").write_text(json.dumps({"records": records, "reads": log}, indent=1))
     contexts, sizes = {}, {}
     for inst in instances:
         if arguments.arm.startswith("criteria"):

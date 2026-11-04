@@ -56,13 +56,16 @@ def parse_reply(reply: str, message: str) -> tuple[list[str], list[str]]:
 def build_records(messages: list[dict], read, cache: dict) -> list[dict]:
     """Records for one history. ``read(text)`` returns the kept quotes of one user message;
     ``cache`` maps message text to them, so a message seen before is not read again."""
-    records = []
+    records, seen = [], set()
     for index, message in enumerate(messages):
         if message["role"] != "user":
             continue
         if message["content"] not in cache:
             cache[message["content"]] = read(message["content"])
-        records += [{"message": index, "text": quote} for quote in cache[message["content"]]]
+        for quote in cache[message["content"]]:
+            if quote not in seen:  # an instruction repeated word for word is one record, at its first message
+                seen.add(quote)
+                records.append({"message": index, "text": quote})
     return records
 
 

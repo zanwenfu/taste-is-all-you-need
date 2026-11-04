@@ -86,3 +86,11 @@ def test_repeated_rounds_probe_an_added_block_after_the_last_summary():
                            package_prompt=lambda option, messages: [{"role": "user", "content": "x"}],
                            blocks={"criteria": ("- use metric units", "Standing:")})
     assert "S\n\nStanding:\n- use metric units" in seen and row["criteria_compliant"] is False
+
+
+def test_an_instruction_repeated_word_for_word_is_one_record_at_its_first_message():
+    history = [{"role": "user", "content": "Always answer in English. First task."},
+               {"role": "assistant", "content": "Done."},
+               {"role": "user", "content": "Always answer in English. Second task."}]
+    records = criteria.build_records(history, lambda text: ["Always answer in English."], {})
+    assert records == [{"message": 0, "text": "Always answer in English."}]

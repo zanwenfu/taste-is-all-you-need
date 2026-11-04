@@ -63,3 +63,9 @@ def test_paired_scoring_reuses_the_baseline_full_history_probes_and_reprobes_onl
     assert written[0]["id"] == "h1-1"
     inputs = [json.loads(line) for line in (tmp_path / "judge_inputs.jsonl").read_text().splitlines()]
     assert inputs == [{"id": "h1-1", "sc_text": "Use metric units."}]
+
+
+def test_stored_records_are_reused_so_arm_and_control_share_one_reading(tmp_path):
+    stored = tmp_path / "records.json"
+    stored.write_text(json.dumps({"records": {"h1:sc01": [{"message": 1, "text": "Use metric units."}]}, "reads": []}))
+    assert record_arms.stored_records(stored) == {"h1:sc01": [{"message": 1, "text": "Use metric units."}]}
