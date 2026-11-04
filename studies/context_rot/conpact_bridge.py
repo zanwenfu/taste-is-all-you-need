@@ -169,6 +169,49 @@ def deferred_judge():
         evaluate._judge = original
 
 
+@contextlib.contextmanager
+def reuse_full_history(stored: dict):
+    """Answer the two full-history probes from an earlier run of the same cases.
+
+    They do not depend on the summary prompt, so a second prompt's run need not ask them
+    again: the package's _probe is answered from ``stored`` (id -> results row) when its
+    context is the case's own history, with or without the rule. Anything else is asked.
+    """
+    evaluate = importlib.import_module("conpact.evaluate")
+    original = evaluate._probe
+
+    def _probe(client, endpoint, inst, context, user_turn):
+        row = stored.get(inst.id)
+        if row is not None and context is inst.messages:
+            return row["full_with_sc_output"], row["full_with_sc_compliant"]
+        if row is not None and context is inst.messages_without_sc:
+            return row["full_without_sc_output"], row["full_without_sc_compliant"]
+        return original(client, endpoint, inst, context, user_turn)
+
+    evaluate._probe = _probe
+    try:
+        yield
+    finally:
+        evaluate._probe = original
+
+
+def load_instances(source: str, revision: str, length: int | None = None, direct: bool = True):
+    """The paper's static set, or (with ``length``) instances built from its long haystacks.
+
+    Built instances follow the package's own builder (conpact.generate.ConPact); with
+    direct=False the rules carry no "For the rest of this session." cue.
+    """
+    from conpact import load_static
+
+    if length is None:
+        if not direct:
+            raise SystemExit("--no-cue needs --build-length (the static set always carries the cue)")
+        return load_static(source, revision=revision)
+    from conpact.generate import ConPact
+
+    return ConPact(source=source, length=length, direct=direct, revision=revision).generate()
+
+
 def judge_deferred(out: Path, judge: RetentionJudge, prompts, workers: int = 8,
                    spend_cap: float | None = None) -> list[dict]:
     """Ask the verdicts a deferred run left empty; keep results.jsonl as written.
@@ -358,11 +401,11 @@ def judge_later(arguments) -> dict:
 
 
 def run(arguments) -> dict:
-    from conpact import Endpoint, LLMSummarize, evaluate, load_static
+    from conpact import Endpoint, LLMSummarize, evaluate
 
     out = Path(arguments.out)
     out.mkdir(parents=True, exist_ok=True)
-    instances = load_static(arguments.source, revision=arguments.revision)
+    instances = load_instances(arguments.source, arguments.revision, arguments.build_length, not arguments.no_cue)
     if arguments.histories:
         start, end = (int(part) for part in arguments.histories.split(":"))
         instances = history_range(instances, start, end)
@@ -397,15 +440,20 @@ def run(arguments) -> dict:
                            {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP}, out / "not_served.jsonl")
     summarizer = LLMSummarize(oss, prompt=arguments.prompt)
     unused = Endpoint("bedrock-judge", api_key="unused")
+    reuse = contextlib.nullcontext()
+    if arguments.reuse_full:
+        stored = {row["id"]: row for row in map(json.loads,
+                                                 (Path(arguments.reuse_full) / "results.jsonl").read_text().splitlines())}
+        reuse = reuse_full_history(stored)
     if arguments.judge == "defer":
-        with deferred_judge():
+        with reuse, deferred_judge():
             evaluate(instances, summarizer, out_dir=out, probe=oss, judge=unused,
                      compact_workers=arguments.workers, workers=arguments.workers)
         settings = {"model": JUDGE_MODEL, "deferred": True}
     else:
         judge = RetentionJudge(Converse(JUDGE_MODEL, effort="low", max_tokens=arguments.judge_max_tokens),
                                log=out / "judge_calls.jsonl")
-        with bedrock_judge(judge):
+        with reuse, bedrock_judge(judge):
             evaluate(instances, summarizer, out_dir=out, probe=oss, judge=unused,
                      compact_workers=arguments.workers, workers=arguments.workers)
         settings = _judge_settings(judge)
@@ -420,6 +468,10 @@ def main(argv=None) -> int:
                                                                  "swe_natural"))
     parser.add_argument("--contexts", type=int, default=5, help="first N histories x 15 rules; 0 for all 50")
     parser.add_argument("--histories", help="START:END, histories in file order, end excluded (overrides --contexts)")
+    parser.add_argument("--build-length", type=int, help="build instances of this many tokens from the long haystacks")
+    parser.add_argument("--no-cue", action="store_true", help="with --build-length: rules without the session cue")
+    parser.add_argument("--reuse-full", help="results folder of an earlier run of the same cases whose full-history "
+                                             "probes are reused (another summary prompt)")
     parser.add_argument("--prompt", default="pi_mono", choices=("pi_mono", "anthropic"))
     parser.add_argument("--probe-url", help="the served summarizer and probe model; not needed with --judge-later")
     parser.add_argument("--probe-model", default="openai/gpt-oss-120b")

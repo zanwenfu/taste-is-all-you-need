@@ -113,15 +113,16 @@ def main(argv=None) -> int:
     parser.add_argument("--probe-model", default="openai/gpt-oss-120b")
     parser.add_argument("--tokenizer", required=True, help="gpt-oss folder, to count block sizes as the paper does")
     parser.add_argument("--source", default="hermes")
+    parser.add_argument("--build-length", type=int, help="instances built from the long haystacks (as the baseline)")
+    parser.add_argument("--no-cue", action="store_true")
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
 
-    from conpact import Endpoint, load_static
     from conpact.evaluate import _probe
     from transformers import AutoTokenizer
 
-    from studies.context_rot.conpact_bridge import DATA_REVISION, OUTPUT_CAP
+    from studies.context_rot.conpact_bridge import DATA_REVISION, OUTPUT_CAP, load_instances
 
     tokenizer = AutoTokenizer.from_pretrained(arguments.tokenizer)
 
@@ -130,7 +131,8 @@ def main(argv=None) -> int:
 
     rows = [json.loads(line) for line in (Path(arguments.baseline) / "results.jsonl").read_text().splitlines()]
     baseline = {row["id"]: row for row in rows}
-    instances = [inst for inst in load_static(arguments.source, revision=DATA_REVISION) if inst.id in baseline]
+    instances = [inst for inst in load_instances(arguments.source, DATA_REVISION, arguments.build_length,
+                                                 not arguments.no_cue) if inst.id in baseline]
     out = Path(arguments.out)
     out.mkdir(parents=True, exist_ok=True)
     records = {}

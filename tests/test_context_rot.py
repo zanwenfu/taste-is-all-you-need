@@ -547,3 +547,31 @@ def test_unserved_cases_are_counted_and_never_sent_to_the_judge(tmp_path):
     assert len(asked) == 1 and [row["retention"] for row in judged] == [None, True]
     counts = conpact_bridge.not_served_counts(rows)
     assert counts["compaction"] == 1 and counts["full_with_sc"] == 1 and counts["summary"] == 1
+
+
+# -- reusing the full-history probes across summary prompts --------------------------
+
+
+def test_full_history_probes_are_taken_from_an_earlier_run_and_only_summaries_are_probed(monkeypatch):
+    evaluate = pytest.importorskip("conpact.evaluate")
+    inst = types.SimpleNamespace(id="h1:sc01", messages=[{"role": "user", "content": "with"}],
+                                 messages_without_sc=[{"role": "user", "content": "without"}])
+    stored = {"h1:sc01": {"full_with_sc_output": "A", "full_with_sc_compliant": True,
+                          "full_without_sc_output": "B", "full_without_sc_compliant": False}}
+    asked = []
+    monkeypatch.setattr(evaluate, "_probe", lambda client, endpoint, i, context, turn: asked.append(context) or ("B", None))
+    with conpact_bridge.reuse_full_history(stored):
+        assert evaluate._probe(None, None, inst, inst.messages, "P?") == ("A", True)
+        assert evaluate._probe(None, None, inst, inst.messages_without_sc, "P?") == ("B", False)
+        summary = [{"role": "assistant", "content": "S"}]
+        assert evaluate._probe(None, None, inst, summary, "P?") == ("B", None)
+    assert asked == [[{"role": "assistant", "content": "S"}]]
+
+
+def test_a_case_missing_from_the_earlier_run_is_probed_in_full(monkeypatch):
+    evaluate = pytest.importorskip("conpact.evaluate")
+    inst = types.SimpleNamespace(id="h9:sc01", messages=[{"role": "user", "content": "with"}],
+                                 messages_without_sc=[])
+    monkeypatch.setattr(evaluate, "_probe", lambda client, endpoint, i, context, turn: ("A", True))
+    with conpact_bridge.reuse_full_history({}):
+        assert evaluate._probe(None, None, inst, inst.messages, "P?") == ("A", True)
