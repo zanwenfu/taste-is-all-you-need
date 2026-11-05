@@ -29,6 +29,7 @@ from minisweagent.models.utils.actions_toolcall import (
     BASH_TOOL,
     format_toolcall_observation_messages,
 )
+from pydantic import Field
 
 from taste.memstore.tools import FETCH, SEARCH, definitions
 
