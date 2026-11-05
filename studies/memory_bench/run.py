@@ -165,7 +165,8 @@ def views(arguments: argparse.Namespace) -> int:
         units = [{"unit": v["qid"], "sessions": v["sessions"],
                   "queries": [{"qid": v["qid"], "query": v["question"], "date": v["question_date"]}]} for v in loaded]
     else:
-        loaded, _ = locomo.load([sample for sample in data if sample["sample_id"] in wanted])
+        loaded, _ = locomo.load([sample for sample in data if sample["sample_id"] in wanted],
+                                captions=not arguments.no_captions)
         units = [{"unit": v["conversation"], "sessions": v["sessions"],
                   "queries": [{"qid": q["qid"], "query": q["query"]} for q in v["questions"]]} for v in loaded]
     out = Path(arguments.out)
@@ -256,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     stage.add_argument("--part", required=True, choices=("dev", "held_out", "all"),
                        help="all: only for checking an adapter against a system's own published run")
     stage.add_argument("--benchmark", default="lme", choices=("lme", "locomo"))
+    stage.add_argument("--no-captions", action="store_true",
+                       help="LoCoMo: only for checking an adapter against a runner that leaves captions out")
     stage.set_defaults(run=views)
 
     stage = stages.add_parser("score", help="LoCoMo only: the official judge-free score")

@@ -217,3 +217,210 @@ def test_render_shows_tool_calls_as_text() -> None:
     message = {"role": "assistant", "content": "", "tool_calls": [
         {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": json.dumps({"command": "ls -la"})}}]}
     assert "bash" in render(message) and "ls -la" in render(message)
+
+
+# ------------------------------------------------------------------ several tasks in one conversation
+
+
+def test_the_next_task_is_a_new_user_message_in_its_own_container_and_the_conversation_goes_on() -> None:
+    script = _Script([_bash("first", "c1"), _bash(DONE, "c2"), _bash("second", "c3"), _bash(DONE, "c4")])
+    agent, _ = _agent(script)
+    shells = {"one": _Shell(), "two": _Shell()}
+
+    outcomes = agent.run_tasks([{"name": "one", "instruction": "Do one."}, {"name": "two", "instruction": "Do two."}],
+                               lambda task: shells[task["name"]])
+
+    assert shells["one"].ran == ["first", DONE] and shells["two"].ran == ["second", DONE]
+    assert [o["task"] for o in outcomes] == ["one", "two"] and all(o["exit_status"] == "Submitted" for o in outcomes)
+    users = [m["content"] for m in script.sent[-1]["messages"] if m["role"] == "user"]
+    assert users == ["Do one.", "Do two."], "the second task follows the first; no exit message is ever sent to the model"
+
+
+def test_memory_tools_are_answered_in_every_task_and_a_task_change_is_kept_in_the_memory(tmp_path: Path) -> None:
+    store = GitTurns(tmp_path)
+    script = _Script([_bash(DONE, "c1"), _reply([_call(SEARCH, {"description": "parser one"}, "s1")]), _bash(DONE, "c2")])
+    agent, _ = _agent(script, store=store)
+    shells = {"one": _Shell(), "two": _Shell()}
+    try:
+        agent.run_tasks([{"name": "one", "instruction": "Fix parser one."}, {"name": "two", "instruction": "Do two."}],
+                        lambda task: shells[task["name"]])
+        result = next(m for m in agent.messages if m.get("tool_call_id") == "s1")
+        assert "Fix parser one." in result["content"]
+        assert store.commits == agent.recorded
+    finally:
+        store.close()
+
+
+# ------------------------------------------------------------------ the record the scores are read from
+
+
+def test_every_action_is_logged_with_its_call_its_task_and_how_many_compactions_came_before(tmp_path: Path) -> None:
+    log: list = []
+    store = GitTurns(tmp_path)
+    script = _Script([*[_bash(f"step {n} " + "word " * 30, f"c{n}") for n in range(5)],
+                      _reply([_call(SEARCH, {"description": "the rule"}, "s1")]), _bash(DONE, "c9")])
+    agent, _ = _agent(script, store=store, summarize=_summarize([]), compact_at_tokens=150, keep_recent_tokens=60,
+                      on_action=log.append)
+    try:
+        agent.run_tasks([{"name": "one", "instruction": f"Fix it. {RULE}"}], lambda task: _Shell())
+    finally:
+        store.close()
+    commands = [row for row in log if row["kind"] == "bash"]
+    assert commands[0]["command"].startswith("step 0") and commands[0]["call"] == 1 and commands[0]["compactions"] == 0
+    assert commands[0]["task"] == "one"
+    assert log[-2]["kind"] == SEARCH and RULE in log[-2]["output"], "a memory call is logged whole, with what it brought back"
+    assert log[-1]["compactions"] == len(agent.events) > 0
+
+
+# ------------------------------------------------------------------ the summary, from the two published prompts
+
+from studies.long_run.session import load_session, make_summarizer, run_session  # noqa: E402
+
+
+def _prompt(option: str, messages: list[dict]) -> list[dict]:
+    return [{"role": "system", "content": f"summarize with {option}"}, *messages, {"role": "user", "content": "now summarize"}]
+
+
+def _text(text: str) -> SimpleNamespace:
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None),
+                                                    finish_reason="stop")],
+                           usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))
+
+
+def test_the_summary_is_the_published_prompt_asked_of_the_served_model_with_no_tools() -> None:
+    sent = []
+
+    def chat(messages, tools):
+        sent.append((messages, tools))
+        return _text("the summary")
+
+    summarize = make_summarizer(chat, "anthropic", _prompt)
+    older = [{"role": "user", "content": "the task"}]
+    assert summarize(older, None) == "the summary" and sent[0][1] is None
+    assert sent[0][0][0]["content"] == "summarize with anthropic"
+    summarize(older, "the summary")
+    assert {"role": "assistant", "content": "the summary"} in sent[1][0], "the previous summary goes in with the new part"
+
+
+def test_an_empty_summary_is_asked_again_and_stops_the_run_if_it_stays_empty() -> None:
+    replies = iter(["", "fine"])
+    assert make_summarizer(lambda m, t: _text(next(replies)), "anthropic", _prompt)([], None) == "fine"
+    with pytest.raises(RuntimeError, match="summary"):
+        make_summarizer(lambda m, t: _text(""), "anthropic", _prompt)([], None)
+
+
+# ------------------------------------------------------------------ one whole session, on a stand-in
+
+
+SESSION = {
+    "tasks": [{"name": "one", "instruction": "Do one."}, {"name": "two", "instruction": "Do two."}],
+    "rules": [{"name": "bytes", "say": "first", "text": "Whenever you run a Python script, pass -B to Python.",
+               "trigger": r"\bpython3?\s", "obeys": r"\bpython3?\s+-B\b"},
+              {"name": "ls", "say": 3, "text": "From now on, list a folder with ls -1.",
+               "trigger": r"(^|[;&|]\s*)ls\b", "obeys": r"\bls\s+-1\b"}],
+    "compact_at_tokens": 150, "keep_recent_tokens": 60, "summary_prompt": "anthropic", "step_limit": 40,
+}
+
+
+def _session_chat() -> _Script:
+    return _Script([_bash("python3 a.py " + "word " * 30, "c1"), _bash("ls " + "word " * 30, "c2"),
+                    _bash("python3 -B a.py " + "word " * 30, "c3"), _bash(DONE, "c4"),
+                    _reply([_call(SEARCH, {"description": "python script"}, "s1")]) , _bash("ls -1", "c5"), _bash(DONE, "c6")])
+
+
+def _summaries(messages, tools):
+    return _text("a summary")
+
+
+def _routed(script):
+    def chat(messages, tools):
+        return script(messages, tools) if tools else _summaries(messages, tools)
+    return chat
+
+
+def test_a_memory_session_writes_its_record_and_its_ledger_counts_the_real_store(tmp_path: Path) -> None:
+    session = load_session(SESSION)
+    script = _session_chat()
+    summary = run_session(session, arm="taste", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    rows = [json.loads(line) for line in (tmp_path / "run" / "actions.jsonl").read_text().splitlines()]
+    assert any(row["kind"] == SEARCH for row in rows)
+    assert summary["arm"] == "taste" and summary["ledger"]["name"] == "Taste memory, study-driven"
+    assert summary["ledger"]["search_calls"] == 1
+    assert summary["memory_turns"] > 0 and summary["compactions"] == len(summary["events"]) > 0
+    assert [o["exit_status"] for o in summary["outcomes"]] == ["Submitted", "Submitted"]
+    assert json.loads((tmp_path / "run" / "summary.json").read_text())["arm"] == "taste"
+
+
+def test_the_first_rule_is_told_with_the_first_task_and_the_later_one_at_its_call(tmp_path: Path) -> None:
+    session = load_session(SESSION)
+    script = _session_chat()
+    run_session(session, arm="taste", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    first = script.sent[0]["messages"]
+    assert [m["content"] for m in first if m["role"] == "user"] == [f"{session['rules'][0]['text']}\n\nDo one."]
+    assert session["rules"][1]["text"] in json.dumps(script.sent[2]["messages"])
+    assert session["rules"][1]["text"] not in json.dumps(script.sent[1]["messages"])
+
+
+def test_with_no_memory_only_bash_is_offered_and_the_ledger_says_baseline(tmp_path: Path) -> None:
+    script = _Script([_bash("python3 a.py", "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    summary = run_session(load_session(SESSION), arm="compaction", chat=_routed(script), make_env=lambda task: _Shell(),
+                          count=_count, out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert [t["function"]["name"] for t in script.sent[0]["tools"]] == ["bash"]
+    assert summary["ledger"]["name"] == "baseline" and summary["memory_turns"] == 0
+
+
+def test_a_ceiling_with_no_compaction_never_asks_for_a_summary(tmp_path: Path) -> None:
+    script = _Script([_bash("word " * 200, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    summary = run_session(load_session(SESSION), arm="no_compaction", chat=_routed(script), make_env=lambda task: _Shell(),
+                          count=_count, out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["compactions"] == 0
+
+
+def test_a_ceiling_with_each_rule_told_again_at_every_task_says_so(tmp_path: Path) -> None:
+    script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2")])
+    run_session(load_session({**SESSION, "rules": SESSION["rules"][:1]}), arm="restated", chat=_routed(script),
+                make_env=lambda task: _Shell(), count=_count, out=tmp_path / "run", workdir=tmp_path / "w",
+                package_prompt=_prompt)
+    users = [m["content"] for m in script.sent[-1]["messages"] if m["role"] == "user"]
+    assert users[-1] == f"{SESSION['rules'][0]['text']}\n\nDo two."
+
+
+def test_a_session_with_a_rule_it_cannot_score_is_refused() -> None:
+    with pytest.raises(ValueError, match="trigger"):
+        load_session({**SESSION, "rules": [{"name": "x", "say": "first", "text": "t", "obeys": "y"}]})
+    with pytest.raises(ValueError, match="say"):
+        load_session({**SESSION, "rules": [{"name": "x", "say": "soon", "text": "t", "trigger": "a", "obeys": "y"}]})
+    with pytest.raises(ValueError, match="tasks"):
+        load_session({**SESSION, "tasks": []})
+
+
+# ------------------------------------------------------------------ the score, from the record alone
+
+from studies.long_run.score import score_session  # noqa: E402
+
+
+def test_a_rule_is_scored_only_after_it_was_told_and_only_on_commands_it_applies_to() -> None:
+    rules = [{"name": "bytes", "say": "first", "trigger": r"\bpython3?\s", "obeys": r"\bpython3?\s+-B\b"},
+             {"name": "ls", "say": 3, "trigger": r"(^|[;&|]\s*)ls\b", "obeys": r"\bls\s+-1\b"}]
+    actions = [{"kind": "bash", "call": 1, "compactions": 0, "command": "python3 a.py"},
+               {"kind": "bash", "call": 2, "compactions": 0, "command": "ls"},
+               {"kind": "bash", "call": 3, "compactions": 1, "command": "cd x && python3 -B a.py"},
+               {"kind": "bash", "call": 4, "compactions": 1, "command": "cat f; ls -1"},
+               {"kind": "bash", "call": 5, "compactions": 2, "command": "ls -la"},
+               {"kind": "memory_search", "call": 6, "compactions": 2, "command": "[memory_search] {}", "output": "x"}]
+    scored = score_session(actions, rules)
+    assert scored["bytes"]["applies"] == 2 and scored["bytes"]["obeyed"] == 1
+    assert scored["ls"]["applies"] == 2 and scored["ls"]["obeyed"] == 1, "call 2 came before the rule was told"
+    assert scored["ls"]["by_compactions"] == {"1": [1, 1], "2": [0, 1]}
+    assert scored["bytes"]["by_compactions"] == {"0": [0, 1], "1": [1, 1]}
+
+
+def test_a_memory_call_counts_as_a_look_and_a_find_only_when_the_rule_came_back() -> None:
+    rules = [{"name": "ls", "say": "first", "text": "From now on, list a folder with ls -1.", "trigger": r"\bls\b", "obeys": r"\bls\s+-1\b"}]
+    actions = [{"kind": "memory_search", "call": 1, "compactions": 0, "command": "q", "output": "nothing here"},
+               {"kind": "memory_search", "call": 2, "compactions": 0, "command": "q", "output": "FROM NOW ON, list a folder with ls -1. more"},
+               {"kind": "memory_fetch", "call": 3, "compactions": 0, "command": "q", "output": "other"}]
+    scored = score_session(actions, rules)
+    assert scored["ls"]["looks"] == 3 and scored["ls"]["finds"] == 1

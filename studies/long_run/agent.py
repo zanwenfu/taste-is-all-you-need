@@ -24,7 +24,7 @@ from collections.abc import Callable
 from typing import Any
 
 from minisweagent.agents.default import AgentConfig, DefaultAgent
-from minisweagent.exceptions import FormatError
+from minisweagent.exceptions import FormatError, InterruptAgentFlow
 from minisweagent.models.utils.actions_toolcall import (
     BASH_TOOL,
     format_toolcall_observation_messages,
@@ -34,6 +34,7 @@ from pydantic import Field
 from taste.memstore.tools import FETCH, SEARCH, definitions
 
 SUMMARY_LEAD = "The conversation so far was compacted. Summary of the earlier part:\n\n"
+OUTPUT_KEPT = 2000  # characters of a command's output kept in the action log; a memory call's output is kept whole
 _SENT_KEYS = ("role", "content", "tool_calls", "tool_call_id")
 
 
@@ -141,9 +142,11 @@ class LongRunConfig(AgentConfig):
 class LongRunAgent(DefaultAgent):
     def __init__(self, model: Any, env: Any, *, count: Callable[[str], int],
                  summarize: Callable[[list[dict], str | None], str] | None = None,
-                 record: Callable[[dict], None] | None = None, **kwargs: Any) -> None:
+                 record: Callable[[dict], None] | None = None,
+                 on_action: Callable[[dict], None] | None = None, **kwargs: Any) -> None:
         super().__init__(model, env, config_class=LongRunConfig, **kwargs)
-        self.count, self.summarize, self.record = count, summarize, record
+        self.count, self.summarize, self.record, self.on_action = count, summarize, record, on_action
+        self.task_name = ""
         self.events: list[dict] = []
         self.recorded = 0
         self.previous_summary: str | None = None
@@ -199,6 +202,75 @@ class LongRunAgent(DefaultAgent):
             "watched_in_kept_turns": {name: any(text in render(m) for m in recent)
                                       for name, text in self.config.watch.items()},
         })
+
+    def execute_actions(self, message: dict) -> list[dict]:
+        """As the default agent does, with each action logged: compaction drops old messages, the log keeps them all."""
+        outputs = []
+        for action in message.get("extra", {}).get("actions", []):
+            kind = action.get("memory_tool", "bash")
+            row = {"kind": kind, "call": self.n_calls, "task": self.task_name, "compactions": len(self.events),
+                   "command": action["command"]}
+            try:
+                output = self.env.execute(action)
+            except Exception:
+                if self.on_action:
+                    self.on_action(row)
+                raise
+            if self.on_action:
+                self.on_action({**row, "returncode": output.get("returncode"), "output": str(output.get("output", ""))
+                                if kind != "bash" else str(output.get("output", ""))[:OUTPUT_KEPT]})
+            outputs.append(output)
+        return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+
+    def _until_exit(self) -> dict:
+        """The default agent's loop, after its first two messages."""
+        while True:
+            try:
+                self.step()
+                self.n_consecutive_format_errors = 0
+            except FormatError as error:
+                self.cost += error.messages[0].get("extra", {}).get("cost", 0.0)
+                self.n_consecutive_format_errors += 1
+                limit = self.config.max_consecutive_format_errors
+                self.add_messages(*error.messages)
+                if 0 < limit <= self.n_consecutive_format_errors:
+                    self.add_messages({"role": "exit", "content": "RepeatedFormatError",
+                                       "extra": {"exit_status": "RepeatedFormatError", "submission": ""}})
+            except InterruptAgentFlow as error:
+                self.add_messages(*error.messages)
+            except Exception as error:
+                self.handle_uncaught_exception(error)
+                raise
+            finally:
+                self.save(self.config.output_path)
+            if self.messages[-1].get("role") == "exit":
+                return self.messages[-1].get("extra", {})
+
+    def run_tasks(self, tasks: list[dict], make_env: Callable[[dict], Any],
+                  worded: Callable[[dict, int], str] | None = None) -> list[dict]:
+        """Several tasks in one conversation, each in its own container. A submitted task's exit message is never sent
+        to the model: the next task follows as a user message, and only the container changes. A task that ends any
+        other way ends the session."""
+        outcomes = []
+        for number, task in enumerate(tasks):
+            self.task_name = task["name"]
+            self.env.inner = make_env(task)
+            text = worded(task, number) if worded else task["instruction"]
+            if number == 0:
+                self.extra_template_vars |= {"task": text}
+                self.messages = []
+                self.add_messages(
+                    self.model.format_message(role="system", content=self._render_template(self.config.system_template)),
+                    self.model.format_message(role="user", content=self._render_template(self.config.instance_template)))
+            else:
+                self.messages.pop()
+                self.add_messages({"role": "user", "content": text})
+            ended = self._until_exit()
+            outcomes.append({"task": task["name"], "exit_status": ended.get("exit_status"), "calls": self.n_calls,
+                             "compactions": len(self.events)})
+            if ended.get("exit_status") != "Submitted":
+                break
+        return outcomes
 
     def serialize(self, *extra_dicts: dict) -> dict:
         return super().serialize({"info": {"compactions": self.events, "recorded_to_memory": self.recorded}},

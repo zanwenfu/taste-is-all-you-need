@@ -334,3 +334,13 @@ def test_the_command_line_runs_a_conversation_end_to_end(tmp_path: Path) -> None
     summary = json.loads((tmp_path / "run" / "scores.summary.json").read_text())
     assert summary["questions"] == 5 and summary["scored_1_to_4"] == 4
     assert summary["stemmer"].startswith(f"nltk {NLTK_VERSION}")
+
+
+def test_a_caption_reaches_every_memory_and_can_be_left_out_only_to_check_an_adapter() -> None:
+    sample = {"sample_id": "conv-1", "qa": [], "conversation": {
+        "speaker_a": "A", "speaker_b": "B", "session_1_date_time": "1:56 pm on 8 May, 2023",
+        "session_1": [{"speaker": "A", "dia_id": "D1:1", "text": "Look.", "blip_caption": "a photo of a dog"}]}}
+    with_captions, _ = load([sample])
+    without, _ = load([sample], captions=False)
+    assert with_captions[0]["sessions"][0]["turns"][0]["content"] == "Look. and shared a photo of a dog."
+    assert without[0]["sessions"][0]["turns"][0]["content"] == "Look."

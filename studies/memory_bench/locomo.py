@@ -62,7 +62,7 @@ class Gold:
     evidence_rounds: tuple
 
 
-def _sessions(conversation: dict, sample_id: str) -> tuple[list[dict], dict[str, str], dict[str, tuple[str, int]]]:
+def _sessions(conversation: dict, sample_id: str, captions: bool = True) -> tuple[list[dict], dict[str, str], dict[str, tuple[str, int]]]:
     numbers = sorted(int(k.split("_")[1]) for k in conversation if re.fullmatch(r"session_\d+", k))
     sessions, session_of, turn_of = [], {}, {}
     for number in numbers:
@@ -71,7 +71,7 @@ def _sessions(conversation: dict, sample_id: str) -> tuple[list[dict], dict[str,
         turns = []
         for index, dialog in enumerate(conversation[f"session_{number}"]):
             caption = dialog.get("blip_caption")
-            text = dialog["text"] + (f" and shared {caption}." if caption else "")
+            text = dialog["text"] + (f" and shared {caption}." if caption and captions else "")
             turns.append({"role": dialog["speaker"], "content": text})
             turn_of[dialog["dia_id"]] = (sid, index)
         sessions.append({"sid": sid, "date": conversation[f"session_{number}_date_time"], "turns": turns,
@@ -91,12 +91,14 @@ def _asked(item: dict, question_id: str) -> tuple[str, dict]:
     return item["question"], {}
 
 
-def load(samples: list[dict]) -> tuple[list[dict], dict[str, Gold]]:
-    """(one view per conversation, the gold for each question by neutral id)."""
+def load(samples: list[dict], *, captions: bool = True) -> tuple[list[dict], dict[str, Gold]]:
+    """(one view per conversation, the gold for each question by neutral id). The benchmark's reader prompt shows an
+    image's caption, so every system ingests it; MemPalace's runner leaves it out, so ``captions=False`` is only for
+    checking an adapter against its committed lists."""
     views, golds = [], {}
     for sample in samples:
         conversation = sample["conversation"]
-        sessions, session_of, turn_of = _sessions(conversation, sample["sample_id"])
+        sessions, session_of, turn_of = _sessions(conversation, sample["sample_id"], captions)
         questions = []
         for index, item in enumerate(sample["qa"]):
             question_id = f"{sample['sample_id']}:{index}"
