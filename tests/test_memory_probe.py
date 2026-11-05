@@ -433,3 +433,67 @@ def test_a_long_turn_is_cut_before_the_header_model_sees_it(tmp_path: Path) -> N
     write_turn_headers([case], lambda p: asked.append(p) or {"text": "{}", "prompt_tokens": 1,
                                                              "completion_tokens": 1}, tmp_path / "h.jsonl", workers=1)
     assert len(asked[0]) < 30_000
+
+
+# ------------------------------------------------------------------ the delivered and flat-file arms
+
+from studies.memory_probe.cases import DELIVERED_HEADER, FLAT_HEADER, flat_file  # noqa: E402
+
+
+def test_the_rules_arm_delivers_the_records_beside_the_summary_and_offers_no_tools(tmp_path: Path) -> None:
+    sent = []
+
+    def chat(messages, tools):
+        sent.append((json.loads(json.dumps(messages)), tools))
+        return _reply("A")
+
+    row = run_case(_case(), "S", chat=chat, arm="a6", condition="i", workdir=tmp_path, max_rounds=4, budget=500,
+                   count=_count, prompt="pi_mono", k=1, delivered=f"- {RULE}")
+    (messages, tools), = sent
+    assert tools is None and messages[2]["content"] == f"S\n\n{DELIVERED_HEADER}\n- {RULE}"
+    assert row["compliant"] is True and row["looked"] is False and row["ledger"]["name"] == "baseline"
+    check([row["ledger"]])
+    with pytest.raises(ValueError, match="delivered"):
+        run_case(_case(), "S", chat=chat, arm="a6", condition="i", workdir=tmp_path, max_rounds=4, budget=500,
+                 count=_count, prompt="pi_mono", k=1)
+
+
+def test_the_strongest_arm_has_the_tools_the_headers_and_the_delivered_records(tmp_path: Path) -> None:
+    sent = []
+
+    def chat(messages, tools):
+        sent.append((messages[2]["content"], tools))
+        return _reply("A")
+
+    headers = {n: CommitHeader(what=f"turn {n}") for n in range(6)}
+    row = run_case(_case(), "S", chat=chat, arm="a7", condition="ii", workdir=tmp_path, max_rounds=4, budget=500,
+                   count=_count, prompt="pi_mono", k=1, delivered=f"- {RULE}", header=lambda n, t: headers[n])
+    content, tools = sent[0]
+    assert content.endswith(f"- {RULE}") and [t["function"]["name"] for t in tools] == [SEARCH, FETCH]
+    assert row["ledger"]["name"] == STUDY_DRIVEN and row["commits"] == 6
+
+
+def test_the_flat_file_arm_is_the_whole_conversation_cut_to_the_budget_from_the_chosen_end() -> None:
+    whole = flat_file(_history(), budget=10_000, keep="newest", count=_count)
+    assert whole.startswith("[user]: Help me plan") and whole.endswith("it seats forty.")
+    newest = flat_file(_history(), budget=12, keep="newest", count=_count)
+    oldest = flat_file(_history(), budget=12, keep="oldest", count=_count)
+    assert _count(newest) <= 12 and _count(oldest) <= 12
+    assert newest.endswith("it seats forty.") and RULE not in newest
+    assert oldest.startswith("[user]: Help me plan")
+    with pytest.raises(ValueError):
+        flat_file(_history(), budget=12, keep="middle", count=_count)
+
+
+def test_the_flat_file_arm_offers_no_tools_and_is_a_baseline(tmp_path: Path) -> None:
+    sent = []
+
+    def chat(messages, tools):
+        sent.append((messages[2]["content"], tools))
+        return _reply("B")
+
+    row = run_case(_case(), "S", chat=chat, arm="a2a", condition="i", workdir=tmp_path, max_rounds=4, budget=12,
+                   count=_count, prompt="pi_mono", k=1, keep="newest")
+    content, tools = sent[0]
+    assert tools is None and content.startswith(f"S\n\n{FLAT_HEADER}\n") and RULE not in content
+    assert row["ledger"]["name"] == "baseline" and row["compliant"] is False
