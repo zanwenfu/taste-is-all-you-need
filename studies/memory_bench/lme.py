@@ -36,6 +36,9 @@ def _split_rounds(turns: list[dict]) -> list[list[dict]]:
 
 
 def rounds(session: dict) -> list[list[dict]]:
+    """LoCoMo's sessions mark each turn as its own round: it is a talk between two people, with no replies to pair."""
+    if session.get("each_turn_is_a_round"):
+        return [[turn] for turn in session["turns"]]
     return _split_rounds(session["turns"])
 
 

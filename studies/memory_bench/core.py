@@ -41,7 +41,8 @@ def chunk_text(item: Item, number: int = 1) -> str:
     return _CHUNK.format(number, item.date, "\n" + json.dumps(list(item.turns)))
 
 
-def deliver(items: Iterable[Item], budget: int, count: Callable[[str], int]) -> Delivered:
+def deliver(items: Iterable[Item], budget: int, count: Callable[[str], int],
+            render: Callable[[Item], str] = chunk_text) -> Delivered:
     """Fill the budget in the system's own rank order, in tokens, and stop at the first item that does
     not fit whole. That item is cut between turns, never inside one, and the cut part cannot claim its
     rounds: what arrived is no longer known round by round."""
@@ -49,14 +50,14 @@ def deliver(items: Iterable[Item], budget: int, count: Callable[[str], int]) -> 
     taken: list[Item] = []
     used = cut = 0
     for position, item in enumerate(offered):
-        cost = count(chunk_text(item))
+        cost = count(render(item))
         if used + cost <= budget:
             taken.append(item)
             used += cost
             continue
         for keep in range(len(item.turns) - 1, 0, -1):
             part = Item(item.session, item.date, item.turns[:keep], (), item.source)
-            cost = count(chunk_text(part))
+            cost = count(render(part))
             if used + cost <= budget:
                 taken.append(part)
                 used += cost

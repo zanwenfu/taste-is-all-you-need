@@ -211,6 +211,8 @@ def test_systems_are_made_by_name(tmp_path: Path) -> None:
         make_system("our memory layer", gold, tmp_path)
     with pytest.raises(ValueError, match="needs stored headers"):
         make_system("taste_git_headers", gold, tmp_path)
+    with pytest.raises(ValueError, match="only for LongMemEval"):
+        make_system("oracle", None, tmp_path)
 
 
 def test_a_run_of_the_real_store_end_to_end_with_a_word_count_tokenizer(tmp_path: Path, capsys) -> None:

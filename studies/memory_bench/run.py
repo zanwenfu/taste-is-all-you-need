@@ -23,21 +23,23 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from studies.memory_bench import lme, locomo
 from studies.memory_bench.headers import served_ask, stored_writer, write_all
-from studies.memory_bench.lme import Gold, load
 from studies.memory_bench.reader import ServedJudge, read_all
-from studies.memory_bench.runner import retrieve_one, validate
+from studies.memory_bench.runner import retrieve_conversation, retrieve_one, validate
 from studies.memory_bench.systems import FlatBm25, FullContext, NoMemory, Oracle, System, TasteGit
 from studies.memory_ledger import code_version
 
 
-def make_system(name: str, gold: Gold, workdir: Path, *, unit: str = "round", commit_per: str = "session",
+def make_system(name: str, gold: lme.Gold | None, workdir: Path, *, unit: str = "round", commit_per: str = "session",
                 headers: Path | None = None) -> System:
     if name == "none":
         return NoMemory()
     if name == "full":
         return FullContext()
     if name == "oracle":
+        if gold is None:
+            raise ValueError("the oracle exists only for LongMemEval")
         return Oracle(gold)
     if name == "flat_bm25":
         return FlatBm25(unit=unit)
@@ -61,12 +63,17 @@ def _counter(tokenizer: str) -> Callable[[str], int]:
     return lambda text: len(loaded(text, add_special_tokens=False)["input_ids"])
 
 
-def _one(job: tuple[dict, Gold, dict[str, Any]]) -> dict[str, Any]:
+def _one(job: tuple[dict, Any, dict[str, Any]]) -> list[dict[str, Any]]:
+    """One LongMemEval question, or one LoCoMo conversation with all of its questions."""
     view, gold, settings = job
-    system = make_system(settings["system"], gold, Path(settings["workdir"]), unit=settings["unit"],
+    single = settings["benchmark"] == "lme"
+    system = make_system(settings["system"], gold if single else None, Path(settings["workdir"]), unit=settings["unit"],
                          commit_per=settings["commit_per"],
                          headers=Path(settings["headers"]) if settings["headers"] else None)
-    return retrieve_one(view, gold, system, budget=settings["budget"], count=_counter(settings["tokenizer"]))
+    count = _counter(settings["tokenizer"])
+    if single:
+        return [retrieve_one(view, gold, system, budget=settings["budget"], count=count)]
+    return retrieve_conversation(view, gold, system, budget=settings["budget"], count=count)
 
 
 def _pool(workers: int) -> Executor:
@@ -79,7 +86,7 @@ def _pool(workers: int) -> Executor:
 def _summary(rows: list[dict[str, Any]], settings: dict[str, Any], ledger: dict[str, Any]) -> dict[str, Any]:
     keys = sorted({key for row in rows for key in row["scores"]})
     return {
-        **{key: settings[key] for key in ("system", "part", "budget", "tokenizer", "unit", "commit_per")},
+        **{key: settings[key] for key in ("benchmark", "system", "part", "budget", "tokenizer", "unit", "commit_per")},
         "questions": len(rows),
         "ledger": ledger,
         "means": {key: fmean(row["scores"][key] for row in rows if key in row["scores"]) for key in keys},
@@ -98,18 +105,22 @@ def retrieve(arguments: argparse.Namespace) -> int:
         if arguments.frozen_config != commit or dirty:
             raise SystemExit("held-out runs once, on committed settings: --frozen-config must name the clean commit in use")
     wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
-    data = [item for item in json.loads(Path(arguments.data).read_text()) if item["question_id"] in wanted]
-    views, golds = load(data)
+    field, loader = ("question_id", lme.load) if arguments.benchmark == "lme" else ("sample_id", locomo.load)
+    views, golds = loader([item for item in json.loads(Path(arguments.data).read_text()) if item[field] in wanted])
     out = Path(arguments.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
     done = {json.loads(line)["qid"] for line in out.read_text().splitlines()} if out.exists() else set()
     settings = {key: getattr(arguments, key) for key in
-                ("system", "part", "budget", "tokenizer", "unit", "commit_per", "workdir", "headers")}
-    jobs = [(view, golds[view["qid"]], settings) for view in views if view["qid"] not in done]
+                ("benchmark", "system", "part", "budget", "tokenizer", "unit", "commit_per", "workdir", "headers")}
+    if arguments.benchmark == "lme":
+        jobs = [(view, golds[view["qid"]], settings) for view in views if view["qid"] not in done]
+    else:
+        # A conversation's records are written together, so one is either all here or to be run again.
+        jobs = [(view, golds, settings) for view in views if view["questions"][0]["qid"] not in done]
     with _pool(arguments.workers) as pool, out.open("a") as written:
         for future in as_completed([pool.submit(_one, job) for job in jobs]):
-            written.write(json.dumps(future.result()) + "\n")
+            written.write("".join(json.dumps(record) + "\n" for record in future.result()))
             written.flush()
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     ledger = validate(rows, expected=set(golds))
@@ -127,7 +138,7 @@ def _client(url: str) -> Any:
 
 def headers(arguments: argparse.Namespace) -> int:
     wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
-    views, _ = load([item for item in json.loads(Path(arguments.data).read_text()) if item["question_id"] in wanted])
+    views, _ = lme.load([item for item in json.loads(Path(arguments.data).read_text()) if item["question_id"] in wanted])
     ask = served_ask(_client(arguments.url), arguments.model, max_tokens=arguments.max_tokens, effort=arguments.effort)
     print(json.dumps(write_all(views, ask, Path(arguments.out), workers=arguments.workers)))
     return 0
@@ -155,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("data", "split", "system", "tokenizer", "workdir", "out"):
         stage.add_argument(f"--{name}", required=True)
     stage.add_argument("--part", required=True, choices=("dev", "held_out"))
+    stage.add_argument("--benchmark", default="lme", choices=("lme", "locomo"))
     stage.add_argument("--budget", required=True, type=int)
     stage.add_argument("--unit", default="round", choices=("round", "session"))
     stage.add_argument("--commit-per", default="session", choices=("round", "session"))
