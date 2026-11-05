@@ -63,8 +63,8 @@ class GitTurns:
         chosen = Pointer.from_text(pointer) if isinstance(pointer, str) else pointer
         return self.turn_at.get(chosen.state)
 
-    def ledger(self) -> dict[str, Any]:
-        return taste_record(self.store, mode="agent_tools")
+    def ledger(self, mode: str = "agent_tools") -> dict[str, Any]:
+        return taste_record(self.store, mode=mode)
 
     def close(self) -> None:
         self.store.close()

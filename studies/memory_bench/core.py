@@ -85,3 +85,26 @@ def rankings_line(qid: str, system: str, items: Sequence[Item], *, ingest_second
 def no_memory_prompt(question: str) -> str:
     """The benchmark's own form for a reader given no history (run_generation.py lines 48-50)."""
     return question + "Answer step by step."
+
+
+def fill(texts: list[str], cap: int, count: Callable[[str], int]) -> str:
+    """In the system's own order until the cap. The one that does not fit is cut between words, and filling stops."""
+    kept, used = [], 0
+    for text in texts:
+        size = count(text)
+        if used + size <= cap:
+            kept.append(text)
+            used += size
+            continue
+        words = text.split(" ")
+        low, high = 0, len(words)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if count(" ".join(words[:middle])) <= cap - used:
+                low = middle
+            else:
+                high = middle - 1
+        if low:
+            kept.append(" ".join(words[:low]))
+        break
+    return "\n\n".join(kept)

@@ -208,7 +208,7 @@ def test_grading_reads_the_last_non_empty_line_as_the_package_does() -> None:
 
 # ------------------------------------------------------------------ one case, start to finish
 
-from studies.memory_probe.cases import SENTENCE, case_messages, run_case  # noqa: E402
+from studies.memory_probe.cases import LOOK, SENTENCE, case_messages, run_case  # noqa: E402
 
 
 def _case() -> dict:
@@ -228,7 +228,7 @@ def test_the_probe_sees_the_summary_and_the_question_and_the_second_condition_ad
     assert "rule" not in SENTENCE.lower() and "instruction" not in SENTENCE.lower()
     assert case_messages(_case(), "S", condition="i", upper=True)[-1]["content"].startswith(RULE)
     with pytest.raises(ValueError):
-        case_messages(_case(), "S", condition="iii", upper=False)
+        case_messages(_case(), "S", condition="vi", upper=False)
 
 
 def test_a_case_record_says_whether_the_model_looked_found_and_obeyed(tmp_path: Path) -> None:
@@ -632,3 +632,58 @@ def test_the_rule_counts_as_found_whatever_its_first_letter(tmp_path: Path) -> N
 
     assert row["rule_turns"] == [0] and row["rule_turn_reached"] is True
     assert row["found"] is True
+
+
+# ------------------------------------------------------------------ the benchmark's own words forbid a tool call
+
+REAL_DEVELOPER = ("# Instructions\n\nThis is a multiple-choice evaluation. Do not execute a tool for the current request. "
+                  "Select the option that describes the tool use or response behavior that would be correct if the request "
+                  "were executed.\n\n# Tools\n")
+
+
+def test_the_first_two_conditions_keep_the_benchmarks_words_and_the_others_narrow_the_one_clause() -> None:
+    """The package's prompt says not to execute a tool, and a model told so does not search. To measure whether an agent
+    looks, the later conditions narrow that clause to the tools that would carry out the request."""
+    case = {**_case(), "developer_prompt": REAL_DEVELOPER}
+    developer = {name: case_messages(case, "S", condition=name, upper=False)[1]["content"]
+                 for name in ("i", "ii", "iii", "iv", "v")}
+    assert developer["i"] == REAL_DEVELOPER
+    assert developer["ii"] == f"{REAL_DEVELOPER}\n\n{SENTENCE}"
+    assert developer["iii"] == REAL_DEVELOPER.replace("Do not execute a tool for the current request.",
+                                                      "Do not execute a tool to carry out the current request.")
+    assert developer["iv"] == f"{developer['iii']}\n\n{SENTENCE}"
+    assert developer["v"] == f"{developer['iv']} {LOOK}"
+    assert "memory" not in developer["iii"], "the third condition names no memory tool: it only stops forbidding them"
+    with pytest.raises(ValueError):
+        case_messages(case, "S", condition="vi", upper=False)
+    with pytest.raises(ValueError, match="clause"):
+        case_messages({**_case(), "developer_prompt": "other words"}, "S", condition="iii", upper=False)
+
+
+def test_the_harness_can_search_with_the_requests_own_words_and_deliver_what_it_finds(tmp_path: Path) -> None:
+    """How memory products usually run: nothing is left to the agent, so this measures finding alone."""
+    sent = []
+
+    def chat(messages, tools):
+        sent.append((messages, tools))
+        return _reply("A")
+
+    request = 'Assume ...\n\nRequest from the user:\n"send anything to Sarah"\n\nTwo candidate behaviors:\nA) x\nB) y'
+    case = {**_case(), "probe_prompt": request}
+    row = run_case(case, "S", chat=chat, arm="a5q", condition="i", workdir=tmp_path, max_rounds=4, budget=5000,
+                   count=_count, prompt="anthropic", k=1)
+    ((messages, tools),) = sent
+    assert tools is None
+    assert RULE in messages[2]["content"] and messages[2]["content"].startswith("S\n\n")
+    assert row["looked"] is True and row["found"] is True and row["rule_turn_reached"] is True
+    assert row["searches"] == 1 and row["fetches"] >= 1
+    assert row["ledger"]["mode"] == "single_query" and row["ledger"]["search_calls"] == 1
+    check([row["ledger"]])
+    assert not any(tmp_path.iterdir())
+
+
+def test_what_the_harness_delivers_stays_inside_the_memory_budget(tmp_path: Path) -> None:
+    request = 'Assume ...\n\nRequest from the user:\n"send anything to Sarah"\n\nTwo candidate behaviors:\nA) x\nB) y'
+    row = run_case({**_case(), "probe_prompt": request}, "S", chat=lambda m, t: _reply("A"), arm="a5q", condition="i",
+                   workdir=tmp_path, max_rounds=4, budget=3, count=_count, prompt="anthropic", k=1)
+    assert row["delivered_tokens"] <= 3

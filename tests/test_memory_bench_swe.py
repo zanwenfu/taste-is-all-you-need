@@ -11,7 +11,8 @@ import pytest
 from studies.memory_bench.adapters.common import QueryFree, run_adapter
 from studies.memory_bench.adapters.mem0_arm import Mem0Arm
 from studies.memory_bench.adapters.mempalace_arms import ProductArm
-from studies.memory_bench.swe import FIXED_DATE, answer_all, fill, read_blocks, views_of
+from studies.memory_bench.core import fill
+from studies.memory_bench.swe import FIXED_DATE, answer_all, read_blocks, views_of
 from studies.memory_bench.systems import FlatBm25, TasteGit
 from studies.memory_ledger import check
 from taste.memstore import CommitHeader

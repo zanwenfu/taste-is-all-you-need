@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from studies.context_rot.lme_clean import neutral
+from studies.memory_bench.core import fill
 from studies.memory_bench.lme import _split_rounds
 
 FIXED_DATE = "2026/01/01 (Thu) 00:00"  # the logs carry no dates, and every system's ingest wants one
@@ -44,29 +45,6 @@ def views_of(cases: list[dict]) -> list[dict]:
         qid = neutral("q", case["id"])
         units.append({"unit": qid, "sessions": sessions, "queries": [{"qid": qid, "query": case["probe"]}]})
     return units
-
-
-def fill(texts: list[str], cap: int, count: Callable[[str], int]) -> str:
-    """In the system's own order until the cap. The one that does not fit is cut between words, and filling stops."""
-    kept, used = [], 0
-    for text in texts:
-        size = count(text)
-        if used + size <= cap:
-            kept.append(text)
-            used += size
-            continue
-        words = text.split(" ")
-        low, high = 0, len(words)
-        while low < high:
-            middle = (low + high + 1) // 2
-            if count(" ".join(words[:middle])) <= cap - used:
-                low = middle
-            else:
-                high = middle - 1
-        if low:
-            kept.append(" ".join(words[:low]))
-        break
-    return "\n\n".join(kept)
 
 
 def read_blocks(rankings: Path, cases: list[dict], *, cap: int, count: Callable[[str], int]) -> dict[str, dict]:
