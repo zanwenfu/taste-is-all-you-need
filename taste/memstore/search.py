@@ -17,6 +17,12 @@ session's root. Identical bytes are one hit at the state that first held them, s
 repeats the world on every state would otherwise fill the list; the same goes for a turn said twice
 in the same words. Binary files and files over ``MAX_DOCUMENT_BYTES`` are left out and counted in
 ``Store.memory_counts``.
+
+Keeping old versions is the point of a version-controlled memory, and it is also a trap: search can
+hand an agent a rule that was changed later. So every hit carries its place in the session's order,
+and a file's hit says whether the newest state still holds those bytes and, if not, where that path
+stands now. An equal score goes to the current version, then to the newest. A better match in an old
+version keeps its rank, because a question about the past must still find the past.
 """
 
 from __future__ import annotations
@@ -159,6 +165,8 @@ class _Document:
     kind: str
     where: str
     line: int  # a turn or verdict's place in its note; 0 for a file or message
+    order: int
+    created_at: str
     blob: str = ""
 
 
@@ -177,7 +185,9 @@ class _Index:
         self.scorer = Bm25()
         self.documents: list[_Document] = []
         self.commits: set[str] = set()
-        self.states: list[tuple[str, str]] = []
+        self.states: list[tuple[str, Meta]] = []
+        self.heads: list[tuple[str, str]] = []
+        self.head_blobs: set[str] = set()
         self.trees: set[str] = set()
         self.blobs: set[str] = set()
         self.turns: set[bytes] = set()
@@ -190,11 +200,11 @@ class _Index:
         self.scorer.add(terms)
         self.documents.append(document)
 
-    def refresh(self, store: Store, heads: list[str]) -> None:
+    def refresh(self, store: Store, heads: list[tuple[str, str]]) -> None:
         mark = (tuple(sorted(heads)), store.backend.ref_sha(NOTES["verdicts"]))
         if mark == self.mark:
             return
-        reachable = store.backend.commits_oldest_first(heads)
+        reachable = store.backend.commits_oldest_first([sha for _, sha in heads])
         if not self.commits.issubset(reachable):
             self._reset()
         for commit in reachable:
@@ -206,23 +216,30 @@ class _Index:
                 continue  # ordinary git history beneath the session's root
             meta = Meta.from_json(raw)
             if meta.session == store.session:
-                self.states.append((commit, meta.branch))
+                self.states.append((commit, meta))
                 self._add_state(store, commit, meta)
         if "verdict" in self.kinds:
             self._add_verdicts(store)
+        if "file" in self.kinds:
+            self.head_blobs = set().union(*(store.backend.blobs_under(sha) for _, sha in heads))
+        self.heads = heads
         self.mark = mark
 
     def _add_state(self, store: Store, commit: str, meta: Meta) -> None:
         if "file" in self.kinds:
-            self._add_files(store, commit, meta.branch)
+            self._add_files(store, commit, meta)
         # The store's own structural commits say nothing anyone wrote.
         if "message" in self.kinds and meta.kind not in ("root", "branch"):
             words = _searched_words("message", store.backend.commit_message(commit))
-            self._add(_Document(commit, meta.branch, "message", "", 0), tokens(words))
+            self._add(self._document(commit, meta, "message", "", 0), tokens(words))
         if "transcript" in self.kinds:
-            self._add_turns(store, commit, meta.branch)
+            self._add_turns(store, commit, meta)
 
-    def _add_files(self, store: Store, commit: str, branch: str) -> None:
+    def _document(self, commit: str, meta: Meta, kind: str, where: str, line: int, blob: str = "") -> _Document:
+        order = next(n for n, (state, _) in enumerate(reversed(self.states)) if state == commit)
+        return _Document(commit, meta.branch, kind, where, line, len(self.states) - order, meta.created_at, blob)
+
+    def _add_files(self, store: Store, commit: str, meta: Meta) -> None:
         for path, blob, size in store.backend.unseen_files(commit, self.trees, self.blobs):
             if size > MAX_DOCUMENT_BYTES:
                 self.too_large.add(blob)
@@ -231,9 +248,9 @@ class _Index:
             if b"\0" in data[:8000]:
                 self.binary.add(blob)
                 continue
-            self._add(_Document(commit, branch, "file", path, 0, blob), tokens(_dec(data)))
+            self._add(self._document(commit, meta, "file", path, 0, blob), tokens(_dec(data)))
 
-    def _add_turns(self, store: Store, commit: str, branch: str) -> None:
+    def _add_turns(self, store: Store, commit: str, meta: Meta) -> None:
         # Every so often a state stores the whole transcript, not the turns it added.
         for number, line in enumerate(_turn_lines(store, commit), 1):
             if not line.strip():
@@ -243,14 +260,14 @@ class _Index:
                 continue
             self.turns.add(key)
             words = "\n".join(_values(json.loads(line)))
-            self._add(_Document(commit, branch, "transcript", NOTES["transcript"], number), tokens(words))
+            self._add(self._document(commit, meta, "transcript", NOTES["transcript"], number), tokens(words))
 
     def _add_verdicts(self, store: Store) -> None:
-        for commit, branch in self.states:
+        for commit, meta in self.states:
             verdicts = store.state(commit).verdicts
             for number in range(self.verdicts.get(commit, 0), len(verdicts)):
                 words = "\n".join(_values(verdicts[number].to_dict()))
-                self._add(_Document(commit, branch, "verdict", NOTES["verdicts"], number + 1), tokens(words))
+                self._add(self._document(commit, meta, "verdict", NOTES["verdicts"], number + 1), tokens(words))
             self.verdicts[commit] = len(verdicts)
 
 
@@ -278,7 +295,16 @@ def _best_line(kind: str, text: str, wanted: set[str]) -> tuple[int, str]:
     return best_number, _clip(best, wanted)
 
 
-def _hit(store: Store, document: _Document, score: float, wanted: set[str]) -> ContentHit:
+def _replaced_by(store: Store, index: _Index, document: _Document) -> str:
+    """A pointer to this path in the newest state that has it, this document's own branch first."""
+    for name, head in sorted(index.heads, key=lambda item: (item[0] != document.branch, item[0])):
+        blob = store.backend.blob_at(head, document.where)
+        if blob is not None:
+            return Pointer(store.session, name, head, "file", document.where, 1, blob).to_text()
+    return ""
+
+
+def _hit(store: Store, index: _Index, document: _Document, score: float, wanted: set[str]) -> ContentHit:
     text = _text(store, document.state, document.kind, document.where, document.line)
     number, snippet = _best_line(document.kind, text, wanted)
     pointer = Pointer(
@@ -290,11 +316,16 @@ def _hit(store: Store, document: _Document, score: float, wanted: set[str]) -> C
         line=document.line or number,
         blob=document.blob,
     )
+    current = document.blob in index.head_blobs if document.kind == "file" else None
     return ContentHit(
         pointer=pointer,
         score=score,
         snippet=snippet,
         header=header_text(store.backend.commit_message(document.state)),
+        order=document.order,
+        created_at=document.created_at,
+        current=current,
+        replaced_by=_replaced_by(store, index, document) if current is False else "",
     )
 
 
@@ -317,15 +348,22 @@ def search_contents(
     with store._content_lock:
         store.memory_counts["search"] += 1
         index = store._content_indexes.setdefault((selected, names), _Index(selected))
-        heads = [store.backend.ref_sha(store.ref_for(name)) for name in (names or store.branches())]
-        index.refresh(store, [head for head in heads if head])
+        heads = [(name, store.backend.ref_sha(store.ref_for(name))) for name in (names or store.branches())]
+        index.refresh(store, [(name, sha) for name, sha in heads if sha])
         indexes = store._content_indexes.values()
         store.memory_counts["documents_too_large"] = len(set().union(*(i.too_large for i in indexes)))
         store.memory_counts["documents_binary"] = len(set().union(*(i.binary for i in indexes)))
         query = tokens(description)
+
+        def replaced(ranked: tuple[int, float]) -> bool:
+            document = index.documents[ranked[0]]
+            return document.kind == "file" and document.blob not in index.head_blobs
+
+        # The sort is stable, and the scorer gives ties to the newest.
+        ordered = sorted(index.scorer.rank(query), key=lambda ranked: (-ranked[1], replaced(ranked)))
         return [
-            _hit(store, index.documents[doc], score, set(query))
-            for doc, score in index.scorer.rank(query, limit)
+            _hit(store, index, index.documents[doc], score, set(query))
+            for doc, score in (ordered if limit is None else ordered[:limit])
         ]
 
 

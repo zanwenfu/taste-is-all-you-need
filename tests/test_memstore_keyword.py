@@ -98,11 +98,12 @@ def test_every_query_word_adds_its_part_and_a_repeated_word_counts_once() -> Non
     assert index.rank(["x", "y", "x"]) == index.rank(["x", "y"])
 
 
-def test_ties_keep_the_order_documents_were_added() -> None:
+def test_ties_go_to_the_document_added_last() -> None:
+    """For a memory, the newest of two equal matches is the natural one to read first."""
     index = Bm25()
     for _ in range(4):
         index.add(["same", "words"])
-    assert [doc for doc, _ in index.rank(["same"])] == [0, 1, 2, 3]
+    assert [doc for doc, _ in index.rank(["same"])] == [3, 2, 1, 0]
 
 
 def test_the_limit_and_no_match() -> None:

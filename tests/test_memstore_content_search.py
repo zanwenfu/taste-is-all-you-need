@@ -224,6 +224,115 @@ def test_ordinary_git_history_under_the_session_is_not_a_state(tmp_path: Path) -
         store.close()
 
 
+# ------------------------------------------------------------------ which version is current
+
+
+def test_a_revised_file_puts_the_current_version_first_on_a_tie_and_marks_the_old_one(store: Store) -> None:
+    a = store.branch("a")
+    a.write("rules.md", "deploy to port 8080 on every release\n")
+    old = a.checkpoint("the first rule")
+    a.write("rules.md", "deploy to port 9090 on every release\n")
+    new = a.checkpoint("the rule changed")
+
+    first, second = store.search_contents("which port do we deploy to on release", kinds=("file",))
+
+    assert first.score == second.score
+    assert (first.pointer.state, first.current, first.replaced_by) == (new.id, True, "")
+    assert (second.pointer.state, second.current) == (old.id, False)
+    assert store.fetch(second.replaced_by).text == "deploy to port 9090 on every release\n"
+    assert first.order > second.order
+
+
+def test_a_file_changed_back_is_current_again(store: Store) -> None:
+    """After A, B, A the bytes of A are in the newest state, so they are current, though they
+    are found at the state that first held them, and the B between is the one replaced."""
+    a = store.branch("a")
+    a.write("rules.md", "deploy to port 8080 on every release\n")
+    first_a = a.checkpoint("A")
+    a.write("rules.md", "deploy to port 9090 on every release\n")
+    b = a.checkpoint("B")
+    a.write("rules.md", "deploy to port 8080 on every release\n")
+    a.checkpoint("A again")
+
+    hits = store.search_contents("deploy port release", kinds=("file",))
+
+    assert [(h.pointer.state, h.current) for h in hits] == [(first_a.id, True), (b.id, False)]
+    assert store.fetch(hits[1].replaced_by).text == "deploy to port 8080 on every release\n"
+
+
+def test_a_withdrawn_rule_is_still_found_and_says_it_was_replaced(store: Store) -> None:
+    a = store.branch("a")
+    a.write("rules.md", "never touch the staging database\nother rule\n")
+    a.write("gone.md", "always ask about the staging database\n")
+    a.checkpoint("two rules")
+    a.write("rules.md", "other rule\n")
+    (a.worktree / "gone.md").unlink()
+    a.checkpoint("withdrew them")
+
+    hits = {h.pointer.where: h for h in store.search_contents("staging database", kinds=("file",))}
+
+    assert hits["rules.md"].current is False
+    assert store.fetch(hits["rules.md"].replaced_by).text == "other rule\n"
+    assert hits["gone.md"].current is False
+    assert hits["gone.md"].replaced_by == ""  # no file holds that path any more
+
+
+def test_a_better_match_in_an_old_version_keeps_its_place_and_its_mark(store: Store) -> None:
+    """The current version wins a tie, not the ranking: a question about history must still find history."""
+    a = store.branch("a")
+    a.write("rules.md", "port port port port port and the staging port\n")
+    a.checkpoint("old")
+    a.write("rules.md", "one port now, among many other words that dilute it a good deal\n")
+    new = a.checkpoint("new")
+
+    first, second = store.search_contents("port", kinds=("file",))
+    assert (first.current, second.current) == (False, True)
+    assert second.pointer.state == new.id
+
+
+def test_the_mark_moves_when_a_later_state_replaces_the_bytes(store: Store) -> None:
+    a = store.branch("a")
+    a.write("rules.md", "the sandpiper rule\n")
+    a.checkpoint("one")
+    assert store.search_contents("sandpiper", kinds=("file",))[0].current is True
+    a.write("rules.md", "something else\n")
+    a.checkpoint("two")
+    assert store.search_contents("sandpiper", kinds=("file",))[0].current is False
+
+
+def test_bytes_another_branch_still_holds_are_current(store: Store) -> None:
+    a, b = store.branch("a"), store.branch("b")
+    a.write("x.md", "the oystercatcher\n")
+    a.checkpoint("a holds it")
+    b.write("x.md", "the oystercatcher\n")
+    b.checkpoint("b holds it too")
+    a.write("x.md", "changed\n")
+    a.checkpoint("a moved on")
+
+    (hit,) = store.search_contents("oystercatcher", kinds=("file",))
+    assert hit.current is True
+    (only_a,) = store.search_contents("oystercatcher", kinds=("file",), branches=["a"])
+    assert only_a.current is False
+
+
+def test_every_hit_says_when_it_was_recorded_and_in_what_order(store: Store) -> None:
+    a = store.branch("a")
+    a.write("x.md", "the kestrel\n")
+    a.turn(role="user", content="the kestrel again")
+    first = a.checkpoint("the kestrel in a message")
+    a.turn(role="user", content="the kestrel once more")
+    second = a.checkpoint("next")
+
+    hits = {(h.pointer.kind, h.pointer.state): h for h in store.search_contents("kestrel", limit=None)}
+
+    assert hits["file", first.id].created_at == first.meta.created_at
+    assert hits["transcript", first.id].order == hits["file", first.id].order
+    assert hits["transcript", second.id].order == hits["transcript", first.id].order + 1
+    # A message or a turn is a record of what happened. Nothing replaces it, so the mark does not apply.
+    for kind, state in (("message", first.id), ("transcript", first.id), ("transcript", second.id)):
+        assert hits[kind, state].current is None and hits[kind, state].replaced_by == ""
+
+
 # ------------------------------------------------------------------ what must never happen
 
 

@@ -262,10 +262,21 @@ class Pointer:
 
 @dataclass(frozen=True)
 class ContentHit:
+    """One match. It points at the state that first held these bytes, and says what became of them.
+
+    After a file goes A, B, A the first A is current and B is not: ``current`` asks whether the newest
+    state of a searched branch still holds the bytes, and nothing else about their past. A message,
+    turn or verdict records what happened and is never replaced, so for those it is ``None``.
+    """
+
     pointer: Pointer
     score: float
     snippet: str  # the best line, cut to a short length; always found in what the pointer fetches
     header: str = ""
+    order: int = 0  # the state's place among this session's states, from 1
+    created_at: str = ""
+    current: bool | None = None
+    replaced_by: str = ""  # a pointer, as text, to this path as it is now; empty if nothing holds the path
 
 
 @dataclass(frozen=True)

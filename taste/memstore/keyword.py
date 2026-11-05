@@ -11,7 +11,8 @@ what they stored and never in how they matched.
   ``logi`` rule, ``bli`` in place of ``abli``, and words of one or two letters left alone. Written
   here rather than imported, so that its behaviour cannot move with a library's version.
 * **Score.** Okapi BM25 with k1 1.5 and b 0.75, the idf ``ln(1 + (N - n + 0.5) / (n + 0.5))``. Each
-  distinct query word counts once. Ties keep the order documents were added.
+  distinct query word counts once. Ties go to the document added last: for a memory, the newest of
+  two equal matches is the natural one to read first.
 """
 
 from __future__ import annotations
@@ -221,5 +222,5 @@ class Bm25:
             for doc, frequency in postings:
                 norm = K1 * (1 - B + B * self._lengths[doc] / average) if average else K1
                 scores[doc] = scores.get(doc, 0.0) + idf * frequency * (K1 + 1) / (frequency + norm)
-        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        ranked = sorted(scores.items(), key=lambda item: (-item[1], -item[0]))
         return ranked if limit is None else ranked[:limit]

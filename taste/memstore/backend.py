@@ -808,6 +808,11 @@ class GitBackend:
         return found
 
     @_serialized_object_read
+    def blobs_under(self, commit: str) -> set[str]:
+        """The blob id of every file in this commit's tree."""
+        return {e.hexsha for e in self._tree_object(commit).traverse() if e.type == "blob"}
+
+    @_serialized_object_read
     def ls_files(self, commit: str) -> list[str]:
         if _is_full_object_id(commit):
             cached = _lru_get(self._ls_files_cache, commit)
