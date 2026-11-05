@@ -500,21 +500,47 @@ def test_the_flat_file_arm_offers_no_tools_and_is_a_baseline(tmp_path: Path) -> 
 
 
 from studies.memory_probe.export import delivered as export_delivered  # noqa: E402
+from studies.memory_probe.run import delivered_blocks  # noqa: E402
 
 
-def test_the_delivered_records_come_from_the_earlier_reading_and_must_agree_across_prompts(tmp_path: Path) -> None:
-    for prompt in ("pi_mono", "anthropic"):
-        folder = tmp_path / prompt / "h00-05"
-        folder.mkdir(parents=True)
-        (folder / "records.json").write_text(json.dumps({"records": {"a": [{"text": RULE}], "b": []}, "reads": []}))
-    rows = {row["id"]: row for row in export_delivered(tmp_path, {"a", "b"})}
-    assert rows["a"]["block"] == f"- {RULE}" and rows["b"]["block"] == "(none)" and rows["a"]["records"] == 1
-    (tmp_path / "anthropic" / "h00-05" / "records.json").write_text(
-        json.dumps({"records": {"a": [{"text": "other"}], "b": []}}))
-    with pytest.raises(ValueError, match="two different readings"):
-        export_delivered(tmp_path, {"a", "b"})
+def _records(root: Path, prompt: str, records: dict, part: str = "h00-05") -> None:
+    folder = root / prompt / part
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "records.json").write_text(json.dumps({"records": records, "reads": []}))
+
+
+def test_each_summary_prompt_keeps_the_rule_records_its_own_run_delivered(tmp_path: Path) -> None:
+    """The reader ran once per prompt's run and the readings differ, so one prompt's can't stand for the other's."""
+    _records(tmp_path, "pi_mono", {"a": [{"text": RULE}], "b": []})
+    _records(tmp_path, "anthropic", {"a": [{"text": "other"}, {"text": RULE}], "b": []})
+
+    rows = {(row["id"], row["prompt"]): row for row in export_delivered(tmp_path, {"a", "b"})}
+
+    assert len(rows) == 4
+    assert rows["a", "pi_mono"]["block"] == f"- {RULE}" and rows["a", "pi_mono"]["records"] == 1
+    assert rows["a", "anthropic"]["block"] == f"- other\n- {RULE}" and rows["a", "anthropic"]["records"] == 2
+    assert rows["b", "pi_mono"]["block"] == "(none)" and rows["b", "anthropic"]["records"] == 0
+
+
+def test_a_case_with_no_rule_records_or_found_twice_in_a_run_is_refused(tmp_path: Path) -> None:
+    _records(tmp_path, "pi_mono", {"a": [{"text": RULE}]})
+    _records(tmp_path, "anthropic", {"b": [{"text": RULE}]})
     with pytest.raises(ValueError, match="no rule records"):
-        export_delivered(tmp_path / "pi_mono", {"a"})
+        export_delivered(tmp_path, {"a"})
+    _records(tmp_path, "anthropic", {"a": [{"text": RULE}]})
+    _records(tmp_path, "anthropic", {"a": [{"text": RULE}]}, part="h05-10")
+    with pytest.raises(ValueError, match="twice"):
+        export_delivered(tmp_path, {"a"})
+
+
+def test_a_run_reads_only_its_own_prompts_rule_records(tmp_path: Path) -> None:
+    path = tmp_path / "delivered.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in [
+        {"id": "a", "prompt": "pi_mono", "records": 1, "block": "- pi"},
+        {"id": "a", "prompt": "anthropic", "records": 1, "block": "- anthropic"},
+    ]))
+    assert delivered_blocks(path, "anthropic") == {"a": "- anthropic"}
+    assert delivered_blocks(path, "pi_mono") == {"a": "- pi"}
 
 
 # ------------------------------------------------------------------ a notes file the model keeps, with and without history

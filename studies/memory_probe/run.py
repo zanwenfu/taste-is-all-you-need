@@ -24,6 +24,12 @@ from studies.memory_probe.cases import run_case
 from studies.memory_probe.tool_loop import http_chat
 
 
+def delivered_blocks(path: Path, prompt: str) -> dict[str, str]:
+    """A summary prompt's own rule records, by case (see ``export.delivered``)."""
+    return {row["id"]: row["block"] for row in map(json.loads, Path(path).read_text().splitlines())
+            if row["prompt"] == prompt}
+
+
 def _rate(rows: list[dict], key: str) -> dict[str, Any]:
     values = [row[key] for row in rows if row[key] is not None]
     return {"n": len(values), "true": sum(map(bool, values)), "pct": 100 * sum(map(bool, values)) / len(values)
@@ -104,7 +110,7 @@ def main(argv=None) -> int:
     tokenizer = Tokenizer.from_file(arguments.tokenizer)
     blocks = None
     if arguments.arm in ("a6", "a7"):
-        blocks = {row["id"]: row["block"] for row in map(json.loads, (inputs / "delivered.jsonl").read_text().splitlines())}
+        blocks = delivered_blocks(inputs / "delivered.jsonl", arguments.prompt)
 
     def count(text: str) -> int:
         return len(tokenizer.encode(text, add_special_tokens=False).ids)

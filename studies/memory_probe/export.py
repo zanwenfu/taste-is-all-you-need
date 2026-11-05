@@ -58,20 +58,23 @@ def summaries(full: Path, repeated: Path, ids: set[str]) -> list[dict]:
 
 
 def delivered(repeated: Path, ids: set[str]) -> list[dict]:
-    """The study reader's rule records for each case, as the earlier record arms delivered them. The reading does
-    not depend on the summary prompt; where both prompts' runs hold one, they must agree."""
-    readings: dict[str, list] = {}
-    for path in sorted(Path(repeated).glob("*/h??-??/records.json")):
-        for case, records in json.loads(path.read_text())["records"].items():
-            if case in ids:
-                if case in readings and readings[case] != records:
-                    raise ValueError(f"{case} has two different readings")
-                readings[case] = records
-    if set(readings) != ids:
-        raise ValueError(f"{len(ids - set(readings))} cases have no rule records")
-    return [{"id": case, "records": len(readings[case]),
-             "block": "\n".join(f"- {record['text']}" for record in readings[case]) or "(none)"}
-            for case in sorted(ids)]
+    """One row per (case, prompt): the study reader's rule records as that prompt's own run delivered them. The reader
+    ran once per run and its readings differ (17 of the 150 Hermes cases), so one prompt's can't stand for the other's."""
+    out = []
+    for prompt in PROMPTS:
+        readings: dict[str, list] = {}
+        for path in sorted(Path(repeated, prompt).glob("h??-??/records.json")):
+            for case, records in json.loads(path.read_text())["records"].items():
+                if case in ids:
+                    if case in readings:
+                        raise ValueError(f"{case} appears twice in the {prompt} run's rule records")
+                    readings[case] = records
+        if set(readings) != ids:
+            raise ValueError(f"{len(ids - set(readings))} cases have no rule records in the {prompt} run")
+        out += [{"id": case, "prompt": prompt, "records": len(readings[case]),
+                 "block": "\n".join(f"- {record['text']}" for record in readings[case]) or "(none)"}
+                for case in sorted(ids)]
+    return out
 
 
 def main(argv=None) -> int:

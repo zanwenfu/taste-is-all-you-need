@@ -24,7 +24,7 @@ def compare(data: list[dict], published: list[dict], rankings: list[dict]) -> di
     ours = {row["qid"]: [i["session"] for i in row["items"]] for row in rankings}
     same_top10 = same_top5_set = compared = 0
     recall = {"published@5": 0, "published@10": 0, "adapter@5": 0, "adapter@10": 0}
-    differing = []
+    differing, differing_lists = [], []
     for row in published:
         question = row["question_id"]
         qid = neutral("q", question)
@@ -42,9 +42,13 @@ def compare(data: list[dict], published: list[dict], rankings: list[dict]) -> di
                 recall[f"{name}@{k}"] += bool(gold & set(ranked[:k]))
         if theirs[:5] != mine[:5]:
             differing.append(question)
+        if theirs[:10] != mine[:10]:
+            first = next(rank for rank, pair in enumerate(zip(theirs, mine, strict=False), 1) if pair[0] != pair[1])
+            differing_lists.append({"question": question, "first_rank": first,
+                                    "published": theirs[:10], "adapter": mine[:10]})
     return {"compared": compared, "same_top10": same_top10, "same_top5_set": same_top5_set,
             "recall_any": {key: value / compared for key, value in recall.items()} if compared else {},
-            "differing_top5": differing[:50]}
+            "differing_top5": differing[:50], "differing_top10": differing_lists[:50]}
 
 
 def main(argv: list[str] | None = None) -> int:

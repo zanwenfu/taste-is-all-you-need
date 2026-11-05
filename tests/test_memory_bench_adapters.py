@@ -283,6 +283,8 @@ def test_the_check_maps_published_ids_to_neutral_ones_and_counts_agreement() -> 
     assert result["compared"] == 2 and result["same_top10"] == 1 and result["same_top5_set"] == 2
     assert result["recall_any"] == {"published@5": 1.0, "published@10": 1.0, "adapter@5": 1.0, "adapter@10": 1.0}
     assert result["differing_top5"] == ["q2"]
+    q2 = [neutral("s", f"q2/{c}") for c in ("a", "b")]
+    assert result["differing_top10"] == [{"question": "q2", "first_rank": 1, "published": q2, "adapter": q2[::-1]}]
 
 
 def test_shards_split_the_units_between_processes(tmp_path: Path) -> None:
