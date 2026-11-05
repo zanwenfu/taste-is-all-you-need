@@ -497,3 +497,21 @@ def test_the_flat_file_arm_offers_no_tools_and_is_a_baseline(tmp_path: Path) -> 
     content, tools = sent[0]
     assert tools is None and content.startswith(f"S\n\n{FLAT_HEADER}\n") and RULE not in content
     assert row["ledger"]["name"] == "baseline" and row["compliant"] is False
+
+
+from studies.memory_probe.export import delivered as export_delivered  # noqa: E402
+
+
+def test_the_delivered_records_come_from_the_earlier_reading_and_must_agree_across_prompts(tmp_path: Path) -> None:
+    for prompt in ("pi_mono", "anthropic"):
+        folder = tmp_path / prompt / "h00-05"
+        folder.mkdir(parents=True)
+        (folder / "records.json").write_text(json.dumps({"records": {"a": [{"text": RULE}], "b": []}, "reads": []}))
+    rows = {row["id"]: row for row in export_delivered(tmp_path, {"a", "b"})}
+    assert rows["a"]["block"] == f"- {RULE}" and rows["b"]["block"] == "(none)" and rows["a"]["records"] == 1
+    (tmp_path / "anthropic" / "h00-05" / "records.json").write_text(
+        json.dumps({"records": {"a": [{"text": "other"}], "b": []}}))
+    with pytest.raises(ValueError, match="two different readings"):
+        export_delivered(tmp_path, {"a", "b"})
+    with pytest.raises(ValueError, match="no rule records"):
+        export_delivered(tmp_path / "pi_mono", {"a"})

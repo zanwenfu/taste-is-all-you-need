@@ -57,6 +57,23 @@ def summaries(full: Path, repeated: Path, ids: set[str]) -> list[dict]:
     return out
 
 
+def delivered(repeated: Path, ids: set[str]) -> list[dict]:
+    """The study reader's rule records for each case, as the earlier record arms delivered them. The reading does
+    not depend on the summary prompt; where both prompts' runs hold one, they must agree."""
+    readings: dict[str, list] = {}
+    for path in sorted(Path(repeated).glob("*/h??-??/records.json")):
+        for case, records in json.loads(path.read_text())["records"].items():
+            if case in ids:
+                if case in readings and readings[case] != records:
+                    raise ValueError(f"{case} has two different readings")
+                readings[case] = records
+    if set(readings) != ids:
+        raise ValueError(f"{len(ids - set(readings))} cases have no rule records")
+    return [{"id": case, "records": len(readings[case]),
+             "block": "\n".join(f"- {record['text']}" for record in readings[case]) or "(none)"}
+            for case in sorted(ids)]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--full", required=True)
@@ -78,6 +95,8 @@ def main(argv=None) -> int:
     (out / "cases.jsonl").write_text("".join(json.dumps(case) + "\n" for case in cases))
     rows = summaries(Path(arguments.full), Path(arguments.repeated), {case["id"] for case in cases})
     (out / "summaries.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    blocks = delivered(Path(arguments.repeated), {case["id"] for case in cases})
+    (out / "delivered.jsonl").write_text("".join(json.dumps(row) + "\n" for row in blocks))
     print(json.dumps({"cases": len(cases), "summaries": len(rows), "revision": DATA_REVISION}))
     return 0
 

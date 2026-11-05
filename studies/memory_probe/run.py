@@ -47,14 +47,15 @@ def summarize(rows: list[dict]) -> dict[str, Any]:
 
 
 def run_all(cases: list[dict], summaries: dict[str, str], *, chat: Callable, out: Path, workers: int,
-            **settings: Any) -> dict[str, Any]:
+            delivered: dict[str, str] | None = None, **settings: Any) -> dict[str, Any]:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     done = {json.loads(line)["id"] for line in out.read_text().splitlines()} if out.exists() else set()
     lock = threading.Lock()
 
     def one(case: dict) -> None:
-        row = run_case(case, summaries[case["id"]], chat=chat, **settings)
+        extra = {"delivered": delivered[case["id"]]} if delivered is not None else {}
+        row = run_case(case, summaries[case["id"]], chat=chat, **extra, **settings)
         row["final_names_a_tool"] = any(name in row["final"] for name in ("memory_search", "memory_fetch"))
         with lock, out.open("a") as written:
             written.write(json.dumps(row) + "\n")
@@ -75,7 +76,8 @@ def main(argv=None) -> int:
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--prompt", required=True, choices=("pi_mono", "anthropic"))
     parser.add_argument("--k", required=True, type=int, choices=(1, 16))
-    parser.add_argument("--arm", required=True, choices=("a5", "a4"))
+    parser.add_argument("--arm", required=True, choices=("a5", "a4", "a6", "a7", "a2a"))
+    parser.add_argument("--keep", default="newest", choices=("newest", "oldest"), help="a2a: which end is kept")
     parser.add_argument("--condition", required=True, choices=("i", "ii"))
     parser.add_argument("--limit", type=int, help="the first N cases in file order, for a smoke run")
     parser.add_argument("--max-rounds", type=int, default=6)
@@ -96,13 +98,17 @@ def main(argv=None) -> int:
     summaries = {row["id"]: row["summary"] for row in map(json.loads, (inputs / "summaries.jsonl").read_text().splitlines())
                  if row["prompt"] == arguments.prompt and row["k"] == arguments.k}
     tokenizer = Tokenizer.from_file(arguments.tokenizer)
+    blocks = None
+    if arguments.arm in ("a6", "a7"):
+        blocks = {row["id"]: row["block"] for row in map(json.loads, (inputs / "delivered.jsonl").read_text().splitlines())}
 
     def count(text: str) -> int:
         return len(tokenizer.encode(text, add_special_tokens=False).ids)
 
     chat = http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
-    summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers,
+    summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers, delivered=blocks,
+                      keep=arguments.keep,
                       arm=arguments.arm, condition=arguments.condition, workdir=Path(arguments.workdir),
                       max_rounds=arguments.max_rounds, budget=arguments.budget, count=count,
                       prompt=arguments.prompt, k=arguments.k, upper=arguments.upper,
