@@ -69,10 +69,11 @@ def _counter(tokenizer: str) -> Callable[[str], int]:
     """The one tokenizer that counts every budget. "words" is for tests and dry runs only."""
     if tokenizer == "words":
         return lambda text: len(text.split())
-    from transformers import AutoTokenizer
+    from tokenizers import Tokenizer
 
-    loaded = AutoTokenizer.from_pretrained(tokenizer)
-    return lambda text: len(loaded(text, add_special_tokens=False)["input_ids"])
+    path = Path(tokenizer)
+    loaded = Tokenizer.from_file(str(path / "tokenizer.json" if path.is_dir() else path))
+    return lambda text: len(loaded.encode(text, add_special_tokens=False).ids)
 
 
 def _one(job: tuple[dict, Any, dict[str, Any]]) -> list[dict[str, Any]]:

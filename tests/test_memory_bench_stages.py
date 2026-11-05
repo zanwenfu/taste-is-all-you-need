@@ -251,3 +251,14 @@ def test_the_held_out_part_refuses_to_run_without_saying_so(tmp_path: Path) -> N
     with pytest.raises(SystemExit, match="held-out"):
         run_main(arguments)
     assert run_main([*arguments, "--frozen-config", "abc123"]) == 0
+
+
+def test_the_budget_counts_with_the_readers_own_tokenizer_file(tmp_path: Path) -> None:
+    tokenizers = pytest.importorskip("tokenizers")
+    from studies.memory_bench.run import _counter
+
+    word_level = tokenizers.Tokenizer(tokenizers.models.WordLevel({"[UNK]": 0, "a": 1}, unk_token="[UNK]"))
+    word_level.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+    word_level.save(str(tmp_path / "tokenizer.json"))
+    assert _counter(str(tmp_path))("a b c") == 3
+    assert _counter(str(tmp_path / "tokenizer.json"))("a b") == 2
