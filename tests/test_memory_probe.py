@@ -272,3 +272,62 @@ def test_the_header_arm_needs_its_headers_and_uses_them(tmp_path: Path) -> None:
                    max_rounds=4, budget=5000, count=_count, prompt="pi_mono", k=1,
                    header=lambda number, turn: headers[number])
     assert row["arm"] == "a4" and row["compliant"] is True
+
+
+# ------------------------------------------------------------------ inputs and whole runs
+
+from studies.memory_probe.export import summaries as export_summaries  # noqa: E402
+from studies.memory_probe.run import run_all  # noqa: E402
+
+
+def _baseline(folder: Path, prompt: str, ids: list[str], *, twice: bool = False) -> None:
+    part = folder / "full" / f"hermes-{prompt}" / "h00-05"
+    part.mkdir(parents=True)
+    rows = [{"id": i, "compacted": [{"role": "assistant", "content": f"summary of {i}"}], "compaction_compliant": True,
+             "upper_bound_compliant": True, "full_without_sc_compliant": False} for i in ids]
+    (part / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows + (rows[:1] if twice else [])))
+    (folder / "full" / f"hermes-{prompt}" / "h00-05-user_record").mkdir()
+    deep = folder / "repeated" / prompt / "h00-05"
+    deep.mkdir(parents=True)
+    deep_rows = [{"id": i, "k": k, "summaries": [f"round {n} of {i}" for n in range(k)],
+                  "compaction_compliant": False, "compaction_upper_compliant": True} for i in ids for k in (2, 16)]
+    (deep / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in deep_rows))
+
+
+def test_the_summaries_come_from_the_baseline_runs_at_both_depths(tmp_path: Path) -> None:
+    for prompt in ("pi_mono", "anthropic"):
+        _baseline(tmp_path, prompt, ["a", "b"])
+    rows = export_summaries(tmp_path / "full", tmp_path / "repeated", {"a", "b"})
+    assert len(rows) == 8
+    one = next(r for r in rows if r["id"] == "a" and r["prompt"] == "anthropic" and r["k"] == 1)
+    deep = next(r for r in rows if r["id"] == "a" and r["prompt"] == "anthropic" and r["k"] == 16)
+    assert one["summary"] == "summary of a" and one["a1_compliant"] is True and one["floor_compliant"] is False
+    assert deep["summary"] == "round 15 of a" and deep["a1_compliant"] is False
+
+
+def test_a_case_missing_or_doubled_in_a_baseline_run_is_refused(tmp_path: Path) -> None:
+    for prompt in ("pi_mono", "anthropic"):
+        _baseline(tmp_path, prompt, ["a"])
+    with pytest.raises(ValueError, match="missing"):
+        export_summaries(tmp_path / "full", tmp_path / "repeated", {"a", "b"})
+    doubled = tmp_path / "doubled"
+    for prompt in ("pi_mono", "anthropic"):
+        _baseline(doubled, prompt, ["a"], twice=True)
+    with pytest.raises(ValueError, match="twice"):
+        export_summaries(doubled / "full", doubled / "repeated", {"a"})
+
+
+def test_a_whole_run_resumes_and_counts_the_steps(tmp_path: Path) -> None:
+    cases = [{**_case(), "id": f"h00:sc0{n}"} for n in range(3)]
+    summaries = {case["id"]: "S" for case in cases}
+    out = tmp_path / "run" / "results.jsonl"
+    settings = dict(arm="a5", condition="i", workdir=tmp_path / "w", max_rounds=2, budget=500, count=_count,
+                    prompt="anthropic", k=1)
+    (tmp_path / "w").mkdir()
+    summary = run_all(cases[:2], summaries, chat=lambda m, t: _reply("A"), out=out, workers=2, **settings)
+    assert summary["cases"] == 2
+    summary = run_all(cases, summaries, chat=lambda m, t: _reply("B"), out=out, workers=2, **settings)
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert len(rows) == 3 and summary["compliant"]["true"] == 2
+    assert summary["looked"]["true"] == 0 and summary["ledger"]["looks"]["looked"] == 0
+    assert json.loads((out.parent / "results.summary.json").read_text())["cases"] == 3
