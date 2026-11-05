@@ -15,13 +15,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 MAX_TURN_CHARS = 24_000
-PROMPT = (
+_PROMPT = (
     "You keep the notes file of an assistant that is helping a user. Its conversation history will later be "
     "summarized and most of it removed, and the notes file is kept. Rewrite the whole notes file so that it keeps "
-    "anything from the conversation the assistant may need later, including anything the user asked it to keep "
-    "doing. Reply with the new notes file only.\n\nThe notes file now:\n{notes}\n\nThe newest part of the "
-    "conversation:\n{part}"
+    "anything from the conversation the assistant may need later{told}. Reply with the new notes file only.\n\n"
+    "The notes file now:\n{notes}\n\nThe newest part of the conversation:\n{part}"
 )
+# The one clause under test: whether the note-taker is told that what the user asked for matters.
+STYLES = {"told": ", including anything the user asked it to keep doing", "neutral": ""}
 
 
 def chunks(messages: list[dict]) -> list[list[dict]]:
@@ -34,13 +35,15 @@ def chunks(messages: list[dict]) -> list[list[dict]]:
     return out
 
 
-def take_notes(messages: list[dict], ask: Callable[[str], dict]) -> list[str]:
+def take_notes(messages: list[dict], ask: Callable[[str], dict], *, style: str = "told") -> list[str]:
     """Every version, in order. A reply cut off by the output cap stops the case: a notes file cut at the cap would lose
     its end silently, and the notes arms would look worse for no real reason."""
+    if style not in STYLES:
+        raise ValueError(f"unknown style {style!r}")
     notes, versions = "", []
     for part in chunks(messages):
         text = "\n".join(f"[{turn['role']}]: {str(turn['content'])[:MAX_TURN_CHARS]}" for turn in part)
-        reply = ask(PROMPT.format(notes=notes or "(no notes yet)", part=text))
+        reply = ask(_PROMPT.format(told=STYLES[style], notes=notes or "(no notes yet)", part=text))
         if reply["finish_reason"] == "length":
             raise ValueError("a notes version was cut off by the output cap")
         notes = reply["text"]
@@ -48,7 +51,7 @@ def take_notes(messages: list[dict], ask: Callable[[str], dict]) -> list[str]:
     return versions
 
 
-def write_notes(cases: list[dict], ask: Callable[[str], dict], path: Path, *, workers: int) -> dict[str, int]:
+def write_notes(cases: list[dict], ask: Callable[[str], dict], path: Path, *, workers: int, style: str = "told") -> dict[str, int]:
     """Every case's versions, written as each case finishes; a case that failed is asked again next time."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +61,7 @@ def write_notes(cases: list[dict], ask: Callable[[str], dict], path: Path, *, wo
 
     def one(case: dict) -> None:
         try:
-            versions = take_notes(case["messages"], ask)
+            versions = take_notes(case["messages"], ask, style=style)
         except Exception:
             with lock:
                 failed[0] += 1
@@ -81,12 +84,13 @@ def main(argv=None) -> int:
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--max-tokens", type=int, default=8192)
+    parser.add_argument("--style", default="told", choices=tuple(STYLES))
     parser.add_argument("--workers", type=int, default=16)
     arguments = parser.parse_args(argv)
     cases = [json.loads(line) for line in (Path(arguments.inputs) / "cases.jsonl").read_text().splitlines()]
     cases = cases[: arguments.limit] if arguments.limit else cases
     ask = served_ask(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
-    counts = write_notes(cases, ask, Path(arguments.out), workers=arguments.workers)
+    counts = write_notes(cases, ask, Path(arguments.out), workers=arguments.workers, style=arguments.style)
     print(json.dumps(counts))
     return 0 if counts["failed"] == 0 else 1
 

@@ -896,3 +896,21 @@ def test_the_package_s_judge_reads_what_was_delivered_and_a_run_resumes(tmp_path
             for line in (tmp_path / "found.served.jsonl").read_text().splitlines()}
     assert rows == {"a": True, "b": False}
     assert judge_found(results, rules, verdict, workers=2)["asked"] == 0
+
+
+def test_the_note_taker_can_be_told_to_keep_instructions_or_only_what_may_be_needed() -> None:
+    """On the first 50 cases a notes file told to keep what the user asked for held its rule, and did far better than any
+    search over the turns. How much of that is the one clause has to be measured, not assumed."""
+    asked: list[str] = []
+
+    def ask(prompt: str) -> dict:
+        asked.append(prompt)
+        return {"text": "n", "finish_reason": "stop"}
+
+    take_notes([{"role": "user", "content": "first"}], ask)
+    take_notes([{"role": "user", "content": "first"}], ask, style="neutral")
+    assert "anything the user asked it to keep doing" in asked[0]
+    assert "anything the user asked it to keep doing" not in asked[1]
+    assert "may need later" in asked[1] and "first" in asked[1]
+    with pytest.raises(ValueError):
+        take_notes([{"role": "user", "content": "first"}], ask, style="other")
