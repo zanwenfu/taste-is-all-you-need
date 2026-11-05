@@ -30,7 +30,7 @@ from typing import Any
 
 from taste.memstore.backend import _dec, _is_full_object_id
 from taste.memstore.keyword import WORD, Bm25, stem, tokens
-from taste.memstore.objects import BadPointer, Meta, ObjectType
+from taste.memstore.objects import BadPointer, Meta, ObjectType, header_text
 from taste.memstore.store import NOTES, ContentHit, Fetched, Hit, Pointer, Store
 
 KINDS = ("file", "message", "transcript", "verdict")
@@ -38,6 +38,8 @@ MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 _SNIPPET_CHARS = 240
 _SNIPPET_BEFORE = 60
 _TRAILER = re.compile(r"Taste-[A-Za-z-]+: ")
+# What a header says about the content. Every header holds the others, so they would match every commit.
+_HEADER_SEARCHED = ("what", "keywords", "paths")
 
 
 def _tokens(text: str) -> list[str]:
@@ -125,9 +127,26 @@ def _text(store: Store, state: str, kind: str, where: str, line: int) -> str:
 
 
 def _searched_lines(kind: str, text: str) -> list[str]:
-    """Every commit message carries the same trailers, and matching them would rank every commit."""
+    """Which lines of a document count. A commit message's trailers and most of its header do not:
+    every message carries them, and matching them would rank every commit."""
     lines = text.split("\n")
-    return [line for line in lines if not _TRAILER.match(line)] if kind == "message" else lines
+    if kind != "message":
+        return lines
+    header = set(header_text(text).split("\n"))
+    return [
+        line
+        for line in lines
+        if not _TRAILER.match(line)
+        and (line not in header or line.partition(": ")[0] in _HEADER_SEARCHED)
+    ]
+
+
+def _searched_words(kind: str, text: str) -> str:
+    """The words a document is indexed by: a header line's value, without its label."""
+    header = set(header_text(text).split("\n")) if kind == "message" else set()
+    return "\n".join(
+        line.partition(": ")[2] if line in header else line for line in _searched_lines(kind, text)
+    )
 
 
 # ------------------------------------------------------------------ the index
@@ -198,7 +217,7 @@ class _Index:
             self._add_files(store, commit, meta.branch)
         # The store's own structural commits say nothing anyone wrote.
         if "message" in self.kinds and meta.kind not in ("root", "branch"):
-            words = "\n".join(_searched_lines("message", store.backend.commit_message(commit)))
+            words = _searched_words("message", store.backend.commit_message(commit))
             self._add(_Document(commit, meta.branch, "message", "", 0), tokens(words))
         if "transcript" in self.kinds:
             self._add_turns(store, commit, meta.branch)
@@ -271,7 +290,12 @@ def _hit(store: Store, document: _Document, score: float, wanted: set[str]) -> C
         line=document.line or number,
         blob=document.blob,
     )
-    return ContentHit(pointer=pointer, score=score, snippet=snippet)
+    return ContentHit(
+        pointer=pointer,
+        score=score,
+        snippet=snippet,
+        header=header_text(store.backend.commit_message(document.state)),
+    )
 
 
 def search_contents(

@@ -46,6 +46,7 @@ from taste.memstore.objects import (
     BadName,
     BadPointer,
     BranchBusy,
+    CommitHeader,
     Conflict,
     ForeignHead,
     Manifest,
@@ -63,6 +64,7 @@ from taste.memstore.objects import (
     Verdict,
     WorktreeUnavailable,
     conflict_digest,
+    header_text,
     now_iso,
 )
 from taste.memstore.sidecars import TURN_SUFFIX, Sidecars, _fsync_directory, _mkdir_durable
@@ -403,6 +405,11 @@ class State:
     @property
     def branch(self) -> str:
         return self.meta.branch
+
+    @property
+    def header(self) -> str:
+        """This state's YAML header as written in its commit message, or "" if it has none."""
+        return header_text(self._store.backend.commit_message(self.id))
 
     def read(self, path: str) -> str | None:
         """Demand-page one artifact from this state."""
@@ -984,12 +991,14 @@ class Branch:
         records: dict[str, Any] | None = None,
         verdict: Verdict | None = None,
         attempt: int = 0,
+        header: CommitHeader | None = None,
     ) -> State:
         """Commit the working tree, the brain's context, and the reason, atomically.
 
         ``records`` writes JSON files into the working tree before staging.
         A transcript of ``None`` carries the previous state's forward plus any
-        turns appended with :meth:`turn`.
+        turns appended with :meth:`turn`. ``header`` adds a YAML header to the
+        commit message; without one the message does not change by a byte.
         """
         # Held across build and publish so a gc() in another process cannot
         # land between the commit and the ref move: prune takes this same
@@ -1005,6 +1014,7 @@ class Branch:
                 records=records,
                 verdict=verdict,
                 attempt=attempt,
+                header=header,
             )
             return self.publish_state(built)
 
@@ -1031,6 +1041,7 @@ class Branch:
         verdict: Verdict | None = None,
         attempt: int = 0,
         kind: StateKind = "checkpoint",
+        header: CommitHeader | None = None,
     ) -> Built:
         """Create the objects for a state without publishing it.
 
@@ -1045,6 +1056,9 @@ class Branch:
         self.backend.stage_all()
         tree = self.backend.write_tree()
         manifest = head.manifest
+        written = "" if header is None else header.render(
+            kind=kind, branch=self.name, paths=[path for _, path in self.backend.diff_names(head.id, tree)]
+        )
         return self._build(
             tree=tree,
             parents=[head.id],
@@ -1056,6 +1070,7 @@ class Branch:
             verdict=verdict,
             attempt=attempt,
             expected_head=head.id,
+            header=written,
         )
 
     @_serialized_branch_mutation
@@ -1387,6 +1402,7 @@ class Branch:
         rolled_back_from: str | None = None,
         merged: str | None = None,
         conflicts: list[Conflict] | None = None,
+        header: str = "",
     ) -> Built:
         """Create commit and notes. Nothing is visible until the ref moves."""
         now = now_iso()
@@ -1463,8 +1479,10 @@ class Branch:
         # The message carries session and timestamp so no two states can ever
         # share a commit id: git derives the id from tree, parents, message and
         # a one-second timestamp, and two sessions once minted the same id.
+        written = f"{header}\n\n" if header else ""
         message = (
             f"{reason}\n\n"
+            f"{written}"
             f"Taste-State: {kind}\n"
             f"Taste-Branch: {self.name}\n"
             f"Taste-Session: {self.store.session}\n"

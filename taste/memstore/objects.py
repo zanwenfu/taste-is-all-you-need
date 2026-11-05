@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -289,6 +289,75 @@ class Transcript:
 
     def __add__(self, other: Transcript) -> Transcript:
         return Transcript(self.turns + other.turns)
+
+
+# ------------------------------------------------------------------ commit header
+
+
+_HEADER_MARK = f'header: "{SCHEMA}"'
+_MAX_WHAT = 400
+_MAX_LISTED_KEYWORDS = 32
+_MAX_LISTED_PATHS = 32
+_MAX_LISTED_POINTERS = 16
+_MAX_ITEM_CHARS = 128
+
+
+def _header_value(text: str, limit: int) -> str:
+    """One line of printable text: what cannot sit in a one-line YAML string becomes a space."""
+    return "".join(character if character.isprintable() else " " for character in text)[:limit]
+
+
+def _header_items(values: Iterable[str], count: int) -> list[str]:
+    return [_header_value(value, _MAX_ITEM_CHARS) for value in list(values)[:count]]
+
+
+def _quoted(value: str | list[str]) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class CommitHeader:
+    """What a caller knows about a state that its commit cannot work out for itself.
+
+    ``render`` adds what the commit does know and writes flat YAML by hand: a fixed set of keys, one
+    per line, every value a double-quoted string or a one-line list of them. PyYAML is not a core
+    dependency and this layer stays light. There is no ``---`` fence, because git stops looking for
+    trailers at a line of three hyphens. Everything is cut to stay small: a header travels on a
+    command line, is fixed once written, and full-text search over the contents is the backstop.
+    """
+
+    what: str = ""
+    keywords: tuple[str, ...] = ()
+    pointers: tuple[str, ...] = ()
+
+    def render(self, *, kind: str, branch: str, paths: list[str]) -> str:
+        lines = (
+            ("what", _header_value(self.what, _MAX_WHAT)),
+            ("kind", kind),
+            ("branch", branch),
+            ("paths", _header_items(paths, _MAX_LISTED_PATHS)),
+            ("paths_total", str(len(paths))),
+            ("keywords", _header_items(self.keywords, _MAX_LISTED_KEYWORDS)),
+            ("pointers", _header_items(self.pointers, _MAX_LISTED_POINTERS)),
+        )
+        return "\n".join([_HEADER_MARK, *(f"{key}: {_quoted(value)}" for key, value in lines)])
+
+
+def header_text(message: str) -> str:
+    """The header paragraph of a commit message, or "" if it has none."""
+    for paragraph in message.split("\n\n"):
+        if paragraph == _HEADER_MARK or paragraph.startswith(_HEADER_MARK + "\n"):
+            return paragraph
+    return ""
+
+
+def header_fields(text: str) -> dict[str, Any]:
+    """The values of a header paragraph."""
+    fields: dict[str, Any] = {}
+    for line in text.split("\n") if text else ():
+        key, _, value = line.partition(": ")
+        fields[key] = json.loads(value)
+    return fields
 
 
 # ------------------------------------------------------------------ meta
