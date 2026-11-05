@@ -179,6 +179,7 @@ def main(argv=None) -> int:
     parser.add_argument("--workers", type=int, default=15)
     parser.add_argument("--no-criteria", dest="criteria", action="store_false",
                         help="skip the summary plus criterion records (read once per distinct user message)")
+    parser.add_argument("--records-only", action="store_true", help="read the rule records and stop, with no round run")
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
 
@@ -224,6 +225,9 @@ def main(argv=None) -> int:
         (out / "records.json").write_text(json.dumps({"records": records, "reads": log}, indent=1))
         blocks_by_case = {case: {"criteria": (records_block(found), HEADERS["criteria"])}
                           for case, found in records.items()}
+        if arguments.records_only:
+            print(json.dumps({"prompt": arguments.prompt, "cases": len(instances), "records_read": len(log)}))
+            return 0
     done, lock = done_keys(out), threading.Lock()
     sizes_by_text: dict[str, int] = {}
 

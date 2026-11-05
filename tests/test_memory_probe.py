@@ -1044,3 +1044,12 @@ def test_export_keeps_which_message_each_rule_record_came_from(tmp_path: Path) -
     path = tmp_path / "delivered.jsonl"
     path.write_text(json.dumps(rows[0]) + "\n")
     assert delivered_items(path, "anthropic") == {"a": [{"message": 3, "text": RULE}]}
+
+
+def test_a_small_run_can_be_exported_with_no_deeper_depth_at_all(tmp_path: Path) -> None:
+    _baseline(tmp_path, "anthropic", ["a"])
+    rows = export_summaries(tmp_path / "full", tmp_path / "repeated", {"a"}, deep=0, prompts=("anthropic",))
+    assert [(row["prompt"], row["k"]) for row in rows] == [("anthropic", 1)]
+    empty = tmp_path / "empty"
+    (empty / "anthropic").mkdir(parents=True)
+    assert len(export_summaries(tmp_path / "full", empty, {"a"}, deep=0, prompts=("anthropic",))) == 1
