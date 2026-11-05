@@ -34,6 +34,7 @@ The same model, histories and memory budget in every arm, counted with one token
 | Arm | Store | How the agent gets it |
 |---|---|---|
 | Compaction | none | the summary |
+| Compaction, told | none | the summary, from the same prompt with one sentence added: keep anything the user asked the assistant to keep doing |
 | Flat, delivered | the whole conversation as a flat file | read whole, cut to the budget |
 | Notes, last version | a notes file one model keeps as the conversation goes | search and fetch over its last version |
 | Notes, every version | the same writes, every version kept in git | search and fetch across all its versions |
@@ -50,15 +51,22 @@ belongs to search, not to git. With an append-only record, revised rules tie too
 file position as well as on commit order. Headers could sit in a flat file, so they test structure, not git. Version
 control can separate only where content is overwritten in place, which is what the two notes arms test.
 
+The note-taker rewrites the whole file after each round. Whether it is also told to keep what the user asked it to keep
+doing is a setting, since that clause may matter more than the store. Both are run, and the same sentence is run on the
+summary prompts, so that the store and the instruction can be read apart. Whole-text matching cannot see a rule put in the
+note-taker's own words, so what each notes arm delivers is read by the benchmark's retention judge, the one the study
+calibrated at one compaction.
+
 The delivered rules come from the study's reader (`studies/context_rot/criteria.py`), so that arm is a baseline, and
 each summary prompt's run keeps the records it delivered, since the reader's readings differ between runs in 17 of the
 150 cases.
 
 ## Prompt conditions
 
-The benchmark's developer prompt says "Do not execute a tool for the current request". A model told so does not search:
-in the first 100 probes it searched in none, with or without being told a record exists. Whether an agent looks is the
-point of the study, so each tool arm is reported under these conditions, apart.
+The benchmark's developer prompt says "Do not execute a tool for the current request", and its user prompt asks for one
+letter. A model asked this way does not search: in the first 250 probes, across conditions i to v, it searched in none. So
+"looks" cannot be measured in the benchmark's own format. Whether an agent looks is the point of the study, so it is
+measured on the same histories given as plain requests, and in the long run.
 
 | Condition | Developer prompt |
 |---|---|
@@ -68,9 +76,14 @@ point of the study, so each tool arm is reported under these conditions, apart.
 | iv | iii and the sentence |
 | v | iv and one sentence telling the agent to check that record before it answers |
 
-Nothing in any condition mentions rules or instructions. Condition v is a design an operator could choose, and it
-shows what the later steps give when the agent does look. Which of these the full matrix runs is chosen from the
-small run and frozen before it.
+| vi | a plain request: the summary and the bare request, no options, the memory tools and the benchmark's 13 simulated tools offered as real tools |
+| vii | vi and the sentence |
+| viii | vii and the sentence telling the agent to check that record |
+
+Nothing in any condition mentions rules or instructions. Conditions v and viii are designs an operator could choose. Under
+vi to viii no option is given, so these report "looks" and whether the agent acted, not "uses". Since the agent does not
+look under i to v, "finds" and "uses" come from the harness searching once with the request's own words, as memory products
+usually do. Which of these the full matrix runs is chosen from the small run and frozen before it.
 
 ## Situations
 
