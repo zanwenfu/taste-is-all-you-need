@@ -24,6 +24,11 @@ from studies.memory_probe.cases import _NEEDS_NOTES, _NEEDS_RECORDS, ARMS, run_c
 from studies.memory_probe.tool_loop import http_chat
 
 
+def history_id(case_id: str) -> str:
+    """A cued case has the published case's history word for word, so it shares that case's summaries, records and notes."""
+    return case_id.removesuffix(":cued")
+
+
 def delivered_blocks(path: Path, prompt: str) -> dict[str, str]:
     """A summary prompt's own rule records, by case (see ``export.delivered``)."""
     return {row["id"]: row["block"] for row in map(json.loads, Path(path).read_text().splitlines())
@@ -62,10 +67,11 @@ def run_all(cases: list[dict], summaries: dict[str, str], *, chat: Callable, out
     lock = threading.Lock()
 
     def one(case: dict) -> None:
-        extra = {"delivered": delivered[case["id"]]} if delivered is not None else {}
+        source = history_id(case["id"])
+        extra = {"delivered": delivered[source]} if delivered is not None else {}
         if notes is not None:
-            extra["notes"] = notes[case["id"]]
-        row = run_case(case, summaries[case["id"]], chat=chat, **extra, **settings)
+            extra["notes"] = notes[source]
+        row = run_case(case, summaries[source], chat=chat, **extra, **settings)
         row["final_names_a_tool"] = any(name in row["final"] for name in ("memory_search", "memory_fetch"))
         with lock, out.open("a") as written:
             written.write(json.dumps(row) + "\n")

@@ -914,3 +914,86 @@ def test_the_note_taker_can_be_told_to_keep_instructions_or_only_what_may_be_nee
     assert "may need later" in asked[1] and "first" in asked[1]
     with pytest.raises(ValueError):
         take_notes([{"role": "user", "content": "first"}], ask, style="other")
+
+
+from studies.memory_probe.told_summary import CLAUSE, told_prompt, write_summaries  # noqa: E402
+
+
+def test_the_summary_told_to_keep_what_was_asked_differs_from_the_packages_by_one_sentence() -> None:
+    prompt = [{"role": "user", "content": "the transcript"}, {"role": "user", "content": "Write a summary."}]
+    told = told_prompt(prompt)
+    assert told[0] == prompt[0]
+    assert told[1]["content"] == f"Write a summary.\n\n{CLAUSE}"
+    assert prompt[1]["content"] == "Write a summary."
+
+
+def test_the_told_summaries_have_the_shape_the_runner_reads_and_a_cut_one_stops_the_run(tmp_path: Path) -> None:
+    cases = [{"id": f"c{n}", "messages": [{"role": "user", "content": f"turn {n}"}]} for n in range(3)]
+    asked: list[list[dict]] = []
+
+    def package(option: str, messages: list[dict]) -> list[dict]:
+        return [*messages, {"role": "user", "content": f"Summarize, {option}."}]
+
+    def ask(messages: list[dict]) -> tuple[str, str]:
+        asked.append(messages)
+        return f"summary of {messages[0]['content']}", "stop"
+
+    out = tmp_path / "told"
+    counts = write_summaries(cases[:2], "anthropic", ask, out, workers=2, package_prompt=package)
+    assert counts == {"cases": 2, "written": 2}
+    rows = {row["id"]: row for row in map(json.loads, (out / "summaries.jsonl").read_text().splitlines())}
+    assert rows["c0"] == {"id": "c0", "prompt": "anthropic", "k": 1, "summary": "summary of turn 0"}
+    assert all(CLAUSE in messages[-1]["content"] for messages in asked)
+    assert [json.loads(line)["id"] for line in (out / "cases.jsonl").read_text().splitlines()] == ["c0", "c1"]
+
+    asked.clear()
+    assert write_summaries(cases[:2], "anthropic", ask, out, workers=2, package_prompt=package)["written"] == 0
+    assert not asked, "a stopped run picks up where it was"
+    with pytest.raises(ValueError, match="cut"):
+        write_summaries(cases, "anthropic", lambda messages: ("half a sum", "length"), out, workers=2, package_prompt=package)
+    assert "c2" not in (out / "summaries.jsonl").read_text()
+
+
+def test_a_cued_case_is_read_with_the_summary_records_and_notes_of_the_published_case_it_comes_from(tmp_path: Path) -> None:
+    case = {"id": "h:1:cued", "haystack_id": "h", "sc_id": 1, "sc_type": "Action", "sc_text": "Keep the rule.",
+            "compliant_letter": "A", "system_prompt": "s", "developer_prompt": "d",
+            "probe_prompt": 'Request from the user:\n"Do it. Keep in mind what I told you earlier about the rule."\n\nTwo candidate replies. Output one letter only.',
+            "post_sc_probe_prompt": "restated", "messages": [{"role": "user", "content": "first"}]}
+    seen: list[list[dict]] = []
+
+    def chat(messages: list[dict], tools: list | None) -> SimpleNamespace:
+        seen.append(messages)
+        return _reply("A")
+
+    summary = run_all([case], {"h:1": "THE PUBLISHED SUMMARY"}, chat=chat, out=tmp_path / "results.jsonl", workers=1,
+                      delivered={"h:1": "- the rule"}, arm="a6", condition="i", workdir=tmp_path, max_rounds=1,
+                      budget=100, count=len, prompt="anthropic", k=1, upper=False, header=None)
+    assert summary["cases"] == 1
+    sent = json.dumps(seen[0])
+    assert "THE PUBLISHED SUMMARY" in sent and "the rule" in sent
+
+
+def test_a_small_run_of_moved_cases_can_be_exported_with_one_prompt_and_a_shallower_depth(tmp_path: Path) -> None:
+    _baseline(tmp_path, "anthropic", ["a"])
+    rows = export_summaries(tmp_path / "full", tmp_path / "repeated", {"a"}, deep=2, prompts=("anthropic",))
+    assert [(row["prompt"], row["k"]) for row in rows] == [("anthropic", 1), ("anthropic", 2)]
+    assert rows[1]["summary"] == "round 1 of a"
+
+
+def test_the_flat_file_cut_is_the_longest_that_fits_and_does_not_count_a_long_turn_word_by_word() -> None:
+    """A single turn can hold tens of thousands of words: counting after each dropped word held the first real run still
+    for seven minutes, with the model idle."""
+    calls = [0]
+
+    def count(text: str) -> int:
+        calls[0] += 1
+        return len(text.split())
+
+    words = [f"w{n}" for n in range(50_000)]
+    messages = [{"role": "user", "content": "first"}, {"role": "assistant", "content": " ".join(words)}]
+    newest = flat_file(messages, budget=100, keep="newest", count=count)
+    assert newest.split() == words[-100:]
+    assert calls[0] < 40
+    oldest = flat_file(messages, budget=100, keep="oldest", count=count)
+    assert oldest.split()[:3] == ["[user]:", "first", "[assistant]:"] and len(oldest.split()) == 100
+    assert flat_file(messages, budget=0, keep="newest", count=count) == ""

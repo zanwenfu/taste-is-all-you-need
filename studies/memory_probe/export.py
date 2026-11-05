@@ -25,10 +25,10 @@ def _rows(paths) -> list[dict]:
     return [json.loads(line) for path in paths for line in Path(path).read_text().splitlines() if line.strip()]
 
 
-def summaries(full: Path, repeated: Path, ids: set[str]) -> list[dict]:
-    """One row per (case, prompt, k) for k = 1 and 16, refusing a case that is missing or found twice."""
+def summaries(full: Path, repeated: Path, ids: set[str], *, deep: int = 16, prompts: tuple[str, ...] = PROMPTS) -> list[dict]:
+    """One row per (case, prompt, k) for k = 1 and ``deep``, refusing a case that is missing or found twice."""
     out = []
-    for prompt in PROMPTS:
+    for prompt in prompts:
         base = {}
         for row in _rows(sorted(Path(full, f"hermes-{prompt}").glob("h??-??/results.jsonl"))):
             if row["id"] in ids:
@@ -37,31 +37,31 @@ def summaries(full: Path, repeated: Path, ids: set[str]) -> list[dict]:
                 base[row["id"]] = row
         long = {}
         for row in _rows(sorted(Path(repeated, prompt).rglob("results.jsonl"))):
-            if row["id"] in ids and row["k"] == 16:
+            if row["id"] in ids and row["k"] == deep:
                 if row["id"] in long:
-                    raise ValueError(f"{row['id']} appears twice at k = 16 in the {prompt} repeated run")
+                    raise ValueError(f"{row['id']} appears twice at k = {deep} in the {prompt} repeated run")
                 long[row["id"]] = row
-        for label, found in (("full", base), ("repeated k = 16", long)):
+        for label, found in (("full", base), (f"repeated k = {deep}", long)):
             if set(found) != ids:
                 raise ValueError(f"{len(ids - set(found))} cases missing from the {prompt} {label} run")
         for case in sorted(ids):
-            row, deep = base[case], long[case]
+            row, last = base[case], long[case]
             floor = row["full_without_sc_compliant"]
             out.append({"id": case, "prompt": prompt, "k": 1,
                         "summary": "\n\n".join(m["content"] for m in row["compacted"]),
                         "a1_compliant": row["compaction_compliant"], "a1_upper_compliant": row["upper_bound_compliant"],
                         "floor_compliant": floor})
-            out.append({"id": case, "prompt": prompt, "k": 16, "summary": deep["summaries"][-1],
-                        "a1_compliant": deep["compaction_compliant"],
-                        "a1_upper_compliant": deep["compaction_upper_compliant"], "floor_compliant": floor})
+            out.append({"id": case, "prompt": prompt, "k": deep, "summary": last["summaries"][-1],
+                        "a1_compliant": last["compaction_compliant"],
+                        "a1_upper_compliant": last["compaction_upper_compliant"], "floor_compliant": floor})
     return out
 
 
-def delivered(repeated: Path, ids: set[str]) -> list[dict]:
+def delivered(repeated: Path, ids: set[str], *, prompts: tuple[str, ...] = PROMPTS) -> list[dict]:
     """One row per (case, prompt): the study reader's rule records as that prompt's own run delivered them. The reader
     ran once per run and its readings differ (17 of the 150 Hermes cases), so one prompt's can't stand for the other's."""
     out = []
-    for prompt in PROMPTS:
+    for prompt in prompts:
         readings: dict[str, list] = {}
         for path in sorted(Path(repeated, prompt).glob("h??-??/records.json")):
             for case, records in json.loads(path.read_text())["records"].items():
@@ -85,6 +85,8 @@ def main(argv=None) -> int:
     parser.add_argument("--source", default="hermes")
     parser.add_argument("--variant", help="middle, bottom, revised, withdrawn or cued (studies.memory_probe.variants)")
     parser.add_argument("--cases-only", action="store_true", help="write the cases and stop; no baseline run is read")
+    parser.add_argument("--deep", type=int, default=16, help="the deeper depth the repeated run holds")
+    parser.add_argument("--prompts", default=",".join(PROMPTS), help="the summary prompts the baseline runs cover")
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
 
@@ -102,9 +104,11 @@ def main(argv=None) -> int:
     if arguments.cases_only:
         print(json.dumps({"cases": len(cases), "variant": arguments.variant, "revision": DATA_REVISION}))
         return 0
-    rows = summaries(Path(arguments.full), Path(arguments.repeated), {case["id"] for case in cases})
+    prompts = tuple(arguments.prompts.split(","))
+    rows = summaries(Path(arguments.full), Path(arguments.repeated), {case["id"] for case in cases}, deep=arguments.deep,
+                     prompts=prompts)
     (out / "summaries.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
-    blocks = delivered(Path(arguments.repeated), {case["id"] for case in cases})
+    blocks = delivered(Path(arguments.repeated), {case["id"] for case in cases}, prompts=prompts)
     (out / "delivered.jsonl").write_text("".join(json.dumps(row) + "\n" for row in blocks))
     print(json.dumps({"cases": len(cases), "summaries": len(rows), "revision": DATA_REVISION}))
     return 0

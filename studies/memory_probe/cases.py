@@ -107,7 +107,7 @@ FLAT_HEADER = "The conversation so far, from a notes file:"
 
 def flat_file(messages: list[dict], *, budget: int, keep: str, count: Callable[[str], int]) -> str:
     """Every turn as "[role]: content", one per line, cut to ``budget`` tokens from the stated end. The turn at the
-    cut is shortened from its far side, a word at a time, as the earlier record arms' recent text was."""
+    cut is shortened from its far side, at a word boundary, as the earlier record arms' recent text was."""
     if keep not in ("newest", "oldest"):
         raise ValueError(f"keep must be newest or oldest, not {keep!r}")
     lines = [f"[{turn['role']}]: {turn['content']}" for turn in messages]
@@ -120,10 +120,16 @@ def flat_file(messages: list[dict], *, budget: int, keep: str, count: Callable[[
             used += size
             continue
         words = line.split()
-        while words and count(" ".join(words)) > budget - used:
-            words = words[1:] if keep == "newest" else words[:-1]
-        if words:
-            kept.append(" ".join(words))
+        low, high = 0, len(words)  # how many words fit: found by halves, since one turn can hold tens of thousands
+        while low < high:
+            middle = (low + high + 1) // 2
+            piece = words[-middle:] if keep == "newest" else words[:middle]
+            if count(" ".join(piece)) <= budget - used:
+                low = middle
+            else:
+                high = middle - 1
+        if low:
+            kept.append(" ".join(words[-low:] if keep == "newest" else words[:low]))
         break
     return "\n".join(reversed(kept) if keep == "newest" else kept)
 
