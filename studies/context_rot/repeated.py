@@ -172,6 +172,7 @@ def main(argv=None) -> int:
     parser.add_argument("--ks", default="2,4,8,16", help="numbers of compaction rounds, comma-separated")
     parser.add_argument("--histories", default="0:10", help="START:END, histories in file order, end excluded")
     parser.add_argument("--source", default="hermes")
+    parser.add_argument("--variant", help="middle, bottom, revised, withdrawn or cued (studies.memory_probe.variants)")
     parser.add_argument("--probe-url", required=True)
     parser.add_argument("--probe-model", default="openai/gpt-oss-120b")
     parser.add_argument("--tokenizer", required=True)
@@ -195,6 +196,10 @@ def main(argv=None) -> int:
 
     start, end = (int(part) for part in arguments.histories.split(":"))
     instances = history_range(load_static(arguments.source, revision=DATA_REVISION), start, end)
+    if arguments.variant:
+        from studies.memory_probe.variants import apply
+
+        instances = apply(instances, arguments.variant)
     ks = [int(k) for k in arguments.ks.split(",")]
     endpoint = Endpoint(arguments.probe_model, arguments.probe_url, "EMPTY",
                         {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP})

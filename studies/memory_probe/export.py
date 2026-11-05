@@ -83,19 +83,25 @@ def main(argv=None) -> int:
     parser.add_argument("--repeated", required=True)
     parser.add_argument("--histories", default="0:10")
     parser.add_argument("--source", default="hermes")
+    parser.add_argument("--variant", help="middle, bottom, revised, withdrawn or cued (studies.memory_probe.variants)")
+    parser.add_argument("--cases-only", action="store_true", help="write the cases and stop; no baseline run is read")
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
 
     from conpact import load_static
 
     from studies.context_rot.conpact_bridge import DATA_REVISION, history_range
+    from studies.memory_probe.variants import apply
 
     start, end = (int(part) for part in arguments.histories.split(":"))
-    instances = history_range(load_static(arguments.source, revision=DATA_REVISION), start, end)
+    instances = apply(history_range(load_static(arguments.source, revision=DATA_REVISION), start, end), arguments.variant)
     out = Path(arguments.out)
     out.mkdir(parents=True, exist_ok=True)
     cases = [{key: getattr(inst, key) for key in CASE_FIELDS} for inst in instances]
     (out / "cases.jsonl").write_text("".join(json.dumps(case) + "\n" for case in cases))
+    if arguments.cases_only:
+        print(json.dumps({"cases": len(cases), "variant": arguments.variant, "revision": DATA_REVISION}))
+        return 0
     rows = summaries(Path(arguments.full), Path(arguments.repeated), {case["id"] for case in cases})
     (out / "summaries.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
     blocks = delivered(Path(arguments.repeated), {case["id"] for case in cases})

@@ -443,6 +443,10 @@ def run(arguments) -> dict:
         instances = history_range(instances, start, end)
     elif arguments.contexts:
         instances = first_contexts(instances, arguments.contexts)
+    if arguments.variant:
+        from studies.memory_probe.variants import apply
+
+        instances = apply(instances, arguments.variant)
     if arguments.tokenizer:
         from conpact.prompts import summarization_prompt
         from transformers import AutoTokenizer
@@ -503,6 +507,7 @@ def main(argv=None) -> int:
     parser.add_argument("--histories", help="START:END, histories in file order, end excluded (overrides --contexts)")
     parser.add_argument("--build-length", type=int, help="build instances of this many tokens from the long haystacks")
     parser.add_argument("--no-cue", action="store_true", help="with --build-length: rules without the session cue")
+    parser.add_argument("--variant", help="middle, bottom, revised, withdrawn or cued (studies.memory_probe.variants)")
     parser.add_argument("--drop-cue", action="store_true",
                         help="the published cases with the rule's session cue removed (paired with the published run)")
     parser.add_argument("--reuse-without-only", action="store_true",
