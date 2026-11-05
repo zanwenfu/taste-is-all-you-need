@@ -71,6 +71,35 @@ class GitTurns:
         shutil.rmtree(self.folder, ignore_errors=True)
 
 
+class NotesStore:
+    """A notes file in Taste's memory: every version committed in turn (history), or only the last one."""
+
+    PATH = "notes.md"
+
+    def __init__(self, workdir: Path, versions: list[str], *, history: bool) -> None:
+        self.folder = Path(tempfile.mkdtemp(prefix="notes-", dir=workdir))
+        self.store = Store.open(self.folder / "repo", "memory-probe")
+        self.branch = self.store.branch("notes", producer="memory-probe")
+        self.commits = 0
+        for text in versions if history else versions[-1:]:
+            self.branch.write(self.PATH, text)
+            self.branch.checkpoint("notes updated")
+            self.commits += 1
+
+    def answer(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        return memory_tools.answer(self.store, name, arguments, kinds=("file",))
+
+    def turn_of(self, pointer: str | Pointer) -> int | None:
+        return None
+
+    def ledger(self) -> dict[str, Any]:
+        return taste_record(self.store, mode="agent_tools")
+
+    def close(self) -> None:
+        self.store.close()
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+
 class FlatTurns:
     """The same turns in a plain list: the words search reads of a turn are its content and its role."""
 

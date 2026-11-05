@@ -515,3 +515,69 @@ def test_the_delivered_records_come_from_the_earlier_reading_and_must_agree_acro
         export_delivered(tmp_path, {"a", "b"})
     with pytest.raises(ValueError, match="no rule records"):
         export_delivered(tmp_path / "pi_mono", {"a"})
+
+
+# ------------------------------------------------------------------ a notes file the model keeps, with and without history
+
+from studies.memory_probe.notes import chunks, take_notes, write_notes  # noqa: E402
+from studies.memory_probe.stores import NotesStore  # noqa: E402
+
+
+def test_the_conversation_is_read_in_rounds_and_each_round_rewrites_the_notes() -> None:
+    assert [len(c) for c in chunks(_history())] == [2, 2, 2]
+    asked: list[str] = []
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        return f"notes after {len(asked)}"
+
+    versions = take_notes(_history(), ask)
+    assert versions == ["notes after 1", "notes after 2", "notes after 3"]
+    assert RULE in asked[0] and "(no notes yet)" in asked[0]
+    assert "notes after 1" in asked[1] and RULE not in asked[1]
+
+
+def test_notes_are_written_once_per_case_and_resume(tmp_path: Path) -> None:
+    calls = []
+    cases = [{**_case(), "id": "a"}, {**_case(), "id": "b"}]
+    path = tmp_path / "notes.jsonl"
+    counts = write_notes(cases, lambda prompt: calls.append(prompt) or "n", path, workers=2)
+    assert counts == {"cases": 2, "written": 2, "failed": 0} and len(calls) == 6
+    assert write_notes(cases, lambda prompt: "x", path, workers=2)["written"] == 0
+
+
+def _versions() -> list[str]:
+    return [f"Offsite planning. {RULE}", "Offsite: coast, second week of June.",
+            "Offsite: Harbor House booked for the kickoff dinner."]
+
+
+def test_without_history_only_the_current_notes_can_be_found(tmp_path: Path) -> None:
+    store = NotesStore(tmp_path, _versions(), history=False)
+    try:
+        assert store.commits == 1
+        assert json.loads(store.answer(SEARCH, {"description": "draft go-ahead"})[0])["results"] == []
+    finally:
+        store.close()
+
+
+def test_with_history_an_overwritten_rule_is_found_and_marked_replaced(tmp_path: Path) -> None:
+    store = NotesStore(tmp_path, _versions(), history=True)
+    try:
+        assert store.commits == 3
+        (hit,) = json.loads(store.answer(SEARCH, {"description": "draft go-ahead"})[0])["results"]
+        assert hit["current"] is False and hit["kind"] == "file"
+        assert RULE in json.loads(store.answer(FETCH, {"pointer": hit["pointer"]})[0])["text"]
+        now = json.loads(store.answer(FETCH, {"pointer": hit["replaced_by"]})[0])["text"]
+        assert now == _versions()[-1]
+    finally:
+        store.close()
+
+
+def test_the_two_notes_arms_differ_only_in_history(tmp_path: Path) -> None:
+    for arm, commits in (("a2c", 1), ("a2d", 3)):
+        row = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm=arm, condition="ii", workdir=tmp_path,
+                       max_rounds=4, budget=500, count=_count, prompt="pi_mono", k=1, notes=_versions())
+        assert row["commits"] == commits and row["ledger"]["name"] == STUDY_DRIVEN
+    with pytest.raises(ValueError, match="notes"):
+        run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a2d", condition="ii", workdir=tmp_path,
+                 max_rounds=4, budget=500, count=_count, prompt="pi_mono", k=1)

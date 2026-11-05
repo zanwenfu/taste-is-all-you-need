@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from studies.memory_ledger import BASELINE, stand_in_record
-from studies.memory_probe.stores import GitTurns
+from studies.memory_probe.stores import GitTurns, NotesStore
 from studies.memory_probe.tool_loop import ToolRun, ask_with_tools, found_in, grade
 from taste.memstore import BadPointer, CommitHeader
 from taste.memstore.tools import FETCH, SEARCH, definitions
@@ -26,8 +26,10 @@ ARMS = {
     "a6": "rule records written by the study's reader, delivered with the summary at every call; no tools",
     "a7": "a4 and a6 together",
     "a2a": "the whole conversation as a flat file, cut to the memory budget from a stated end, delivered; no tools",
+    "a2c": "a notes file one model kept as the conversation went, its last version only, searched with the tools",
+    "a2d": "the same notes file with every version kept in git, searched with the tools",
 }
-TOOL_ARMS = ("a5", "a4", "a7")
+TOOL_ARMS = ("a5", "a4", "a7", "a2c", "a2d")
 # The same words the earlier record arms used, so a6 is the same delivery measured in this harness.
 DELIVERED_HEADER = "Standing instructions the user gave in this session, verbatim, from the record:"
 FLAT_HEADER = "The conversation so far, from a notes file:"
@@ -101,13 +103,15 @@ def _without_tools(chat: Callable, messages: list[dict]) -> ToolRun:
 def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: str, workdir: Path, max_rounds: int,
              budget: int, count: Callable[[str], int], prompt: str, k: int,
              header: Callable[[int, dict], CommitHeader] | None = None, upper: bool = False,
-             delivered: str | None = None, keep: str = "newest") -> dict[str, Any]:
+             delivered: str | None = None, keep: str = "newest", notes: list[str] | None = None) -> dict[str, Any]:
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
     if arm in ("a4", "a7") and header is None:
         raise ValueError(f"arm {arm} needs its headers")
     if arm in ("a6", "a7") and delivered is None:
         raise ValueError(f"arm {arm} needs its delivered records")
+    if arm in ("a2c", "a2d") and not notes:
+        raise ValueError(f"arm {arm} needs the notes versions")
     block, block_header = None, ""
     if arm in ("a6", "a7"):
         block, block_header = delivered, DELIVERED_HEADER
@@ -118,9 +122,13 @@ def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: s
     reached: list[int] = []
     commits = 0
     if arm in TOOL_ARMS:
-        store = GitTurns(Path(workdir), header=header if arm in ("a4", "a7") else None)
+        if arm in ("a2c", "a2d"):
+            store = NotesStore(Path(workdir), notes or [], history=arm == "a2d")
+        else:
+            store = GitTurns(Path(workdir), header=header if arm in ("a4", "a7") else None)
         try:
-            store.ingest(case["messages"])
+            if isinstance(store, GitTurns):
+                store.ingest(case["messages"])
             ingested = time.perf_counter()
             run = ask_with_tools(chat, messages, definitions("chat"), store.answer, max_rounds=max_rounds,
                                  budget=budget, count=count)
