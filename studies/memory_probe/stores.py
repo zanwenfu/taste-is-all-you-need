@@ -68,6 +68,7 @@ class GitTurns:
             line = max(position for position, text in enumerate(lines, 1) if text.strip())
             fields = header_fields(self.store.state(state).header)
             rows.append({"turn": number, "what": fields.get("what", ""), "keywords": fields.get("keywords", []),
+                         "instructions": fields.get("instructions", []),
                          "pointer": Pointer("memory-probe", "conversation", state, "transcript", NOTES["transcript"],
                                             line).to_text()})
         return rows

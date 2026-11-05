@@ -71,7 +71,7 @@ def delivered(repeated: Path, ids: set[str], *, prompts: tuple[str, ...] = PROMP
                     readings[case] = records
         if set(readings) != ids:
             raise ValueError(f"{len(ids - set(readings))} cases have no rule records in the {prompt} run")
-        out += [{"id": case, "prompt": prompt, "records": len(readings[case]),
+        out += [{"id": case, "prompt": prompt, "records": len(readings[case]), "items": readings[case],
                  "block": "\n".join(f"- {record['text']}" for record in readings[case]) or "(none)"}
                 for case in sorted(ids)]
     return out

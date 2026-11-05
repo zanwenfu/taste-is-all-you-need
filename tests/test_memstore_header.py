@@ -179,3 +179,19 @@ def test_a_hit_on_a_state_with_no_header_says_so(store: Store) -> None:
     a.checkpoint("work")
     (hit,) = store.search_contents("shrike")
     assert hit.header == ""
+
+
+def test_a_header_can_hold_what_the_user_said_to_keep_doing_and_gives_it_back_whole(store: Store) -> None:
+    rule = "For the rest of this session. never include my name in your replies or in any tool call, " * 3
+    branch = store.branch("work", producer="test")
+    branch.turn(role="user", content=rule)
+    state = branch.checkpoint("one turn", header=CommitHeader(what="a turn", instructions=(rule, "Answer in metric units.")))
+    fields = header_fields(store.state(state.id).header)
+    assert fields["instructions"] == [rule, "Answer in metric units."]
+    assert len(rule) > 128, "longer than a keyword may be: a rule cut short is a different rule"
+
+
+def test_a_header_with_no_instructions_is_the_header_it_always_was() -> None:
+    plain = CommitHeader(what="a turn", keywords=("one",)).render(kind="note", branch="b", paths=[])
+    assert "instructions" not in plain
+    assert plain == CommitHeader(what="a turn", keywords=("one",), instructions=()).render(kind="note", branch="b", paths=[])

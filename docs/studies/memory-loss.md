@@ -41,6 +41,7 @@ The same model, histories and memory budget in every arm, counted with one token
 | Taste memory | each turn a commit in `taste.memstore` | search and fetch tools |
 | Taste memory, headers | the same, with a model-written header per commit | search and fetch tools |
 | Delivered rules | rule records from a named reader | put in front of the agent at every call |
+| Delivered rules, in the headers | the same records, each in the header of the commit of its turn in `taste.memstore` | read back from the store and put in front of the agent at every call |
 | Both | the header arm and the delivered rules | both |
 | Searched for it | the Taste store, with and without headers, and both notes files | the harness searches once with the request's own words and delivers what it finds |
 | Header index | the Taste store, with a model-written header per commit | what each header says, listed in the prompt and cut to the budget; fetch offered, no search |

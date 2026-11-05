@@ -997,3 +997,50 @@ def test_the_flat_file_cut_is_the_longest_that_fits_and_does_not_count_a_long_tu
     oldest = flat_file(messages, budget=100, keep="oldest", count=count)
     assert oldest.split()[:3] == ["[user]:", "first", "[assistant]:"] and len(oldest.split()) == 100
     assert flat_file(messages, budget=0, keep="newest", count=count) == ""
+
+
+def test_the_rule_records_can_live_in_the_headers_of_the_commits_they_came_from(tmp_path: Path) -> None:
+    """Delivery through the real store: each record goes in the header of its own turn's commit, and what reaches the model
+    is read back from the store, so the ledger names Taste's memory and no store means no rule."""
+    case = _case()
+    seen: list[list[dict]] = []
+
+    def chat(messages: list[dict], tools: list | None) -> SimpleNamespace:
+        seen.append(messages)
+        assert tools is None
+        return _reply("A")
+
+    items = [{"message": 0, "text": "Keep the first rule."}, {"message": len(case["messages"]) - 1, "text": "Keep the last rule."}]
+    row = run_case(case, "SUMMARY", chat=chat, arm="a6h", condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                   prompt="anthropic", k=1, items=items)
+    sent = json.dumps(seen[0])
+    assert "SUMMARY" in sent and "Keep the first rule." in sent and "Keep the last rule." in sent
+    assert sent.index("Keep the first rule.") < sent.index("Keep the last rule.")
+    assert row["looked"] is False and row["searches"] == 0 and row["compliant"] is True
+    assert row["commits"] == len(case["messages"]) and row["delivered_text"] == "- Keep the first rule.\n- Keep the last rule."
+    assert check([row["ledger"]])["names"] == {STUDY_DRIVEN: 1}
+    with pytest.raises(ValueError, match="records"):
+        run_case(case, "S", chat=chat, arm="a6h", condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                 prompt="anthropic", k=1)
+
+
+def test_records_past_the_budget_are_cut_from_the_oldest_and_none_says_so(tmp_path: Path) -> None:
+    case = _case()
+    items = [{"message": 0, "text": "aaa " * 30}, {"message": 1, "text": "bbb " * 3}]
+    row = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a6h", condition="i", workdir=tmp_path, max_rounds=1, budget=10,
+                   count=_count, prompt="anthropic", k=1, items=items)
+    assert "bbb" in row["delivered_text"] and "aaa" not in row["delivered_text"]
+    empty = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a6h", condition="i", workdir=tmp_path, max_rounds=1, budget=10,
+                     count=_count, prompt="anthropic", k=1, items=[])
+    assert empty["delivered_text"] == "(none)"
+
+
+def test_export_keeps_which_message_each_rule_record_came_from(tmp_path: Path) -> None:
+    from studies.memory_probe.run import delivered_items
+
+    _records(tmp_path, "anthropic", {"a": [{"message": 3, "text": RULE}]})
+    rows = export_delivered(tmp_path, {"a"}, prompts=("anthropic",))
+    assert rows[0]["items"] == [{"message": 3, "text": RULE}]
+    path = tmp_path / "delivered.jsonl"
+    path.write_text(json.dumps(rows[0]) + "\n")
+    assert delivered_items(path, "anthropic") == {"a": [{"message": 3, "text": RULE}]}

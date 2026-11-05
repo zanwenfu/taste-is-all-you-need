@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from studies.memory_ledger import check
-from studies.memory_probe.cases import _NEEDS_NOTES, _NEEDS_RECORDS, ARMS, run_case
+from studies.memory_probe.cases import _NEEDS_ITEMS, _NEEDS_NOTES, _NEEDS_RECORDS, ARMS, run_case
 from studies.memory_probe.tool_loop import http_chat
 
 
@@ -33,6 +33,11 @@ def delivered_blocks(path: Path, prompt: str) -> dict[str, str]:
     """A summary prompt's own rule records, by case (see ``export.delivered``)."""
     return {row["id"]: row["block"] for row in map(json.loads, Path(path).read_text().splitlines())
             if row["prompt"] == prompt}
+
+
+def delivered_items(path: Path, prompt: str) -> dict[str, list[dict]]:
+    """The same records with the message each came from, by case."""
+    return {row["id"]: row["items"] for row in map(json.loads, Path(path).read_text().splitlines()) if row["prompt"] == prompt}
 
 
 def _rate(rows: list[dict], key: str) -> dict[str, Any]:
@@ -60,7 +65,7 @@ def summarize(rows: list[dict]) -> dict[str, Any]:
 
 def run_all(cases: list[dict], summaries: dict[str, str], *, chat: Callable, out: Path, workers: int,
             delivered: dict[str, str] | None = None, notes: dict[str, list[str]] | None = None,
-            **settings: Any) -> dict[str, Any]:
+            items: dict[str, list[dict]] | None = None, **settings: Any) -> dict[str, Any]:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     done = {json.loads(line)["id"] for line in out.read_text().splitlines()} if out.exists() else set()
@@ -71,6 +76,8 @@ def run_all(cases: list[dict], summaries: dict[str, str], *, chat: Callable, out
         extra = {"delivered": delivered[source]} if delivered is not None else {}
         if notes is not None:
             extra["notes"] = notes[source]
+        if items is not None:
+            extra["items"] = items[source]
         row = run_case(case, summaries[source], chat=chat, **extra, **settings)
         row["final_names_a_tool"] = any(name in row["final"] for name in ("memory_search", "memory_fetch"))
         with lock, out.open("a") as written:
@@ -127,8 +134,9 @@ def main(argv=None) -> int:
     versions = None
     if arguments.arm in _NEEDS_NOTES:
         versions = {row["id"]: row["versions"] for row in map(json.loads, Path(arguments.notes).read_text().splitlines())}
+    items = delivered_items(inputs / "delivered.jsonl", arguments.prompt) if arguments.arm in _NEEDS_ITEMS else None
     summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers, delivered=blocks,
-                      notes=versions,
+                      notes=versions, items=items,
                       keep=arguments.keep,
                       arm=arguments.arm, condition=arguments.condition, workdir=Path(arguments.workdir),
                       max_rounds=arguments.max_rounds, budget=arguments.budget, count=count,

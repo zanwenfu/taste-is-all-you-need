@@ -83,6 +83,7 @@ ARMS = {
     "a5q": "a5's store, searched once by the harness with the request's own words, what it finds delivered; no tools",
     "a4": "Taste git memory, keyword search and fetch, model-written headers",
     "a6": "rule records written by the study's reader, delivered with the summary at every call; no tools",
+    "a6h": "a6's records in the headers of the commits of their turns in Taste's memory, read back and delivered at every call",
     "a7": "a4 and a6 together",
     "a2a": "the whole conversation as a flat file, cut to the memory budget from a stated end, delivered; no tools",
     "a2c": "a notes file one model kept as the conversation went, its last version only, searched with the tools",
@@ -97,6 +98,7 @@ _HARNESS_SEARCHES = ("a5q", "a4q", "a7q", "a2cq", "a2dq")
 _NEEDS_HEADERS = ("a4", "a7", "a3", "a4q", "a7q")
 _NEEDS_RECORDS = ("a6", "a7", "a7q")
 _NEEDS_NOTES = ("a2c", "a2d", "a2cq", "a2dq")
+_NEEDS_ITEMS = ("a6h",)
 TOOL_ARMS = ("a5", "a4", "a7", "a2c", "a2d")
 # The same words the earlier record arms used, so a6 is the same delivery measured in this harness.
 DELIVERED_HEADER = "Standing instructions the user gave in this session, verbatim, from the record:"
@@ -319,10 +321,45 @@ def _header_index(case: dict, summary: str, *, chat: Callable, condition: str, w
             "searches": run.searches, "fetches": run.fetches, "tool_errors": run.tool_errors}
 
 
+def _rules_in_headers(case: dict, summary: str, *, chat: Callable, condition: str, workdir: Path, budget: int,
+                      count: Callable[[str], int], prompt: str, k: int, upper: bool, items: list[dict]) -> dict[str, Any]:
+    """Delivery through the real store: each record goes in the header of the commit of the turn it came from, and what
+    reaches the model is read back from the store, oldest first. Past the budget the oldest go first, as a later
+    instruction may replace an earlier one."""
+    started = time.perf_counter()
+    said: dict[int, list[str]] = {}
+    for item in items:
+        said.setdefault(item["message"], []).append(item["text"])
+    store = GitTurns(Path(workdir), header=lambda number, turn: CommitHeader(instructions=tuple(said.get(number, ()))))
+    try:
+        store.ingest(case["messages"])
+        lines = [f"- {text}" for row in store.index() for text in row["instructions"]]
+        kept: list[str] = []
+        used = 0
+        for line in reversed(lines):
+            if used + count(line) > budget:
+                break
+            kept.append(line)
+            used += count(line)
+        block = "\n".join(reversed(kept)) or "(none)"
+        ingested = time.perf_counter()
+        run = _without_tools(chat, case_messages(case, summary, condition=condition, upper=upper, block=block,
+                                                 block_header=DELIVERED_HEADER))
+        asked = time.perf_counter()
+        ledger, commits = store.ledger("delivered"), store.commits
+    finally:
+        store.close()
+    return {**_common(case, run, arm="a6h", condition=condition, prompt=prompt, k=k, upper=upper, reached=[], calls=[],
+                      commits=commits, seconds=(ingested - started, asked - ingested), ledger=ledger),
+            "delivered_tokens": count(block), "delivered_text": block, "records_read_back": len(lines), "looked": False,
+            "found": holds(block, case["sc_text"]), "searches": 0, "fetches": 0, "tool_errors": 0}
+
+
 def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: str, workdir: Path, max_rounds: int,
              budget: int, count: Callable[[str], int], prompt: str, k: int,
              header: Callable[[int, dict], CommitHeader] | None = None, upper: bool = False,
-             delivered: str | None = None, keep: str = "newest", notes: list[str] | None = None) -> dict[str, Any]:
+             delivered: str | None = None, keep: str = "newest", notes: list[str] | None = None,
+             items: list[dict] | None = None) -> dict[str, Any]:
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
     if arm in _NEEDS_HEADERS and header is None:
@@ -331,7 +368,12 @@ def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: s
         raise ValueError(f"arm {arm} needs its delivered records")
     if arm in _NEEDS_NOTES and not notes:
         raise ValueError(f"arm {arm} needs the notes versions")
+    if arm in _NEEDS_ITEMS and items is None:
+        raise ValueError(f"arm {arm} needs its rule records with the turns they came from")
     block, block_header = None, ""
+    if arm == "a6h":
+        return _rules_in_headers(case, summary, chat=chat, condition=condition, workdir=workdir, budget=budget, count=count,
+                                 prompt=prompt, k=k, upper=upper, items=items or [])
     if arm in _HARNESS_SEARCHES:
         return _delivered_search(case, summary, chat=chat, arm=arm, condition=condition, workdir=workdir, budget=budget,
                                  count=count, prompt=prompt, k=k, upper=upper, header=header, delivered=delivered, notes=notes)

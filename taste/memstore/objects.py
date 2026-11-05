@@ -300,6 +300,8 @@ _MAX_LISTED_KEYWORDS = 32
 _MAX_LISTED_PATHS = 32
 _MAX_LISTED_POINTERS = 16
 _MAX_ITEM_CHARS = 128
+_MAX_LISTED_INSTRUCTIONS = 16
+_MAX_INSTRUCTION_CHARS = 1_000
 
 
 def _header_value(text: str, limit: int) -> str:
@@ -329,9 +331,12 @@ class CommitHeader:
     what: str = ""
     keywords: tuple[str, ...] = ()
     pointers: tuple[str, ...] = ()
+    # What the user said in this state to keep doing beyond the request at hand. No such key unless there are some: a rule
+    # cut short is a different rule, so these get far more room than a keyword, and a header without them stays as it was.
+    instructions: tuple[str, ...] = ()
 
     def render(self, *, kind: str, branch: str, paths: list[str]) -> str:
-        lines = (
+        lines = [
             ("what", _header_value(self.what, _MAX_WHAT)),
             ("kind", kind),
             ("branch", branch),
@@ -339,7 +344,10 @@ class CommitHeader:
             ("paths_total", str(len(paths))),
             ("keywords", _header_items(self.keywords, _MAX_LISTED_KEYWORDS)),
             ("pointers", _header_items(self.pointers, _MAX_LISTED_POINTERS)),
-        )
+        ]
+        if self.instructions:
+            kept = self.instructions[:_MAX_LISTED_INSTRUCTIONS]
+            lines.append(("instructions", [_header_value(value, _MAX_INSTRUCTION_CHARS) for value in kept]))
         return "\n".join([_HEADER_MARK, *(f"{key}: {_quoted(value)}" for key, value in lines)])
 
 
