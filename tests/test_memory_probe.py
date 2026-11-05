@@ -871,3 +871,28 @@ def test_an_agent_that_acts_at_once_did_not_look_and_one_that_only_replies_has_n
     replied = run_case(case, "S", chat=lambda m, t: _reply("Here is a draft."), arm="a5", condition="vi", workdir=tmp_path,
                        max_rounds=4, budget=5000, count=_count, prompt="anthropic", k=1)
     assert replied["looked"] is False and replied["action"] is None and replied["final"] == "Here is a draft."
+
+
+# ------------------------------------------------------------------ a notes file may say the rule in its own words
+
+from studies.memory_probe.judge import judge_found  # noqa: E402
+
+
+def test_the_package_s_judge_reads_what_was_delivered_and_a_run_resumes(tmp_path: Path) -> None:
+    results = tmp_path / "results.jsonl"
+    results.write_text("".join(json.dumps(row) + "\n" for row in [
+        {"id": "a", "delivered_text": "keep drafts for the user to send"}, {"id": "b", "delivered_text": ""}]))
+    asked = []
+
+    def verdict(rule: str, delivered: list[dict]) -> bool | None:
+        asked.append((rule, delivered))
+        return True
+
+    rules = {"a": "Draft emails, don't send them.", "b": "Use metric."}
+    counts = judge_found(results, rules, verdict, workers=2)
+    assert counts == {"cases": 2, "asked": 1, "found": 1, "unclear": 0}, "nothing delivered needs no judge"
+    assert asked == [("Draft emails, don't send them.", [{"role": "assistant", "content": "keep drafts for the user to send"}])]
+    rows = {json.loads(line)["id"]: json.loads(line)["found_by_judge"]
+            for line in (tmp_path / "found.served.jsonl").read_text().splitlines()}
+    assert rows == {"a": True, "b": False}
+    assert judge_found(results, rules, verdict, workers=2)["asked"] == 0
