@@ -178,3 +178,86 @@ def test_a_search_error_is_raised_not_ranked_as_nothing(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="broken"):
         arm.retrieve("x")
     arm.close()
+
+
+# ------------------------------------------------------------------ Mem0, with its Memory stood in for
+
+from studies.memory_bench.adapters.mem0_arm import Counted, Mem0Arm, mem0_config  # noqa: E402
+
+
+class _Memory:
+    def __init__(self) -> None:
+        self.adds, self.resets, self.searches = [], 0, []
+
+    def reset(self) -> None:
+        self.resets += 1
+
+    def add(self, messages, *, user_id, infer, metadata):
+        self.adds.append({"messages": messages, "user_id": user_id, "infer": infer, "metadata": metadata})
+        return {"results": []}
+
+    def search(self, query, *, filters, top_k, threshold):
+        self.searches.append({"query": query, "filters": filters, "top_k": top_k, "threshold": threshold})
+        return {"results": [
+            {"id": "m1", "memory": "User parked on level 3.", "metadata": {"session_id": "sB", "round": "0"}},
+            {"id": "m2", "memory": "User's dog is Biscuit.", "metadata": {"session_id": "sA", "round": "0"}}]}
+
+
+def test_mem0_gets_one_add_per_round_with_the_date_and_the_session_in_metadata() -> None:
+    memory = _Memory()
+    arm = Mem0Arm(memory)
+    arm.ingest(_sessions())
+    assert memory.resets == 1 and len(memory.adds) == 3  # sA one round, sB two
+    first = memory.adds[1]
+    assert first["messages"][0] == {"role": "system", "content": "Session date: 2023/05/02 (Tue) 10:30"}
+    assert first["messages"][1:] == [{"role": "user", "content": "Parked on level 3."},
+                                     {"role": "assistant", "content": "Noted."}]
+    assert first["metadata"] == {"session_id": "sB", "round": "0", "session_date": "2023/05/02 (Tue) 10:30"}
+    assert first["infer"] is True and memory.adds[2]["metadata"]["round"] == "1"
+
+
+def test_a_conversation_between_two_people_maps_them_to_user_and_assistant_with_names_kept() -> None:
+    memory = _Memory()
+    sessions = [{"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True,
+                 "turns": [{"role": "Caroline", "content": "Hi."}, {"role": "Melanie", "content": "Hello."}]}]
+    Mem0Arm(memory).ingest(sessions)
+    assert [a["messages"][1] for a in memory.adds] == [{"role": "user", "content": "Caroline: Hi."},
+                                                       {"role": "assistant", "content": "Melanie: Hello."}]
+
+
+def test_every_memory_found_reaches_the_reader_tagged_with_its_session_and_round() -> None:
+    memory = _Memory()
+    arm = Mem0Arm(memory, top_k=150)
+    arm.ingest(_sessions())
+    first, second = arm.retrieve("Where did I park?")
+    assert memory.searches == [{"query": "Where did I park?", "filters": {"user_id": "eval"}, "top_k": 150,
+                                "threshold": 0.0}]
+    assert (first.session, first.rounds, first.turns) == ("sB", (0,), ({"role": "memory",
+                                                                       "content": "User parked on level 3."},))
+    assert second.date == "2023/05/01 (Mon) 09:00"
+
+
+def test_a_memory_from_no_session_of_the_unit_is_refused() -> None:
+    memory = _Memory()
+    memory.search = lambda *a, **k: {"results": [{"id": "x", "memory": "?", "metadata": {"session_id": "zz", "round": "0"}}]}
+    arm = Mem0Arm(memory)
+    arm.ingest(_sessions())
+    with pytest.raises(ValueError, match="no session of this unit"):
+        arm.retrieve("x")
+
+
+def test_the_served_models_json_replies_are_counted() -> None:
+    replies = iter(['{"memory": []}', "```json\n{\"memory\": [1]}\n```", "Sure! Here are the facts."])
+    counted = Counted(type("L", (), {"generate_response": lambda self, *a, **k: next(replies), "config": 7})())
+    for _ in range(3):
+        counted.generate_response([], response_format={"type": "json_object"})
+    assert (counted.calls, counted.unparsed) == (3, 1) and counted.config == 7
+
+
+def test_the_configuration_names_the_served_model_and_a_local_embedder_only() -> None:
+    config = mem0_config("http://127.0.0.1:8000/v1", "openai/gpt-oss-120b", "sentence-transformers/all-MiniLM-L6-v2",
+                         384, "cpu")
+    assert config["llm"]["provider"] == "vllm" and config["embedder"]["provider"] == "huggingface"
+    assert config["vector_store"]["config"]["embedding_model_dims"] == 384 == config["embedder"]["config"]["embedding_dims"]
+    assert config["vector_store"]["config"]["path"] == ":memory:" and config["history_db_path"] == ":memory:"
+    assert "openai" not in json.dumps(config).replace("openai/gpt-oss-120b", "")
