@@ -228,7 +228,7 @@ def test_the_probe_sees_the_summary_and_the_question_and_the_second_condition_ad
     assert "rule" not in SENTENCE.lower() and "instruction" not in SENTENCE.lower()
     assert case_messages(_case(), "S", condition="i", upper=True)[-1]["content"].startswith(RULE)
     with pytest.raises(ValueError):
-        case_messages(_case(), "S", condition="vi", upper=False)
+        case_messages(_case(), "S", condition="ix", upper=False)
 
 
 def test_a_case_record_says_whether_the_model_looked_found_and_obeyed(tmp_path: Path) -> None:
@@ -655,7 +655,7 @@ def test_the_first_two_conditions_keep_the_benchmarks_words_and_the_others_narro
     assert developer["v"] == f"{developer['iv']} {LOOK}"
     assert "memory" not in developer["iii"], "the third condition names no memory tool: it only stops forbidding them"
     with pytest.raises(ValueError):
-        case_messages(case, "S", condition="vi", upper=False)
+        case_messages(case, "S", condition="ix", upper=False)
     with pytest.raises(ValueError, match="clause"):
         case_messages({**_case(), "developer_prompt": "other words"}, "S", condition="iii", upper=False)
 
@@ -821,3 +821,53 @@ def test_a_harness_search_keeps_what_it_delivered_so_a_paraphrase_can_be_judged(
     row = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a5q", condition="i", workdir=tmp_path, max_rounds=4,
                    budget=5000, count=_count, prompt="anthropic", k=1)
     assert RULE in row["delivered_text"]
+
+
+# ------------------------------------------------------------------ a plain request, so that looking is the agent's own choice
+
+
+PLAIN_CASE = {"probe_prompt": 'Assume ...\n\nRequest from the user:\n"Email Sarah the plan."\n\nTwo candidate behaviors:\nA) x\nB) y',
+              "developer_prompt": REAL_DEVELOPER + "namespace functions {}"}
+
+
+def test_a_plain_request_has_no_multiple_choice_and_no_ban_and_the_sentences_are_the_same_ones() -> None:
+    case = {**_case(), **PLAIN_CASE}
+    plain = case_messages(case, "S", condition="vi", upper=False)
+    assert [m["role"] for m in plain] == ["system", "assistant", "user"]
+    assert plain[-1]["content"] == "Email Sarah the plan."
+    assert plain[1]["content"] == "S"
+    told = case_messages(case, "S", condition="vii", upper=False)
+    assert told[1] == {"role": "developer", "content": SENTENCE}
+    check_it = case_messages(case, "S", condition="viii", upper=False)
+    assert check_it[1] == {"role": "developer", "content": f"{SENTENCE} {LOOK}"}
+
+
+def test_an_agent_given_a_plain_request_stops_at_its_first_action_and_the_record_says_whether_it_looked_first(tmp_path: Path) -> None:
+    case = {**_case(), **PLAIN_CASE}
+    sent = []
+
+    def chat(messages, tools):
+        sent.append(tools)
+        if not any(m["role"] == "tool" for m in messages):
+            return _reply(calls=[_call(SEARCH, json.dumps({"description": "sending go-ahead"}), "c1")], finish="tool_calls")
+        return _reply(calls=[_call("draft_email", json.dumps({"to": ["sarah"], "subject": "plan", "body": "the plan"}), "c2")],
+                      finish="tool_calls")
+
+    row = run_case(case, "S", chat=chat, arm="a5", condition="vii", workdir=tmp_path, max_rounds=4, budget=5000, count=_count,
+                   prompt="anthropic", k=1)
+    names = {tool["function"]["name"] for tool in sent[0]}
+    assert {SEARCH, FETCH, "run_command", "send_email", "draft_email"} <= names
+    assert row["looked"] is True and row["found"] is True
+    assert row["action"]["name"] == "draft_email" and json.loads(row["action"]["arguments"])["to"] == ["sarah"]
+    assert row["compliant"] is None, "a plain request has no letter; what the action obeyed is judged apart"
+    assert row["searches"] == 1 and len(sent) == 2
+
+
+def test_an_agent_that_acts_at_once_did_not_look_and_one_that_only_replies_has_no_action(tmp_path: Path) -> None:
+    case = {**_case(), **PLAIN_CASE}
+    acted = run_case(case, "S", chat=lambda m, t: _reply(calls=[_call("send_email", "{}", "c1")], finish="tool_calls"), arm="a5",
+                     condition="vi", workdir=tmp_path, max_rounds=4, budget=5000, count=_count, prompt="anthropic", k=1)
+    assert acted["looked"] is False and acted["action"]["name"] == "send_email"
+    replied = run_case(case, "S", chat=lambda m, t: _reply("Here is a draft."), arm="a5", condition="vi", workdir=tmp_path,
+                       max_rounds=4, budget=5000, count=_count, prompt="anthropic", k=1)
+    assert replied["looked"] is False and replied["action"] is None and replied["final"] == "Here is a draft."

@@ -33,6 +33,7 @@ class ToolRun:
     tool_tokens: int = 0
     budget_refusals: int = 0
     round_limit_hit: bool = False
+    action: dict | None = None
     usage: list[tuple[int, int]] = field(default_factory=list)
 
 
@@ -42,7 +43,8 @@ def _error(text: str) -> str:
 
 def ask_with_tools(chat: Callable[[list[dict], list | None], Any], messages: list[dict], tools: list[dict],
                    answer: Callable[[str, dict], tuple[str, bool]], *, max_rounds: int, budget: int,
-                   count: Callable[[str], int]) -> ToolRun:
+                   count: Callable[[str], int], actions: frozenset[str] = frozenset()) -> ToolRun:
+    """Until the model answers. A call to one of ``actions`` is what the agent chose to do, and ends the run there."""
     sent = [dict(message) for message in messages]
     run = ToolRun()
     for round_number in range(max_rounds + 1):
@@ -62,6 +64,10 @@ def ask_with_tools(chat: Callable[[list[dict], list | None], Any], messages: lis
                                     for c in calls]})
         for call in calls:
             name = call.function.name
+            if name in actions:
+                run.action = {"name": name, "arguments": call.function.arguments}
+                run.final, run.finish_reason = choice.message.content or "", choice.finish_reason
+                return run
             run.searches += name == SEARCH
             run.fetches += name == FETCH
             try:

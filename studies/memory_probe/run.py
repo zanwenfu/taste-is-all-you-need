@@ -47,6 +47,7 @@ def summarize(rows: list[dict]) -> dict[str, Any]:
         "budget_refusals": sum(row["budget_refusals"] for row in rows),
         "round_limit_hit": sum(row["round_limit_hit"] for row in rows),
         "final_names_a_tool": sum(row["final_names_a_tool"] for row in rows),
+        "acted": sum(bool(row.get("action")) for row in rows),
         "searches_mean": sum(row["searches"] for row in rows) / len(rows) if rows else None,
         "ledger": check([row["ledger"] for row in rows]),
     }
@@ -88,7 +89,7 @@ def main(argv=None) -> int:
     parser.add_argument("--arm", required=True, choices=tuple(ARMS))
     parser.add_argument("--notes", help="the notes arms: the notes versions (studies.memory_probe.notes)")
     parser.add_argument("--keep", default="newest", choices=("newest", "oldest"), help="a2a: which end is kept")
-    parser.add_argument("--condition", required=True, choices=("i", "ii", "iii", "iv", "v"))
+    parser.add_argument("--condition", required=True, choices=("i", "ii", "iii", "iv", "v", "vi", "vii", "viii"))
     parser.add_argument("--limit", type=int, help="the first N cases in file order, for a smoke run")
     parser.add_argument("--max-rounds", type=int, default=6)
     parser.add_argument("--budget", type=int, default=4096, help="memory tokens a probe may receive in all")
@@ -127,7 +128,7 @@ def main(argv=None) -> int:
                       max_rounds=arguments.max_rounds, budget=arguments.budget, count=count,
                       prompt=arguments.prompt, k=arguments.k, upper=arguments.upper,
                       header=StoredTurnHeaders(Path(arguments.headers)) if arguments.headers else None)
-    print(json.dumps({key: summary[key] for key in ("cases", "looked", "found", "compliant", "unparsed_arguments")}))
+    print(json.dumps({key: summary[key] for key in ("cases", "looked", "found", "compliant", "acted", "unparsed_arguments")}))
     return 0
 
 
