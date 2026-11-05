@@ -19,8 +19,9 @@ public benchmarks, in retrieval and in final-answer accuracy?
 
 ## Systems
 
-- **No memory**; **full context** (when the budget cuts, the newest sessions are kept); **LongMemEval oracle**
-  (the evidence sessions only).
+- **No memory**; **full context** (when the budget cuts, the newest sessions are kept, and how many were cut is
+  reported per question; every prompt is checked to fit the reader's window); **LongMemEval oracle** (the
+  evidence sessions only).
 - **Flat keyword**: the same units as Taste's store in a plain list, ranked by the same code
   (`taste/memstore/keyword.py`: letters and digits, Porter's stemmer, BM25 with k1 1.5 and b 0.75).
 - **Flat dense**: the same units ranked by cosine similarity under one shared local embedder (chosen on dev).
@@ -75,6 +76,8 @@ hash is recorded.
   with agreement and kappa reported, a strict parse, and the official "yes anywhere" rule kept beside it.
 - **LoCoMo answers**: the benchmark's own token F1, which needs no judge, leads, with the stemmer of its
   evaluation script (NLTK 3.10.4, default Porter stemmer). Adversarial questions are scored by their own rule.
+  Every question is scored, then again without the answers a public audit of the gold flags (99 of 1,540,
+  13 of them ambiguous); the gold is never edited.
 - Paired tests per question on LongMemEval; a bootstrap over conversations on LoCoMo. Gaps under about 4.5
   points on LoCoMo are not claimed.
 
