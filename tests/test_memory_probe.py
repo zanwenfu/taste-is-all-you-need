@@ -331,3 +331,70 @@ def test_a_whole_run_resumes_and_counts_the_steps(tmp_path: Path) -> None:
     assert len(rows) == 3 and summary["compliant"]["true"] == 2
     assert summary["looked"]["true"] == 0 and summary["ledger"]["looks"]["looked"] == 0
     assert json.loads((out.parent / "results.summary.json").read_text())["cases"] == 3
+
+
+# ------------------------------------------------------------------ the plain-HTTP client
+
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, HTTPServer  # noqa: E402
+
+from studies.memory_probe.tool_loop import http_chat  # noqa: E402
+
+
+def _serve(replies: list[tuple[int, dict]]) -> tuple[HTTPServer, list[dict]]:
+    received: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            received.append({"path": self.path,
+                             "body": json.loads(self.rfile.read(int(self.headers["Content-Length"])))})
+            status, body = replies.pop(0)
+            payload = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, received
+
+
+def test_the_http_client_sends_the_tools_and_reads_tool_calls_back() -> None:
+    reply = {"choices": [{"finish_reason": "tool_calls", "message": {"content": None, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": SEARCH, "arguments": "{\"description\": \"x\"}"}}]}}],
+             "usage": {"prompt_tokens": 12, "completion_tokens": 4}}
+    server, received = _serve([(200, reply)])
+    try:
+        chat = http_chat(f"http://127.0.0.1:{server.server_port}/v1", "m", max_tokens=99)
+        answer = chat([{"role": "user", "content": "hi"}], definitions("chat"))
+    finally:
+        server.shutdown()
+    body = received[0]["body"]
+    assert received[0]["path"] == "/v1/chat/completions"
+    assert body["tools"] == definitions("chat") and body["tool_choice"] == "auto" and body["max_tokens"] == 99
+    assert body["reasoning_effort"] == "low"
+    call = answer.choices[0].message.tool_calls[0]
+    assert (call.id, call.function.name, json.loads(call.function.arguments)) == ("c1", SEARCH, {"description": "x"})
+    assert answer.usage.prompt_tokens == 12 and answer.choices[0].finish_reason == "tool_calls"
+
+
+def test_the_http_client_tries_again_after_a_server_error_and_not_after_a_refusal() -> None:
+    plain = {"choices": [{"finish_reason": "stop", "message": {"content": "A"}}], "usage": {}}
+    server, received = _serve([(503, {"error": "busy"}), (200, plain), (400, {"error": "too long"})])
+    try:
+        chat = http_chat(f"http://127.0.0.1:{server.server_port}/v1", "m", max_tokens=9)
+        answer = chat([{"role": "user", "content": "hi"}], None)
+        assert answer.choices[0].message.content == "A" and answer.choices[0].message.tool_calls is None
+        assert "tools" not in received[1]["body"]
+        import urllib.error
+
+        with pytest.raises(urllib.error.HTTPError):
+            chat([{"role": "user", "content": "again"}], None)
+    finally:
+        server.shutdown()
+    assert len(received) == 3

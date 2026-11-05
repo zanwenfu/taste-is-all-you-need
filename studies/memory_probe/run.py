@@ -21,7 +21,7 @@ from typing import Any
 
 from studies.memory_ledger import check
 from studies.memory_probe.cases import run_case
-from studies.memory_probe.tool_loop import served_chat
+from studies.memory_probe.tool_loop import http_chat
 
 
 def _rate(rows: list[dict], key: str) -> dict[str, Any]:
@@ -85,7 +85,6 @@ def main(argv=None) -> int:
     parser.add_argument("--upper", action="store_true", help="ask the restated probe instead (the ceiling)")
     arguments = parser.parse_args(argv)
 
-    from openai import OpenAI
     from tokenizers import Tokenizer
 
     inputs = Path(arguments.inputs)
@@ -98,8 +97,7 @@ def main(argv=None) -> int:
     def count(text: str) -> int:
         return len(tokenizer.encode(text, add_special_tokens=False).ids)
 
-    chat = served_chat(OpenAI(base_url=arguments.url, api_key="EMPTY", timeout=1800), arguments.model,
-                       max_tokens=arguments.max_tokens)
+    chat = http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
     summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers,
                       arm=arguments.arm, condition=arguments.condition, workdir=Path(arguments.workdir),

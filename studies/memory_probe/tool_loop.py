@@ -9,8 +9,12 @@ rather than cut, so the model knows it got nothing and the budget is the same fo
 from __future__ import annotations
 
 import json
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from taste.memstore.tools import FETCH, SEARCH
@@ -89,6 +93,49 @@ def served_chat(client: Any, model: str, *, max_tokens: int, effort: str = "low"
         extra = {"tools": tools, "tool_choice": "auto"} if tools else {}
         return client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens,
                                               reasoning_effort=effort, **extra)
+
+    return chat
+
+
+def _reply(raw: dict) -> SimpleNamespace:
+    choice = raw["choices"][0]
+    message = choice.get("message") or {}
+    calls = [SimpleNamespace(id=call.get("id", ""), type="function",
+                             function=SimpleNamespace(name=call["function"]["name"],
+                                                      arguments=call["function"].get("arguments") or ""))
+             for call in message.get("tool_calls") or []]
+    usage = raw.get("usage") or {}
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=message.get("content"), tool_calls=calls or None),
+                                 finish_reason=choice.get("finish_reason") or "")],
+        usage=SimpleNamespace(prompt_tokens=usage.get("prompt_tokens", 0),
+                              completion_tokens=usage.get("completion_tokens", 0)))
+
+
+def http_chat(url: str, model: str, *, max_tokens: int, effort: str = "low", timeout: float = 1800,
+              tries: int = 3) -> Callable[[list[dict], list | None], Any]:
+    """The same call as ``served_chat`` over plain HTTP, for an environment with no OpenAI package. A refusal
+    by the server (4xx) is raised at once; a dropped connection or a server error is tried again."""
+    endpoint = url.rstrip("/") + "/chat/completions"
+
+    def chat(messages: list[dict], tools: list | None) -> Any:
+        body = {"model": model, "messages": messages, "max_tokens": max_tokens, "reasoning_effort": effort}
+        if tools:
+            body |= {"tools": tools, "tool_choice": "auto"}
+        request = urllib.request.Request(endpoint, data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+        for attempt in range(tries):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return _reply(json.load(response))
+            except urllib.error.HTTPError as error:
+                if error.code < 500 or attempt == tries - 1:
+                    raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt == tries - 1:
+                    raise
+            time.sleep(2 ** attempt)
+        raise AssertionError("unreachable")
 
     return chat
 
