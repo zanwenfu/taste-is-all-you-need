@@ -157,6 +157,27 @@ def test_the_counts_the_ledger_reads_move_with_the_tools(store: Store) -> None:
     assert store.memory_counts["tool_errors"] == 1
 
 
+def test_search_can_be_narrowed_to_some_kinds_and_hits_resolved_and_deduplicated(store: Store) -> None:
+    a = store.branch("a")
+    a.turn(role="user", content="the godwit rule")
+    a.write("x.md", "the godwit file\n")
+    a.checkpoint("the godwit commit")
+
+    kinds = {r["kind"] for r in _search_with(store, kinds=("transcript",))}
+    assert kinds == {"transcript"}
+
+    first = store.search_contents("godwit", kinds=("transcript",))[0]
+    resolved = _search_with(store, resolve=lambda hit: first)
+    assert [r["pointer"] for r in resolved] == [first.pointer.to_text()]
+    assert store.memory_counts["search"] == 3
+
+
+def _search_with(store: Store, **options) -> list[dict]:
+    text, failed = answer(store, SEARCH, {"description": "godwit"}, **options)
+    assert failed is False
+    return json.loads(text)["results"]
+
+
 def test_the_definitions_are_neutral_and_avoid_the_argument_names_benchmarks_read() -> None:
     """A benchmark reads a call with ``path`` and ``content`` as an edit of its repository."""
     for api, unwrap in (("responses", lambda d: d), ("chat", lambda d: d["function"])):

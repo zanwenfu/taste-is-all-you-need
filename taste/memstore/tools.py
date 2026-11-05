@@ -10,6 +10,7 @@ agent's loop.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from taste.memstore.objects import BadPointer
@@ -105,13 +106,26 @@ def _result(hit: ContentHit) -> dict[str, Any]:
     return result
 
 
-def _search(store: Store, arguments: dict[str, Any]) -> str:
+def _search(store: Store, arguments: dict[str, Any], kinds: Iterable[str] | None,
+            resolve: Callable[[ContentHit], ContentHit] | None) -> str:
     _only(arguments, ("description", "limit"))
     description = arguments.get("description")
     if not isinstance(description, str) or not description.strip():
         raise _Refused("description must be text saying what is wanted")
     limit = _whole_number(arguments, "limit", DEFAULT_RESULTS, 1, MAX_RESULTS)
-    return _text({"results": [_result(hit) for hit in store.search_contents(description, limit=limit)]})
+    if resolve is None:
+        hits = store.search_contents(description, limit=limit, kinds=kinds)
+    else:
+        # A caller may turn a hit into the thing it stands for (a header's commit into what that commit added);
+        # two hits that come to the same thing are shown once, at the better rank.
+        hits, seen = [], set()
+        for hit in map(resolve, store.search_contents(description, limit=None, kinds=kinds)):
+            if hit.pointer.to_text() not in seen:
+                seen.add(hit.pointer.to_text())
+                hits.append(hit)
+            if len(hits) == limit:
+                break
+    return _text({"results": [_result(hit) for hit in hits]})
 
 
 def _fetch(store: Store, arguments: dict[str, Any]) -> str:
@@ -127,11 +141,13 @@ def _fetch(store: Store, arguments: dict[str, Any]) -> str:
     )
 
 
-def answer(store: Store, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
-    """(what the agent is told, whether the call failed)."""
+def answer(store: Store, name: str, arguments: dict[str, Any], *, kinds: Iterable[str] | None = None,
+           resolve: Callable[[ContentHit], ContentHit] | None = None) -> tuple[str, bool]:
+    """(what the agent is told, whether the call failed). ``kinds`` narrows what search reads, and ``resolve``
+    maps each hit before results are cut to the limit."""
     try:
         if name == SEARCH:
-            return _search(store, arguments), False
+            return _search(store, arguments, kinds, resolve), False
         if name == FETCH:
             return _fetch(store, arguments), False
         raise _Refused(f"unknown tool {name!r}")
