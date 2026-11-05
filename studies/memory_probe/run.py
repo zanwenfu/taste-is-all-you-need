@@ -83,9 +83,12 @@ def main(argv=None) -> int:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--upper", action="store_true", help="ask the restated probe instead (the ceiling)")
+    parser.add_argument("--headers", help="the header arm's stored headers (studies.memory_probe.headers)")
     arguments = parser.parse_args(argv)
 
     from tokenizers import Tokenizer
+
+    from studies.memory_probe.headers import StoredTurnHeaders
 
     inputs = Path(arguments.inputs)
     cases = [json.loads(line) for line in (inputs / "cases.jsonl").read_text().splitlines()]
@@ -102,7 +105,8 @@ def main(argv=None) -> int:
     summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers,
                       arm=arguments.arm, condition=arguments.condition, workdir=Path(arguments.workdir),
                       max_rounds=arguments.max_rounds, budget=arguments.budget, count=count,
-                      prompt=arguments.prompt, k=arguments.k, upper=arguments.upper)
+                      prompt=arguments.prompt, k=arguments.k, upper=arguments.upper,
+                      header=StoredTurnHeaders(Path(arguments.headers)) if arguments.headers else None)
     print(json.dumps({key: summary[key] for key in ("cases", "looked", "found", "compliant", "unparsed_arguments")}))
     return 0
 

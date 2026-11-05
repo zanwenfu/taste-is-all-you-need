@@ -398,3 +398,38 @@ def test_the_http_client_tries_again_after_a_server_error_and_not_after_a_refusa
     finally:
         server.shutdown()
     assert len(received) == 3
+
+
+# ------------------------------------------------------------------ headers for the header arm
+
+from studies.memory_probe.headers import StoredTurnHeaders, write_turn_headers  # noqa: E402
+
+
+def test_each_distinct_turn_gets_one_header_call_and_the_store_reads_them_back(tmp_path: Path) -> None:
+    asked: list[str] = []
+
+    def ask(prompt: str) -> dict:
+        asked.append(prompt)
+        return {"text": '{"what": "A turn about the offsite.", "keywords": ["offsite", 7]}', "prompt_tokens": 5,
+                "completion_tokens": 2}
+
+    cases = [{**_case(), "id": "a"}, {**_case(), "id": "b"}]
+    cases[1]["messages"] = [{"role": "user", "content": "A different first turn."}, *_history()[1:]]
+    path = tmp_path / "headers.jsonl"
+    counts = write_turn_headers(cases, ask, path, workers=2)
+    assert counts["turns"] == 12 and counts["calls"] == 7 and counts["failed"] == 0
+    assert write_turn_headers(cases, ask, path, workers=2)["calls"] == 0
+    assert all("Turn:\nuser: " in p or "Turn:\nassistant: " in p for p in asked)
+
+    headers = StoredTurnHeaders(path)
+    header = headers(0, _history()[0])
+    assert header == CommitHeader(what="A turn about the offsite.", keywords=("offsite",))
+    assert headers(0, {"role": "user", "content": "never seen"}) == CommitHeader() and headers.missing == 1
+
+
+def test_a_long_turn_is_cut_before_the_header_model_sees_it(tmp_path: Path) -> None:
+    asked: list[str] = []
+    case = {**_case(), "messages": [{"role": "tool", "content": "x" * 100_000}]}
+    write_turn_headers([case], lambda p: asked.append(p) or {"text": "{}", "prompt_tokens": 1,
+                                                             "completion_tokens": 1}, tmp_path / "h.jsonl", workers=1)
+    assert len(asked[0]) < 30_000
