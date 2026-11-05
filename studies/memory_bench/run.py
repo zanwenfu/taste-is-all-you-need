@@ -183,7 +183,8 @@ def views(arguments: argparse.Namespace) -> int:
 
 def headers(arguments: argparse.Namespace) -> int:
     wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
-    views, _ = lme.load([item for item in json.loads(Path(arguments.data).read_text()) if item["question_id"] in wanted])
+    field, loader = ("question_id", lme.load) if arguments.benchmark == "lme" else ("sample_id", locomo.load)
+    views, _ = loader([item for item in json.loads(Path(arguments.data).read_text()) if item[field] in wanted])
     ask = served_ask(_client(arguments.url), arguments.model, max_tokens=arguments.max_tokens, effort=arguments.effort)
     print(json.dumps(write_all(views, ask, Path(arguments.out), workers=arguments.workers)))
     return 0
@@ -246,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             stage.add_argument(f"--{argument}", required=True)
         if name == "headers":
             stage.add_argument("--part", required=True, choices=("dev", "held_out"))
+            stage.add_argument("--benchmark", default="lme", choices=("lme", "locomo"))
         stage.add_argument("--max-tokens", type=int, default=800)
         stage.add_argument("--effort")
         stage.add_argument("--workers", type=int, default=12)

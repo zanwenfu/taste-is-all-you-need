@@ -262,3 +262,31 @@ def test_the_budget_counts_with_the_readers_own_tokenizer_file(tmp_path: Path) -
     word_level.save(str(tmp_path / "tokenizer.json"))
     assert _counter(str(tmp_path))("a b c") == 3
     assert _counter(str(tmp_path / "tokenizer.json"))("a b") == 2
+
+
+def test_the_headers_stage_also_reads_locomo_conversations(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from studies.memory_bench import run as run_module
+
+    data = tmp_path / "locomo.json"
+    data.write_text(json.dumps([{"sample_id": "conv-1", "qa": [], "conversation": {
+        "speaker_a": "A", "speaker_b": "B", "session_1_date_time": "1:56 pm on 8 May, 2023",
+        "session_1": [{"speaker": "A", "dia_id": "D1:1", "text": "My dog is Biscuit."}]}}]))
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"dev": ["conv-1"], "held_out": []}))
+    asked = []
+
+    def create(**kwargs):
+        asked.append(kwargs["messages"][0]["content"])
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"what": "A talks about a dog.", "keywords": ["dog"]}'),
+                                                        finish_reason="stop")],
+                               usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(run_module, "_client", lambda url: client)
+    out = tmp_path / "headers.jsonl"
+    assert run_module.main(["headers", "--benchmark", "locomo", "--data", str(data), "--split", str(split), "--part", "dev",
+                            "--url", "u", "--model", "m", "--out", str(out)]) == 0
+    assert json.loads(out.read_text())["what"] == "A talks about a dog."
+    assert "A: My dog is Biscuit." in asked[0] and "user and an assistant" not in asked[0]

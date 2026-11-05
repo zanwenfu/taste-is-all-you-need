@@ -22,7 +22,7 @@ from studies.memory_bench.reader import served_ask  # noqa: F401 - the same call
 from taste.memstore import CommitHeader
 
 PROMPT = (
-    "Below is one past conversation between a user and an assistant. Say what it contains, so that someone "
+    "Below is one past conversation. Say what it contains, so that someone "
     "looking for something later can tell whether to open it. Reply with one JSON object and nothing else, in "
     'this form: {"what": "one sentence saying what this conversation contains", "keywords": ["up to 12 words '
     'or short names someone might search for"]}\n\nConversation:\n'
