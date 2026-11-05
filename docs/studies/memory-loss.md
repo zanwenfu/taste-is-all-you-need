@@ -74,7 +74,8 @@ small run and frozen before it.
 ## Situations
 
 **Cued.** The same history, rule and options, with one hand-written cue inside the request naming the rule's subject
-without its content. The 15 cues are in `studies/memory_probe/variants.py`, committed before any run.
+without its content. The 15 cues are in `studies/memory_probe/variants.py`, written before any run of these cases, after
+the first 100 probes of the unchanged cases had been read.
 
 **Uncued.** The benchmark as published. Every published case states its rule in the first user turn, so anything that
 keeps the start of a history wins by position alone, and anything that keeps the end loses by it. The flat file keeps
@@ -83,8 +84,8 @@ last user turn, where the benchmark's own builder puts it.
 
 **Revised and withdrawn.** The same histories with a later statement in the median user turn that reverses the rule
 (the right answer flips) or takes it back (the old rule's option is then read against the no-rule rate). The 15
-revisions are in the same file. Git keeps old versions, and a search can return a stale one; each hit says when it was
-recorded.
+revisions are in the same file and were written at the same point, before any run of these cases and after those 100
+probes had been read. Git keeps old versions, and a search can return a stale one; each hit says when it was recorded.
 
 **Long run.** One coding agent with compaction on (below).
 

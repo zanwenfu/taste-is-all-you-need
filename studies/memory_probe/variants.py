@@ -8,7 +8,8 @@
 * **cued**: the request names the rule's subject without its content, so the agent has a reason to look and words to
   look with.
 
-The cues and revisions were written once, before any run, and not changed after seeing a result.
+The cues and revisions were written before any run of these cases, after the first 100 probes of the unchanged cases
+had been read, and are not changed after seeing a result of these cases.
 """
 
 from __future__ import annotations
