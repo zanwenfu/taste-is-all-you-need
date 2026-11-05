@@ -32,10 +32,10 @@ USER = "eval"  # one store per unit, reset in between, so one user id serves eve
 ALL = 100_000
 
 
-def mem0_config(url: str, model: str, embedder: str, dims: int, device: str) -> dict[str, Any]:
+def mem0_config(url: str, model: str, embedder: str, dims: int, device: str, *, max_tokens: int = 2000) -> dict[str, Any]:
     return {
         "llm": {"provider": "vllm", "config": {"model": model, "vllm_base_url": url, "api_key": "EMPTY",
-                                               "temperature": 0.0, "max_tokens": 2000, "top_p": 1.0}},
+                                               "temperature": 0.0, "max_tokens": max_tokens, "top_p": 1.0}},
         "embedder": {"provider": "huggingface", "config": {"model": embedder, "embedding_dims": dims,
                                                            "model_kwargs": {"device": device}}},
         "vector_store": {"provider": "qdrant", "config": {"collection_name": "mem0_eval", "embedding_model_dims": dims,
@@ -54,14 +54,15 @@ def _parses(text: str) -> bool:
 
 class Counted:
     """Wraps the model behind Mem0 to count its calls and the replies that do not parse as one JSON object. With a
-    log, every reply is kept whole, so what the parse rate counts can be read."""
+    log, every reply is kept whole, so what the parse rate counts can be read. ``extra`` goes on every call: Mem0's
+    vLLM settings have no field for the reasoning effort the rest of the study uses, and its client passes it through."""
 
-    def __init__(self, llm: Any, log: Path | None = None) -> None:
-        self.llm, self.log, self.calls, self.unparsed = llm, log, 0, 0
+    def __init__(self, llm: Any, log: Path | None = None, extra: dict[str, Any] | None = None) -> None:
+        self.llm, self.log, self.extra, self.calls, self.unparsed = llm, log, extra or {}, 0, 0
 
     def generate_response(self, *args: Any, **kwargs: Any) -> Any:
         started = time.perf_counter()
-        reply = self.llm.generate_response(*args, **kwargs)
+        reply = self.llm.generate_response(*args, **kwargs, **self.extra)
         seconds = time.perf_counter() - started
         text = reply if isinstance(reply, str) else json.dumps(reply)
         parsed = _parses(text)
@@ -127,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dims", type=int, required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--top-k", type=int, default=200)
+    parser.add_argument("--max-tokens", type=int, default=2000, help="the output cap; Mem0's default is 2,000")
+    parser.add_argument("--effort", help="the model's reasoning effort, for a model that reasons")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--shard", default="0/1", help="i/n: every n-th unit from the i-th")
     parser.add_argument("--query-free", action="store_true", help="all memories, no search, for the rule-loss cases")
@@ -144,14 +147,16 @@ def main(argv: list[str] | None = None) -> int:
     from mem0 import Memory
 
     memory = Memory.from_config(mem0_config(arguments.url, arguments.model, arguments.embedder, arguments.dims,
-                                            arguments.device))
+                                            arguments.device, max_tokens=arguments.max_tokens))
     if type(memory.llm).__name__ != "VllmLLM" or type(memory.embedding_model).__name__ != "HuggingFaceEmbedding":
         raise SystemExit("Mem0 is not using the served model and the local embedder")
     if not getattr(memory.vector_store, "_has_bm25_slot", False):
         raise SystemExit("Mem0's keyword search is off; install fastembed")
-    counted = Counted(memory.llm, log=Path(arguments.out).with_suffix(".replies.jsonl"))
+    counted = Counted(memory.llm, log=Path(arguments.out).with_suffix(".replies.jsonl"),
+                      extra={"reasoning_effort": arguments.effort} if arguments.effort else None)
     memory.llm = counted
-    versions = {"mem0ai": mem0.__version__, "embedder": arguments.embedder, "model": arguments.model}
+    versions = {"mem0ai": mem0.__version__, "embedder": arguments.embedder, "model": arguments.model,
+                "max_tokens": arguments.max_tokens, "effort": arguments.effort}
 
     def make() -> Any:
         arm = Mem0Arm(memory, top_k=arguments.top_k)

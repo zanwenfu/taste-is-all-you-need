@@ -480,6 +480,29 @@ def test_every_reply_is_logged_whole_so_it_can_be_read(tmp_path: Path) -> None:
     assert all(row["seconds"] >= 0 for row in rows)
 
 
+def test_a_setting_mem0_has_no_field_for_reaches_the_model_on_every_call() -> None:
+    """Its vLLM client passes extra arguments through. gpt-oss-120b counts its reasoning against the output cap, and at
+    Mem0's defaults 21 of 181 real replies ran out, so every call here says the effort the rest of the study uses."""
+    seen = []
+
+    class Llm:
+        def generate_response(self, messages, response_format=None, **kwargs):
+            seen.append(kwargs)
+            return '{"memory": []}'
+
+    counted = Counted(Llm(), extra={"reasoning_effort": "low"})
+    counted.generate_response([], response_format={"type": "json_object"})
+    assert seen == [{"reasoning_effort": "low"}]
+    plain = Counted(Llm())
+    plain.generate_response([])
+    assert seen[-1] == {}
+
+
+def test_the_output_cap_is_a_setting_of_the_run() -> None:
+    config = mem0_config("http://127.0.0.1:8000/v1", "m", "e", 384, "cpu", max_tokens=4096)
+    assert config["llm"]["config"]["max_tokens"] == 4096
+
+
 def test_the_configuration_names_the_served_model_and_a_local_embedder_only() -> None:
     config = mem0_config("http://127.0.0.1:8000/v1", "openai/gpt-oss-120b", "sentence-transformers/all-MiniLM-L6-v2",
                          384, "cpu")
