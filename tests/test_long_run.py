@@ -424,3 +424,66 @@ def test_a_memory_call_counts_as_a_look_and_a_find_only_when_the_rule_came_back(
                {"kind": "memory_fetch", "call": 3, "compactions": 0, "command": "q", "output": "other"}]
     scored = score_session(actions, rules)
     assert scored["ls"]["looks"] == 3 and scored["ls"]["finds"] == 1
+
+
+# ------------------------------------------------------------------ the command line, on a stand-in server and a real shell
+
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, HTTPServer  # noqa: E402
+
+import studies.long_run.session as session_module  # noqa: E402
+
+
+def _stand_in_server(script: list[dict]) -> HTTPServer:
+    """Answers each tool-offering call with the next scripted call, and any call without tools with a summary."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if body.get("tools"):
+                call = script.pop(0)
+                message = {"role": "assistant", "content": "working", "tool_calls": [
+                    {"id": f"c{len(script)}", "type": "function",
+                     "function": {"name": call["name"], "arguments": json.dumps(call["arguments"])}}]}
+            else:
+                message = {"role": "assistant", "content": "a summary of the work so far"}
+            payload = json.dumps({"choices": [{"message": message, "finish_reason": "stop"}],
+                                  "usage": {"prompt_tokens": 1, "completion_tokens": 1}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_a_whole_session_from_the_command_line_with_a_real_shell(tmp_path: Path, monkeypatch) -> None:
+    work = tmp_path / "project"
+    work.mkdir()
+    bash = lambda command: {"name": "bash", "arguments": {"command": command}}  # noqa: E731
+    long = " ".join(["word"] * 60)
+    server = _stand_in_server([bash(f"echo {long}"), bash(f"echo python3 -B a.py {long}"),
+                               bash("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+                               {"name": SEARCH, "arguments": {"description": "Python script"}},
+                               bash(f"echo {long}"), bash("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")])
+    file = tmp_path / "session.json"
+    file.write_text(json.dumps({**SESSION, "tasks": [{"name": "one", "instruction": "Do one.", "cwd": str(work)},
+                                                     {"name": "two", "instruction": "Do two.", "cwd": str(work)}]}))
+    monkeypatch.setattr(session_module, "package_prompt", lambda: _prompt)
+    try:
+        code = session_module.main(["--session", str(file), "--arm", "taste", "--url", f"http://127.0.0.1:{server.server_port}/v1",
+                                    "--model", "stand-in", "--tokenizer", "words", "--env", "local", "--out", str(tmp_path / "run"),
+                                    "--workdir", str(tmp_path / "w")])
+    finally:
+        server.shutdown()
+    summary = json.loads((tmp_path / "run" / "summary.json").read_text())
+    assert code == 0 and [o["exit_status"] for o in summary["outcomes"]] == ["Submitted", "Submitted"]
+    assert summary["compactions"] > 0 and summary["ledger"]["search_calls"] == 1
+    assert summary["scores"]["bytes"]["looks"] == 1 and summary["scores"]["bytes"]["finds"] == 1
+    assert summary["versions"]["mini_swe_agent"] == "2.4.6"

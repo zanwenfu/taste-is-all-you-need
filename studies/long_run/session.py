@@ -14,8 +14,11 @@ Names, per the study's rule: "taste" is "Taste memory, study-driven"; the others
 
 from __future__ import annotations
 
+import argparse
 import json
+import platform
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -61,7 +64,7 @@ def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tr
 
 
 def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[dict], Any], count: Callable[[str], int],
-                out: Path, workdir: Path, package_prompt: Callable) -> dict[str, Any]:
+                out: Path, workdir: Path, package_prompt: Callable, versions: dict | None = None) -> dict[str, Any]:
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
     out, workdir = Path(out), Path(workdir)
@@ -87,6 +90,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         keep_recent_tokens=session.get("keep_recent_tokens", 0),
         planted={rule["say"]: rule["text"] for rule in rules if isinstance(rule["say"], int)},
         watch={rule["name"]: rule["text"] for rule in rules})
+    agent.extra_template_vars |= platform.uname()._asdict()  # mini-swe-agent's own templates ask for these
 
     def worded(task: dict, number: int) -> str:
         told = [rule["text"] for rule in rules if rule["say"] == "first" and (number == 0 or arm == "restated")]
@@ -101,7 +105,75 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         if store:
             store.close()
     rows = [json.loads(line) for line in actions.read_text().splitlines()] if actions.exists() else []
-    summary = {"arm": arm, "outcomes": outcomes, "calls": agent.n_calls, "compactions": len(agent.events), "events": agent.events,
-               "memory_turns": agent.recorded, "ledger": ledger, "scores": score_session(rows, rules)}
+    summary = {"arm": arm, "versions": versions or {}, "outcomes": outcomes, "calls": agent.n_calls,
+               "compactions": len(agent.events), "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
+               "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary
+
+
+def package_prompt() -> Callable:
+    """The benchmark package's two published summary prompts."""
+    from conpact.prompts import summarization_prompt
+
+    return summarization_prompt
+
+
+def _environment(kind: str, timeout: int) -> Callable[[dict], Any]:
+    """The task's own container, or the machine's shell for a dry run. The memory tools never reach any of these."""
+
+    def make(task: dict) -> Any:
+        settings = {"cwd": task.get("cwd", ""), "timeout": timeout, "env": {"PAGER": "cat", "MANPAGER": "cat"}}
+        if kind == "local":
+            from minisweagent.environments.local import LocalEnvironment
+
+            return LocalEnvironment(**settings)
+        if kind == "singularity":
+            from minisweagent.environments.singularity import SingularityEnvironment
+
+            return SingularityEnvironment(image=task["image"], executable="apptainer", **settings)
+        if kind == "docker":
+            from minisweagent.environments.docker import DockerEnvironment
+
+            return DockerEnvironment(image=task["image"], **settings)
+        raise ValueError(f"unknown environment {kind!r}")
+
+    return make
+
+
+def _counter(tokenizer: str) -> Callable[[str], int]:
+    """The reader's own tokenizer; "words" is for dry runs only."""
+    if tokenizer == "words":
+        return lambda text: len(text.split())
+    from tokenizers import Tokenizer
+
+    path = Path(tokenizer)
+    loaded = Tokenizer.from_file(str(path / "tokenizer.json" if path.is_dir() else path))
+    return lambda text: len(loaded.encode(text, add_special_tokens=False).ids)
+
+
+def main(argv: list[str] | None = None) -> int:
+    from studies.memory_probe.tool_loop import http_chat
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    for name in ("session", "url", "model", "tokenizer", "out", "workdir"):
+        parser.add_argument(f"--{name}", required=True)
+    parser.add_argument("--arm", required=True, choices=ARMS)
+    parser.add_argument("--env", default="docker", choices=("local", "singularity", "docker"))
+    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--command-timeout", type=int, default=300)
+    arguments = parser.parse_args(argv)
+
+    import minisweagent
+
+    summary = run_session(load_session(json.loads(Path(arguments.session).read_text())), arm=arguments.arm,
+                          chat=http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens),
+                          make_env=_environment(arguments.env, arguments.command_timeout), count=_counter(arguments.tokenizer),
+                          out=Path(arguments.out), workdir=Path(arguments.workdir), package_prompt=package_prompt(),
+                          versions={"mini_swe_agent": minisweagent.__version__, "model": arguments.model, "env": arguments.env})
+    print(json.dumps({key: summary[key] for key in ("arm", "outcomes", "calls", "compactions", "memory_turns", "scores")}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
