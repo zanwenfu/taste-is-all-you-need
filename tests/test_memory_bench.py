@@ -418,6 +418,12 @@ def test_a_split_keeps_a_question_and_its_abstention_twin_together() -> None:
     assert not bases & {q.removesuffix("_abs") for q in held_out}
 
 
+def test_abstention_questions_reach_dev_in_their_share() -> None:
+    """Otherwise no system can be tuned on saying that it does not know."""
+    dev, _ = grouped_split(_questions(), dev_count=28, seed=7)
+    assert 2 <= sum(q.endswith("_abs") for q in dev) <= 6  # 20 of 140 overall, a fifth of 28 is about 4
+
+
 def test_a_split_is_repeatable_and_covers_every_type() -> None:
     assert grouped_split(_questions(), 20, 7) == grouped_split(_questions(), 20, 7)
     assert grouped_split(_questions(), 20, 7) != grouped_split(_questions(), 20, 8)

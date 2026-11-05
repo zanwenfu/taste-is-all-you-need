@@ -39,9 +39,13 @@ def rounds(session: dict) -> list[list[dict]]:
     return _split_rounds(session["turns"])
 
 
+def turns_text(turns: list[dict]) -> str:
+    return "".join(f"{turn['role']}: {turn['content']}\n" for turn in turns)
+
+
 def unit_text(date: str, turns: list[dict]) -> str:
     """What every keyword or dense system indexes for a unit: the same date line, both roles."""
-    return f"Session date: {date}\n" + "".join(f"{turn['role']}: {turn['content']}\n" for turn in turns)
+    return f"Session date: {date}\n" + turns_text(turns)
 
 
 def _gold(item: dict, sessions: list[dict]) -> Gold:

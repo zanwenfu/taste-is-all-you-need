@@ -1,7 +1,8 @@
 """Dev and held-out, grouped: a question and its ``_abs`` twin share their sessions, so they stay together.
 
 MemPalace's own 50/450 split separates such a pair (``6456829e`` in dev, ``6456829e_abs`` in held-out).
-Groups are drawn by a keyed hash, one type at a time, so every question type reaches dev.
+Groups are drawn by a keyed hash, one type at a time, with abstention as a type of its own, so every kind
+of question reaches dev.
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ def grouped_split(questions: list[dict], dev_count: int, seed: int) -> tuple[lis
     for question in questions:
         base = question["question_id"].removesuffix("_abs")
         groups.setdefault(base, []).append(question["question_id"])
-        kinds.setdefault(base, question["question_type"])
+        kinds[base] = question["question_type"]
+    for base, members in groups.items():
+        if any(member.endswith("_abs") for member in members):
+            kinds[base] += " with abstention"
     by_kind: dict[str, list[str]] = {}
     for base in sorted(groups, key=lambda b: hashlib.sha256(f"{seed}:{b}".encode()).hexdigest()):
         by_kind.setdefault(kinds[base], []).append(base)
