@@ -142,7 +142,7 @@ task's outcome except to report a defect in the run itself.
    took 69 seconds. A first pilot found the planner refusing Bedrock's replies
    as of unknown cost; fixed before this one.
 
-**Run (2026-11-02, 12:06 to 6:30 am ET, code ce02a58).** All 414 trials graded
+**Run (2026-11-02, code ce02a58; the arms ran from 12:06 to 4:18 am ET and grading ended at 6:49 am).** All 414 trials graded
 but one; 1 trial raised (a verifier timeout on `mailman`). Model spend $18.78.
 
 Question 1. Solved 81 of 207 alone and 94 of 207 supervised: a mean per-task
@@ -183,7 +183,7 @@ git found no damage. With the planner, checkpoint, terminal and worker paths,
 that is 280 points on a stand-in model and 156 on the real one.
 
 **Question 5 (2026-11-02).** 189 runs, 187 with both verdicts. Accuracy against
-the verifier: record critic 83.4%, live critic 84.0%, a difference of +0.6 points,
+the verifier: record critic 83.4%, live critic 84.0%, a difference of +0.53 points (one run of 187),
 task-clustered 95% interval [-5.3, +6.1], exact paired test p = 1.0. False
 rejections 15.0% and 11.3%, false acceptances 17.8% and 19.6%. All 189 saved
 states restored exactly. The live critic cost $0.37 in all.
@@ -350,7 +350,7 @@ recorded, is clean. Starts are spaced 10 seconds apart, wait while the service m
 is slow to answer, run one host check, and default to 16 at once. The cause of the
 overload was not measured; the rate of starts is what differed from the first study.
 
-**Crash study, second run, on the fixed code (2026-11-02, 5:44 to 6:59 pm ET, code
+**Crash study, second run, on the fixed code (2026-11-02, 5:44 to 7:26 pm ET, code
 d90fea3).** The same 69 tasks with the same kill points, 16 at a time, one start every
 10 seconds, no retries, $5.14 of model time. No run raised an exception or broke.
 Kills landed in 60 runs and all 60 recovered: each new process ran, the goal ended by
@@ -371,8 +371,13 @@ Added after a search found a concurrent project with a matched no-kill group, an
 because the unkilled runs above came earlier, on older code and at another pace. The
 same 69 tasks once, with the same code, pace and settings, and no kill: 32 of 69
 solved, no exceptions, $5.19. Against the second kill run, task by task: 30 of 69
-solved with a kill, 32 of 69 without, -2.9 points, 95% [-13.0, +5.8], better on 5
+solved with a kill, 32 of 69 without, -2.9 points, 95% [-13.0, +7.2], better on 5
 tasks, worse on 7, same on 57, exact sign test p = 0.77. Over the 60 tasks whose kill
 landed, 22 against 25, -5.0 points, [-16.7, +5.0]. Median run length was 519 seconds
 with a kill and 505 without.
 
+**Corrections (2026-11-05).** An independent recount from the raw files changed four statements above: the main
+run's arms ended at 4:18 am and its grading at 6:49 am, not "12:06 to 6:30 am"; the second crash run ended at
+7:26 pm, not 6:59 pm (a maximum had been taken over clock times across midnight); the critics' difference is
++0.53 points, not +0.6 (computed from rounded rates); and the matched control's interval is [-13.0, +7.2], not
+[-13.0, +5.8], which only one bootstrap seed reproduced, while the exact bootstrap gives +7.2.
