@@ -27,12 +27,20 @@ from studies.memory_bench import lme, locomo
 from studies.memory_bench.headers import served_ask, stored_writer, write_all
 from studies.memory_bench.reader import ServedJudge, read_all
 from studies.memory_bench.runner import retrieve_conversation, retrieve_one, validate
-from studies.memory_bench.systems import FlatBm25, FullContext, NoMemory, Oracle, System, TasteGit
+from studies.memory_bench.systems import (
+    FlatBm25,
+    FullContext,
+    NoMemory,
+    Oracle,
+    Precomputed,
+    System,
+    TasteGit,
+)
 from studies.memory_ledger import code_version
 
 
 def make_system(name: str, gold: lme.Gold | None, workdir: Path, *, unit: str = "round", commit_per: str = "session",
-                headers: Path | None = None) -> System:
+                headers: Path | None = None, rankings: Path | None = None) -> System:
     if name == "none":
         return NoMemory()
     if name == "full":
@@ -43,6 +51,10 @@ def make_system(name: str, gold: lme.Gold | None, workdir: Path, *, unit: str = 
         return Oracle(gold)
     if name == "flat_bm25":
         return FlatBm25(unit=unit)
+    if name == "precomputed":
+        if rankings is None:
+            raise ValueError("precomputed needs --rankings")
+        return Precomputed(rankings)
     if name == "taste_git":
         return TasteGit(workdir, unit=unit, commit_per=commit_per)
     if name == "taste_git_headers":
@@ -69,7 +81,8 @@ def _one(job: tuple[dict, Any, dict[str, Any]]) -> list[dict[str, Any]]:
     single = settings["benchmark"] == "lme"
     system = make_system(settings["system"], gold if single else None, Path(settings["workdir"]), unit=settings["unit"],
                          commit_per=settings["commit_per"],
-                         headers=Path(settings["headers"]) if settings["headers"] else None)
+                         headers=Path(settings["headers"]) if settings["headers"] else None,
+                         rankings=Path(settings["rankings"]) if settings["rankings"] else None)
     count = _counter(settings["tokenizer"])
     if single:
         return [retrieve_one(view, gold, system, budget=settings["budget"], count=count)]
@@ -112,7 +125,8 @@ def retrieve(arguments: argparse.Namespace) -> int:
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
     done = {json.loads(line)["qid"] for line in out.read_text().splitlines()} if out.exists() else set()
     settings = {key: getattr(arguments, key) for key in
-                ("benchmark", "system", "part", "budget", "tokenizer", "unit", "commit_per", "workdir", "headers")}
+                ("benchmark", "system", "part", "budget", "tokenizer", "unit", "commit_per", "workdir", "headers",
+                 "rankings")}
     if arguments.benchmark == "lme":
         jobs = [(view, golds[view["qid"]], settings) for view in views if view["qid"] not in done]
     else:
@@ -134,6 +148,34 @@ def _client(url: str) -> Any:
     from openai import OpenAI
 
     return OpenAI(base_url=url, api_key="EMPTY", timeout=3600)
+
+
+def views(arguments: argparse.Namespace) -> int:
+    """The one ingest every system shares, with nothing a memory may not see: per unit its sessions, oldest first,
+    and each question's own words. Systems that run in environments of their own read this file."""
+    import hashlib
+
+    wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
+    data = json.loads(Path(arguments.data).read_text())
+    units = []
+    if arguments.benchmark == "lme":
+        loaded, _ = lme.load([item for item in data if item["question_id"] in wanted])
+        units = [{"unit": v["qid"], "sessions": v["sessions"], "queries": [{"qid": v["qid"], "query": v["question"]}]}
+                 for v in loaded]
+    else:
+        loaded, _ = locomo.load([sample for sample in data if sample["sample_id"] in wanted])
+        units = [{"unit": v["conversation"], "sessions": v["sessions"],
+                  "queries": [{"qid": q["qid"], "query": q["query"]} for q in v["questions"]]} for v in loaded]
+    out = Path(arguments.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(json.dumps(unit) + "\n" for unit in units))
+    summary = {"benchmark": arguments.benchmark, "part": arguments.part, "units": len(units),
+               "queries": sum(len(u["queries"]) for u in units),
+               "data_sha256": hashlib.sha256(Path(arguments.data).read_bytes()).hexdigest(),
+               "sha256": hashlib.sha256(out.read_bytes()).hexdigest()}
+    out.with_name(out.stem + ".summary.json").write_text(json.dumps(summary, indent=1))
+    print(json.dumps(summary))
+    return 0
 
 
 def headers(arguments: argparse.Namespace) -> int:
@@ -188,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     stage.add_argument("--unit", default="round", choices=("round", "session"))
     stage.add_argument("--commit-per", default="session", choices=("round", "session"))
     stage.add_argument("--headers")
+    stage.add_argument("--rankings", help="a precomputed system's rankings file, made in its own environment")
     stage.add_argument("--frozen-config")
     stage.add_argument("--workers", type=int, default=8)
     stage.set_defaults(run=retrieve)
@@ -204,6 +247,13 @@ def main(argv: list[str] | None = None) -> int:
         stage.add_argument("--effort")
         stage.add_argument("--workers", type=int, default=12)
         stage.set_defaults(run=run)
+
+    stage = stages.add_parser("views", help="the shared, memory-visible ingest file")
+    for argument in ("data", "split", "out"):
+        stage.add_argument(f"--{argument}", required=True)
+    stage.add_argument("--part", required=True, choices=("dev", "held_out"))
+    stage.add_argument("--benchmark", default="lme", choices=("lme", "locomo"))
+    stage.set_defaults(run=views)
 
     stage = stages.add_parser("score", help="LoCoMo only: the official judge-free score")
     for argument in ("answers", "data", "split", "out"):
