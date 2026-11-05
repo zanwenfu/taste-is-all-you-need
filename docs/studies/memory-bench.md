@@ -45,8 +45,9 @@ to keyword search, not to version control. Only the header can move Taste's row.
 
 - **LongMemEval-S**, the cleaned release at revision `98d7416c`, sha256 `d6f21ea9…c3a442`, 500 questions. Dev
   50, held-out 450, grouped so a question stays with its `_abs` twin (seed 20261105).
-- **LoCoMo** (`locomo10.json`, commit and hash recorded at setup), 10 conversations, split whole: 2 dev,
-  8 held-out. Categories 1-4 are scored; the 446 adversarial questions are reported apart.
+- **LoCoMo** (`locomo10.json` at commit `3eb6f2c5`, sha256 `79fa87e9…98ff4`), 10 conversations, split whole in
+  `data/splits/memory-bench-locomo.json`: 2 dev, 8 held-out. Categories 1-4 are scored; the 446 adversarial
+  questions are reported apart.
 - **ConPact SWE-Natural** (126 cases): compliance after one compaction, every system given the same token cap
   and no query.
 
@@ -86,6 +87,9 @@ hash is recorded.
 - MemPalace raw on LongMemEval-S: `recall_any@5` 0.966, `@10` 0.982, NDCG@10 0.889, as published.
 - MemPalace on LoCoMo, top 10: session 0.603, dialog 0.480.
 - A gap over 0.5 points blocks that system's numbers until it is explained.
+- The MemPalace adapter is checked against the per-question ranked lists MemPalace committed at its release.
+  This ranks all 500 LongMemEval questions, held-out included, for MemPalace alone and with its published
+  settings. No setting is chosen from it, no answer is read, and the held-out run is a separate run.
 - The LongMemEval oracle with Llama 3.1 70B: 0.848 published with the official judge, 0.814 here with
   GPT-5.4; the gap is stated, not removed.
 

@@ -3,8 +3,8 @@
 * **Benchmark arm** (what MemPalace's published numbers mean): its own benchmark functions, imported from the
   repository at the release commit. LongMemEval: ``build_palace_and_retrieve`` (raw) or
   ``build_palace_and_retrieve_hybrid_v4``, with ``n_results`` 50 as published; they index user turns only and rank
-  sessions, and the reader then gets each ranked session whole. LoCoMo: its helpers rebuilt per conversation, as
-  its runner does, at session or dialog level.
+  sessions, and the reader then gets each ranked session whole. LoCoMo: ``LocomoArm``, its helpers rebuilt per
+  conversation, as its runner does, at session or dialog level.
 * **Product arm** (what a user of MemPalace gets): each session written as one Claude Code JSONL file named by its
   neutral id, mined with ``mine_convos`` and searched with ``search_memories``; the reader gets the drawers found.
 
@@ -32,7 +32,9 @@ from studies.memory_bench.core import Item
 from studies.memory_bench.lme import rounds
 
 COMMIT = "602d796c699cabba2971982cd9dccbbf46abfe79"
-ARMS = ("bench_raw", "bench_v4", "product")
+LOCOMO_ARMS = {"locomo_raw_session": ("session", "raw"), "locomo_raw_dialog": ("dialog", "raw"),
+               "locomo_hybrid_session": ("session", "hybrid")}
+ARMS = ("bench_raw", "bench_v4", "product", *LOCOMO_ARMS)
 
 
 def _all_rounds(session: dict) -> tuple[int, ...]:
@@ -103,20 +105,93 @@ class BenchArm:
         pass
 
 
-class ProductArm:
-    """MemPalace as a user runs it: mine the sessions, search the palace, hand the reader the drawers found."""
+class LocomoArm:
+    """LoCoMo, MemPalace's own helpers rebuilt per conversation as its runner does, with no model. Its runner asks for
+    the top ten (three times that for hybrid, then its own re-scoring). Those are kept exactly as published, and the
+    rest of the ranking follows them, so a budget larger than ten sessions still has something to fill."""
 
-    def __init__(self, mine: Any, search: Any, workdir: Path, *, n_results: int = 200,
-                 speakers: tuple[str, str] | None = None) -> None:
-        self.mine, self.search, self.n_results, self.speakers = mine, search, n_results, speakers
+    TOP = 10
+
+    def __init__(self, bench: Any, chroma: Any, workdir: Path, *, granularity: str, mode: str) -> None:
+        self.bench, self.chroma, self.granularity, self.mode = bench, chroma, granularity, mode
+        self.folder = Path(tempfile.mkdtemp(prefix="palace-", dir=workdir))
+
+    def ingest(self, sessions: list[dict]) -> None:
+        self.sessions = sessions
+        conversation: dict[str, Any] = {}
+        for number, session in enumerate(sessions, 1):
+            conversation[f"session_{number}"] = [
+                {"speaker": turn["role"], "text": turn["content"], "dia_id": f"D{number}:{index}"}
+                for index, turn in enumerate(session["turns"], 1)]
+            conversation[f"session_{number}_date_time"] = session["date"]
+        built = self.bench.load_conversation_sessions(conversation, {})
+        corpus, ids, stamps = self.bench.build_corpus_from_sessions(built, granularity=self.granularity)
+        client = self.chroma.PersistentClient(path=str(self.folder / "palace"))
+        self.collection = client.create_collection("mempal_drawers")
+        self.collection.add(documents=corpus, ids=[f"doc_{i}" for i in range(len(corpus))],
+                            metadatas=[{"corpus_id": c, "timestamp": t, "room": "general"}
+                                       for c, t in zip(ids, stamps, strict=True)])
+        self.size = len(corpus)
+
+    def _fused(self, query: str, found: dict) -> list[str]:
+        """Its hybrid score, as its runner computes it."""
+        bench = self.bench
+        names = bench._person_names(query)
+        lowered = {name.lower() for name in names}
+        predicate = [word for word in bench._kw(query) if word not in lowered]
+        quoted = bench._quoted_phrases(query)
+        scored = []
+        for meta, distance, document in zip(found["metadatas"][0], found["distances"][0], found["documents"][0], strict=True):
+            fused = distance * (1.0 - 0.50 * bench._kw_overlap(predicate, document))
+            boost = bench._quoted_boost(quoted, document)
+            if boost > 0:
+                fused *= 1.0 - 0.60 * boost
+            boost = bench._name_boost(names, document)
+            if boost > 0:
+                fused *= 1.0 - 0.20 * boost
+            scored.append((fused, meta["corpus_id"]))
+        scored.sort(key=lambda row: row[0])
+        return [corpus_id for _, corpus_id in scored]
+
+    def retrieve(self, query: str, *, date: str | None = None) -> list[Item]:
+        pool = min(self.TOP * 3 if self.mode == "hybrid" else self.TOP, self.size)
+        found = self.bench._query(self.collection, query, pool, "default")
+        ids = self._fused(query, found) if self.mode == "hybrid" else [m["corpus_id"] for m in found["metadatas"][0]]
+        if pool < self.size:
+            whole = self.bench._query(self.collection, query, self.size, "default")
+            seen = set(ids)
+            ids += [m["corpus_id"] for m in whole["metadatas"][0] if m["corpus_id"] not in seen]
+        return [self._item(corpus_id) for corpus_id in ids]
+
+    def _item(self, corpus_id: str) -> Item:
+        source = f"mempalace:locomo:{corpus_id}"
+        whole = re.fullmatch(r"session_(\d+)", corpus_id)
+        if whole:
+            session = self.sessions[int(whole.group(1)) - 1]
+            return Item(session["sid"], session["date"], tuple(session["turns"]), _all_rounds(session), source)
+        number, index = re.fullmatch(r"D(\d+):(\d+)", corpus_id).groups()
+        session = self.sessions[int(number) - 1]
+        return Item(session["sid"], session["date"], (session["turns"][int(index) - 1],), (int(index) - 1,), source)
+
+    def close(self) -> None:
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+
+class ProductArm:
+    """MemPalace as a user runs it: mine the sessions, search the palace, hand the reader the drawers found. A drawer
+    MemPalace folded from several sessions (identical text) is delivered once, and its source names the others."""
+
+    def __init__(self, mine: Any, search: Any, workdir: Path, *, n_results: int = 200) -> None:
+        self.mine, self.search, self.n_results = mine, search, n_results
         self.folder = Path(tempfile.mkdtemp(prefix="palace-", dir=workdir))
 
     def ingest(self, sessions: list[dict]) -> None:
         self.by_sid = {s["sid"]: s for s in sessions}
         conversations = self.folder / "conversations"
         conversations.mkdir()
+        people = tuple(dict.fromkeys(t["role"] for s in sessions for t in s["turns"] if t["role"] not in ("user", "assistant")))
         for session in sessions:
-            (conversations / f"{session['sid']}.jsonl").write_text(claude_code_jsonl(session, self.speakers))
+            (conversations / f"{session['sid']}.jsonl").write_text(claude_code_jsonl(session, people or None))
         self.mine(convo_dir=str(conversations), palace_path=str(self.folder / "palace"), wing="eval", agent="adapter")
 
     def retrieve(self, query: str, *, date: str | None = None) -> list[Item]:
@@ -127,8 +202,9 @@ class ProductArm:
         for hit in found["results"]:
             sid = Path(hit["source_path"]).stem
             session = self.by_sid[sid]
+            others = "".join(f"|also:{Path(copy['source_path']).stem}" for copy in hit.get("also_in") or [])
             items.append(Item(sid, session["date"], ({"role": "memory", "content": hit["text"]},), (),
-                              f"mempalace:product:{hit.get('drawer_id', '')}"))
+                              f"mempalace:product:{hit.get('drawer_id', '')}{others}"))
         return items
 
     def close(self) -> None:
@@ -161,6 +237,12 @@ def main(argv: list[str] | None = None) -> int:
 
         def make() -> ProductArm:
             return ProductArm(mine_convos, search_memories, Path(arguments.workdir), n_results=arguments.n_results)
+    elif arguments.arm in LOCOMO_ARMS:
+        bench = load_bench(Path(arguments.repo), "locomo_bench")
+        granularity, mode = LOCOMO_ARMS[arguments.arm]
+
+        def make() -> LocomoArm:
+            return LocomoArm(bench, chromadb, Path(arguments.workdir), granularity=granularity, mode=mode)
     else:
         bench = load_bench(Path(arguments.repo), "longmemeval_bench")
 

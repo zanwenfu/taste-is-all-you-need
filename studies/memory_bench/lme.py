@@ -7,9 +7,11 @@ dedupes bytes would otherwise differ from a flat list for no reason worth measur
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from studies.context_rot.lme_clean import clean, neutral
+from studies.memory_bench.core import Item
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,33 @@ def turns_text(turns: list[dict]) -> str:
 def unit_text(date: str, turns: list[dict]) -> str:
     """What every keyword or dense system indexes for a unit: the same date line, both roles."""
     return f"Session date: {date}\n" + turns_text(turns)
+
+
+@dataclass(frozen=True)
+class Unit:
+    """What a keyword or dense system holds and ranks: a round, or a whole session."""
+
+    path: str  # neutral: a hash of the session and a number, so a file name can leak nothing
+    session: str
+    date: str
+    numbers: tuple[int, ...]
+    turns: tuple[dict, ...]
+    text: str
+
+    def item(self) -> Item:
+        return Item(self.session, self.date, self.turns, self.numbers, self.path)
+
+
+def units_of(session: dict, unit: str) -> Iterator[Unit]:
+    parts = rounds(session)
+    if unit == "session":
+        turns = [turn for part in parts for turn in part]
+        yield Unit(f"{session['sid']}/session.md", session["sid"], session["date"],
+                   tuple(range(len(parts))), tuple(turns), unit_text(session["date"], turns))
+        return
+    for number, part in enumerate(parts):
+        yield Unit(f"{session['sid']}/r{number:03d}.md", session["sid"], session["date"],
+                   (number,), tuple(part), unit_text(session["date"], part))
 
 
 def _gold(item: dict, sessions: list[dict]) -> Gold:

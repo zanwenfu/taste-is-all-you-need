@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -51,15 +52,23 @@ def _parses(text: str) -> bool:
 
 
 class Counted:
-    """Wraps the model behind Mem0 to count its calls and the replies that do not parse as one JSON object."""
+    """Wraps the model behind Mem0 to count its calls and the replies that do not parse as one JSON object. With a
+    log, every reply is kept whole, so what the parse rate counts can be read."""
 
-    def __init__(self, llm: Any) -> None:
-        self.llm, self.calls, self.unparsed = llm, 0, 0
+    def __init__(self, llm: Any, log: Path | None = None) -> None:
+        self.llm, self.log, self.calls, self.unparsed = llm, log, 0, 0
 
     def generate_response(self, *args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
         reply = self.llm.generate_response(*args, **kwargs)
+        seconds = time.perf_counter() - started
+        text = reply if isinstance(reply, str) else json.dumps(reply)
+        parsed = _parses(text)
         self.calls += 1
-        self.unparsed += not _parses(reply if isinstance(reply, str) else json.dumps(reply))
+        self.unparsed += not parsed
+        if self.log is not None:
+            with self.log.open("a") as written:
+                written.write(json.dumps({"seconds": seconds, "parsed": parsed, "reply": text}) + "\n")
         return reply
 
     def __getattr__(self, name: str) -> Any:
@@ -133,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("Mem0 is not using the served model and the local embedder")
     if not getattr(memory.vector_store, "_has_bm25_slot", False):
         raise SystemExit("Mem0's keyword search is off; install fastembed")
-    counted = Counted(memory.llm)
+    counted = Counted(memory.llm, log=Path(arguments.out).with_suffix(".replies.jsonl"))
     memory.llm = counted
     versions = {"mem0ai": mem0.__version__, "embedder": arguments.embedder, "model": arguments.model}
     counts = run_adapter(Path(arguments.views), Path(arguments.out), lambda: Mem0Arm(memory, top_k=arguments.top_k),

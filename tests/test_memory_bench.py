@@ -19,7 +19,6 @@ from studies.memory_bench.runner import retrieve_one, validate
 from studies.memory_bench.splits import grouped_split
 from studies.memory_bench.systems import (
     FlatBm25,
-    FlatDense,
     FullContext,
     NoMemory,
     Oracle,
@@ -286,18 +285,6 @@ def test_a_session_can_be_the_unit(question, tmp_path: Path) -> None:
         ]
     finally:
         taste.close()
-
-
-def test_flat_dense_ranks_by_cosine_with_the_embedder_it_is_given(question) -> None:
-    view, _ = question
-
-    def embed(texts: list[str]) -> list[list[float]]:
-        return [[1.0, 0.0] if "park" in text.lower() else [0.0, 1.0] for text in texts]
-
-    system = FlatDense(embed)
-    system.ingest(view["sessions"])
-    assert system.retrieve("park")[0].turns[0]["content"] == "I parked the rental on level 3."
-    assert system.ledger()["name"] == BASELINE
 
 
 def test_no_memory_offers_nothing(question) -> None:

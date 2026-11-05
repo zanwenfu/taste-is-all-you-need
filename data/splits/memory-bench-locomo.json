@@ -1,0 +1,22 @@
+{
+ "study": "memory-bench",
+ "benchmark": "LoCoMo, locomo10.json at snap-research/locomo commit 3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376",
+ "source_file": "data/locomo10.json",
+ "source_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+ "seed": 20261105,
+ "method": "studies/memory_bench/locomo.py conversation_split: whole conversations, drawn by keyed hash",
+ "dev": [
+  "conv-48",
+  "conv-49"
+ ],
+ "held_out": [
+  "conv-26",
+  "conv-30",
+  "conv-41",
+  "conv-42",
+  "conv-43",
+  "conv-44",
+  "conv-47",
+  "conv-50"
+ ]
+}

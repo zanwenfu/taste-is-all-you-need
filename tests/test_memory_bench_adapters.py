@@ -91,6 +91,7 @@ def test_what_an_adapter_writes_is_read_back_by_the_study(tmp_path: Path) -> Non
 
 from studies.memory_bench.adapters.mempalace_arms import (  # noqa: E402
     BenchArm,
+    LocomoArm,
     ProductArm,
     claude_code_jsonl,
     iso_date,
@@ -170,6 +171,220 @@ def test_the_product_arm_mines_the_files_and_maps_each_drawer_to_its_session(tmp
     assert [(i.session, i.date) for i in items] == [("sB", "2023/05/02 (Tue) 10:30"), ("sA", "2023/05/01 (Mon) 09:00")]
     assert items[0].turns == ({"role": "memory", "content": "> Parked on level 3.\nNoted."},) and items[0].rounds == ()
     assert not any(tmp_path.iterdir())
+
+
+def test_a_drawer_mempalace_folded_from_several_sessions_says_which(tmp_path: Path) -> None:
+    def search(query, palace_path, n_results):
+        return {"results": [{"text": "shared", "source_path": "/x/sB.jsonl", "drawer_id": "d1",
+                             "also_in": [{"drawer_id": "d2", "source_path": "/x/sA.jsonl"}]}]}
+
+    arm = ProductArm(lambda **kwargs: None, search, tmp_path)
+    arm.ingest(_sessions())
+    (item,) = arm.retrieve("x")
+    arm.close()
+    assert item.session == "sB" and item.source == "mempalace:product:d1|also:sA"
+
+
+def test_the_product_arm_finds_the_two_people_of_a_talk_itself(tmp_path: Path) -> None:
+    written = {}
+
+    def mine(convo_dir, palace_path, wing, agent):
+        written.update({f.stem: f.read_text() for f in Path(convo_dir).iterdir()})
+
+    two = [{"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True,
+            "turns": [{"role": "Caroline", "content": "Hi."}, {"role": "Melanie", "content": "Hello."}]}]
+    arm = ProductArm(mine, lambda *a, **k: {"results": []}, tmp_path)
+    arm.ingest(two)
+    arm.close()
+    lines = [json.loads(line) for line in written["s1"].splitlines()]
+    assert [line["type"] for line in lines] == ["user", "assistant"]
+    assert lines[1]["message"]["content"] == "Melanie: Hello."
+
+
+# ------------------------------------------------------------------ MemPalace on LoCoMo, its helpers stood in for
+
+
+class _Collection:
+    def __init__(self) -> None:
+        self.added, self.queries = {}, []
+
+    def add(self, documents, ids, metadatas):
+        self.added = {"documents": documents, "ids": ids, "metadatas": metadatas}
+
+
+class _Client:
+    collection = None
+
+    def __init__(self, path):
+        self.path = path
+
+    def create_collection(self, name):
+        assert name == "mempal_drawers"
+        _Client.collection = _Collection()
+        return _Client.collection
+
+
+class _Chroma:
+    PersistentClient = _Client
+
+
+class _LocomoBench:
+    """Rank by a fixed order; the real helpers are checked on Duke against MemPalace's committed lists."""
+
+    def __init__(self, order: list[str], distances: dict[str, float] | None = None) -> None:
+        self.order, self.distances = order, distances or {}
+
+    def load_conversation_sessions(self, conversation, session_summaries=None):
+        self.conversation = conversation
+        numbers = [int(k.split("_")[1]) for k in conversation if k.endswith("_date_time")]
+        return [{"session_num": n, "date": conversation[f"session_{n}_date_time"],
+                 "dialogs": conversation[f"session_{n}"], "summary": ""} for n in sorted(numbers)]
+
+    def build_corpus_from_sessions(self, sessions, granularity="dialog"):
+        corpus, ids, stamps = [], [], []
+        for session in sessions:
+            if granularity == "session":
+                corpus.append("\n".join(f'{d["speaker"]} said, "{d["text"]}"' for d in session["dialogs"]))
+                ids.append(f"session_{session['session_num']}")
+                stamps.append(session["date"])
+            else:
+                for dialog in session["dialogs"]:
+                    corpus.append(f'{dialog["speaker"]} said, "{dialog["text"]}"')
+                    ids.append(dialog["dia_id"])
+                    stamps.append(session["date"])
+        return corpus, ids, stamps
+
+    def _query(self, collection, question, n_results, embed_model, include=None, where=None):
+        assert embed_model == "default"
+        collection.queries.append(n_results)
+        ids = self.order[:n_results]
+        documents = {m["corpus_id"]: d for m, d in zip(collection.added["metadatas"], collection.added["documents"], strict=True)}
+        return {"metadatas": [[{"corpus_id": c} for c in ids]], "documents": [[documents[c] for c in ids]],
+                "distances": [[self.distances.get(c, 0.5) for c in ids]]}
+
+    def _person_names(self, text):
+        return []
+
+    def _kw(self, text):
+        return [word for word in text.lower().split() if len(word) > 2]
+
+    def _kw_overlap(self, keywords, document):
+        return sum(k in document.lower() for k in keywords) / len(keywords) if keywords else 0.0
+
+    def _quoted_phrases(self, text):
+        return []
+
+    def _quoted_boost(self, phrases, document):
+        return 0.0
+
+    def _name_boost(self, names, document):
+        return 0.0
+
+
+def _talk() -> list[dict]:
+    return [{"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True,
+             "turns": [{"role": "Caroline", "content": "Hi."}, {"role": "Melanie", "content": "I run races."}]},
+            {"sid": "s2", "date": "2:00 pm on 9 May, 2023", "each_turn_is_a_round": True,
+             "turns": [{"role": "Melanie", "content": "My dog barks."}]}]
+
+
+def test_the_locomo_arm_gives_mempalace_the_conversation_in_its_own_shape(tmp_path: Path) -> None:
+    bench = _LocomoBench(["session_2", "session_1"])
+    arm = LocomoArm(bench, _Chroma, tmp_path, granularity="session", mode="raw")
+    arm.ingest(_talk())
+    assert bench.conversation["session_1"][1] == {"speaker": "Melanie", "text": "I run races.", "dia_id": "D1:2"}
+    assert bench.conversation["session_2_date_time"] == "2:00 pm on 9 May, 2023"
+    added = _Client.collection.added
+    assert added["ids"] == ["doc_0", "doc_1"]
+    assert added["metadatas"][0] == {"corpus_id": "session_1", "timestamp": "1:56 pm on 8 May, 2023", "room": "general"}
+    first, second = arm.retrieve("Who barks?")
+    assert (first.session, first.rounds, len(first.turns)) == ("s2", (0,), 1)
+    assert (second.session, second.rounds, len(second.turns)) == ("s1", (0, 1), 2)
+    arm.close()
+    assert not any(tmp_path.iterdir())
+
+
+def test_at_dialog_level_each_hit_is_its_turn(tmp_path: Path) -> None:
+    bench = _LocomoBench(["D1:2", "D2:1", "D1:1"])
+    arm = LocomoArm(bench, _Chroma, tmp_path, granularity="dialog", mode="raw")
+    arm.ingest(_talk())
+    items = arm.retrieve("Who runs?")
+    arm.close()
+    assert [(i.session, i.rounds) for i in items] == [("s1", (1,)), ("s2", (0,)), ("s1", (0,))]
+    assert items[0].turns == ({"role": "Melanie", "content": "I run races."},)
+
+
+def test_the_top_ten_is_asked_as_published_and_the_rest_follow_in_its_ranking(tmp_path: Path) -> None:
+    """The published run asks for ten; the reader may need more, so the whole list follows those ten, unchanged."""
+    order = [f"D1:{n}" for n in range(1, 21)]
+    session = {"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True,
+               "turns": [{"role": "A", "content": f"turn {n}"} for n in range(1, 21)]}
+    arm = LocomoArm(_LocomoBench(order), _Chroma, tmp_path, granularity="dialog", mode="raw")
+    arm.ingest([session])
+    items = arm.retrieve("anything")
+    arm.close()
+    assert _Client.collection.queries == [10, 20]
+    assert [i.rounds[0] for i in items] == list(range(20))
+
+
+def test_hybrid_rescores_only_its_own_pool_with_its_own_formula(tmp_path: Path) -> None:
+    """Three times the top ten by distance, re-scored by keyword overlap; the rest stay in plain order behind them."""
+    order = [f"D1:{n}" for n in range(1, 41)]
+    session = {"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True,
+               "turns": [{"role": "A", "content": "zebra" if n == 30 else f"turn {n}"} for n in range(1, 41)]}
+    arm = LocomoArm(_LocomoBench(order, {c: 0.5 for c in order}), _Chroma, tmp_path, granularity="dialog", mode="hybrid")
+    arm.ingest([session])
+    items = arm.retrieve("zebra")
+    arm.close()
+    assert _Client.collection.queries == [30, 40]
+    ranks = [i.rounds[0] for i in items]
+    assert ranks[0] == 29, "the turn holding the keyword rises to the top of the pool"
+    assert ranks[30:] == list(range(30, 40)), "turns outside the pool keep their plain order"
+    assert sorted(ranks) == list(range(40))
+
+
+from studies.memory_bench.adapters.check_mempalace import compare_locomo  # noqa: E402
+
+
+def test_the_locomo_check_compares_each_question_with_mempalaces_committed_list() -> None:
+    published = [{"sample_id": "conv-1", "retrieved_ids": ["session_2", "session_1"], "recall": 1.0},
+                 {"sample_id": "conv-1", "retrieved_ids": ["session_1", "session_2"], "recall": 0.0},
+                 {"sample_id": "conv-2", "retrieved_ids": ["session_1"], "recall": 0.5}]
+    s = lambda sample, n: neutral("s", f"{sample}/{n}")  # noqa: E731
+    rankings = [{"qid": neutral("q", "conv-1:0"), "items": [{"session": s("conv-1", 2)}, {"session": s("conv-1", 1)}]},
+                {"qid": neutral("q", "conv-1:1"), "items": [{"session": s("conv-1", 2)}, {"session": s("conv-1", 1)}]},
+                {"qid": neutral("q", "conv-2:0"), "items": [{"session": s("conv-2", 1)}]}]
+    result = compare_locomo(published, rankings)
+    assert result["compared"] == 3 and result["same_top10"] == 2
+    assert result["published_mean_recall"] == pytest.approx(0.5)
+    assert result["differing_top10"] == [neutral("q", "conv-1:1")]
+
+
+# ------------------------------------------------------------------ the shared meaning-based baseline
+
+from studies.memory_bench.adapters.flat_dense import FlatDenseArm  # noqa: E402
+
+
+def test_flat_dense_ranks_every_unit_by_similarity_with_the_same_text_as_the_keyword_list() -> None:
+    seen = []
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        seen.extend(texts)
+        return [[1.0, 0.0] if "park" in text.lower() else [0.0, 1.0] for text in texts]
+
+    arm = FlatDenseArm(embed)
+    arm.ingest(_sessions())
+    items = arm.retrieve("park")
+    assert seen[0] == "Session date: 2023/05/01 (Mon) 09:00\nuser: My dog is Biscuit.\nassistant: Nice.\n"
+    assert (items[0].session, items[0].rounds) == ("sB", (0,))
+    assert len(items) == 3 and items[0].turns[0]["content"] == "Parked on level 3."
+    arm.close()
+
+
+def test_a_tie_goes_to_the_newest_as_it_does_in_taste_search() -> None:
+    arm = FlatDenseArm(lambda texts: [[1.0, 0.0] for _ in texts])
+    arm.ingest(_sessions())
+    assert [(i.session, i.rounds) for i in arm.retrieve("x")] == [("sB", (1,)), ("sB", (0,)), ("sA", (0,))]
 
 
 def test_a_search_error_is_raised_not_ranked_as_nothing(tmp_path: Path) -> None:
@@ -252,6 +467,17 @@ def test_the_served_models_json_replies_are_counted() -> None:
     for _ in range(3):
         counted.generate_response([], response_format={"type": "json_object"})
     assert (counted.calls, counted.unparsed) == (3, 1) and counted.config == 7
+
+
+def test_every_reply_is_logged_whole_so_it_can_be_read(tmp_path: Path) -> None:
+    log = tmp_path / "replies.jsonl"
+    replies = iter(['{"memory": []}', "Sure!"])
+    counted = Counted(type("L", (), {"generate_response": lambda self, *a, **k: next(replies)})(), log=log)
+    counted.generate_response([])
+    counted.generate_response([])
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [(row["parsed"], row["reply"]) for row in rows] == [(True, '{"memory": []}'), (False, "Sure!")]
+    assert all(row["seconds"] >= 0 for row in rows)
 
 
 def test_the_configuration_names_the_served_model_and_a_local_embedder_only() -> None:

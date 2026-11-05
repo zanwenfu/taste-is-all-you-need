@@ -3,52 +3,24 @@
 Each takes the same sessions, oldest first, and offers a ranked list of items. ``FlatBm25`` and
 ``TasteGit`` with headers off hold the same text under the same keyword code, so they must rank the same;
 a test holds them to it, and any gain they show belongs to keyword search and not to git. Only the header
-can move Taste's row. MemPalace and Mem0 have adapters of their own, in their own environments.
+can move Taste's row. MemPalace, Mem0 and the dense baseline run as adapters, in environments of their own.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import shutil
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from studies.memory_bench.core import Item, rankings_line  # noqa: F401 - rankings_line is re-exported
-from studies.memory_bench.lme import Gold, rounds, unit_text
+from studies.memory_bench.lme import Gold, Unit, rounds, units_of
 from studies.memory_ledger import BASELINE, stand_in_record, taste_record
 from taste.memstore import CommitHeader, Pointer, Store
 from taste.memstore.keyword import Bm25, tokens
-
-
-@dataclass(frozen=True)
-class _Unit:
-    path: str  # neutral: a hash of the session and a number, so a file name can leak nothing
-    session: str
-    date: str
-    numbers: tuple[int, ...]
-    turns: tuple[dict, ...]
-    text: str
-
-
-def _units(session: dict, unit: str) -> Iterator[_Unit]:
-    parts = rounds(session)
-    if unit == "session":
-        turns = [turn for part in parts for turn in part]
-        yield _Unit(f"{session['sid']}/session.md", session["sid"], session["date"],
-                    tuple(range(len(parts))), tuple(turns), unit_text(session["date"], turns))
-        return
-    for number, part in enumerate(parts):
-        yield _Unit(f"{session['sid']}/r{number:03d}.md", session["sid"], session["date"],
-                    (number,), tuple(part), unit_text(session["date"], part))
-
-
-def _item(unit: _Unit) -> Item:
-    return Item(unit.session, unit.date, unit.turns, unit.numbers, unit.path)
 
 
 class System:
@@ -82,7 +54,7 @@ class FullContext(System):
     own truncation keeps the start and silently loses the newest."""
 
     def retrieve(self, query: str, qid: str | None = None) -> list[Item]:
-        return [_item(next(_units(session, "session"))) for session in reversed(self.sessions)]
+        return [next(units_of(session, "session")).item() for session in reversed(self.sessions)]
 
 
 class Oracle(System):
@@ -90,7 +62,7 @@ class Oracle(System):
         self.gold = gold
 
     def retrieve(self, query: str, qid: str | None = None) -> list[Item]:
-        return [_item(next(_units(s, "session"))) for s in self.sessions if s["sid"] in self.gold.sessions]
+        return [next(units_of(s, "session")).item() for s in self.sessions if s["sid"] in self.gold.sessions]
 
 
 class FlatBm25(System):
@@ -100,35 +72,13 @@ class FlatBm25(System):
         self.unit = unit
 
     def ingest(self, sessions: list[dict], unit: str | None = None) -> None:
-        self.units = [unit for session in sessions for unit in _units(session, self.unit)]
+        self.units = [unit for session in sessions for unit in units_of(session, self.unit)]
         self.index = Bm25()
         for unit in self.units:
             self.index.add(tokens(unit.text))
 
     def retrieve(self, query: str, qid: str | None = None) -> list[Item]:
-        return [_item(self.units[doc]) for doc, _ in self.index.rank(tokens(query))]
-
-
-class FlatDense(System):
-    """The same units ranked by cosine similarity, with the one embedder every system shares."""
-
-    def __init__(self, embed: Callable[[list[str]], Sequence[Sequence[float]]], unit: str = "round") -> None:
-        self.embed, self.unit = embed, unit
-
-    def ingest(self, sessions: list[dict], unit: str | None = None) -> None:
-        self.units = [unit for session in sessions for unit in _units(session, self.unit)]
-        self.vectors = self.embed([unit.text for unit in self.units])
-
-    def retrieve(self, query: str, qid: str | None = None) -> list[Item]:
-        wanted = self.embed([query])[0]
-        scored = [(_cosine(wanted, vector), number) for number, vector in enumerate(self.vectors)]
-        scored.sort(key=lambda pair: (-pair[0], -pair[1]))
-        return [_item(self.units[number]) for _, number in scored]
-
-
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(x * x for x in b))
-    return sum(x * y for x, y in zip(a, b, strict=True)) / norm if norm else 0.0
+        return [self.units[doc].item() for doc, _ in self.index.rank(tokens(query))]
 
 
 class TasteGit(System):
@@ -145,7 +95,7 @@ class TasteGit(System):
         self.folder = Path(tempfile.mkdtemp(prefix="store-", dir=workdir))
         self.store = Store.open(self.folder / "repo", "memory-bench")
         self.branch = self.store.branch("memory", producer="memory-bench")
-        self.units: dict[str, _Unit] = {}
+        self.units: dict[str, Unit] = {}
         self.held_at: dict[str, str] = {}
         self.files_of: dict[str, list[str]] = {}
         self.commits = 0
@@ -161,7 +111,7 @@ class TasteGit(System):
         for session in sessions:
             header = self.header_writer(session) if self.header_writer else None
             waiting: list[str] = []
-            for unit in _units(session, self.unit):
+            for unit in units_of(session, self.unit):
                 self.branch.write(unit.path, unit.text.encode("utf-8", "surrogateescape"))
                 self.units[unit.path] = unit
                 waiting.append(unit.path)
@@ -176,7 +126,7 @@ class TasteGit(System):
         pointer = Pointer("memory-bench", "memory", self.held_at[path], "file", path, 1)
         if self.store.fetch(pointer).text != unit.text:
             raise ValueError(f"the store does not hold what went in at {path}")
-        return _item(unit)
+        return unit.item()
 
     def retrieve(self, query: str, qid: str | None = None) -> list[Item]:
         kinds = ("file", "message") if self.header_writer else ("file",)
