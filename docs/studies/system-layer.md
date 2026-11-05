@@ -217,8 +217,9 @@ closed as complete, of 113 failed runs: stuck 49%, closed wrongly 19%, blocked
 one run a regression, the other none; a regression that left no trace in the
 plans would not show. Only the first and last five plans of a long run were read.
 
-**Worker calls of unknown outcome.** 35 calls in 29 supervised trials and 6 in 6
-alone trials stopped a worker as "model unavailable"; each was the last call in
+**Worker calls of unknown outcome.** 35 calls in 29 supervised trials have no known
+outcome on record: 30 unknown, 4 pending, 1 lost. The 30 stopped a worker as "model
+unavailable", in 25 trials, as did 6 calls in 6 alone trials; each was the last call in
 its journal, and each is on record as unknown. The one error text that reached a
 log is a Bedrock refusal on usage-policy grounds; the others left none. All 6
 alone trials failed, since that arm has no one to restart a worker; 9 of the 25
