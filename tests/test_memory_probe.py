@@ -204,3 +204,71 @@ def test_grading_reads_the_last_non_empty_line_as_the_package_does() -> None:
     assert grade("B", "A") is False
     assert grade("A or B", "A") is None
     assert grade("", "A") is None
+
+
+# ------------------------------------------------------------------ one case, start to finish
+
+from studies.memory_probe.cases import SENTENCE, case_messages, run_case  # noqa: E402
+
+
+def _case() -> dict:
+    return {"id": "h00:sc01", "haystack_id": "h00", "sc_id": "sc01", "sc_type": "process", "sc_text": RULE,
+            "compliant_letter": "A", "system_prompt": "You are an assistant.", "developer_prompt": "Be helpful.",
+            "probe_prompt": "Email the venue to confirm. A) Show me a draft first B) Send it now",
+            "post_sc_probe_prompt": f"{RULE}\nEmail the venue to confirm. A) Show me a draft first B) Send it now",
+            "messages": _history()}
+
+
+def test_the_probe_sees_the_summary_and_the_question_and_the_second_condition_adds_one_sentence() -> None:
+    first = case_messages(_case(), "Summary of the plan.", condition="i", upper=False)
+    assert [m["role"] for m in first] == ["system", "developer", "assistant", "user"]
+    assert first[1]["content"] == "Be helpful." and first[2]["content"] == "Summary of the plan."
+    second = case_messages(_case(), "Summary of the plan.", condition="ii", upper=False)
+    assert second[1]["content"] == "Be helpful.\n\n" + SENTENCE
+    assert "rule" not in SENTENCE.lower() and "instruction" not in SENTENCE.lower()
+    assert case_messages(_case(), "S", condition="i", upper=True)[-1]["content"].startswith(RULE)
+    with pytest.raises(ValueError):
+        case_messages(_case(), "S", condition="iii", upper=False)
+
+
+def test_a_case_record_says_whether_the_model_looked_found_and_obeyed(tmp_path: Path) -> None:
+    case = _case()
+
+    def chat(messages, tools):
+        if tools and not any(m["role"] == "tool" for m in messages):
+            return _reply(calls=[_call(SEARCH, json.dumps({"description": "draft go-ahead sending"}), "c1")],
+                          finish="tool_calls")
+        if tools and sum(m["role"] == "tool" for m in messages) == 1:
+            pointer = json.loads(messages[-1]["content"])["results"][0]["pointer"]
+            return _reply(calls=[_call(FETCH, json.dumps({"pointer": pointer}), "c2")], finish="tool_calls")
+        return _reply("A")
+
+    row = run_case(case, "Summary of the plan.", chat=chat, arm="a5", condition="ii", workdir=tmp_path,
+                   max_rounds=4, budget=5000, count=_count, prompt="anthropic", k=1)
+
+    assert (row["looked"], row["found"], row["compliant"]) == (True, True, True)
+    assert (row["searches"], row["fetches"], row["commits"]) == (1, 1, 6)
+    assert row["found_turns"] == [0]
+    assert row["ledger"]["search_calls"] == 1 and row["ledger"]["fetch_calls"] == 1
+    check([row["ledger"]])
+    assert {"id", "arm", "condition", "prompt", "k", "final", "calls", "usage", "ingest_seconds"} <= set(row)
+    assert not any(tmp_path.iterdir())
+
+
+def test_a_case_where_the_model_does_not_look_is_still_complete(tmp_path: Path) -> None:
+    row = run_case(_case(), "S", chat=lambda m, t: _reply("B"), arm="a5", condition="i", workdir=tmp_path,
+                   max_rounds=4, budget=5000, count=_count, prompt="pi_mono", k=16)
+    assert (row["looked"], row["found"], row["compliant"]) == (False, False, False)
+    assert row["ledger"]["search_calls"] == 0 and row["found_turns"] == []
+    check([row["ledger"]])
+
+
+def test_the_header_arm_needs_its_headers_and_uses_them(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="headers"):
+        run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a4", condition="i", workdir=tmp_path,
+                 max_rounds=4, budget=5000, count=_count, prompt="pi_mono", k=1)
+    headers = {n: CommitHeader(what=f"turn {n}") for n in range(6)}
+    row = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a4", condition="i", workdir=tmp_path,
+                   max_rounds=4, budget=5000, count=_count, prompt="pi_mono", k=1,
+                   header=lambda number, turn: headers[number])
+    assert row["arm"] == "a4" and row["compliant"] is True
