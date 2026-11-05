@@ -32,7 +32,13 @@ public benchmarks, in retrieval and in final-answer accuracy?
 - **MemPalace 3.11.0** (release commit `602d796c`): its own benchmark runner in raw mode, and its product path
   (mining and search), reported apart.
 - **Mem0 open source 2.2.1**: a locally served model, a local embedder and a local vector store, with no
-  route to any paid service.
+  route to any paid service. One `add` with inference per round, as Mem0's own LongMemEval harness does, each
+  with a system line giving the session's date, since `timestamp` is platform-only. `search` with `top_k` 200 and
+  `threshold` 0, and each memory goes to the reader as written, in Mem0's rank order. gpt-oss-120b reasons inside
+  its output cap, so the cap is 4,096 tokens with reasoning effort low: at Mem0's default of 2,000 the reasoning
+  used it up on 84 of 776 extractions, and at 4,096 all 1,835 replies parsed. The extraction prompt gives today as
+  the observation date whatever the system line says, so a relative date in an old session is grounded to today;
+  this is left as it is and put to the maintainers.
 
 One auxiliary model serves every system that needs one (Mem0's extraction, Taste's headers): gpt-oss-120b if
 its JSON replies parse at least 95% of the time on 50 real Mem0 extractions, otherwise Llama 3.1 70B.
@@ -48,15 +54,20 @@ to keyword search, not to version control. Only the header can move Taste's row.
 - **LoCoMo** (`locomo10.json` at commit `3eb6f2c5`, sha256 `79fa87e9…98ff4`), 10 conversations, split whole in
   `data/splits/memory-bench-locomo.json`: 2 dev, 8 held-out. Categories 1-4 are scored; the 446 adversarial
   questions are reported apart.
-- **ConPact SWE-Natural** (126 cases): compliance after one compaction, every system given the same token cap
-  and no query.
+- **ConPact SWE-Natural** (126 cases): compliance after one compaction, every system given the same token cap.
+  These logs give no question, so the main table has no query: Mem0 all its memories newest first, MemPalace
+  `wake_up`, the flat list and Taste their newest records. A second table, apart, uses the request as the query.
+  Each round of a log is one unit. The cap is set on the small run from the sizes of the compaction summaries, so
+  that a system is held to about what a summary may take.
 
 ## Ingest
 
 The same for every system: oldest first, one fresh store per LongMemEval question and per LoCoMo
 conversation, every marker of the answer removed, neutral ids, and the same date line at the head of each
 unit. Systems that need an environment of their own read one shared file of what a memory may see, and its
-hash is recorded.
+hash is recorded. LoCoMo's image captions are in the text for every system, because the benchmark's reader prompt
+shows them. MemPalace's own LoCoMo runner leaves them out, so its adapter is checked with them left out and
+run with them in.
 
 ## Retrieval and the reader
 
