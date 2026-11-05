@@ -13,12 +13,12 @@ import math
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from studies.memory_bench.core import Item
+from studies.memory_bench.core import Item, rankings_line  # noqa: F401 - rankings_line is re-exported
 from studies.memory_bench.lme import Gold, rounds, unit_text
 from studies.memory_ledger import BASELINE, stand_in_record, taste_record
 from taste.memstore import CommitHeader, Pointer, Store
@@ -194,13 +194,6 @@ class TasteGit(System):
     def close(self) -> None:
         self.store.close()
         shutil.rmtree(self.folder, ignore_errors=True)
-
-
-def rankings_line(qid: str, system: str, items: Sequence[Item], *, ingest_seconds: float, retrieve_seconds: float,
-                  ledger: dict[str, Any], **extra: Any) -> str:
-    """One question's ranked list, as an adapter in another environment writes it."""
-    return json.dumps({"qid": qid, "system": system, "items": [asdict(item) for item in items],
-                       "ingest_seconds": ingest_seconds, "retrieve_seconds": retrieve_seconds, "ledger": ledger, **extra})
 
 
 @lru_cache(maxsize=4)

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import asdict, dataclass
+from typing import Any
 
 # LongMemEval's own reader prompt with its reading method on, byte for byte
 # (src/generation/run_generation.py at commit 9e0b455, lines 55 and 252; "json" history format).
@@ -72,6 +73,13 @@ def reader_prompt(items: Iterable[Item], question_date: str, question: str) -> s
     ordered = sorted(items, key=lambda item: item.date)
     history = "".join(chunk_text(item, number) for number, item in enumerate(ordered, 1))
     return _READER.format(history, question_date, question)
+
+
+def rankings_line(qid: str, system: str, items: Sequence[Item], *, ingest_seconds: float, retrieve_seconds: float,
+                  ledger: dict[str, Any], **extra: Any) -> str:
+    """One question's ranked list, as an adapter in another environment writes it."""
+    return json.dumps({"qid": qid, "system": system, "items": [asdict(item) for item in items],
+                       "ingest_seconds": ingest_seconds, "retrieve_seconds": retrieve_seconds, "ledger": ledger, **extra})
 
 
 def no_memory_prompt(question: str) -> str:
