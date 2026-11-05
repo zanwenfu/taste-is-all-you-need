@@ -13,6 +13,7 @@ import pytest
 
 from studies.memory_bench.core import Item
 from studies.memory_bench.locomo import (
+    NLTK_VERSION,
     adversarial_score,
     conversation_split,
     f1_multi,
@@ -20,9 +21,11 @@ from studies.memory_bench.locomo import (
     load,
     locomo_scores,
     normalize_answer,
+    official_stem,
     qa_score,
     reader_prompt,
     reference,
+    score_answers,
 )
 from studies.memory_bench.run import main as run_main
 from studies.memory_bench.runner import retrieve_conversation
@@ -189,6 +192,47 @@ def test_an_adversarial_answer_scores_one_only_for_saying_it_is_not_there() -> N
     assert adversarial_score("a sunset, I think", key) == 0
 
 
+def test_scores_stem_as_the_official_script_does_and_search_does_not() -> None:
+    """The official evaluation.py uses NLTK's default PorterStemmer. Taste's search uses Porter's paper with his
+    reference code's departures, and the two disagree on words an answer can hold. This fails if NLTK is not
+    installed at the pinned version: scores are never made without it."""
+    official = official_stem()
+    assert (official("skies"), stem("skies")) == ("sky", "ski")
+    assert (official("dying"), stem("dying")) == ("die", "dy")
+    assert f1_score("blue skies", "blue sky", official) == 1.0
+    assert f1_score("blue skies", "blue sky", stem) == 0.5
+
+
+def test_the_official_stemmer_refuses_another_nltk_version(monkeypatch) -> None:
+    import nltk
+
+    monkeypatch.setattr(nltk, "__version__", "0.0.1")
+    with pytest.raises(RuntimeError, match=NLTK_VERSION):
+        official_stem()
+
+
+def test_answers_are_scored_by_category_with_adversarial_apart(conversation) -> None:
+    view, golds = conversation
+    said = {0: "7 May 2023", 1: "a charity race", 2: "pottery", 3: "", 4: "(a)"}
+    answers = [{"qid": q["qid"], "hypothesis": said[n]} for n, q in enumerate(view["questions"])]
+    adversarial_key = golds[view["questions"][4]["qid"]].key
+    expected_adversarial = 1.0 if adversarial_key["a"].startswith("Not mentioned") else 0.0
+
+    rows, summary = score_answers(answers, golds, official_stem())
+
+    assert [row["score"] for row in rows] == [1.0, 1.0, 0.5, 0.0, expected_adversarial]
+    assert summary["scored_1_to_4"] == 4 and summary["f1_categories_1_to_4"] == pytest.approx(2.5 / 4)
+    assert summary["adversarial_questions"] == 1 and summary["adversarial"] == expected_adversarial
+    assert summary["per_category"][3] == 0.0
+
+
+def test_scoring_refuses_a_run_with_a_question_unanswered(conversation) -> None:
+    view, golds = conversation
+    answers = [{"qid": q["qid"], "hypothesis": "x"} for q in view["questions"][:4]]
+    with pytest.raises(ValueError, match="1 questions have no answer"):
+        score_answers(answers, golds, official_stem())
+
+
 # ------------------------------------------------------------------ retrieval scores
 
 
@@ -280,3 +324,13 @@ def test_the_command_line_runs_a_conversation_end_to_end(tmp_path: Path) -> None
     assert len(rows) == 5 and {r["question_id"].split(":")[0] for r in rows} == {"conv-1"}
     assert run_main(arguments) == 0
     assert len(out.read_text().splitlines()) == 5
+
+    answers = tmp_path / "run" / "answers.jsonl"
+    answers.write_text("".join(json.dumps({"qid": r["qid"], "question_id": r["question_id"], "hypothesis": "charity race"})
+                               + "\n" for r in rows))
+    scored = tmp_path / "run" / "scores.jsonl"
+    assert run_main(["score", "--answers", str(answers), "--data", str(data), "--split", str(split), "--part", "dev",
+                     "--out", str(scored)]) == 0
+    summary = json.loads((tmp_path / "run" / "scores.summary.json").read_text())
+    assert summary["questions"] == 5 and summary["scored_1_to_4"] == 4
+    assert summary["stemmer"].startswith(f"nltk {NLTK_VERSION}")

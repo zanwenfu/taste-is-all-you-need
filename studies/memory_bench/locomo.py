@@ -5,6 +5,10 @@ strings and the judge-free scoring are the benchmark's own (task_eval/gpt_utils.
 token F1 needs no judge, so it survives every judge dispute, and it leads. Its official form stems with NLTK's
 default Porter mode, so the stemmer is passed in; a judge's prompt, where one is used, is LongMemEval's plain
 one, chosen in advance, and adversarial questions are scored apart by their own rule.
+
+The official scorer stems with NLTK's default ``PorterStemmer()``, whose extensions differ from Porter's paper on
+words an answer can hold ("skies" is "sky" there and "ski" in Taste's search), so scores use exactly that
+stemmer, at a pinned NLTK version (``official_stem``). Taste's own stemmer stays in search; the two never mix.
 """
 
 from __future__ import annotations
@@ -31,6 +35,17 @@ _QA = (
 _QA_ADVERSARIAL = "\nBased on the above context, answer the following question.\n\nQuestion: {} Short answer:\n"
 _NOT_THERE = "Not mentioned in the conversation"
 CUTS = (1, 3, 5, 10, 30, 50)
+NLTK_VERSION = "3.10.4"
+
+
+def official_stem() -> Callable[[str], str]:
+    """The stemmer of the benchmark's evaluation.py (``ps = PorterStemmer()``), at the pinned NLTK version."""
+    import nltk
+    from nltk.stem.porter import PorterStemmer
+
+    if nltk.__version__ != NLTK_VERSION:
+        raise RuntimeError(f"scores are pinned to NLTK {NLTK_VERSION}; this is {nltk.__version__}")
+    return PorterStemmer().stem
 
 
 @dataclass(frozen=True)
@@ -167,6 +182,36 @@ def qa_score(category: int, prediction: str, answer: str, stem: Callable[[str], 
     if category == 1:
         return f1_multi(prediction, answer, stem)
     raise ValueError(f"category {category} has no F1 rule")
+
+
+def score_answers(answers: Sequence[dict], view_golds: dict[str, Gold],
+                  stem: Callable[[str], str]) -> tuple[list[dict], dict]:
+    """Every question's judge-free score, and the summary: categories 1-4 together, adversarial apart.
+
+    An answer the reader returned empty scores 0. A question with no answer at all stops the scoring: the run
+    is not finished, and leaving it out would change the denominator without saying so."""
+    by_qid = {answer["qid"]: answer for answer in answers}
+    missing = sorted(set(view_golds) - set(by_qid))
+    if missing:
+        raise ValueError(f"{len(missing)} questions have no answer; finish the run before scoring")
+    rows = []
+    for qid, gold in sorted(view_golds.items(), key=lambda item: item[1].question_id):
+        said = by_qid[qid]["hypothesis"]
+        value = (adversarial_score(said, gold.key) if gold.adversarial
+                 else qa_score(gold.category, said, gold.answer, stem))
+        rows.append({"qid": qid, "question_id": gold.question_id, "category": gold.category, "score": float(value)})
+    scored = [row for row in rows if row["category"] != 5]
+    adversarial = [row["score"] for row in rows if row["category"] == 5]
+    summary = {
+        "questions": len(rows),
+        "f1_categories_1_to_4": fmean(row["score"] for row in scored) if scored else None,
+        "scored_1_to_4": len(scored),
+        "per_category": {c: fmean(r["score"] for r in rows if r["category"] == c)
+                         for c in sorted({r["category"] for r in rows})},
+        "adversarial": fmean(adversarial) if adversarial else None,
+        "adversarial_questions": len(adversarial),
+    }
+    return rows, summary
 
 
 def adversarial_score(prediction: str, key: dict) -> int:

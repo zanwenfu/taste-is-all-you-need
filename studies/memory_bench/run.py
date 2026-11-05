@@ -158,6 +158,23 @@ def judge(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def score(arguments: argparse.Namespace) -> int:
+    """LoCoMo's judge-free score, with the official script's stemmer at its pinned version."""
+    import nltk
+
+    wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
+    _, golds = locomo.load([s for s in json.loads(Path(arguments.data).read_text()) if s["sample_id"] in wanted])
+    answers = [json.loads(line) for line in Path(arguments.answers).read_text().splitlines()]
+    rows, summary = locomo.score_answers(answers, golds, locomo.official_stem())
+    summary["stemmer"] = f"nltk {nltk.__version__}, PorterStemmer() in its default mode, as evaluation.py"
+    out = Path(arguments.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    out.with_name(out.stem + ".summary.json").write_text(json.dumps(summary, indent=1))
+    print(json.dumps(summary))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     stages = parser.add_subparsers(dest="stage", required=True)
@@ -187,6 +204,12 @@ def main(argv: list[str] | None = None) -> int:
         stage.add_argument("--effort")
         stage.add_argument("--workers", type=int, default=12)
         stage.set_defaults(run=run)
+
+    stage = stages.add_parser("score", help="LoCoMo only: the official judge-free score")
+    for argument in ("answers", "data", "split", "out"):
+        stage.add_argument(f"--{argument}", required=True)
+    stage.add_argument("--part", required=True, choices=("dev", "held_out"))
+    stage.set_defaults(run=score)
 
     arguments = parser.parse_args(argv)
     return arguments.run(arguments)
