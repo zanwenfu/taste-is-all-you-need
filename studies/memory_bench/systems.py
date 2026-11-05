@@ -80,6 +80,9 @@ class FlatBm25(System):
     def retrieve(self, query: str, qid: str | None = None) -> list[Item]:
         return [self.units[doc].item() for doc, _ in self.index.rank(tokens(query))]
 
+    def memories(self) -> list[str]:
+        return [unit.text for unit in reversed(self.units)]
+
 
 class TasteGit(System):
     """Taste's real memory store, driven by study code: "Taste memory, study-driven".
@@ -90,8 +93,8 @@ class TasteGit(System):
     """
 
     def __init__(self, workdir: Path, *, unit: str = "round", commit_per: str = "session",
-                 header_writer: Callable[[dict], CommitHeader] | None = None) -> None:
-        self.unit, self.commit_per, self.header_writer = unit, commit_per, header_writer
+                 header_writer: Callable[[dict], CommitHeader] | None = None, mode: str = "single_query") -> None:
+        self.unit, self.commit_per, self.header_writer, self.mode = unit, commit_per, header_writer, mode
         self.folder = Path(tempfile.mkdtemp(prefix="store-", dir=workdir))
         self.store = Store.open(self.folder / "repo", "memory-bench")
         self.branch = self.store.branch("memory", producer="memory-bench")
@@ -138,8 +141,16 @@ class TasteGit(System):
         ]
         return [self._fetched(path) for path in dict.fromkeys(paths)]
 
+    def memories(self) -> list[str]:
+        """With no question asked, newest first: what each commit's header says it holds or, with headers off, the
+        records themselves, read back from the store."""
+        if self.header_writer:
+            return [self.store.state(state).header for state in reversed(self.files_of)]
+        return [self.store.fetch(Pointer("memory-bench", "memory", state, "file", path, 1)).text
+                for state in reversed(self.files_of) for path in reversed(self.files_of[state])]
+
     def ledger(self) -> dict[str, Any]:
-        return taste_record(self.store, mode="single_query")
+        return taste_record(self.store, mode=self.mode)
 
     def close(self) -> None:
         self.store.close()

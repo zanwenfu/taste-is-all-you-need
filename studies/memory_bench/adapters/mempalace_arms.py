@@ -27,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from studies.memory_bench.adapters.common import run_adapter
+from studies.memory_bench.adapters.common import QueryFree, run_adapter
 from studies.memory_bench.core import Item
 from studies.memory_bench.lme import rounds
 
@@ -181,8 +181,8 @@ class ProductArm:
     """MemPalace as a user runs it: mine the sessions, search the palace, hand the reader the drawers found. A drawer
     MemPalace folded from several sessions (identical text) is delivered once, and its source names the others."""
 
-    def __init__(self, mine: Any, search: Any, workdir: Path, *, n_results: int = 200) -> None:
-        self.mine, self.search, self.n_results = mine, search, n_results
+    def __init__(self, mine: Any, search: Any, workdir: Path, *, n_results: int = 200, stack: Any = None) -> None:
+        self.mine, self.search, self.n_results, self.stack = mine, search, n_results, stack
         self.folder = Path(tempfile.mkdtemp(prefix="palace-", dir=workdir))
 
     def ingest(self, sessions: list[dict]) -> None:
@@ -207,6 +207,11 @@ class ProductArm:
                               f"mempalace:product:{hit.get('drawer_id', '')}{others}"))
         return items
 
+    def memories(self) -> list[str]:
+        """Its wake-up text, for the rule-loss cases, which give no question to search with."""
+        stack = self.stack(palace_path=str(self.folder / "palace"), identity_path=str(self.folder / "identity.txt"))
+        return [stack.wake_up(wing="eval")]
+
     def close(self) -> None:
         shutil.rmtree(self.folder, ignore_errors=True)
 
@@ -221,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n-results", type=int, default=200, help="product arm: drawers asked for")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--shard", default="0/1", help="i/n: every n-th unit from the i-th")
+    parser.add_argument("--query-free", action="store_true", help="product arm: its wake-up text, for the rule-loss cases")
     arguments = parser.parse_args(argv)
     shard = tuple(int(part) for part in arguments.shard.split("/"))
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
@@ -233,10 +239,13 @@ def main(argv: list[str] | None = None) -> int:
     versions = {"mempalace": mempalace.__version__, "commit": COMMIT, "chromadb": chromadb.__version__}
     if arguments.arm == "product":
         from mempalace.convo_miner import mine_convos
+        from mempalace.layers import MemoryStack
         from mempalace.searcher import search_memories
 
-        def make() -> ProductArm:
-            return ProductArm(mine_convos, search_memories, Path(arguments.workdir), n_results=arguments.n_results)
+        def make() -> Any:
+            arm = ProductArm(mine_convos, search_memories, Path(arguments.workdir), n_results=arguments.n_results,
+                             stack=MemoryStack)
+            return QueryFree(arm) if arguments.query_free else arm
     elif arguments.arm in LOCOMO_ARMS:
         bench = load_bench(Path(arguments.repo), "locomo_bench")
         granularity, mode = LOCOMO_ARMS[arguments.arm]
@@ -248,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
 
         def make() -> BenchArm:
             return BenchArm(bench, mode="raw" if arguments.arm == "bench_raw" else "v4")
-    counts = run_adapter(Path(arguments.views), Path(arguments.out), make, system=f"mempalace_{arguments.arm}",
+    label = f"mempalace_{arguments.arm}{'_free' if arguments.query_free else ''}"
+    counts = run_adapter(Path(arguments.views), Path(arguments.out), make, system=label,
                          code=f"studies/memory_bench/adapters/mempalace_arms.py:{arguments.arm}", versions=versions,
                          limit=arguments.limit, shard=shard)
     print(json.dumps(counts))

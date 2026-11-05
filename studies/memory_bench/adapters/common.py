@@ -3,7 +3,8 @@
 An adapter supplies ``ingest(sessions)``, ``retrieve(query) -> list[Item]`` and ``close()``. This loop times both
 steps, writes one rankings line per question as it goes, and on a second run skips every unit already complete.
 A unit whose questions are only partly written is run again whole, and its old lines are dropped first, so no
-question is ever ranked twice. Every line carries the adapter's ledger entry: a rival is always a baseline.
+question is ever ranked twice. Every line carries a ledger entry: a rival is always a baseline, and an adapter that
+keeps its own (Taste's store does) gives that one.
 """
 
 from __future__ import annotations
@@ -26,6 +27,25 @@ class Adapter(Protocol):
     def close(self) -> None: ...
 
 
+class QueryFree:
+    """What a system would put in front of an agent with no question asked: its ``memories()``, in its own order. The
+    question is ignored, because the rule-loss cases have none to give."""
+
+    def __init__(self, adapter: Any) -> None:
+        self.adapter = adapter
+
+    def ingest(self, sessions: list[dict]) -> None:
+        self.adapter.ingest(sessions)
+        self.first = sessions[0]
+
+    def retrieve(self, query: str, *, date: str | None = None) -> list[Item]:
+        return [Item(self.first["sid"], self.first["date"], ({"role": "memory", "content": text},), (), "query-free")
+                for text in self.adapter.memories()]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.adapter, name)
+
+
 def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: str, code: str,
                 versions: dict[str, Any], limit: int | None = None, shard: tuple[int, int] = (0, 1)) -> dict[str, int]:
     """``shard`` (i, n) runs every n-th unit from the i-th, so n processes can share a views file."""
@@ -40,7 +60,7 @@ def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: 
     if partial:
         out.write_text("".join(json.dumps(row) + "\n" for row in rows if row["qid"] not in partial))
         done -= partial
-    ledger = stand_in_record(BASELINE, code=code)
+    default = stand_in_record(BASELINE, code=code)
     ran = 0
     for unit in units:
         if all(q["qid"] in done for q in unit["queries"]):
@@ -54,8 +74,10 @@ def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: 
             for query in unit["queries"]:
                 asked = time.perf_counter()
                 items = adapter.retrieve(query["query"], date=query.get("date"))
+                seconds = time.perf_counter() - asked
+                own = getattr(adapter, "ledger", None)
                 lines.append(rankings_line(query["qid"], system, items, ingest_seconds=ingest_seconds,
-                                           retrieve_seconds=time.perf_counter() - asked, ledger=ledger,
+                                           retrieve_seconds=seconds, ledger=own() if own else default,
                                            versions=versions))
         finally:
             adapter.close()

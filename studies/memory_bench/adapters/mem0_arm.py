@@ -24,11 +24,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from studies.memory_bench.adapters.common import run_adapter
+from studies.memory_bench.adapters.common import QueryFree, run_adapter
 from studies.memory_bench.core import Item
 from studies.memory_bench.lme import rounds
 
 USER = "eval"  # one store per unit, reset in between, so one user id serves every unit
+ALL = 100_000
 
 
 def mem0_config(url: str, model: str, embedder: str, dims: int, device: str) -> dict[str, Any]:
@@ -108,6 +109,11 @@ class Mem0Arm:
                               (int(meta["round"]),), f"mem0:{hit.get('id', '')}"))
         return items
 
+    def memories(self) -> list[str]:
+        """Every memory of this unit, newest first, for the rule-loss cases, which give no question to search with."""
+        found = self.memory.get_all(filters={"user_id": USER}, top_k=ALL)["results"]
+        return [hit["memory"] for hit in sorted(found, key=lambda hit: hit.get("created_at") or "", reverse=True)]
+
     def close(self) -> None:
         pass
 
@@ -123,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=200)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--shard", default="0/1", help="i/n: every n-th unit from the i-th")
+    parser.add_argument("--query-free", action="store_true", help="all memories, no search, for the rule-loss cases")
     arguments = parser.parse_args(argv)
     shard = tuple(int(part) for part in arguments.shard.split("/"))
 
@@ -145,8 +152,14 @@ def main(argv: list[str] | None = None) -> int:
     counted = Counted(memory.llm, log=Path(arguments.out).with_suffix(".replies.jsonl"))
     memory.llm = counted
     versions = {"mem0ai": mem0.__version__, "embedder": arguments.embedder, "model": arguments.model}
-    counts = run_adapter(Path(arguments.views), Path(arguments.out), lambda: Mem0Arm(memory, top_k=arguments.top_k),
-                         system="mem0", code="studies/memory_bench/adapters/mem0_arm.py", versions=versions,
+
+    def make() -> Any:
+        arm = Mem0Arm(memory, top_k=arguments.top_k)
+        return QueryFree(arm) if arguments.query_free else arm
+
+    counts = run_adapter(Path(arguments.views), Path(arguments.out), make,
+                         system="mem0_free" if arguments.query_free else "mem0",
+                         code="studies/memory_bench/adapters/mem0_arm.py", versions=versions,
                          limit=arguments.limit, shard=shard)
     counts |= {"llm_calls": counted.calls, "llm_unparsed": counted.unparsed}
     Path(arguments.out).with_suffix(".counts.json").write_text(json.dumps(counts, indent=1))
