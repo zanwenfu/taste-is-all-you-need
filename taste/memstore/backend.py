@@ -767,6 +767,46 @@ class GitBackend:
         with self._tempfile(raw) as path:
             return self.repo.git.hash_object("-w", str(path))
 
+    def commits_oldest_first(self, heads: list[str]) -> list[str]:
+        """Every commit reachable from ``heads``, parents before children."""
+        return self.repo.git.rev_list("--topo-order", "--reverse", *heads).split() if heads else []
+
+    @_serialized_object_read
+    def object_bytes(self, sha: str) -> bytes:
+        """One object's contents through the persistent reader, not a new process each time."""
+        if not _is_full_object_id(sha):
+            raise ValueError("reading an object requires an exact object id")
+        return self.repo.odb.stream(bytes.fromhex(sha)).read()
+
+    def commit_message(self, commit: str) -> str:
+        """A commit's message, byte for byte as stored."""
+        return _dec(self.object_bytes(commit).partition(b"\n\n")[2])
+
+    @_serialized_object_read
+    def unseen_files(
+        self, commit: str, trees: set[str], blobs: set[str]
+    ) -> list[tuple[str, str, int]]:
+        """Regular files under ``commit`` that no walk sharing these sets has met.
+
+        Returns (path, blob id, size). A tree already walked is skipped whole, so a long history
+        costs what it changed and not its length.
+        """
+        found: list[tuple[str, str, int]] = []
+
+        def walk(tree: Tree) -> None:
+            if tree.hexsha in trees:
+                return
+            trees.add(tree.hexsha)
+            for entry in tree:
+                if entry.type == "tree":
+                    walk(cast(Tree, entry))
+                elif entry.type == "blob" and stat.S_ISREG(entry.mode) and entry.hexsha not in blobs:
+                    blobs.add(entry.hexsha)
+                    found.append((entry.path, entry.hexsha, cast(Blob, entry).size))
+
+        walk(self._tree_object(commit))
+        return found
+
     @_serialized_object_read
     def ls_files(self, commit: str) -> list[str]:
         if _is_full_object_id(commit):

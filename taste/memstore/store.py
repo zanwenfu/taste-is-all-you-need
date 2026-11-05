@@ -32,6 +32,7 @@ import re
 import socket
 import tempfile
 import threading
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,7 @@ from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from taste.memstore.backend import BLOB_MODES, EMPTY_TREE, MODE_EXEC, MODE_SYMLINK, GitBackend
 from taste.memstore.objects import (
     BadName,
+    BadPointer,
     BranchBusy,
     Conflict,
     ForeignHead,
@@ -230,6 +232,49 @@ class Hit:
     state: State
     entry: ManifestEntry
     score: int
+
+
+@dataclass(frozen=True)
+class Pointer:
+    """Where a search hit's bytes live: enough to fetch exactly them again, at any later time."""
+
+    session: str
+    branch: str
+    state: str
+    kind: str  # "file", "message", "transcript" or "verdict"
+    where: str  # a file's path or a note's namespace; empty for a commit message
+    line: int  # from 1: the best line of a file or message, the turn or verdict's place in its note
+    blob: str = ""  # a file's blob id
+
+    def to_text(self) -> str:
+        """The form a tool hands to a model. The state id locates the rest, which is checked on fetch."""
+        return f"{self.state}:{self.kind}:{self.line}:{self.where}"
+
+    @classmethod
+    def from_text(cls, text: str) -> Pointer:
+        parts = text.split(":", 3)
+        if len(parts) != 4 or not (parts[2].isascii() and parts[2].isdecimal()):
+            raise BadPointer("a pointer reads <state>:<kind>:<line>:<where>")
+        return cls(session="", branch="", state=parts[0], kind=parts[1], where=parts[3], line=int(parts[2]))
+
+
+@dataclass(frozen=True)
+class ContentHit:
+    pointer: Pointer
+    score: float
+    snippet: str  # the best line, cut to a short length; always found in what the pointer fetches
+    header: str = ""
+
+
+@dataclass(frozen=True)
+class Fetched:
+    """One page of a document. Offsets and sizes count characters, so a page never splits one."""
+
+    text: str
+    offset: int
+    next_offset: int
+    size: int
+    eof: bool
 
 
 @dataclass(frozen=True)
@@ -1522,6 +1567,10 @@ class Store:
         # writer lease. Track resource ownership independently of that lease;
         # monitoring views can also own read-only worktree backends.
         self._worktree_backends: WeakSet[GitBackend] = WeakSet()
+        # Read by a study's claim ledger: how often anything really looked. In memory, not history.
+        self.memory_counts: Counter[str] = Counter()
+        self._content_indexes: dict[Any, Any] = {}
+        self._content_lock = threading.Lock()
 
     @classmethod
     def open(cls, root: Path, session: str) -> Store:
@@ -2072,3 +2121,22 @@ class Store:
         from taste.memstore.search import search as _search
 
         return _search(self, query, types=types, branches=branches)
+
+    def search_contents(
+        self,
+        description: str,
+        *,
+        limit: int | None = 10,
+        kinds: Iterable[str] | None = None,
+        branches: Iterable[str] | None = None,
+    ) -> list[ContentHit]:
+        """Everything this session recorded, ranked by keyword, in every state and not only heads."""
+        from taste.memstore.search import search_contents as _search_contents
+
+        return _search_contents(self, description, limit=limit, kinds=kinds, branches=branches)
+
+    def fetch(self, pointer: Pointer | str, *, offset: int = 0, limit: int | None = None) -> Fetched:
+        """The bytes a pointer names, whole or one page at a time. Refuses another session's."""
+        from taste.memstore.search import fetch as _fetch
+
+        return _fetch(self, pointer, offset=offset, limit=limit)

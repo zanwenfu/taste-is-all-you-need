@@ -68,6 +68,10 @@ class NoSuchState(KeyError):
     """No state with that id is reachable in this store."""
 
 
+class BadPointer(ValueError):
+    """A pointer that does not name bytes this session recorded."""
+
+
 class NotAnAncestor(ValueError):
     """A rollback target must be in the branch's own history."""
 

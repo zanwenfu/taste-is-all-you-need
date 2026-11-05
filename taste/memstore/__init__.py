@@ -9,6 +9,8 @@ Public surface:
     branch.publish(...)           make an artifact findable
     store.catalog()               everything published, for orientation
     store.search("...")           does anyone have X?
+    store.search_contents("...")  where was X said or written, in any state?
+    store.fetch(pointer)          the exact bytes a hit points at
     store.view(name)              read a branch without taking its lease
     store.judge(state, verdict)   a monitor records a judgment
     store.send(branch, message)   ask another brain for something
@@ -21,6 +23,7 @@ Public surface:
 from taste.memstore.objects import (
     SCHEMA,
     BadName,
+    BadPointer,
     BranchBusy,
     Conflict,
     ForeignHead,
@@ -44,9 +47,12 @@ from taste.memstore.store import (
     Branch,
     BranchView,
     Built,
+    ContentHit,
     DiffEntry,
+    Fetched,
     Hit,
     MergeResult,
+    Pointer,
     State,
     Store,
     TypedDiff,
@@ -55,12 +61,15 @@ from taste.memstore.store import (
 __all__ = [
     "SCHEMA",
     "BadName",
+    "BadPointer",
     "Branch",
     "BranchBusy",
     "BranchView",
     "Built",
     "Conflict",
+    "ContentHit",
     "DiffEntry",
+    "Fetched",
     "ForeignHead",
     "Hit",
     "Manifest",
@@ -70,6 +79,7 @@ __all__ = [
     "NoSuchState",
     "NotAnAncestor",
     "ObjectType",
+    "Pointer",
     "PublishError",
     "Resume",
     "SchemaMismatch",
