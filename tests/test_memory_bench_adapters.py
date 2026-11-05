@@ -261,3 +261,31 @@ def test_the_configuration_names_the_served_model_and_a_local_embedder_only() ->
     assert config["vector_store"]["config"]["embedding_model_dims"] == 384 == config["embedder"]["config"]["embedding_dims"]
     assert config["vector_store"]["config"]["path"] == ":memory:" and config["history_db_path"] == ":memory:"
     assert "openai" not in json.dumps(config).replace("openai/gpt-oss-120b", "")
+
+
+# ------------------------------------------------------------------ the check against MemPalace's own published run
+
+from studies.context_rot.lme_clean import neutral  # noqa: E402
+from studies.memory_bench.adapters.check_mempalace import compare  # noqa: E402
+
+
+def test_the_check_maps_published_ids_to_neutral_ones_and_counts_agreement() -> None:
+    data = [{"question_id": "q1", "answer_session_ids": ["answer_x"]}, {"question_id": "q2", "answer_session_ids": ["b"]}]
+    published = [
+        {"question_id": "q1", "retrieval_results": {"ranked_items": [{"corpus_id": c} for c in ("answer_x", "a", "c")]}},
+        {"question_id": "q2", "retrieval_results": {"ranked_items": [{"corpus_id": c} for c in ("a", "b")]}},
+    ]
+    rankings = [
+        {"qid": neutral("q", "q1"), "items": [{"session": neutral("s", f"q1/{c}")} for c in ("answer_x", "a", "c")]},
+        {"qid": neutral("q", "q2"), "items": [{"session": neutral("s", f"q2/{c}")} for c in ("b", "a")]},
+    ]
+    result = compare(data, published, rankings)
+    assert result["compared"] == 2 and result["same_top10"] == 1 and result["same_top5_set"] == 2
+    assert result["recall_any"] == {"published@5": 1.0, "published@10": 1.0, "adapter@5": 1.0, "adapter@10": 1.0}
+    assert result["differing_top5"] == ["q2"]
+
+
+def test_shards_split_the_units_between_processes(tmp_path: Path) -> None:
+    views, out = _views(tmp_path), tmp_path / "a.jsonl"
+    run_adapter(views, out, _Stand, system="s", code="c", versions={}, shard=(1, 2))
+    assert sorted({json.loads(line)["qid"][:2] for line in out.read_text().splitlines()}) == ["q1"]

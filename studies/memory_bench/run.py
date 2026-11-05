@@ -155,7 +155,8 @@ def views(arguments: argparse.Namespace) -> int:
     and each question's own words. Systems that run in environments of their own read this file."""
     import hashlib
 
-    wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
+    split = json.loads(Path(arguments.split).read_text())
+    wanted = set(split["dev"]) | set(split["held_out"]) if arguments.part == "all" else set(split[arguments.part])
     data = json.loads(Path(arguments.data).read_text())
     units = []
     if arguments.benchmark == "lme":
@@ -251,7 +252,8 @@ def main(argv: list[str] | None = None) -> int:
     stage = stages.add_parser("views", help="the shared, memory-visible ingest file")
     for argument in ("data", "split", "out"):
         stage.add_argument(f"--{argument}", required=True)
-    stage.add_argument("--part", required=True, choices=("dev", "held_out"))
+    stage.add_argument("--part", required=True, choices=("dev", "held_out", "all"),
+                       help="all: only for checking an adapter against a system's own published run")
     stage.add_argument("--benchmark", default="lme", choices=("lme", "locomo"))
     stage.set_defaults(run=views)
 

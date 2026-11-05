@@ -144,7 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--arm", required=True, choices=ARMS)
     parser.add_argument("--n-results", type=int, default=200, help="product arm: drawers asked for")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--shard", default="0/1", help="i/n: every n-th unit from the i-th")
     arguments = parser.parse_args(argv)
+    shard = tuple(int(part) for part in arguments.shard.split("/"))
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
 
     paths = list(sys.path)  # importing mempalace drops PYTHONPATH entries; this study's code must stay importable
@@ -166,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             return BenchArm(bench, mode="raw" if arguments.arm == "bench_raw" else "v4")
     counts = run_adapter(Path(arguments.views), Path(arguments.out), make, system=f"mempalace_{arguments.arm}",
                          code=f"studies/memory_bench/adapters/mempalace_arms.py:{arguments.arm}", versions=versions,
-                         limit=arguments.limit)
+                         limit=arguments.limit, shard=shard)
     print(json.dumps(counts))
     return 0
 

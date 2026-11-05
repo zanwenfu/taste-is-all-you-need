@@ -27,9 +27,10 @@ class Adapter(Protocol):
 
 
 def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: str, code: str,
-                versions: dict[str, Any], limit: int | None = None) -> dict[str, int]:
+                versions: dict[str, Any], limit: int | None = None, shard: tuple[int, int] = (0, 1)) -> dict[str, int]:
+    """``shard`` (i, n) runs every n-th unit from the i-th, so n processes can share a views file."""
     units = [json.loads(line) for line in Path(views).read_text().splitlines()]
-    units = units[:limit] if limit else units
+    units = (units[:limit] if limit else units)[shard[0]::shard[1]]
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     rows = [json.loads(line) for line in out.read_text().splitlines()] if out.exists() else []

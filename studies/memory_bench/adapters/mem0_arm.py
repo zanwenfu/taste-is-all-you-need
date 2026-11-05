@@ -113,7 +113,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--top-k", type=int, default=200)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--shard", default="0/1", help="i/n: every n-th unit from the i-th")
     arguments = parser.parse_args(argv)
+    shard = tuple(int(part) for part in arguments.shard.split("/"))
 
     if os.environ.get("MEM0_TELEMETRY") != "False":
         raise SystemExit("set MEM0_TELEMETRY=False before starting: Mem0 reads it once, at import")
@@ -136,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     versions = {"mem0ai": mem0.__version__, "embedder": arguments.embedder, "model": arguments.model}
     counts = run_adapter(Path(arguments.views), Path(arguments.out), lambda: Mem0Arm(memory, top_k=arguments.top_k),
                          system="mem0", code="studies/memory_bench/adapters/mem0_arm.py", versions=versions,
-                         limit=arguments.limit)
+                         limit=arguments.limit, shard=shard)
     counts |= {"llm_calls": counted.calls, "llm_unparsed": counted.unparsed}
     Path(arguments.out).with_suffix(".counts.json").write_text(json.dumps(counts, indent=1))
     print(json.dumps(counts))
