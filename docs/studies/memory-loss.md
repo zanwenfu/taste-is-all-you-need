@@ -41,7 +41,8 @@ The same model, histories and memory budget in every arm, counted with one token
 | Taste memory, headers | the same, with a model-written header per commit | search and fetch tools |
 | Delivered rules | rule records from a named reader | put in front of the agent at every call |
 | Both | the header arm and the delivered rules | both |
-| Searched for it | the Taste store | the harness searches once with the request's own words and delivers what it finds |
+| Searched for it | the Taste store, with and without headers, and both notes files | the harness searches once with the request's own words and delivers what it finds |
+| Header index | the Taste store, with a model-written header per commit | what each header says, listed in the prompt and cut to the budget; fetch offered, no search |
 
 A flat list searched by the same code holds the same text under the same tokenizer and scorer as Taste with headers
 off, so the two must rank alike: a test holds them to it and they are one row. Any gain over compaction in that row
@@ -94,8 +95,7 @@ probes had been read. Git keeps old versions, and a search can return a stale on
 Hermes, the first 10 histories (150 cases); one and 16 rounds of compaction; the Pi and Anthropic summary prompts.
 Reader gpt-oss-120b on vLLM 0.32.0, as in the benchmark's own table, reasoning effort low, up to 6 tool rounds and the
 memory budget (both set from the small run). Each case gets a fresh store: the 15 cases of a history differ only by the
-rule. Added in this order as time allows: headers listed in the prompt with fetch and no search, WildChat, and
-2, 4 and 8 rounds.
+rule. Added in this order as time allows: WildChat, and 2, 4 and 8 rounds.
 
 ## The long run
 
@@ -118,6 +118,9 @@ more only after reading them.
 ## Claims and analysis
 
 "Stored: 0 of N lost, by construction." For any other step, "0 of N (95% upper bound about 3/N)", naming the step.
+Compliance is never read against zero: each probe has two options, so a model the rule never reached obeys it about half
+the time (15 of 30 in the first harness-search probes), and every arm is read against that rate, the benchmark's no-rule
+rate on the same cases.
 Paired tests per case against the compaction arm, intervals by a bootstrap over histories, since the 15 cases of a
 history share it. Every clean result is reported, whichever way it falls.
 

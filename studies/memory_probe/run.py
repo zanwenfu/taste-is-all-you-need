@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from studies.memory_ledger import check
-from studies.memory_probe.cases import run_case
+from studies.memory_probe.cases import _NEEDS_NOTES, _NEEDS_RECORDS, ARMS, run_case
 from studies.memory_probe.tool_loop import http_chat
 
 
@@ -85,8 +85,8 @@ def main(argv=None) -> int:
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--prompt", required=True, choices=("pi_mono", "anthropic"))
     parser.add_argument("--k", required=True, type=int, choices=(1, 16))
-    parser.add_argument("--arm", required=True, choices=("a5", "a5q", "a4", "a6", "a7", "a2a", "a2c", "a2d"))
-    parser.add_argument("--notes", help="a2c and a2d: the notes versions (studies.memory_probe.notes)")
+    parser.add_argument("--arm", required=True, choices=tuple(ARMS))
+    parser.add_argument("--notes", help="the notes arms: the notes versions (studies.memory_probe.notes)")
     parser.add_argument("--keep", default="newest", choices=("newest", "oldest"), help="a2a: which end is kept")
     parser.add_argument("--condition", required=True, choices=("i", "ii", "iii", "iv", "v"))
     parser.add_argument("--limit", type=int, help="the first N cases in file order, for a smoke run")
@@ -109,7 +109,7 @@ def main(argv=None) -> int:
                  if row["prompt"] == arguments.prompt and row["k"] == arguments.k}
     tokenizer = Tokenizer.from_file(arguments.tokenizer)
     blocks = None
-    if arguments.arm in ("a6", "a7"):
+    if arguments.arm in _NEEDS_RECORDS:
         blocks = delivered_blocks(inputs / "delivered.jsonl", arguments.prompt)
 
     def count(text: str) -> int:
@@ -118,7 +118,7 @@ def main(argv=None) -> int:
     chat = http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
     versions = None
-    if arguments.arm in ("a2c", "a2d"):
+    if arguments.arm in _NEEDS_NOTES:
         versions = {row["id"]: row["versions"] for row in map(json.loads, Path(arguments.notes).read_text().splitlines())}
     summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers, delivered=blocks,
                       notes=versions,

@@ -19,6 +19,7 @@ from studies.memory_ledger import taste_record
 from taste.memstore import CommitHeader, ContentHit, Pointer, Store
 from taste.memstore import tools as memory_tools
 from taste.memstore.keyword import Bm25, tokens
+from taste.memstore.objects import header_fields
 from taste.memstore.store import NOTES
 
 SUBJECT = "conversation turn"  # the same in every commit, so it can never rank one above another
@@ -59,6 +60,18 @@ class GitTurns:
     def answer(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
         return memory_tools.answer(self.store, name, arguments, kinds=self.kinds, resolve=self._turn)
 
+    def index(self) -> list[dict[str, Any]]:
+        """Each commit, oldest first: what its header says, read back from the store, and a pointer to its turn."""
+        rows = []
+        for state, number in sorted(self.turn_at.items(), key=lambda item: item[1]):
+            lines = (self.store.backend.note_get(NOTES["transcript"], state) or "").split("\n")
+            line = max(position for position, text in enumerate(lines, 1) if text.strip())
+            fields = header_fields(self.store.state(state).header)
+            rows.append({"turn": number, "what": fields.get("what", ""), "keywords": fields.get("keywords", []),
+                         "pointer": Pointer("memory-probe", "conversation", state, "transcript", NOTES["transcript"],
+                                            line).to_text()})
+        return rows
+
     def turn_of(self, pointer: str | Pointer) -> int | None:
         chosen = Pointer.from_text(pointer) if isinstance(pointer, str) else pointer
         return self.turn_at.get(chosen.state)
@@ -92,8 +105,8 @@ class NotesStore:
     def turn_of(self, pointer: str | Pointer) -> int | None:
         return None
 
-    def ledger(self) -> dict[str, Any]:
-        return taste_record(self.store, mode="agent_tools")
+    def ledger(self, mode: str = "agent_tools") -> dict[str, Any]:
+        return taste_record(self.store, mode=mode)
 
     def close(self) -> None:
         self.store.close()

@@ -11,8 +11,10 @@ search, so five conditions separate that from what an agent does when it may loo
     ii   i and one sentence saying a searchable record      iv   iii and the sentence
          exists; it never mentions rules or instructions    v    iv and one sentence telling it to check that record
 
-Arm a5q leaves nothing to the agent: the harness searches once with the request's own words and delivers what it
-finds, as memory products usually do. That measures finding alone.
+The arms ending in q leave nothing to the agent: the harness searches once with the request's own words and delivers
+what it finds, as memory products usually do. That measures finding alone. Arm a3 lists what each commit's header says
+in the prompt, with fetch offered and no search, so it depends neither on the agent choosing to search nor on the request
+sharing words with the rule.
 """
 
 from __future__ import annotations
@@ -48,11 +50,21 @@ ARMS = {
     "a2a": "the whole conversation as a flat file, cut to the memory budget from a stated end, delivered; no tools",
     "a2c": "a notes file one model kept as the conversation went, its last version only, searched with the tools",
     "a2d": "the same notes file with every version kept in git, searched with the tools",
+    "a3": "Taste git memory, what each commit's header says listed in the prompt, cut to the budget; fetch offered, no search",
+    "a4q": "a4's store, searched once by the harness with the request's own words; no tools",
+    "a7q": "a4q and a6 together",
+    "a2cq": "a2c's notes file, searched once by the harness with the request's own words; no tools",
+    "a2dq": "a2d's notes file with every version, searched once by the harness with the request's own words; no tools",
 }
+_HARNESS_SEARCHES = ("a5q", "a4q", "a7q", "a2cq", "a2dq")
+_NEEDS_HEADERS = ("a4", "a7", "a3", "a4q", "a7q")
+_NEEDS_RECORDS = ("a6", "a7", "a7q")
+_NEEDS_NOTES = ("a2c", "a2d", "a2cq", "a2dq")
 TOOL_ARMS = ("a5", "a4", "a7", "a2c", "a2d")
 # The same words the earlier record arms used, so a6 is the same delivery measured in this harness.
 DELIVERED_HEADER = "Standing instructions the user gave in this session, verbatim, from the record:"
 FOUND_HEADER = "From the record of this session, what may bear on this request:"
+INDEX_HEADER = "The record of this session, one line per commit, oldest first. memory_fetch with a line's number brings it back:"
 FLAT_HEADER = "The conversation so far, from a notes file:"
 
 
@@ -98,19 +110,29 @@ def case_messages(case: dict, summary: str, *, condition: str, upper: bool, bloc
             {"role": "user", "content": case["post_sc_probe_prompt"] if upper else case["probe_prompt"]}]
 
 
-def _search_for_it(store: GitTurns, case: dict, budget: int, count: Callable[[str], int]) -> tuple[str, list[dict]]:
-    """One search with the request's own words, each hit fetched in rank order, all of it cut to the budget."""
+def _search_for_it(store: Any, case: dict, budget: int, count: Callable[[str], int]) -> tuple[str, list[dict]]:
+    """One search with the request's own words, each hit fetched in rank order, page by page until the budget could be
+    full, and all of it cut to the budget."""
     request = _REQUEST.search(case["probe_prompt"]).group(1)
     arguments = {"description": request, "limit": MAX_RESULTS}
     output, failed = store.answer(SEARCH, arguments)
     calls = [{"name": SEARCH, "arguments": json.dumps(arguments), "output": output, "failed": failed}]
-    pieces = []
+    pieces: list[str] = []
     for hit in json.loads(output).get("results", []):
-        arguments = {"pointer": hit["pointer"]}
-        output, failed = store.answer(FETCH, arguments)
-        calls.append({"name": FETCH, "arguments": json.dumps(arguments), "output": output, "failed": failed})
-        if not failed:
-            pieces.append(json.loads(output)["text"])
+        text, offset = "", 0
+        while count("".join(pieces) + text) <= budget:
+            arguments = {"pointer": hit["pointer"], "offset": offset}
+            output, failed = store.answer(FETCH, arguments)
+            calls.append({"name": FETCH, "arguments": json.dumps(arguments), "output": output, "failed": failed})
+            if failed:
+                break
+            page = json.loads(output)
+            text += page["text"]
+            offset = page["next_offset"]
+            if page["eof"]:
+                break
+        if text:
+            pieces.append(text)
     return fill(pieces, budget, count), calls
 
 
@@ -146,35 +168,103 @@ def _rule_turns(case: dict) -> list[int]:
     return [n for n, turn in enumerate(case["messages"]) if holds(str(turn.get("content", "")), case["sc_text"])]
 
 
-def _delivered_search(case: dict, summary: str, *, chat: Callable, condition: str, workdir: Path, budget: int,
-                      count: Callable[[str], int], prompt: str, k: int, upper: bool) -> dict[str, Any]:
-    """Arm a5q: the store is searched by the harness, so "looked" is true by construction and "found" is all it says."""
+def _common(case: dict, run: Any, *, arm: str, condition: str, prompt: str, k: int, upper: bool, reached: list[int],
+            calls: list[dict], commits: int, seconds: tuple[float, float], ledger: dict) -> dict[str, Any]:
+    rule_turns = _rule_turns(case)
+    return {
+        **{key: case[key] for key in ("id", "haystack_id", "sc_id", "sc_type", "compliant_letter")},
+        "arm": arm, "condition": condition, "prompt": prompt, "k": k, "upper": upper, "keep": None,
+        "final": run.final, "finish_reason": run.finish_reason, "compliant": grade(run.final, case["compliant_letter"]),
+        "found_turns": reached, "rule_turns": rule_turns, "rule_turn_reached": bool(set(reached) & set(rule_turns)),
+        "rounds": run.rounds, "unparsed_arguments": run.unparsed_arguments, "budget_refusals": run.budget_refusals,
+        "round_limit_hit": run.round_limit_hit, "tool_tokens": run.tool_tokens, "usage": run.usage, "calls": calls,
+        "commits": commits, "ingest_seconds": seconds[0], "probe_seconds": seconds[1], "ledger": ledger,
+    }
+
+
+def _delivered_search(case: dict, summary: str, *, chat: Callable, arm: str, condition: str, workdir: Path, budget: int,
+                      count: Callable[[str], int], prompt: str, k: int, upper: bool,
+                      header: Callable[[int, dict], CommitHeader] | None, delivered: str | None,
+                      notes: list[str] | None) -> dict[str, Any]:
+    """The arms ending in q: the store is searched by the harness, so "looked" is true by construction and "found" says
+    whether the search brought the rule back. The text delivered is kept, since a notes file may paraphrase the rule."""
     started = time.perf_counter()
-    store = GitTurns(Path(workdir), header=None)
+    if arm in ("a2cq", "a2dq"):
+        store: Any = NotesStore(Path(workdir), notes or [], history=arm == "a2dq")
+    else:
+        store = GitTurns(Path(workdir), header=header if arm in ("a4q", "a7q") else None)
     try:
-        store.ingest(case["messages"])
+        if isinstance(store, GitTurns):
+            store.ingest(case["messages"])
         ingested = time.perf_counter()
-        block, calls = _search_for_it(store, case, budget, count)
-        messages = case_messages(case, summary, condition=condition, upper=upper, block=block, block_header=FOUND_HEADER)
-        run = _without_tools(chat, messages)
+        found, calls = _search_for_it(store, case, budget, count)
+        if arm == "a7q":
+            block, block_header = f"{delivered}\n\n{FOUND_HEADER}\n{found}", DELIVERED_HEADER
+        else:
+            block, block_header = found, FOUND_HEADER
+        run = _without_tools(chat, case_messages(case, summary, condition=condition, upper=upper, block=block,
+                                                 block_header=block_header))
         asked = time.perf_counter()
-        run.calls, run.searches, run.fetches = calls, 1, len(calls) - 1
+        run.calls, run.searches = calls, 1
         reached = _turns_reached(store, run)
         ledger, commits = store.ledger("single_query"), store.commits
     finally:
         store.close()
-    rule_turns = _rule_turns(case)
-    return {
-        **{key: case[key] for key in ("id", "haystack_id", "sc_id", "sc_type", "compliant_letter")},
-        "arm": "a5q", "condition": condition, "prompt": prompt, "k": k, "upper": upper, "keep": None,
-        "delivered_tokens": count(block), "final": run.final, "finish_reason": run.finish_reason,
-        "compliant": grade(run.final, case["compliant_letter"]), "looked": True, "found": holds(block, case["sc_text"]),
-        "found_turns": reached, "rule_turns": rule_turns, "rule_turn_reached": bool(set(reached) & set(rule_turns)),
-        "searches": 1, "fetches": len(calls) - 1, "rounds": 0, "tool_errors": sum(call["failed"] for call in calls),
-        "unparsed_arguments": 0, "budget_refusals": 0, "round_limit_hit": False, "tool_tokens": 0, "usage": run.usage,
-        "calls": calls, "commits": commits, "ingest_seconds": ingested - started, "probe_seconds": asked - ingested,
-        "ledger": ledger,
-    }
+    fetches = sum(call["name"] == FETCH for call in calls)
+    return {**_common(case, run, arm=arm, condition=condition, prompt=prompt, k=k, upper=upper, reached=reached, calls=calls,
+                      commits=commits, seconds=(ingested - started, asked - ingested), ledger=ledger),
+            "delivered_tokens": count(block), "delivered_text": block, "looked": True, "found": holds(found, case["sc_text"]),
+            "searches": 1, "fetches": fetches, "tool_errors": sum(call["failed"] for call in calls)}
+
+
+def _index_lines(rows: list[dict], budget: int, count: Callable[[str], int]) -> tuple[list[str], list[dict]]:
+    """Each commit's line, oldest first. When the budget cuts, the newest stay, as in a context window."""
+    lines = [f"{row['turn'] + 1} {row['what']}" + (f" [{', '.join(row['keywords'])}]" if row["keywords"] else "") for row in rows]
+    kept, used = [], 0
+    for line in reversed(lines):
+        size = count(line)
+        if used + size > budget:
+            break
+        kept.append(line)
+        used += size
+    return kept[::-1], rows[len(rows) - len(kept):]
+
+
+def _header_index(case: dict, summary: str, *, chat: Callable, condition: str, workdir: Path, max_rounds: int, budget: int,
+                  count: Callable[[str], int], prompt: str, k: int, upper: bool,
+                  header: Callable[[int, dict], CommitHeader]) -> dict[str, Any]:
+    """Arm a3. What fetch brings back counts against the same budget as the index."""
+    started = time.perf_counter()
+    store = GitTurns(Path(workdir), header=header)
+    try:
+        store.ingest(case["messages"])
+        rows = store.index()
+        lines, kept = _index_lines(rows, budget, count)
+        block = "\n".join(lines)
+        pointers = {str(row["turn"] + 1): row["pointer"] for row in kept}
+        reached: set[int] = set()
+
+        def answer(name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+            wanted = str(arguments.get("pointer", ""))
+            output, failed = store.answer(name, {**arguments, "pointer": pointers.get(wanted, wanted)})
+            if not failed and wanted in pointers:
+                reached.add(int(wanted) - 1)
+            return output, failed
+
+        ingested = time.perf_counter()
+        fetch_only = [tool for tool in definitions("chat") if tool["function"]["name"] == FETCH]
+        messages = case_messages(case, summary, condition=condition, upper=upper, block=block, block_header=INDEX_HEADER)
+        run = ask_with_tools(chat, messages, fetch_only, answer, max_rounds=max_rounds, budget=budget - count(block), count=count)
+        asked = time.perf_counter()
+        ledger, commits = store.ledger("delivered"), store.commits
+    finally:
+        store.close()
+    return {**_common(case, run, arm="a3", condition=condition, prompt=prompt, k=k, upper=upper, reached=sorted(reached),
+                      calls=run.calls, commits=commits, seconds=(ingested - started, asked - ingested), ledger=ledger),
+            "delivered_tokens": count(block), "delivered_text": block, "index_lines": len(lines),
+            "index_cut": len(rows) - len(lines), "looked": run.fetches > 0,
+            "found": holds(block, case["sc_text"]) or found_in(run, case["sc_text"]), "rule_in_index": holds(block, case["sc_text"]),
+            "searches": run.searches, "fetches": run.fetches, "tool_errors": run.tool_errors}
 
 
 def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: str, workdir: Path, max_rounds: int,
@@ -183,16 +273,19 @@ def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: s
              delivered: str | None = None, keep: str = "newest", notes: list[str] | None = None) -> dict[str, Any]:
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
-    if arm in ("a4", "a7") and header is None:
+    if arm in _NEEDS_HEADERS and header is None:
         raise ValueError(f"arm {arm} needs its headers")
-    if arm in ("a6", "a7") and delivered is None:
+    if arm in _NEEDS_RECORDS and delivered is None:
         raise ValueError(f"arm {arm} needs its delivered records")
-    if arm in ("a2c", "a2d") and not notes:
+    if arm in _NEEDS_NOTES and not notes:
         raise ValueError(f"arm {arm} needs the notes versions")
     block, block_header = None, ""
-    if arm == "a5q":
-        return _delivered_search(case, summary, chat=chat, condition=condition, workdir=workdir, budget=budget,
-                                 count=count, prompt=prompt, k=k, upper=upper)
+    if arm in _HARNESS_SEARCHES:
+        return _delivered_search(case, summary, chat=chat, arm=arm, condition=condition, workdir=workdir, budget=budget,
+                                 count=count, prompt=prompt, k=k, upper=upper, header=header, delivered=delivered, notes=notes)
+    if arm == "a3":
+        return _header_index(case, summary, chat=chat, condition=condition, workdir=workdir, max_rounds=max_rounds, budget=budget,
+                             count=count, prompt=prompt, k=k, upper=upper, header=header)
     if arm in ("a6", "a7"):
         block, block_header = delivered, DELIVERED_HEADER
     elif arm == "a2a":

@@ -728,3 +728,96 @@ def test_the_served_helper_says_how_the_reply_ended() -> None:
     finally:
         server.shutdown()
     assert reply["finish_reason"] == "length"
+
+
+# ------------------------------------------------------------------ the header index, and the harness searching every store
+
+from studies.memory_probe.cases import INDEX_HEADER  # noqa: E402
+
+
+def _headers(number: int, turn: dict) -> CommitHeader:
+    words = str(turn["content"])
+    return CommitHeader(what=f"Turn {number}: {words[:40]}", keywords=("offsite",))
+
+
+REQUEST = 'Assume ...\n\nRequest from the user:\n"send anything to Sarah"\n\nTwo candidate behaviors:\nA) x\nB) y'
+
+
+def test_the_header_index_lists_what_each_commit_holds_in_the_prompt_and_offers_fetch_and_no_search(tmp_path: Path) -> None:
+    sent = []
+
+    def chat(messages, tools):
+        sent.append((messages, tools))
+        return _reply("A")
+
+    row = run_case(_case(), "S", chat=chat, arm="a3", condition="i", workdir=tmp_path, max_rounds=4, budget=5000, count=_count,
+                   prompt="anthropic", k=1, header=_headers)
+    ((messages, tools),) = sent
+    assert [tool["function"]["name"] for tool in tools] == [FETCH]
+    assert messages[2]["content"].startswith(f"S\n\n{INDEX_HEADER}\n")
+    lines = messages[2]["content"].split(f"{INDEX_HEADER}\n")[1].splitlines()
+    assert lines[0].startswith("1 ") and "Turn 0:" in lines[0] and "offsite" in lines[0]
+    assert row["index_lines"] == row["commits"] == len(lines) and row["index_cut"] == 0
+    assert row["searches"] == 0 and row["ledger"]["mode"] == "delivered" and row["ledger"]["search_calls"] == 0
+    check([row["ledger"]])
+    assert not any(tmp_path.iterdir())
+
+
+def test_a_commit_in_the_index_is_fetched_by_its_number_and_the_rule_then_counts_as_found(tmp_path: Path) -> None:
+    def chat(messages, tools):
+        if tools and not any(m["role"] == "tool" for m in messages):
+            return _reply(calls=[_call(FETCH, json.dumps({"pointer": "1"}), "c1")], finish="tool_calls")
+        return _reply("A")
+
+    row = run_case(_case(), "S", chat=chat, arm="a3", condition="i", workdir=tmp_path, max_rounds=4, budget=5000, count=_count,
+                   prompt="anthropic", k=1, header=_headers)
+    assert row["fetches"] == 1 and row["tool_errors"] == 0 and row["found"] is True and row["looked"] is True
+    assert row["found_turns"] == [0] and row["rule_turn_reached"] is True
+
+
+def test_the_index_keeps_the_newest_commits_when_the_budget_cuts_and_says_how_many_went(tmp_path: Path) -> None:
+    sent = []
+    row = run_case(_case(), "S", chat=lambda m, t: sent.append(m) or _reply("A"), arm="a3", condition="i", workdir=tmp_path,
+                   max_rounds=4, budget=30, count=_count, prompt="anthropic", k=1, header=_headers)
+    assert row["delivered_tokens"] <= 30 and row["index_cut"] > 0
+    assert row["index_lines"] + row["index_cut"] == row["commits"]
+    assert f"{row['commits']} " in sent[0][2]["content"], "the newest commit is the one kept"
+
+
+def test_the_index_arm_needs_its_headers(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="headers"):
+        run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a3", condition="i", workdir=tmp_path, max_rounds=4,
+                 budget=500, count=_count, prompt="anthropic", k=1)
+
+
+def test_the_harness_searches_the_notes_with_history_and_without(tmp_path: Path) -> None:
+    case = {**_case(), "probe_prompt": REQUEST.replace("send anything to Sarah", "draft go-ahead")}
+    rows = {arm: run_case(case, "S", chat=lambda m, t: _reply("A"), arm=arm, condition="i", workdir=tmp_path, max_rounds=4,
+                          budget=5000, count=_count, prompt="anthropic", k=1, notes=_versions())
+            for arm in ("a2cq", "a2dq")}
+    assert rows["a2cq"]["found"] is False and rows["a2cq"]["commits"] == 1
+    assert rows["a2dq"]["found"] is True and rows["a2dq"]["commits"] == 3
+    assert RULE in rows["a2dq"]["delivered_text"] and RULE not in rows["a2cq"]["delivered_text"]
+    assert all(row["ledger"]["mode"] == "single_query" for row in rows.values())
+    with pytest.raises(ValueError, match="notes"):
+        run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a2cq", condition="i", workdir=tmp_path, max_rounds=4,
+                 budget=5000, count=_count, prompt="anthropic", k=1)
+
+
+def test_the_harness_search_reads_headers_in_the_header_arm_and_adds_the_rules_in_the_strongest(tmp_path: Path) -> None:
+    case = {**_case(), "probe_prompt": REQUEST.replace("send anything to Sarah", "offsite")}
+    with_headers = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a4q", condition="i", workdir=tmp_path, max_rounds=4,
+                            budget=5000, count=_count, prompt="anthropic", k=1, header=_headers)
+    assert with_headers["looked"] is True and with_headers["ledger"]["search_calls"] == 1
+    sent = []
+    both = run_case(case, "S", chat=lambda m, t: sent.append(m) or _reply("A"), arm="a7q", condition="i", workdir=tmp_path,
+                    max_rounds=4, budget=5000, count=_count, prompt="anthropic", k=1, header=_headers, delivered=f"- {RULE}")
+    assert sent[0][2]["content"].startswith(f"S\n\n{DELIVERED_HEADER}\n- {RULE}\n\n")
+    assert both["delivered_tokens"] <= 5000 + _count(f"- {RULE}")
+
+
+def test_a_harness_search_keeps_what_it_delivered_so_a_paraphrase_can_be_judged(tmp_path: Path) -> None:
+    case = {**_case(), "probe_prompt": REQUEST}
+    row = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a5q", condition="i", workdir=tmp_path, max_rounds=4,
+                   budget=5000, count=_count, prompt="anthropic", k=1)
+    assert RULE in row["delivered_text"]
