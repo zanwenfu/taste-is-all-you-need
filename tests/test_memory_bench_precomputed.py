@@ -54,7 +54,8 @@ def test_the_views_file_holds_only_what_a_memory_may_see_for_longmemeval(tmp_pat
     units = [json.loads(line) for line in text.splitlines()]
     assert len(units) == 2
     assert set(units[0]) == {"unit", "sessions", "queries"}
-    assert units[0]["queries"] == [{"qid": units[0]["unit"], "query": "Which level did I park the rental on?"}]
+    assert units[0]["queries"] == [{"qid": units[0]["unit"], "query": "Which level did I park the rental on?",
+                                    "date": "2023/06/01 (Thu) 10:00"}]
     for marker in ("has_answer", "answer_", "noans_", "single-session", "question_type", "level 3\""):
         assert marker not in text, marker
 

@@ -160,8 +160,8 @@ def views(arguments: argparse.Namespace) -> int:
     units = []
     if arguments.benchmark == "lme":
         loaded, _ = lme.load([item for item in data if item["question_id"] in wanted])
-        units = [{"unit": v["qid"], "sessions": v["sessions"], "queries": [{"qid": v["qid"], "query": v["question"]}]}
-                 for v in loaded]
+        units = [{"unit": v["qid"], "sessions": v["sessions"],
+                  "queries": [{"qid": v["qid"], "query": v["question"], "date": v["question_date"]}]} for v in loaded]
     else:
         loaded, _ = locomo.load([sample for sample in data if sample["sample_id"] in wanted])
         units = [{"unit": v["conversation"], "sessions": v["sessions"],

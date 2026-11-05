@@ -21,7 +21,7 @@ from studies.memory_ledger import BASELINE, stand_in_record
 class Adapter(Protocol):
     def ingest(self, sessions: list[dict]) -> None: ...
 
-    def retrieve(self, query: str) -> list[Item]: ...
+    def retrieve(self, query: str, *, date: str | None = None) -> list[Item]: ...
 
     def close(self) -> None: ...
 
@@ -52,7 +52,7 @@ def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: 
             lines = []
             for query in unit["queries"]:
                 asked = time.perf_counter()
-                items = adapter.retrieve(query["query"])
+                items = adapter.retrieve(query["query"], date=query.get("date"))
                 lines.append(rankings_line(query["qid"], system, items, ingest_seconds=ingest_seconds,
                                            retrieve_seconds=time.perf_counter() - asked, ledger=ledger,
                                            versions=versions))
