@@ -15,7 +15,7 @@ from typing import Any
 
 from studies.memory_ledger import BASELINE, stand_in_record
 from studies.memory_probe.stores import GitTurns, NotesStore
-from studies.memory_probe.tool_loop import ToolRun, ask_with_tools, found_in, grade
+from studies.memory_probe.tool_loop import ToolRun, ask_with_tools, found_in, grade, holds
 from taste.memstore import BadPointer, CommitHeader
 from taste.memstore.tools import FETCH, SEARCH, definitions
 
@@ -143,7 +143,7 @@ def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: s
         asked = time.perf_counter()
         source = "studies/context_rot/criteria.py records" if arm == "a6" else f"flat file, keep {keep}"
         ledger = stand_in_record(BASELINE, code=f"studies/memory_probe/cases.py:{arm} ({source})")
-    rule_turns = [n for n, turn in enumerate(case["messages"]) if case["sc_text"] in str(turn.get("content", ""))]
+    rule_turns = [n for n, turn in enumerate(case["messages"]) if holds(str(turn.get("content", "")), case["sc_text"])]
     return {
         **{key: case[key] for key in ("id", "haystack_id", "sc_id", "sc_type", "compliant_letter")},
         "arm": arm, "condition": condition, "prompt": prompt, "k": k, "upper": upper,

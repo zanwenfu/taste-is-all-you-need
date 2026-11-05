@@ -607,3 +607,28 @@ def test_the_two_notes_arms_differ_only_in_history(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="notes"):
         run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a2d", condition="ii", workdir=tmp_path,
                  max_rounds=4, budget=500, count=_count, prompt="pi_mono", k=1)
+
+
+# ------------------------------------------------------------------ the benchmark's rule text against its history
+
+
+def test_the_rule_counts_as_found_whatever_its_first_letter(tmp_path: Path) -> None:
+    """The package's rule text starts with a capital; its histories hold it lower-cased after "For the rest of this
+    session." On the real Hermes cases an exact match finds 0 of 150, which would read as nothing ever being found."""
+    case = {**_case(), "sc_text": "Don't send any messages on my behalf.", "messages": [
+        {"role": "user", "content": "For the rest of this session. don't send any messages on my behalf.\nWrite a script."},
+        {"role": "assistant", "content": "Done."}]}
+
+    def chat(messages, tools):
+        if tools and not any(m["role"] == "tool" for m in messages):
+            return _reply(calls=[_call(SEARCH, json.dumps({"description": "send messages"}), "c1")], finish="tool_calls")
+        if tools and sum(m["role"] == "tool" for m in messages) == 1:
+            pointer = json.loads(messages[-1]["content"])["results"][0]["pointer"]
+            return _reply(calls=[_call(FETCH, json.dumps({"pointer": pointer}), "c2")], finish="tool_calls")
+        return _reply("A")
+
+    row = run_case(case, "S", chat=chat, arm="a5", condition="i", workdir=tmp_path, max_rounds=4, budget=5000,
+                   count=_count, prompt="anthropic", k=1)
+
+    assert row["rule_turns"] == [0] and row["rule_turn_reached"] is True
+    assert row["found"] is True

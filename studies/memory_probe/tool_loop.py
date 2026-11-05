@@ -158,6 +158,12 @@ def _strings(value: Any) -> Iterator[str]:
             yield from _strings(item)
 
 
+def holds(value: str, text: str) -> bool:
+    """Whether ``value`` holds all of ``text``, whatever the case: the benchmark's rule text starts with a capital and
+    its histories hold it lower-cased, mid-sentence."""
+    return text.casefold() in value.casefold()
+
+
 def found_in(run: ToolRun, text: str) -> bool:
     """Whether the whole of ``text`` reached the model in any one piece of tool output."""
     for call in run.calls:
@@ -165,6 +171,6 @@ def found_in(run: ToolRun, text: str) -> bool:
             values = list(_strings(json.loads(call["output"])))
         except json.JSONDecodeError:
             values = [call["output"]]
-        if any(text in value for value in values):
+        if any(holds(value, text) for value in values):
             return True
     return False
