@@ -402,7 +402,7 @@ def test_the_http_client_tries_again_after_a_server_error_and_not_after_a_refusa
 
 # ------------------------------------------------------------------ headers for the header arm
 
-from studies.memory_probe.headers import StoredTurnHeaders, write_turn_headers  # noqa: E402
+from studies.memory_probe.headers import StoredTurnHeaders, served_ask, write_turn_headers  # noqa: E402
 
 
 def test_each_distinct_turn_gets_one_header_call_and_the_store_reads_them_back(tmp_path: Path) -> None:
@@ -410,7 +410,7 @@ def test_each_distinct_turn_gets_one_header_call_and_the_store_reads_them_back(t
 
     def ask(prompt: str) -> dict:
         asked.append(prompt)
-        return {"text": '{"what": "A turn about the offsite.", "keywords": ["offsite", 7]}', "prompt_tokens": 5,
+        return {"text": '{"what": "A turn about the offsite.", "keywords": ["offsite", 7]}', "finish_reason": "stop", "prompt_tokens": 5,
                 "completion_tokens": 2}
 
     cases = [{**_case(), "id": "a"}, {**_case(), "id": "b"}]
@@ -430,7 +430,7 @@ def test_each_distinct_turn_gets_one_header_call_and_the_store_reads_them_back(t
 def test_a_long_turn_is_cut_before_the_header_model_sees_it(tmp_path: Path) -> None:
     asked: list[str] = []
     case = {**_case(), "messages": [{"role": "tool", "content": "x" * 100_000}]}
-    write_turn_headers([case], lambda p: asked.append(p) or {"text": "{}", "prompt_tokens": 1,
+    write_turn_headers([case], lambda p: asked.append(p) or {"text": "{}", "finish_reason": "stop", "prompt_tokens": 1,
                                                              "completion_tokens": 1}, tmp_path / "h.jsonl", workers=1)
     assert len(asked[0]) < 30_000
 
@@ -553,9 +553,9 @@ def test_the_conversation_is_read_in_rounds_and_each_round_rewrites_the_notes() 
     assert [len(c) for c in chunks(_history())] == [2, 2, 2]
     asked: list[str] = []
 
-    def ask(prompt: str) -> str:
+    def ask(prompt: str) -> dict:
         asked.append(prompt)
-        return f"notes after {len(asked)}"
+        return {"text": f"notes after {len(asked)}", "finish_reason": "stop"}
 
     versions = take_notes(_history(), ask)
     assert versions == ["notes after 1", "notes after 2", "notes after 3"]
@@ -567,9 +567,9 @@ def test_notes_are_written_once_per_case_and_resume(tmp_path: Path) -> None:
     calls = []
     cases = [{**_case(), "id": "a"}, {**_case(), "id": "b"}]
     path = tmp_path / "notes.jsonl"
-    counts = write_notes(cases, lambda prompt: calls.append(prompt) or "n", path, workers=2)
+    counts = write_notes(cases, lambda prompt: calls.append(prompt) or {"text": "n", "finish_reason": "stop"}, path, workers=2)
     assert counts == {"cases": 2, "written": 2, "failed": 0} and len(calls) == 6
-    assert write_notes(cases, lambda prompt: "x", path, workers=2)["written"] == 0
+    assert write_notes(cases, lambda prompt: {"text": "x", "finish_reason": "stop"}, path, workers=2)["written"] == 0
 
 
 def _versions() -> list[str]:
@@ -687,3 +687,44 @@ def test_what_the_harness_delivers_stays_inside_the_memory_budget(tmp_path: Path
     row = run_case({**_case(), "probe_prompt": request}, "S", chat=lambda m, t: _reply("A"), arm="a5q", condition="i",
                    workdir=tmp_path, max_rounds=4, budget=3, count=_count, prompt="anthropic", k=1)
     assert row["delivered_tokens"] <= 3
+
+
+# ------------------------------------------------------------------ a reply cut off by the output cap is never kept as if whole
+
+
+def test_a_notes_version_cut_off_by_the_output_cap_fails_the_case_and_is_asked_again(tmp_path: Path) -> None:
+    """A notes file cut at the cap would lose its end silently, and the notes arms would look worse for no real reason."""
+    path = tmp_path / "notes.jsonl"
+    case = {"id": "h00:sc01", "messages": [{"role": "user", "content": "first"}, {"role": "assistant", "content": "ok"}]}
+
+    def cut(prompt: str) -> dict:
+        return {"text": "notes that stop mid", "finish_reason": "length"}
+
+    counts = write_notes([case], cut, path, workers=1)
+    assert counts == {"cases": 1, "written": 0, "failed": 1}
+    assert not path.exists() or path.read_text() == ""
+
+    def whole(prompt: str) -> dict:
+        return {"text": "whole notes", "finish_reason": "stop"}
+
+    assert write_notes([case], whole, path, workers=1) == {"cases": 1, "written": 1, "failed": 0}
+    assert json.loads(path.read_text())["versions"] == ["whole notes"]
+
+
+def test_a_header_cut_off_by_the_output_cap_is_counted_as_failed(tmp_path: Path) -> None:
+    case = {"id": "h00:sc01", "messages": [{"role": "user", "content": "first"}]}
+    path = tmp_path / "headers.jsonl"
+    counts = write_turn_headers([case], lambda prompt: {"text": '{"what": "a turn", "keywords": []}', "finish_reason": "length",
+                                                        "prompt_tokens": 1, "completion_tokens": 1}, path, workers=1)
+    assert counts["failed"] == 1
+    assert json.loads(path.read_text())["ok"] is False
+
+
+def test_the_served_helper_says_how_the_reply_ended() -> None:
+    server, _ = _serve([(200, {"choices": [{"message": {"content": "hi"}, "finish_reason": "length"}],
+                               "usage": {"prompt_tokens": 1, "completion_tokens": 1}})])
+    try:
+        reply = served_ask(f"http://127.0.0.1:{server.server_port}/v1", "m")("q")
+    finally:
+        server.shutdown()
+    assert reply["finish_reason"] == "length"

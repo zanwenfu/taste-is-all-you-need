@@ -309,6 +309,13 @@ def test_an_empty_summary_is_asked_again_and_stops_the_run_if_it_stays_empty() -
         make_summarizer(lambda m, t: _text(""), "anthropic", _prompt)([], None)
 
 
+def test_a_summary_cut_off_by_the_output_cap_stops_the_run() -> None:
+    reply = _text("half a summ")
+    reply.choices[0].finish_reason = "length"
+    with pytest.raises(RuntimeError, match="cut off"):
+        make_summarizer(lambda m, t: reply, "anthropic", _prompt)([], None)
+
+
 # ------------------------------------------------------------------ one whole session, on a stand-in
 
 

@@ -48,9 +48,9 @@ def write_turn_headers(cases: list[dict], ask: Callable[[str], dict], path: Path
             with lock:
                 failed[0] += 1
             return
-        parsed = _parsed(reply["text"])
+        parsed = None if reply["finish_reason"] == "length" else _parsed(reply["text"])
         row = {"key": key, "what": parsed[0] if parsed else "", "keywords": parsed[1] if parsed else [],
-               "ok": parsed is not None, "prompt_tokens": reply["prompt_tokens"],
+               "ok": parsed is not None, "finish_reason": reply["finish_reason"], "prompt_tokens": reply["prompt_tokens"],
                "completion_tokens": reply["completion_tokens"], "raw": reply["text"]}
         with lock, path.open("a") as written:
             written.write(json.dumps(row) + "\n")
@@ -61,7 +61,7 @@ def write_turn_headers(cases: list[dict], ask: Callable[[str], dict], path: Path
     return {"turns": len(turns), "calls": len(todo), "failed": failed[0]}
 
 
-def served_ask(url: str, model: str, *, max_tokens: int = 600) -> Callable[[str], dict]:
+def served_ask(url: str, model: str, *, max_tokens: int = 1024) -> Callable[[str], dict]:
     """One user message to the served auxiliary model, over plain HTTP, no tools."""
     from studies.memory_probe.tool_loop import http_chat
 
@@ -69,8 +69,9 @@ def served_ask(url: str, model: str, *, max_tokens: int = 600) -> Callable[[str]
 
     def ask(prompt: str) -> dict:
         reply = chat([{"role": "user", "content": prompt}], None)
-        return {"text": reply.choices[0].message.content or "", "prompt_tokens": reply.usage.prompt_tokens,
-                "completion_tokens": reply.usage.completion_tokens}
+        choice = reply.choices[0]
+        return {"text": choice.message.content or "", "finish_reason": choice.finish_reason,
+                "prompt_tokens": reply.usage.prompt_tokens, "completion_tokens": reply.usage.completion_tokens}
 
     return ask
 

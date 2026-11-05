@@ -55,7 +55,10 @@ def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tr
     def summarize(older: list[dict], previous: str | None) -> str:
         messages = round_prompt(option, previous, older, package_prompt)
         for _ in range(tries):
-            text = (chat(messages, None).choices[0].message.content or "").strip()
+            choice = chat(messages, None).choices[0]
+            text = (choice.message.content or "").strip()
+            if choice.finish_reason == "length":
+                raise RuntimeError("a summary was cut off by the output cap")
             if text:
                 return text
         raise RuntimeError(f"the model gave no summary in {tries} tries")

@@ -64,9 +64,9 @@ def write_all(views: list[dict], ask: Callable[[str], dict], path: Path, *, work
             with lock:
                 failed[0] += 1
             return
-        parsed = _parsed(reply["text"])
+        parsed = None if reply.get("finish_reason") == "length" else _parsed(reply["text"])
         row = {"key": key, "what": parsed[0] if parsed else "", "keywords": parsed[1] if parsed else [],
-               "ok": parsed is not None, "prompt_tokens": reply["prompt_tokens"],
+               "ok": parsed is not None, "finish_reason": reply.get("finish_reason"), "prompt_tokens": reply["prompt_tokens"],
                "completion_tokens": reply["completion_tokens"], "raw": reply["text"]}
         with lock, path.open("a") as written:
             written.write(json.dumps(row) + "\n")

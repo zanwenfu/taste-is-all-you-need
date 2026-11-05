@@ -34,16 +34,21 @@ def chunks(messages: list[dict]) -> list[list[dict]]:
     return out
 
 
-def take_notes(messages: list[dict], ask: Callable[[str], str]) -> list[str]:
+def take_notes(messages: list[dict], ask: Callable[[str], dict]) -> list[str]:
+    """Every version, in order. A reply cut off by the output cap stops the case: a notes file cut at the cap would lose
+    its end silently, and the notes arms would look worse for no real reason."""
     notes, versions = "", []
     for part in chunks(messages):
         text = "\n".join(f"[{turn['role']}]: {str(turn['content'])[:MAX_TURN_CHARS]}" for turn in part)
-        notes = ask(PROMPT.format(notes=notes or "(no notes yet)", part=text))
+        reply = ask(PROMPT.format(notes=notes or "(no notes yet)", part=text))
+        if reply["finish_reason"] == "length":
+            raise ValueError("a notes version was cut off by the output cap")
+        notes = reply["text"]
         versions.append(notes)
     return versions
 
 
-def write_notes(cases: list[dict], ask: Callable[[str], str], path: Path, *, workers: int) -> dict[str, int]:
+def write_notes(cases: list[dict], ask: Callable[[str], dict], path: Path, *, workers: int) -> dict[str, int]:
     """Every case's versions, written as each case finishes; a case that failed is asked again next time."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,13 +80,13 @@ def main(argv=None) -> int:
     for name in ("inputs", "url", "model", "out"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--workers", type=int, default=16)
     arguments = parser.parse_args(argv)
     cases = [json.loads(line) for line in (Path(arguments.inputs) / "cases.jsonl").read_text().splitlines()]
     cases = cases[: arguments.limit] if arguments.limit else cases
     ask = served_ask(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
-    counts = write_notes(cases, lambda prompt: ask(prompt)["text"], Path(arguments.out), workers=arguments.workers)
+    counts = write_notes(cases, ask, Path(arguments.out), workers=arguments.workers)
     print(json.dumps(counts))
     return 0 if counts["failed"] == 0 else 1
 
