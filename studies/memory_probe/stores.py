@@ -35,11 +35,16 @@ class GitTurns:
         self.commits = 0
 
     def ingest(self, messages: list[dict]) -> None:
-        for number, turn in enumerate(messages):
-            self.branch.turn(role=turn["role"], content=turn["content"])
-            state = self.branch.checkpoint(SUBJECT, header=self.header(number, turn) if self.header else None)
-            self.turn_at[state.id] = number
-            self.commits += 1
+        for turn in messages:
+            self.add(turn)
+
+    def add(self, turn: dict) -> None:
+        """One turn, committed on its own, as it happens."""
+        number = self.commits
+        self.branch.turn(role=turn["role"], content=turn["content"])
+        state = self.branch.checkpoint(SUBJECT, header=self.header(number, turn) if self.header else None)
+        self.turn_at[state.id] = number
+        self.commits += 1
 
     def _turn(self, hit: ContentHit) -> ContentHit:
         """A header's commit stands for the one turn it added: the last line of its transcript note."""
