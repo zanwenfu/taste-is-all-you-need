@@ -35,7 +35,7 @@ from studies.long_run.agent import LongRunAgent, MemoryEnvironment, ToolModel
 from studies.long_run.score import score_session
 from studies.memory_bench.core import fill
 from studies.memory_ledger import BASELINE, stand_in_record
-from studies.memory_probe.cases import DELIVERED_HEADER, FLAT_HEADER, LOOK, SENTENCE
+from studies.memory_probe.cases import DELIVERED_HEADER, FLAT_HEADER, LOOK, SENTENCE, keep_newest
 from studies.memory_probe.stores import GitTurns, NotesStore
 from taste.memstore import CommitHeader
 
@@ -134,11 +134,11 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     elif arm == "taste_rules":
         read, reader_calls = make_reader(chat)
         store = GitTurns(workdir, header=lambda number, turn: CommitHeader(instructions=tuple(read(turn["content"])))
-                         if turn["role"] == "user" else CommitHeader())
+                         if turn["role"] == "user" and not turn.get("from_harness") else CommitHeader())
 
         def standing() -> str:
-            found = store.instructions()
-            return f"{DELIVERED_HEADER}\n" + fill([f"- {text}\n" for text in found], MEMORY_BUDGET, count) if found else ""
+            kept = keep_newest([f"- {text}" for text in dict.fromkeys(store.instructions())], MEMORY_BUDGET, count)
+            return f"{DELIVERED_HEADER}\n" + "\n".join(kept) if kept else ""
     elif arm in NOTE_ARMS:
         store = NotesStore(workdir, [], history=True)
         on_compact = make_note_taker(chat, NOTE_ARMS[arm], store)

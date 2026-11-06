@@ -719,3 +719,18 @@ def test_a_notes_file_is_rewritten_at_each_compaction_kept_in_git_and_reaches_ev
         assert "Notes: pass -B to Python." not in script.sent[0]["messages"][0]["content"]
         assert summary["ledger"]["name"] == "Taste memory, study-driven" and summary["note_versions"] == summary["compactions"]
         assert [t["function"]["name"] for t in script.sent[0]["tools"]] == ["bash"]
+
+
+def test_the_reader_does_not_read_the_harnesss_own_messages_as_the_users_rules(tmp_path: Path) -> None:
+    rule = SESSION["rules"][0]["text"]
+    silent = _reply([], content="done")
+    script = _Script([silent, _bash(DONE, "c1"), _bash(DONE, "c2")])
+    nagging = "Every response MUST include at least one tool call."
+    chat, _ = _reader_route(script, [rule, nagging])
+    session = load_session({**SESSION, "rules": SESSION["rules"][:1], "compact_at_tokens": 0})
+    run_session(session, arm="taste_rules", chat=chat, make_env=lambda task: _Shell(), count=_count, out=tmp_path / "run",
+                workdir=tmp_path / "w", package_prompt=_prompt)
+    system = script.sent[-1]["messages"][0]["content"]
+    assert rule in system and system.count(rule) == 1
+    assert nagging not in system
+    assert "\n\n- " not in system.split("\n", 1)[1], "one record to a line"

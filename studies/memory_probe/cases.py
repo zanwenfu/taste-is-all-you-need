@@ -290,7 +290,7 @@ def _index_lines(rows: list[dict], budget: int, count: Callable[[str], int]) -> 
             break
         kept.append(line)
         used += size
-    return kept[::-1], rows[len(rows) - len(kept):]
+    return list(reversed(kept)), rows[len(rows) - len(kept):]
 
 
 def _header_index(case: dict, summary: str, *, chat: Callable, condition: str, workdir: Path, max_rounds: int, budget: int,
@@ -330,6 +330,18 @@ def _header_index(case: dict, summary: str, *, chat: Callable, condition: str, w
             "searches": run.searches, "fetches": run.fetches, "tool_errors": run.tool_errors}
 
 
+def keep_newest(lines: list[str], budget: int, count: Callable[[str], int]) -> list[str]:
+    """As many of the newest lines as fit, in their order: a later instruction may replace an earlier one."""
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        if used + count(line) > budget:
+            break
+        kept.append(line)
+        used += count(line)
+    return list(reversed(kept))
+
+
 def _rules_in_headers(case: dict, summary: str, *, chat: Callable, condition: str, workdir: Path, budget: int,
                       count: Callable[[str], int], prompt: str, k: int, upper: bool, items: list[dict]) -> dict[str, Any]:
     """Delivery through the real store: each record goes in the header of the commit of the turn it came from, and what
@@ -343,14 +355,7 @@ def _rules_in_headers(case: dict, summary: str, *, chat: Callable, condition: st
     try:
         store.ingest(case["messages"])
         lines = [f"- {text}" for row in store.index() for text in row["instructions"]]
-        kept: list[str] = []
-        used = 0
-        for line in reversed(lines):
-            if used + count(line) > budget:
-                break
-            kept.append(line)
-            used += count(line)
-        block = "\n".join(reversed(kept)) or "(none)"
+        block = "\n".join(keep_newest(lines, budget, count)) or "(none)"
         ingested = time.perf_counter()
         run = _without_tools(chat, case_messages(case, summary, condition=condition, upper=upper, block=block,
                                                  block_header=DELIVERED_HEADER))

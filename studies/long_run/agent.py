@@ -167,7 +167,8 @@ class LongRunAgent(DefaultAgent):
         if self.record is not None:
             for message in messages:
                 if message.get("role") != "exit":
-                    self.record({"role": message["role"], "content": render(message)})
+                    self.record({"role": message["role"], "content": render(message),
+                                 "from_harness": "interrupt_type" in message.get("extra", {})})
                     self.recorded += 1
         return added
 
