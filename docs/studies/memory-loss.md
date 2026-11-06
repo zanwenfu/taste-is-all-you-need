@@ -62,9 +62,8 @@ calibrated at one compaction.
 
 The delivered rules come from the study's reader (`studies/context_rot/criteria.py`), a model reading each user message with a
 prompt close to the benchmark paper's own fix, so that arm is a baseline. Writing the same records into commit headers changes
-where they are kept, not who wrote them, so that row is read the same way and names the reader wherever it is reported. Each run
-each summary prompt's run keeps the records it delivered, since the reader's readings differ between runs in 17 of the
-150 cases.
+where they are kept, not who wrote them, so that row is read the same way and names the reader wherever it is reported. Each
+summary prompt's run keeps the records it delivered, since the reader's readings differ between runs in 17 of the 150 cases.
 
 ## Prompt conditions
 
