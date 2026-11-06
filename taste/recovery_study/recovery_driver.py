@@ -979,7 +979,8 @@ class RecoveryDriver(Driver):
                 elif recovery in (AGENTREWIND, NORESTORE):
                     text = note(AGENTREWIND, submission)
                 else:
-                    text = note("continue_bare" if message == "bare" else "continue", submission)
+                    text = note("continue_wide" if recovery == "continue_wide"
+                                else "continue_bare" if message == "bare" else "continue", submission)
             caps = self._caps(usd, seconds, base, branch=True)
             rewind = None
             if recovery in REWIND_ARMS:

@@ -17,7 +17,7 @@ import pytest
 
 from taste.recovery_study.driver import STARTED
 from taste.recovery_study.jobs import JobSpec
-from taste.recovery_study.recovery_driver import DEFAULTS, RecoveryDriver
+from taste.recovery_study.recovery_driver import DEFAULTS, WIDE_SENTENCE, RecoveryDriver
 from tests.recovery_fakes import FakeHarbor, agent_steps, finish, recoveries, trial
 from tests.test_recovery_messages import graded_recoveries
 from tests.test_recovery_messages import study as messages_study
@@ -120,6 +120,37 @@ def test_an_unchecked_first_only_arm_still_ends_no_submission_and_arms_outside_i
     assert [e["end"] for e in episodes(driver, run_id, "continue_wide")] == ["no_submission"] * 2
     assert "continue" in checked_arms(driver)
     assert "continue_wide" not in checked_arms(driver)
+
+
+def test_a_first_attempt_the_model_refused_is_tried_again_in_that_arm_and_never_counted(tmp_path):
+    arms = ["continue", "continue_wide"]
+    jobs_dir, trials, given, run_id = messages_study(tmp_path, recoveries=arms, first_only=arms,
+                                                     first_only_checked=False, budget_runs=2.0)
+    base = graded_recoveries()
+
+    def refused_once(spec, task, settings, harbor):
+        fields = base(spec, task, settings, harbor)
+        if settings.get("agent") != "checker" and "-cw-" in spec.name and spec.name.endswith("-f1"):
+            fields.update(stopped_by="model_unavailable", exit_status="Stopped")
+        return fields
+
+    harbor = FakeHarbor(trials, refused_once)
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, harbor)
+    assert [e["end"] for e in episodes(driver, run_id, "continue_wide")] == ["first_only"] * 2
+    wide = driver.runs[run_id]["arms"]["continue_wide"]
+    assert len(wide["first"]) == 2
+    assert all(episode["rounds"][0]["agent"][0] == wide["first"][1] for episode in wide["episodes"])
+
+
+def test_the_wide_arm_keeps_its_sentence_in_a_later_round(tmp_path):
+    arms = ["continue_wide"]
+    jobs_dir, trials, given, run_id = messages_study(tmp_path, recoveries=arms, budget_runs=2.0)
+    driver, harbor = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries()))
+    rounds = [job for job in driver.jobs.values() if job.get("purpose") == "round" and job.get("arm") == "continue_wide"]
+    assert rounds
+    for job in rounds:
+        spec = JobSpec.from_dict(job["spec"])
+        assert Path(spec.settings()["branch_note"]).read_text().endswith(WIDE_SENTENCE)
 
 
 def test_first_only_rounds_are_checked_unless_told_otherwise_and_the_setting_is_a_true_or_false(tmp_path):

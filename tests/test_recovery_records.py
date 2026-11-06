@@ -241,3 +241,30 @@ def test_a_record_says_whether_the_checkpoint_its_trial_saved_is_partial(tmp_pat
     unsaved = trial(jobs_dir, "j", "task-a", reward=0.0, trials_root=trials, branch={"faithful": True})
     found = [records.trial(jobs_dir / "j" / name, trials)["checkpoint_partial"] for name in (over, whole, unsaved)]
     assert found == [True, False, None]
+
+
+def _graded(**fields):
+    return {"reward": 0.0, "faithful": True, "agent_started": True, "audit_flags": [], "stopped_by": "",
+            "cost_usd": 0.05, "settings": {"spend_cap_usd": 0.16}, **fields}
+
+
+@pytest.mark.parametrize("stop", ["model_unavailable", "model_session_closed", "terminal_unavailable", "cancelled"])
+def test_a_trial_the_service_ended_is_not_a_sample_of_the_outcome(stop):
+    assert records.usable(_graded())
+    assert records.service_failed(_graded(stopped_by=stop)) and not records.usable(_graded(stopped_by=stop))
+
+
+def test_a_budget_stop_below_the_cap_is_a_lost_reply_charged_its_worst_case_not_a_spent_budget():
+    # A lost reply is charged its worst case against the cap, so the next call does not fit: the service's failure.
+    assert not records.usable(_graded(stopped_by="budget", cost_usd=0.05))
+    # A budget really spent is the agent's own, and so are the other ends.
+    assert records.usable(_graded(stopped_by="budget", cost_usd=0.16))
+    assert records.usable(_graded(stopped_by="budget", cost_usd=0.17))
+    for stop in ("deadline", "context_window", "request_too_large", "refusal", ""):
+        assert records.usable(_graded(stopped_by=stop))
+
+
+def test_a_record_older_than_stop_reasons_stays_usable():
+    old = _graded()
+    del old["stopped_by"]
+    assert records.usable(old) and not records.service_failed(old)

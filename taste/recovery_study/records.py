@@ -54,6 +54,8 @@ TASTE_ROLES = frozenset({"taste-coordinator", "taste-monitor", "taste-azure-work
 SENTINEL = MINI_SENTINEL
 # The model stops a trial counts: a refusal, a cut-off or filtered reply, a full window, anything unnamed.
 COUNTED_STOPS = frozenset({"refusal", "max_tokens", "content_filter", "context_window", "other"})
+# How a run ends when the service failed it (``service_failed``).
+SERVICE_STOPS = frozenset({"model_unavailable", "model_session_closed", "terminal_unavailable", "cancelled"})
 
 
 def number(raw):
@@ -265,14 +267,28 @@ def _rewind(view):
             "rewind_protocol_from": first, "rewind_commit_ran_command": ran}
 
 
+def service_failed(summary):
+    """The service ended this run, not the agent: a refused or lost model, a dead container, a cancelled run.
+
+    A budget stop below the dollar cap is one too: a lost reply is charged its worst case against the cap, so the
+    next call does not fit, though the agent never spent it. Such a grade says nothing of the agent's work; on
+    Nov 2 trials refused for want of credit read as ordinary failures."""
+    stop = summary.get("stopped_by")
+    if stop in SERVICE_STOPS:
+        return True
+    cap = number((summary.get("settings") or {}).get("spend_cap_usd"))
+    return stop == "budget" and cap is not None and (summary.get("cost_usd") or 0.0) < 0.99 * cap
+
+
 def usable(summary):
     """A graded trial of an agent that started, whose prefix, if it had one, was faithful: a sample of the outcome.
 
     A trial Taste flagged as not settled is not one: its record was never read (the settlement race),
-    so its exit status and submission are unknown; it is retried rather than read as "no submission"."""
+    so its exit status and submission are unknown; it is retried rather than read as "no submission".
+    Nor is one the service ended (``service_failed``)."""
     unsettled = any(str(flag).startswith("settlement_failed") for flag in summary.get("audit_flags") or ())
     return (summary["reward"] is not None and summary["faithful"] is not False
-            and summary["agent_started"] is not False and not unsettled)
+            and summary["agent_started"] is not False and not unsettled and not service_failed(summary))
 
 
 def verdict(summary):
