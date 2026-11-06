@@ -9,6 +9,8 @@ and its verdicts go back beside the answers. Batches stay small and each is read
     python -m studies.memory_bench.paid_judge run --root copy/ --reference reference.json --row oss/mem0-8000 --first 5 --part-split split.json
     python -m studies.memory_bench.paid_judge run --root copy/ --reference reference.json --row oss/mem0-8000 --stand-in     # no key, no call, in a file of its own
     python -m studies.memory_bench.paid_judge status --root copy/
+    bash studies/memory_bench/paid_judge_files.sh fetch <run on the cluster> copy/    # the answers and free verdicts of these rows, small files, to where the key is
+    bash studies/memory_bench/paid_judge_files.sh push copy/ <run on the cluster>     # the verdicts back beside them, each checked by md5
 """
 
 from __future__ import annotations
@@ -172,6 +174,11 @@ def _status(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _list_rows(arguments: argparse.Namespace) -> int:
+    print("\n".join(f"answers-{reader}/lme/{row}" for reader, row in second_judge_rows()))
+    return 0
+
+
 def _reference(arguments: argparse.Namespace) -> int:
     print(cut_reference(Path(arguments.data), Path(arguments.split), arguments.part, Path(arguments.out)))
     return 0
@@ -194,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
     stage.add_argument("--root", required=True)
     stage.add_argument("--stand-in", action="store_true")
     stage.set_defaults(action=_status)
+    stage = stages.add_parser("rows")
+    stage.set_defaults(action=_list_rows)
     stage = stages.add_parser("reference")
     for name in ("data", "split", "part", "out"):
         stage.add_argument(f"--{name}", required=True)
