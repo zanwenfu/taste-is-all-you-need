@@ -38,6 +38,7 @@ HELPER_SECTION = "diff --git a/testdata/x.txt b/testdata/x.txt\n--- a/testdata/x
 # The helper first: the section naming the failing test is shown before it.
 TEST_PATCH = HELPER_SECTION + PARSE_SECTION
 CODE_SHOWN = PARSE_SECTION + HELPER_SECTION.strip()
+ASSIGNED = "Parsing a date with an offset drops the offset.\n\nThe reviewer's check: Parsed one such date.\nExpected: 2020-01-01T00:00:00+02:00\nObserved: 2020-01-01T00:00:00Z"
 
 
 def study(tmp_path, **settings):
@@ -271,6 +272,47 @@ def test_the_richer_forms_caps_are_settings_with_a_floor(tmp_path):
 def test_the_report_names_the_richer_forms():
     for name in ("continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden"):
         assert name in report.VIEWS
+
+
+def test_continue_assigned_tells_the_runs_own_written_reasons_from_where_the_agent_stopped(tmp_path):
+    """Reasons written for this run in place of the reviewer's, in the same head, from the same state as ``continue``."""
+    assert note("continue_assigned", ASSIGNED) == "Submission rejected by a reviewer: " + ASSIGNED
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue", "continue_assigned"], first_only=["continue_assigned"], first_only_checked=False)
+    path, harbor = tmp_path / "rec.json", FakeHarbor(trials, graded_recoveries())
+    driver, [saved] = step(path, given, jobs_dir)
+    harbor.run([saved])
+    driver, [check] = step(path, given, jobs_dir)
+    harbor.run([check])
+    driver.runs[run_id]["assigned"] = ASSIGNED
+    driver.save()
+    driver, emitted = step(path, given, jobs_dir)
+    first = {spec.name.split("-")[-2]: spec.settings() for spec in emitted}
+    assert sorted(first) == ["ca", "ct"]
+    for settings in first.values():
+        assert (settings["branch_step"], settings["branch_override"], settings["branch_checkpoint"]) == ("6", "reject", saved.name)
+    assert Path(first["ca"]["branch_note"]).read_text() == "Submission rejected by a reviewer: " + ASSIGNED
+    assert ASSIGNED not in Path(first["ct"]["branch_note"]).read_text()
+
+
+def test_continue_assigned_stops_rather_than_tell_a_run_with_no_written_reasons_anything_else(tmp_path):
+    jobs_dir, trials, given, run_id = study(tmp_path, recoveries=["continue_assigned"], first_only=["continue_assigned"], first_only_checked=False)
+    path, harbor = tmp_path / "rec.json", FakeHarbor(trials, graded_recoveries())
+    driver, [saved] = step(path, given, jobs_dir)
+    harbor.run([saved])
+    driver, [check] = step(path, given, jobs_dir)
+    harbor.run([check])
+    with pytest.raises(ValueError, match="written reasons"):
+        step(path, given, jobs_dir)
+
+
+def test_continue_assigned_is_first_attempt_only_and_unchecked(tmp_path):
+    """Its reasons fit the base run's submission, so a later round has nothing to tell, and no reviewer reply exists."""
+    jobs_dir, _trials, given, _run_id = study(tmp_path, recoveries=["continue_assigned"])
+    with pytest.raises(ValueError, match="continue_assigned"):
+        step(tmp_path / "rec.json", given, jobs_dir)
+    jobs_dir, _trials, given, _run_id = study(tmp_path / "b", recoveries=["continue_assigned"], first_only=["continue_assigned"])
+    with pytest.raises(ValueError, match="continue_assigned"):
+        step(tmp_path / "b" / "rec.json", given, jobs_dir)
 
 
 def test_continue_wide_is_the_reasons_and_one_sentence_from_where_the_agent_stopped(tmp_path):

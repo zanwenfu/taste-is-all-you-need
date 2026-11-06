@@ -39,6 +39,8 @@ the test in its repository and finds nothing):
   passes). Decided by the checker, as ``continue``;
 - ``continue_wide``: the reviewer's feedback as ``continue`` tells it, then one sentence saying the reviewer may
   have missed other problems. Decided by the checker, as ``continue``.
+- ``continue_assigned``: reasons written for this run (``run["assigned"]``) in place of the reviewer's, under the same
+  head, to assign what the reasons say. First attempt only and unchecked: they fit the base run's submission alone.
 - ``continue_tests_hidden``: the tests message as it is, with one sentence
   saying the tests are hidden (added only at grading, so they may be missing or
   different in the agent's copy): the framing alone. Decided by the hidden tests.
@@ -140,7 +142,7 @@ from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver, own_
 RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare",
               "retry_bare", "rewind_bare", "retry_tests", "rewind_tests", "continue_tests",
               "continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden", "agentrewind",
-              "agentrewind_tests", "continue_wide")
+              "agentrewind_tests", "continue_wide", "continue_assigned")
 # The rewind arm and its twin, which the first commit of each of its episodes forks; and the same pair decided by
 # the hidden tests, told Phase 1b's code message where the reviewer's feedback was.
 AGENTREWIND, NORESTORE = "agentrewind", "agentrewind_norestore"
@@ -152,13 +154,13 @@ SOURCES = ("oracle", "reader", "rules")
 SLUG = {"retry": "rt", "retry_feedback": "rf", "continue": "ct", "continue_bare": "cb",
         "retry_bare": "rb", "retry_tests": "rx", "continue_tests": "cx",
         "continue_tests_code": "cc", "continue_tests_full": "cf", "continue_both": "cr", "continue_tests_hidden": "ch",
-        "continue_wide": "cw", AGENTREWIND: "ar", NORESTORE: "an", AGENTREWIND_TESTS: "ax", NORESTORE_TESTS: "nx"}
+        "continue_wide": "cw", "continue_assigned": "ca", AGENTREWIND: "ar", NORESTORE: "an", AGENTREWIND_TESTS: "ax", NORESTORE_TESTS: "nx"}
 # What each recovery tells the agent: the checker's feedback, its bare rejection, the failed tests, or both.
 MESSAGE = {"retry": "reviewer", "retry_feedback": "reviewer", "rewind": "reviewer", "continue": "reviewer",
            "retry_bare": "bare", "rewind_bare": "bare", "continue_bare": "bare",
            "retry_tests": "tests", "rewind_tests": "tests", "continue_tests": "tests",
            "continue_tests_code": "tests", "continue_tests_full": "tests", "continue_both": "both",
-           "continue_tests_hidden": "tests", "continue_wide": "reviewer", AGENTREWIND: "reviewer", NORESTORE: "reviewer",
+           "continue_tests_hidden": "tests", "continue_wide": "reviewer", "continue_assigned": "assigned", AGENTREWIND: "reviewer", NORESTORE: "reviewer",
            AGENTREWIND_TESTS: "tests", NORESTORE_TESTS: "tests"}
 # The form of a tests message: the excerpt, or with the failing tests' code, or the wide excerpt.
 TESTS_FORM = {"continue_tests_code": "code", "continue_tests_full": "full", AGENTREWIND_TESTS: "code",
@@ -285,6 +287,8 @@ def note(recovery, submission, tests=None):
     True when every required test passed, or ""/None when the grader left nothing to tell."""
     if recovery in BARE_NOTES:
         return BARE_NOTES[recovery]
+    if recovery == "continue_assigned":
+        return NOTES["continue"].format(feedback=submission)
     if recovery in (AGENTREWIND_TESTS, NORESTORE_TESTS):
         return note("continue_tests_code", submission) + "\n\n" + REWIND_SENTENCE
     if recovery in TESTS_NOTES:
@@ -340,6 +344,8 @@ class RecoveryDriver(Driver):
         wrong = sorted(set(settings["first_only"]) - (set(RECOVERIES) - REWIND_ARMS))
         if wrong:
             raise ValueError("first_only names arms that are unknown or the rewind-tools arms: " + ", ".join(wrong))
+        if "continue_assigned" in settings["recoveries"] and ("continue_assigned" not in settings["first_only"] or settings["first_only_checked"]):
+            raise ValueError("continue_assigned must be first_only and unchecked: its reasons fit the base run's submission alone")
         env = settings["checker_env"]
         if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
             raise ValueError("checker_env must map names to values (text)")
@@ -890,6 +896,10 @@ class RecoveryDriver(Driver):
         graded = (Path(run["job_dir"]), run["base"]["trial"])
         told = self._tests_message(run, graded, TESTS_FORM.get(recovery, "excerpt")) \
             if MESSAGE[recovery] == "tests" else reply
+        if MESSAGE[recovery] == "assigned":
+            told = run.get("assigned")
+            if not told:
+                raise ValueError(f"{run_id}: continue_assigned has no written reasons for this run")
         # A rejected base run failed the hidden tests: that is what they say of it.
         hidden = self._hidden_verdict(run, graded, False) if MESSAGE[recovery] == "both" else None
         if recovery != "retry" and (recovery.startswith("retry") or (recovery in REWINDS and step == 0)):
