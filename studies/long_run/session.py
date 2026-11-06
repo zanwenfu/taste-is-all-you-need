@@ -37,6 +37,8 @@ _SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SEN
 # Duke's Apptainer has no user-id map, and its fakeroot helper needs a newer C library than the task images have. Without the
 # helper the agent is still root inside and its writes stay; a package whose install changes file owners may only half install.
 CONTAINER_ARGS = ["--contain", "--cleanenv", "--fakeroot", "--ignore-fakeroot-command"]
+# A warning from the container runtime would come first in a command's output, where the agent looks for its submission.
+CONTAINER_GLOBAL_ARGS = ["--silent"]
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 
@@ -154,7 +156,8 @@ def _environment(kind: str, timeout: int) -> Callable[[dict], Any]:
         if kind == "singularity":
             from minisweagent.environments.singularity import SingularityEnvironment
 
-            return SingularityEnvironment(image=task["image"], executable="apptainer", exec_args=CONTAINER_ARGS, **settings)
+            return SingularityEnvironment(image=task["image"], executable="apptainer", exec_args=CONTAINER_ARGS,
+                                          global_args=CONTAINER_GLOBAL_ARGS, **settings)
         if kind == "docker":
             from minisweagent.environments.docker import DockerEnvironment
 

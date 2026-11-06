@@ -593,6 +593,7 @@ def test_the_task_containers_use_the_setting_that_works_on_the_cluster(monkeypat
     _environment("singularity", 300)({"image": "docker://x/y:1", "cwd": "/app"})
     assert made["executable"] == "apptainer" and made["image"] == "docker://x/y:1" and made["cwd"] == "/app"
     assert made["exec_args"] == ["--contain", "--cleanenv", "--fakeroot", "--ignore-fakeroot-command"]
+    assert made["global_args"] == ["--silent"], "a warning first in the output would hide a submission"
 
 
 def test_the_session_file_is_built_the_same_way_from_the_public_tasks(tmp_path: Path) -> None:
