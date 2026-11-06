@@ -92,7 +92,8 @@ run with them in.
 - **LoCoMo answers**: the benchmark's own token F1, which needs no judge, leads, with the stemmer of its
   evaluation script (NLTK 3.10.4, default Porter stemmer). Adversarial questions are scored by their own rule.
   Every question is scored, then again without the answers a public audit of the gold flags (99 of 1,540,
-  13 of them ambiguous); the gold is never edited.
+  13 of them ambiguous; `errors.json` of dial481/locomo-audit at `9493fb4b`, sha256 `f298ef46…`, leaving in its
+  57 wrong citations, which fault the evidence and not the answer); the gold is never edited.
 - Paired tests per question on LongMemEval; a bootstrap over conversations on LoCoMo. Gaps under about 4.5
   points on LoCoMo are not claimed.
 

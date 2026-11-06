@@ -15,6 +15,7 @@ from studies.memory_bench.core import Item
 from studies.memory_bench.locomo import (
     NLTK_VERSION,
     adversarial_score,
+    audit_flags,
     conversation_split,
     f1_multi,
     f1_score,
@@ -226,6 +227,35 @@ def test_answers_are_scored_by_category_with_adversarial_apart(conversation) -> 
     assert summary["per_category"][3] == 0.0
 
 
+def _audit(place: int, *rows: tuple[int, str, str]) -> list[dict]:
+    return [{"question_id": f"locomo_{place}_qa{qa}", "question": question, "error_type": kind}
+            for qa, question, kind in rows]
+
+
+def test_the_audit_flags_wrong_answers_and_leaves_a_wrong_citation_in() -> None:
+    samples = [_sample("conv-1"), _sample("conv-2")]
+    errors = _audit(1, (1, "What race did Melanie run?", "HALLUCINATION"), (2, "What activities does Melanie do?", "AMBIGUOUS"),
+                    (0, "When did Caroline go to the support group?", "WRONG_CITATION"))
+    assert audit_flags(samples, errors) == {"conv-2:1", "conv-2:2"}
+
+
+def test_an_audit_entry_whose_question_is_not_the_one_at_its_place_stops_the_scoring() -> None:
+    with pytest.raises(ValueError, match="locomo_0_qa1"):
+        audit_flags([_sample()], _audit(0, (1, "Some other question?", "TEMPORAL_ERROR")))
+
+
+def test_scoring_reports_the_score_with_and_without_what_the_audit_flags(conversation) -> None:
+    view, golds = conversation
+    said = {0: "7 May 2023", 1: "a charity race", 2: "pottery", 3: "", 4: "(a)"}
+    answers = [{"qid": q["qid"], "hypothesis": said[n]} for n, q in enumerate(view["questions"])]
+
+    rows, summary = score_answers(answers, golds, official_stem(), flagged=frozenset({"conv-1:3"}))
+
+    assert [row["audit_flagged"] for row in rows] == [False, False, False, True, False]
+    assert summary["f1_categories_1_to_4"] == pytest.approx(2.5 / 4)  # every question is still scored
+    assert summary["f1_without_audit_flags"] == pytest.approx(2.5 / 3) and summary["audit_flagged_scored"] == 1
+
+
 def test_scoring_refuses_a_run_with_a_question_unanswered(conversation) -> None:
     view, golds = conversation
     answers = [{"qid": q["qid"], "hypothesis": "x"} for q in view["questions"][:4]]
@@ -344,3 +374,17 @@ def test_a_caption_reaches_every_memory_and_can_be_left_out_only_to_check_an_ada
     without, _ = load([sample], captions=False)
     assert with_captions[0]["sessions"][0]["turns"][0]["content"] == "Look. and shared a photo of a dog."
     assert without[0]["sessions"][0]["turns"][0]["content"] == "Look."
+
+
+def test_the_command_line_scores_with_the_audit_and_records_which_file(tmp_path: Path) -> None:
+    data, split, answers, audit, out = (tmp_path / name for name in ("d.json", "s.json", "a.jsonl", "e.json", "scores.jsonl"))
+    samples = [_sample("conv-1")]
+    data.write_text(json.dumps(samples))
+    split.write_text(json.dumps({"dev": ["conv-1"], "held_out": []}))
+    views, _ = load(samples)
+    answers.write_text("".join(json.dumps({"qid": q["qid"], "hypothesis": "x"}) + "\n" for q in views[0]["questions"]))
+    audit.write_text(json.dumps(_audit(0, (1, "What race did Melanie run?", "TEMPORAL_ERROR"))))
+    assert run_main(["score", "--answers", str(answers), "--data", str(data), "--split", str(split), "--part", "dev",
+                     "--out", str(out), "--audit", str(audit)]) == 0
+    summary = json.loads(out.with_name("scores.summary.json").read_text())
+    assert summary["audit_flagged_scored"] == 1 and len(summary["audit_sha256"]) == 64

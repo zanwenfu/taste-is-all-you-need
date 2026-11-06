@@ -13,6 +13,7 @@ The held-out part runs once, on settings committed beforehand: ``--frozen-config
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import multiprocessing
 import sys
@@ -154,8 +155,6 @@ def _client(url: str) -> Any:
 def views(arguments: argparse.Namespace) -> int:
     """The one ingest every system shares, with nothing a memory may not see: per unit its sessions, oldest first,
     and each question's own words. Systems that run in environments of their own read this file."""
-    import hashlib
-
     split = json.loads(Path(arguments.split).read_text())
     wanted = set(split["dev"]) | set(split["held_out"]) if arguments.part == "all" else set(split[arguments.part])
     data = json.loads(Path(arguments.data).read_text())
@@ -209,10 +208,14 @@ def score(arguments: argparse.Namespace) -> int:
     import nltk
 
     wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
-    _, golds = locomo.load([s for s in json.loads(Path(arguments.data).read_text()) if s["sample_id"] in wanted])
+    samples = json.loads(Path(arguments.data).read_text())
+    _, golds = locomo.load([s for s in samples if s["sample_id"] in wanted])
     answers = [json.loads(line) for line in Path(arguments.answers).read_text().splitlines()]
-    rows, summary = locomo.score_answers(answers, golds, locomo.official_stem())
+    audit = Path(arguments.audit).read_bytes() if arguments.audit else None
+    flagged = locomo.audit_flags(samples, json.loads(audit)) if audit else frozenset()
+    rows, summary = locomo.score_answers(answers, golds, locomo.official_stem(), flagged=flagged)
     summary["stemmer"] = f"nltk {nltk.__version__}, PorterStemmer() in its default mode, as evaluation.py"
+    summary["audit_sha256"] = hashlib.sha256(audit).hexdigest() if audit else None
     out = Path(arguments.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -267,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     for argument in ("answers", "data", "split", "out"):
         stage.add_argument(f"--{argument}", required=True)
     stage.add_argument("--part", required=True, choices=("dev", "held_out"))
+    stage.add_argument("--audit", help="the public audit's errors.json: also score without the answers it doubts")
     stage.set_defaults(run=score)
 
     arguments = parser.parse_args(argv)

@@ -186,12 +186,30 @@ def qa_score(category: int, prediction: str, answer: str, stem: Callable[[str], 
     raise ValueError(f"category {category} has no F1 rule")
 
 
-def score_answers(answers: Sequence[dict], view_golds: dict[str, Gold],
-                  stem: Callable[[str], str]) -> tuple[list[dict], dict]:
+def audit_flags(samples: Sequence[dict], errors: Sequence[dict]) -> frozenset[str]:
+    """The questions whose gold answer the public audit doubts (dial481/locomo-audit, errors.json), as this study names
+    them. A wrong citation faults the evidence and not the answer, so it stays in. An audit id names a question by its
+    conversation's place in the benchmark's file and its own place in that conversation, and the words must agree."""
+    flagged = set()
+    for error in errors:
+        match = re.fullmatch(r"locomo_(\d+)_qa(\d+)", error["question_id"])
+        if match is None:
+            raise ValueError(f"not an audit id: {error['question_id']}")
+        sample = samples[int(match[1])]
+        if sample["qa"][int(match[2])]["question"] != error["question"]:
+            raise ValueError(f"{error['question_id']} does not name the question the audit quotes")
+        if error["error_type"] != "WRONG_CITATION":
+            flagged.add(f"{sample['sample_id']}:{match[2]}")
+    return frozenset(flagged)
+
+
+def score_answers(answers: Sequence[dict], view_golds: dict[str, Gold], stem: Callable[[str], str], *,
+                  flagged: frozenset[str] = frozenset()) -> tuple[list[dict], dict]:
     """Every question's judge-free score, and the summary: categories 1-4 together, adversarial apart.
 
     An answer the reader returned empty scores 0. A question with no answer at all stops the scoring: the run
-    is not finished, and leaving it out would change the denominator without saying so."""
+    is not finished, and leaving it out would change the denominator without saying so. ``flagged`` adds the same score
+    without the questions a public audit doubts; they stay in the main score and the gold is never edited."""
     by_qid = {answer["qid"]: answer for answer in answers}
     missing = sorted(set(view_golds) - set(by_qid))
     if missing:
@@ -201,13 +219,17 @@ def score_answers(answers: Sequence[dict], view_golds: dict[str, Gold],
         said = by_qid[qid]["hypothesis"]
         value = (adversarial_score(said, gold.key) if gold.adversarial
                  else qa_score(gold.category, said, gold.answer, stem))
-        rows.append({"qid": qid, "question_id": gold.question_id, "category": gold.category, "score": float(value)})
+        rows.append({"qid": qid, "question_id": gold.question_id, "category": gold.category, "score": float(value),
+                     "audit_flagged": gold.question_id in flagged})
     scored = [row for row in rows if row["category"] != 5]
+    kept = [row["score"] for row in scored if not row["audit_flagged"]]
     adversarial = [row["score"] for row in rows if row["category"] == 5]
     summary = {
         "questions": len(rows),
         "f1_categories_1_to_4": fmean(row["score"] for row in scored) if scored else None,
         "scored_1_to_4": len(scored),
+        "f1_without_audit_flags": fmean(kept) if kept else None,
+        "audit_flagged_scored": len(scored) - len(kept),
         "per_category": {c: fmean(r["score"] for r in rows if r["category"] == c)
                          for c in sorted({r["category"] for r in rows})},
         "adversarial": fmean(adversarial) if adversarial else None,
