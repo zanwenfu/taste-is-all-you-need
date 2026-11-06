@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -210,3 +211,171 @@ def test_the_header_writer_takes_the_coding_logs_round_by_round(tmp_path: Path) 
     views = views_of([_case()])
     counts = write_all(views, ask, tmp_path / "headers.jsonl", workers=2)
     assert counts["failed"] == 0 and counts["calls"] == len({json.dumps(s["turns"]) for s in views[0]["sessions"]})
+
+
+# ------------------------------------------------------------------ the set on one commit: what changed, and one whole table
+
+
+def _block(case: dict, text: str, system: str = "s") -> dict:
+    return {"id": case["id"], "block": text, "tokens": len(text.split()), "offered": 1, "system": system, "ledger": {"name": "baseline"}}
+
+
+def _answer(case: dict, text: str, *, compliant: bool | None = True, system: str = "s") -> dict:
+    return {"id": case["id"], "system": system, "sc_type": case["sc_type"], "final": "A", "finish_reason": "stop", "compliant": compliant,
+            "block_tokens": len(text.split()), "usage": [1, 1], "prompt_sha256": hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()}
+
+
+def _lines(rows: list[dict]) -> str:
+    return "".join(json.dumps(row) + "\n" for row in rows)
+
+
+def test_an_answer_read_from_the_same_block_is_kept_and_one_whose_block_changed_is_left_to_be_asked_again(tmp_path: Path) -> None:
+    from studies.memory_bench.swe import carry
+
+    cases = [_case(0), _case(1), _case(2)]
+    blocks = tmp_path / "blocks.jsonl"
+    blocks.write_text(_lines([_block(cases[0], "same text"), _block(cases[1], "new text"), _block(cases[2], "third")]))
+    old = tmp_path / "old" / "answers.jsonl"
+    old.parent.mkdir()
+    old.write_text(_lines([_answer(cases[0], "same text"), _answer(cases[1], "old text")]))
+    out = tmp_path / "new" / "answers.jsonl"
+    assert carry(blocks, old, out) == {"kept": 1, "changed": 1, "never_read": 1}
+    assert [json.loads(line)["id"] for line in out.read_text().splitlines()] == [cases[0]["id"]]
+    calls = []
+
+    def chat(messages, tools):
+        calls.append(messages[2]["content"])
+        return _reply("B")
+
+    summary = answer_all(cases, {row["id"]: row for row in map(json.loads, blocks.read_text().splitlines())}, chat, out, workers=1, system="s")
+    assert sorted(calls) == ["new text", "third"] and summary["cases"] == 3
+
+
+def test_carrying_answers_twice_changes_nothing_and_a_verdict_goes_only_with_its_block(tmp_path: Path) -> None:
+    from studies.memory_bench.swe import carry, carry_verdicts
+
+    cases = [_case(0), _case(1)]
+    blocks = tmp_path / "blocks.jsonl"
+    blocks.write_text(_lines([_block(cases[0], "same text"), _block(cases[1], "new text")]))
+    old = tmp_path / "old.jsonl"
+    old.write_text(_lines([_answer(cases[0], "same text"), _answer(cases[1], "old text")]))
+    out = tmp_path / "answers.jsonl"
+    carry(blocks, old, out)
+    first = out.read_text()
+    carry(blocks, old, out)
+    assert out.read_text() == first
+    judged = tmp_path / "judged-old"
+    judged.mkdir()
+    (judged / "results.jsonl").write_text(_lines([{"id": cases[0]["id"], "delivered_text": "same text"}, {"id": cases[1]["id"], "delivered_text": "old text"}]))
+    (judged / "found.served.jsonl").write_text(_lines([{"id": cases[0]["id"], "found_by_judge": True}, {"id": cases[1]["id"], "found_by_judge": False}]))
+    fresh = tmp_path / "judged-new"
+    assert carry_verdicts(blocks, judged, fresh) == {"kept": 1, "to_judge": 1}
+    assert [json.loads(line)["id"] for line in (fresh / "found.served.jsonl").read_text().splitlines()] == [cases[0]["id"]]
+    assert [json.loads(line)["delivered_text"] for line in (fresh / "results.jsonl").read_text().splitlines()] == ["same text", "new text"]
+
+
+def _whole_run(root: Path, cases: list[dict], *, commit: str = "c1", digest: str = "d1") -> None:
+    from studies.memory_bench import swe
+
+    (root / "cases").mkdir(parents=True)
+    (root / "cases" / "cases.jsonl").write_text(_lines(cases))
+    for name in ("blocks", "answers", "rankings", "judged", "baselines"):
+        (root / name).mkdir()
+    for row in swe.required_rows():
+        name = row.rsplit("-", 1)[0]
+        text = "" if name == "none" else f"text of {row}"
+        (root / "blocks" / f"{row}.jsonl").write_text(_lines([_block(case, text, name) for case in cases]))
+        (root / "answers" / f"{row}.jsonl").write_text(_lines([_answer(case, text, system=name) for case in cases]))
+        if name != "none":
+            folder = root / "judged" / row
+            folder.mkdir()
+            (folder / "results.jsonl").write_text(_lines([{"id": case["id"], "delivered_text": text} for case in cases]))
+            (folder / "found.served.jsonl").write_text(_lines([{"id": case["id"], "found_by_judge": True} for case in cases]))
+    for name in {row.rsplit("-", 1)[0] for row in swe.required_rows()} - {"none"}:
+        versions = {"study_commit": swe.MEM0_INGEST_COMMIT, **swe.MEM0_INGEST} if name.startswith("mem0") else {"study_commit": commit, "code_digest": digest}
+        (root / "rankings" / f"{name}.jsonl").write_text(_lines([{"qid": swe.neutral("q", case["id"]), "system": name, "items": [], "versions": versions} for case in cases]))
+    for prompt in swe.BASELINE_PROMPTS:
+        (root / "baselines" / f"baseline-{prompt}.report.json").write_text(json.dumps({"instances": len(cases), "package_summary": [
+            {"source": "swe_natural", "sc_type": "all", "n": len(cases), "full_with_sc_compliance_pct": 50.0, "full_without_sc_compliance_pct": 50.0, "compaction_compliance_pct": 100.0, "upper_bound_compliance_pct": 100.0}]}))
+
+
+def test_one_table_needs_every_row_every_case_each_answer_to_its_block_and_one_commit(tmp_path: Path) -> None:
+    from studies.memory_bench import swe
+
+    cases = [_case(n) for n in range(3)]
+    _whole_run(tmp_path, cases)
+    assert swe.check_coding(tmp_path, commit="c1", digest="d1") == []
+
+    def broken(change, match: str) -> None:
+        import shutil
+
+        other = tmp_path.parent / "broken"
+        shutil.rmtree(other, ignore_errors=True)
+        shutil.copytree(tmp_path, other)
+        change(other)
+        problems = swe.check_coding(other, commit="c1", digest="d1")
+        assert any(match in problem for problem in problems), problems
+
+    broken(lambda r: (r / "answers" / "flat_free-1000.jsonl").unlink(), "flat_free-1000: no answers")
+    broken(lambda r: (r / "blocks" / "flat_free-1000.jsonl").unlink(), "flat_free-1000: no blocks")
+    broken(lambda r: (r / "answers" / "flat_free-1000.jsonl").write_text(_lines([_answer(cases[0], "text of flat_free-1000", system="flat_free")])), "flat_free-1000: answers hold 1 of 3")
+    broken(lambda r: (r / "answers" / "flat_free-1000.jsonl").write_text(_lines([_answer(case, "something else", system="flat_free") for case in cases])), "flat_free-1000: 3 answers were read from another block")
+    broken(lambda r: (r / "answers" / "flat_free-1000.jsonl").write_text(_lines([_answer(cases[0], "text of flat_free-1000", system="flat_free")] * 3)), "flat_free-1000: answers hold 1 of 3")
+    broken(lambda r: (r / "judged" / "flat_free-1000" / "found.served.jsonl").unlink(), "flat_free-1000: no verdicts")
+    broken(lambda r: (r / "judged" / "flat_free-1000" / "results.jsonl").write_text(_lines([{"id": case["id"], "delivered_text": "old"} for case in cases])), "flat_free-1000: the judge read another block")
+    broken(lambda r: (r / "rankings" / "flat_free.jsonl").write_text(_lines([{"qid": "q", "system": "flat_free", "items": [], "versions": {"study_commit": "other", "code_digest": "d1"}}])), "flat_free: rankings made by")
+    broken(lambda r: (r / "rankings" / "mem0f_free.jsonl").write_text(_lines([{"qid": "q", "system": "mem0_free", "items": [], "versions": {"study_commit": swe.MEM0_INGEST_COMMIT, **swe.MEM0_INGEST, "top_k": 10}}])), "mem0f_free: rankings made with")
+    broken(lambda r: (r / "baselines" / "baseline-pi_mono.report.json").unlink(), "no baseline for pi_mono")
+    broken(lambda r: (r / "blocks" / "stray-1000.jsonl").write_text(""), "stray-1000: not a row of the protocol")
+
+
+def test_the_table_counts_obeyed_unread_and_held_and_compares_each_row_with_no_memory_and_with_taste(tmp_path: Path) -> None:
+    from studies.memory_bench import swe
+
+    cases = [_case(n) for n in range(4)]
+    _whole_run(tmp_path, cases)
+    write = lambda row, marks: (tmp_path / "answers" / f"{row}.jsonl").write_text(_lines([_answer(case, "" if row.startswith("none") else f"text of {row}", compliant=mark, system=row.rsplit('-', 1)[0]) for case, mark in zip(cases, marks, strict=True)]))  # noqa: E731
+    write("none-1000", [False, False, False, True])
+    write("taste_free-1000", [True, False, False, True])
+    write("flat_free-1000", [True, True, None, False])
+    (tmp_path / "judged" / "flat_free-1000" / "found.served.jsonl").write_text(_lines([{"id": case["id"], "found_by_judge": mark} for case, mark in zip(cases, [True, False, None, False], strict=True)]))
+    rows = {row["row"]: row for row in swe.coding_table(tmp_path)}
+    flat = rows["flat_free-1000"]
+    assert (flat["obeyed"], flat["read"], flat["unread"]) == (2, 3, 1)
+    assert (flat["held"], flat["held_unclear"]) == (1, 1)
+    assert flat["against_none"] == {"better": 2, "worse": 1, "p": 1.0}
+    assert flat["against_taste"] == {"better": 1, "worse": 1, "p": 1.0}
+    assert rows["taste_free-1000"]["against_taste"] is None
+    assert rows["none-1000"]["against_none"] is None and rows["none-1000"]["held"] is None
+    text = swe.render_coding(swe.coding_table(tmp_path), swe.coding_baselines(tmp_path))
+    assert "flat_free-1000" in text and "compaction" in text and "pi_mono" in text
+
+
+def test_the_job_makes_every_row_the_table_needs() -> None:
+    from studies.memory_bench import swe
+
+    job = (Path(__file__).parent.parent / "studies" / "memory_bench" / "jobs" / "swe.sbatch").read_text()
+    labels = next(line for line in job.splitlines() if line.startswith("for LABEL in ")).removeprefix("for LABEL in ").removesuffix("; do").split()
+    assert labels == [*swe.FREE_ROWS, *swe.SEARCH_ROWS]
+    assert "row none 1000" in job and swe.NONE_ROW == "none-1000" and swe.CAPS == (1000, 8000) and "for CAP in 1000 8000;" in job
+
+
+def test_mem0s_adapter_differs_from_the_commit_of_its_one_ingest_only_in_its_docstrings() -> None:
+    import ast
+    import subprocess
+
+    from studies.memory_bench.swe import MEM0_INGEST_COMMIT
+
+    def code(text: str) -> str:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) and ast.get_docstring(node) is not None:
+                node.body = node.body[1:] or [ast.Pass()]
+        return ast.dump(tree)
+
+    path = "studies/memory_bench/adapters/mem0_arm.py"
+    root = Path(__file__).parent.parent
+    then = subprocess.run(["git", "show", f"{MEM0_INGEST_COMMIT}:{path}"], cwd=root, capture_output=True, text=True)
+    if then.returncode:
+        pytest.skip("that commit is not in this clone")
+    assert code(then.stdout) == code((root / path).read_text())
