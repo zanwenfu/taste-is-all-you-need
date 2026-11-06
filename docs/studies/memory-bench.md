@@ -41,7 +41,7 @@ public benchmarks, in retrieval and in final-answer accuracy?
   Without that its extraction prompt says the messages were observed today, whatever the system line says: on LoCoMo's dev
   conversations, in the first run with each, the date took F1 from .453 to .492 and temporal questions from .280 to .518, with nothing patched, so it is this
   system's setting. `search` with `top_k` 1,000 and `threshold` 0, the lowest it allows, so memories it scores below zero do not come back: on LongMemEval's dev questions a
-  search returned a median of 476 of 684 memories, and about 1 question in 50 falls under 90% of 8,000 tokens for it. Each memory goes to the reader as written, in Mem0's rank
+  search returned a median of 485 of the 694 memories written (on the 46 questions with a process of their own), no question falls under 90% of 8,000 tokens for it, and 7 of 50 fall under 90% of 16,000. Each memory goes to the reader as written, in Mem0's rank
   order until the budget is full. At first this asked for 200, which on LoCoMo's short memories ran out at about 6,000 tokens, so dev
   was run again. LoCoMo's `speaker_a` is the user and `speaker_b` the assistant, as in Mem0's harness. gpt-oss-120b reasons inside its
   output cap, so the cap is 4,096 tokens with reasoning effort low: at Mem0's default of 2,000 the reasoning used it up on 84 of 776
@@ -74,6 +74,10 @@ to keyword search, not to version control. Only the header can move Taste's row.
   run at a median of 694 tokens under the Anthropic prompt and 628 under Pi's, largest 1,253 and 1,129. It was set from
   those sizes before any system's compliance was read, and the same cases at 8,000 tokens are reported beside it. A row with no memory,
   an empty block in place of the history, read by the same stage, was added after the others had been read; it involves no choice.
+  These cases were read on earlier code, so the frozen code makes every ranking and block again (`jobs/swe.sbatch`), with the cases exported again and compared byte for byte, and an answer or a verdict stands only if
+  its block is the same bytes; those whose block changed are asked again, once (`jobs/swe_read.sbatch`). Of 2,898 answers 58 were: 57 on MemPalace's search, which now asks for 1,000 drawers rather than 200 (the number
+  reaches its ranking: the top five change on 11 of 126), and 1 on the keyword list, which now holds the first copy of identical text. Mem0's one ingest of this set stands on the commit it ran on, whose adapter differs only in a docstring, which a test holds.
+  Taste's headers for these logs were written first, at an output cap of 1,024 with no fixed temperature; the other two sets' at 800 and temperature 0, from the same prompt. `swe.py report` writes no table unless every row holds every case, each answer read from the block on record and each verdict on it. A cap counts each piece's tokens and not the separators between them, so a block may pass it by up to about 1%.
 
 ## Ingest
 
