@@ -87,6 +87,19 @@ def compare_rule(runs: dict[str, dict[str, dict]], arm: str, rule: str) -> dict[
     return pooled
 
 
+def _with_and_without(summaries: list[dict], rule: str) -> tuple[list[int], list[int]]:
+    """A rule's commands under a harness search that brought it back, and under one that did not, task by task: obeyed, of how many."""
+    held, other = [0, 0], [0, 0]
+    for summary in summaries:
+        tasks = summary["scores"].get(rule, {}).get("by_task", {})
+        for row in summary.get("searches", []):
+            if row["task"] in tasks:
+                side = held if row["rules_in_block"].get(rule) else other
+                side[0] += tasks[row["task"]]["obeyed"]
+                side[1] += tasks[row["task"]]["applies"]
+    return held, other
+
+
 def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
     arms = sorted({arm for seed in runs.values() for arm in seed})
     rules = sorted({rule for seed in runs.values() for summary in seed.values() for rule in summary["scores"]})
@@ -102,6 +115,7 @@ def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
             "tasks": sum(len(s["outcomes"]) for s in summaries),
             "machines_failed": sum(o["exit_status"] == "MachineFailed" for s in summaries for o in s["outcomes"]),
             "looks": max((sum(s["scores"][rule]["looks"] for s in summaries if rule in s["scores"]) for rule in rules), default=0),
+            "searched": sum(len(s.get("searches", [])) for s in summaries),
             "rules": {}}
         for rule in rules:
             scores = [s["scores"][rule] for s in summaries if rule in s["scores"]]
@@ -109,6 +123,9 @@ def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
                                     "finds": sum(x["finds"] for x in scores)}
             if any("knows" in x for x in scores):
                 cell["knows"], cell["knows_of"] = sum(x.get("knows", 0) for x in scores), sum(x.get("knows_of", 0) for x in scores)
+            if entry["searched"]:
+                cell["in_block"] = sum(bool(row["rules_in_block"].get(rule)) for s in summaries for row in s.get("searches", []))
+                cell["obeyed_with_block"], cell["obeyed_without_block"] = _with_and_without(summaries, rule)
             if arm != BASE:
                 cell["against_compaction"] = compare_rule(runs, arm, rule)
             entry["rules"][rule] = cell
@@ -159,6 +176,9 @@ def render(table: list[dict[str, Any]]) -> str:
             text = f"{cell.get('obeyed', 0)}/{cell.get('applies', 0)}"
             if "knows" in cell:
                 text += f" knows {cell['knows']}/{cell['knows_of']}"
+            if "in_block" in cell:
+                held, other = cell["obeyed_with_block"], cell["obeyed_without_block"]
+                text += f"; came back at {cell['in_block']} of {entry['searched']} searches, obeyed {held[0]}/{held[1]} with it, {other[0]}/{other[1]} without"
             pair = cell.get("against_compaction")
             if pair:
                 text += f" (paired over {pair['sessions']} sessions, +{pair['sessions_better']} -{pair['sessions_worse']}, p {pair['sessions_p']:.3f}; over {pair['tasks']} tasks, +{pair['better']} -{pair['worse']})"

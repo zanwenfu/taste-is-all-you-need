@@ -237,6 +237,20 @@ def test_the_long_run_totals_leave_out_invalid_sessions_and_say_how_sessions_end
     assert table["taste"]["invalid"] == 1 and table["taste"]["sessions"] == 2 and table["taste"]["ended_early"] == 1
 
 
+def test_the_long_runs_search_arm_says_how_often_the_rule_came_back_and_what_the_agent_did_with_and_without_it() -> None:
+    summary = _summary("taste_search", {"a": {"obeyed": 1, "applies": 2}, "b": {"obeyed": 0, "applies": 3}, "c": {"obeyed": 2, "applies": 2}})
+    summary["searches"] = [{"task": task, "rules_in_block": {"rule": found}} for task, found in (("first", False), ("a", True), ("b", False), ("gone", True))]
+    entry = long_analyze.arm_table({"s1": {"taste_search": summary}})[0]
+    cell = entry["rules"]["rule"]
+    assert entry["searched"] == 4
+    assert cell["in_block"] == 2
+    assert cell["obeyed_with_block"] == [1, 2] and cell["obeyed_without_block"] == [0, 3]
+    text = long_analyze.render([entry])
+    assert "came back at 2 of 4 searches" in text and "obeyed 1/2 with it, 0/3 without" in text
+    other = long_analyze.arm_table({"s1": {"taste": _summary("taste", {"a": {"obeyed": 1, "applies": 1}})}})[0]
+    assert other["searched"] == 0 and "in_block" not in other["rules"]["rule"]
+
+
 def test_the_long_run_compares_sessions_since_tasks_of_one_conversation_are_not_independent() -> None:
     def seed(mine: int, base: int) -> dict:
         return {"taste": _summary("taste", {"a": {"obeyed": mine, "applies": 4}}), "compaction": _summary("compaction", {"a": {"obeyed": base, "applies": 4}})}

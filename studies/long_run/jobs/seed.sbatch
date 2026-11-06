@@ -8,7 +8,7 @@
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
 D=${STUDY_ROOT:?}; S=${SHA:?}; SEED=${SEED:?}; TASKS=${TASKS:-16}; READER=${READER:-gpt-oss}; PROMPT=${PROMPT:-anthropic}; COMPACT_AT=${COMPACT_AT:-8000}; KEEP=${KEEP:-2000}; TASK_CALLS=${TASK_CALLS:-40}
-ARMS=${ARMS:-compaction taste taste_exists taste_check taste_rules notes_told notes_neutral restated no_compaction}
+ARMS=${ARMS:-compaction taste taste_exists taste_check taste_search taste_rules notes_told notes_neutral restated no_compaction}
 L=$D/long
 IMG=$D/images/vllm-v0.32.0.sif
 CODE=$D/code-${S:0:12}

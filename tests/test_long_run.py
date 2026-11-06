@@ -578,6 +578,60 @@ def test_a_fact_in_the_first_machine_is_found_by_the_agent_and_never_sent_by_the
     assert "The tag is tag-7f3a" in json.dumps(restated.sent[-1]["messages"])
 
 
+def test_the_search_arm_looks_up_each_new_tasks_own_words_itself_and_offers_the_agent_no_tools(tmp_path: Path) -> None:
+    from studies.memory_probe.cases import FOUND_HEADER
+
+    session = load_session({"tasks": [{"name": "one", "instruction": "Write a Python script that counts words."},
+                                      {"name": "two", "instruction": "Fix the Python script that counts lines."},
+                                      {"name": "three", "instruction": "Tune the kernel scheduler."}],
+                            "rules": [{"name": "bytes", "say": "first", "text": "Whenever you run a Python script, pass -B to Python.",
+                                       "trigger": r"\bpython3?\s", "obeys": r"\bpython3?\s+-B\b"}],
+                            "compact_at_tokens": 0, "summary_prompt": "anthropic", "step_limit": 40})
+    script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    summary = run_session(session, arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["valid"] and summary["resent"] == {}
+    assert all([tool["function"]["name"] for tool in call["tools"]] == ["bash"] for call in script.sent)
+    system = [call["messages"][0]["content"] for call in script.sent]
+    assert FOUND_HEADER not in system[0]  # nothing to search before the first message
+    assert FOUND_HEADER in system[1] and "pass -B to Python" in system[1]
+    # What the agent is shown is its own task's search, and the next task's replaces it.
+    assert "pass -B to Python" not in system[2].split(FOUND_HEADER)[-1]
+    rows = summary["searches"]
+    assert [row["task"] for row in rows] == ["one", "two", "three"]
+    assert [row["rules_in_block"]["bytes"] for row in rows] == [False, True, False]
+    assert rows[0]["hits"] == 0 and rows[1]["hits"] > 0 and rows[1]["tokens"] > 0
+    assert summary["ledger"]["name"] == "Taste memory, study-driven" and summary["ledger"]["mode"] == "single_query"
+    assert summary["ledger"]["search_calls"] == 2
+
+
+def test_a_search_with_no_hits_shows_nothing_and_a_session_with_no_other_task_still_has_a_true_record(tmp_path: Path) -> None:
+    session = load_session({"tasks": [{"name": "one", "instruction": "Do one."}], "rules": [], "compact_at_tokens": 0, "summary_prompt": "anthropic", "step_limit": 40})
+    script = _Script([_bash(DONE, "c1")])
+    summary = run_session(session, arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["searches"] == [{"task": "one", "call": 0, "compactions": 0, "hits": 0, "tokens": 0, "rules_in_block": {}}]
+    assert summary["ledger"]["mode"] == "delivered" and summary["ledger"]["search_calls"] == 0
+    assert summary["valid"]
+
+
+def test_a_block_from_the_search_survives_compaction_and_never_brings_it_forward(tmp_path: Path) -> None:
+    session = load_session({**SESSION, "rules": SESSION["rules"][:1], "tasks": [{"name": "one", "instruction": "Fix a Python script."},
+                                                                                {"name": "two", "instruction": "Run the Python script again."}]})
+    script = _Script([_bash("python3 a.py " + "word " * 30, "c1"), _bash("python3 b.py " + "word " * 30, "c2"), _bash("python3 c.py " + "word " * 30, "c3"), _bash(DONE, "c4"),
+                      _bash("python3 d.py " + "word " * 30, "c5"), _bash("python3 e.py " + "word " * 30, "c6"), _bash("python3 f.py " + "word " * 30, "c7"), _bash(DONE, "c8")])
+    plain = _Script([_bash("python3 a.py " + "word " * 30, "c1"), _bash("python3 b.py " + "word " * 30, "c2"), _bash("python3 c.py " + "word " * 30, "c3"), _bash(DONE, "c4"),
+                     _bash("python3 d.py " + "word " * 30, "c5"), _bash("python3 e.py " + "word " * 30, "c6"), _bash("python3 f.py " + "word " * 30, "c7"), _bash(DONE, "c8")])
+    searched = run_session(session, arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                           out=tmp_path / "search", workdir=tmp_path / "w", package_prompt=_prompt)
+    alone = run_session(session, arm="compaction", chat=_routed(plain), make_env=lambda task: _Shell(), count=_count,
+                        out=tmp_path / "alone", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert searched["compactions"] > 0
+    assert [event["call"] for event in searched["events"]] == [event["call"] for event in alone["events"]]
+    later = [call["messages"][0]["content"] for call in script.sent[-3:]]
+    assert all("pass -B to Python" in text for text in later)
+
+
 def test_the_memory_arms_differ_only_by_what_the_system_prompt_says_about_the_record(tmp_path: Path) -> None:
     from studies.long_run.session import ARMS
     from studies.memory_probe.cases import LOOK, SENTENCE

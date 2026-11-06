@@ -173,13 +173,18 @@ def case_messages(case: dict, summary: str, *, condition: str, upper: bool, bloc
 
 def _search_for_it(store: Any, case: dict, budget: int, count: Callable[[str], int], *,
                    first: str | None = None) -> tuple[str, list[dict], list[str], int]:
-    """One search with the request's own words, each hit fetched in rank order until the budget is full, the last cut at a word.
+    """A case's search: its request's own words, as ``search_with`` reads them."""
+    return search_with(store, _REQUEST.search(case["probe_prompt"]).group(1), budget, count, first=first)
+
+
+def search_with(store: Any, request: str, budget: int, count: Callable[[str], int], *,
+                first: str | None = None) -> tuple[str, list[dict], list[str], int]:
+    """One search with these words, each hit fetched in rank order until the budget is full, the last cut at a word.
     What reaches the model says what the search says of each hit: when it was recorded and whether it has since been replaced. It goes
     oldest first, so a reversal reads as one, and the labels cost no budget, which counts a memory's own words. ``first``, the newest
     version read whole, is paid for first and shown last, and a hit on the current version of it is not fetched again.
 
     Returns (the block, every call, the pointers of what the block holds, the memory's own tokens in it)."""
-    request = _REQUEST.search(case["probe_prompt"]).group(1)
     arguments = {"description": request, "limit": MAX_RESULTS}
     output, failed = store.answer(SEARCH, arguments)
     calls = [{"name": SEARCH, "arguments": json.dumps(arguments), "output": output, "failed": failed}]

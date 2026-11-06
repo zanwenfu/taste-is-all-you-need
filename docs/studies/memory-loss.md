@@ -149,7 +149,7 @@ system prompt at every call. A block a memory delivers does not count toward the
 same talk. An agent's search and its results stay in the conversation until folded, and they do count, as they would in a real agent: one that searches compacts
 sooner, a cost of searching that the record shows. They stay out of the store, since a store holding its own searches finds them again. Added
 after the first sessions were read, because those arms hardly searched: the rule list delivered at every call, read back from the
-commit headers and written by the study's reader, and the notes file under both note-taker wordings. Size: a free dry run through
+commit headers and written by the study's reader, and the notes file under both note-taker wordings. Added on 2026-11-06, after a look at 39 tasks found 3 memory calls across nine arms and before any session of the arm ran: the harness itself searches the store with each new task's own words, as the harness-searched cases do with the request's, and what comes back stands in the system prompt until the next task, within the same budget. The agent is offered no memory tool in that arm, so its wish to look plays no part. Whether the rule came back at each search is on the record, and obedience is read with it and without it, task by task. Size: a free dry run through
 every stage, then 3 to 5 sessions, then more only after reading them.
 
 **Tasks and machines.** A session chains public Terminal-Bench 2.1 tasks in one conversation, in an order a seed fixes, each on a

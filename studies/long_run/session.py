@@ -8,6 +8,8 @@ score it from the command record.
     taste          the same, and every message committed to Taste's memory, with search and fetch offered beside bash
     taste_exists   the same, and the system prompt says a searchable record exists
     taste_check    the same, and it also says to check that record before answering a request
+    taste_search   compaction, every message committed to Taste's memory, and at each new task the harness itself searches it with the task's own
+                   words and puts what comes back in the system prompt until the next task; no tools, so the agent's own wish to look plays no part
     taste_rules    compaction, each user message read once as it arrives, what it asks to keep doing written in that commit's
                    header, and all of that read back from the store and put in the system prompt at every call; no tools
     notes_told     compaction, and a notes file a model rewrites at each compaction from what is about to be folded away, told to keep
@@ -37,13 +39,22 @@ from studies.long_run.agent import LongRunAgent, MemoryEnvironment, Stopped, Too
 from studies.long_run.score import score_session
 from studies.memory_bench.core import fill
 from studies.memory_ledger import BASELINE, ClaimRefused, check, stand_in_record
-from studies.memory_probe.cases import DELIVERED_HEADER, LOOK, NOTES_HEADER, SENTENCE, keep_newest
+from studies.memory_probe.cases import (
+    DELIVERED_HEADER,
+    FOUND_HEADER,
+    LOOK,
+    NOTES_HEADER,
+    SENTENCE,
+    keep_newest,
+    search_with,
+)
 from studies.memory_probe.stores import GitTurns, NotesStore
 from taste.memstore import CommitHeader
 
 TOOL_ARMS = ("taste", "taste_exists", "taste_check")
+SEARCH_ARM = "taste_search"
 NOTE_ARMS = {"notes_told": "told", "notes_neutral": "neutral"}
-ARMS = ("compaction", *TOOL_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated")
+ARMS = ("compaction", *TOOL_ARMS, SEARCH_ARM, "taste_rules", *NOTE_ARMS, "no_compaction", "restated")
 MEMORY_BUDGET = 4096
 _SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
@@ -151,8 +162,15 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     chat = _counted(chat, model_use)
     store: Any = None
     standing, on_compact, reader_calls = None, None, [0]
+    searches: list[dict] = []
+    found = [""]
     if arm in TOOL_ARMS:
         store = GitTurns(workdir)
+    elif arm == SEARCH_ARM:
+        store = GitTurns(workdir)
+
+        def standing() -> str:
+            return f"{FOUND_HEADER}\n{found[0]}" if found[0] else ""
     elif arm == "taste_rules":
         read, reader_calls = make_reader(chat)
         store = GitTurns(workdir, header=lambda number, turn: CommitHeader(instructions=tuple(read(turn["content"])))
@@ -204,8 +222,19 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         mentions={rule["name"]: rule["mentions"] for rule in rules if rule.get("mentions")})
     agent.extra_template_vars |= platform.uname()._asdict()  # mini-swe-agent's own templates ask for these
 
+    def look_up(task: dict) -> None:
+        """The harness's own look, as a new task comes in and before it goes into the store: one search with the task's words. Before anything is stored there is nothing to search."""
+        hits, tokens = [], 0
+        found[0] = ""
+        if store.commits:
+            found[0], _, hits, tokens = search_with(store, task["instruction"], MEMORY_BUDGET, count)
+        searches.append({"task": task["name"], "call": agent.n_calls, "compactions": len(agent.events), "hits": len(hits), "tokens": tokens,
+                         "rules_in_block": {rule["name"]: (rule.get("watch") or rule["text"]).casefold() in found[0].casefold() for rule in rules}})
+
     def worded(task: dict, machines: int) -> str:
         """The rules told with the first task to get a machine, and never again in a message."""
+        if arm == SEARCH_ARM:
+            look_up(task)
         told = [rule["text"] for rule in rules if rule["say"] == "first" and machines == 0]
         return "\n\n".join([*told, task["instruction"]])
 
@@ -241,8 +270,8 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         except (Exception, Stopped) as error:  # a failed model call or machine, or the job being stopped, ends the session, not its record
             ended_by = f"{type(error).__name__}: {error}"[:1000]
         disarm()
-        ledger = (store.ledger("agent_tools" if arm in TOOL_ARMS else "delivered") if store
-                  else stand_in_record(BASELINE, code=f"studies/long_run/session.py:{arm}"))
+        mode = "agent_tools" if arm in TOOL_ARMS else "single_query" if arm == SEARCH_ARM and store.store.memory_counts["search"] else "delivered"
+        ledger = store.ledger(mode) if store else stand_in_record(BASELINE, code=f"studies/long_run/session.py:{arm}")
         note_versions = store.commits if arm in NOTE_ARMS else 0
         ledger_refused = None
         try:
@@ -264,7 +293,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
                "machines_not_stopped": agent.not_stopped, "model_use": model_use, "notes_not_written": notes_skipped[0],
                "valid": not agent.resent and ledger_refused is None and (bool(planted_on) or not session.get("first_prepare")),
                "no_command": len(silent), "no_command_finish_reasons": reasons,
-               "reader_calls": reader_calls[0], "note_versions": note_versions,
+               "reader_calls": reader_calls[0], "note_versions": note_versions, "searches": searches,
                "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None,
                "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
