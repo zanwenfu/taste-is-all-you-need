@@ -22,10 +22,11 @@ WORK=/tmp/aos-long-$SLURM_JOB_ID-$READER-$PROMPT-seed$SEED; mkdir -p $WORK/machi
 trap 'rm -rf "$WORK"' EXIT
 trap 'exit 143' TERM
 if [ $READER = laguna ]; then
-  FOLDER=$D/models/laguna-s-2.1-nvfp4; MODEL=poolside/laguna-s-2.1
+  # It thinks before it answers, and a thought counts toward the output cap.
+  FOLDER=$D/models/laguna-s-2.1-nvfp4; MODEL=poolside/laguna-s-2.1; MOST=8192
   SERVE=(--tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs '{"enable_thinking": true}')
 else
-  FOLDER=$D/models/gpt-oss-120b; MODEL=openai/gpt-oss-120b
+  FOLDER=$D/models/gpt-oss-120b; MODEL=openai/gpt-oss-120b; MOST=4096
   SERVE=(--tool-call-parser openai)
 fi
 fail() { echo "FAILED: $*"; kill ${PID:-} ${SMI:-} 2>/dev/null; exit 1; }
@@ -55,7 +56,7 @@ RUNS=()
 for ARM in $ARMS; do
   ( T1=$(date +%s)
     TMPDIR=$WORK/machines $L/venv/bin/python -m studies.long_run.session --session $OUT/session.json --arm $ARM --env machine --url $URL --model $MODEL \
-      --tokenizer $FOLDER/tokenizer.json --out $OUT/$ARM --workdir $WORK/$ARM --command-timeout 300 > $OUT/$ARM.log 2>&1
+      --tokenizer $FOLDER/tokenizer.json --out $OUT/$ARM --workdir $WORK/$ARM --command-timeout 300 --max-tokens $MOST > $OUT/$ARM.log 2>&1
     code=$?
     echo "$ARM exit $code seconds $(( $(date +%s) - T1 ))"; tail -1 $OUT/$ARM.log | cut -c1-900
     rm -rf $WORK/$ARM
