@@ -72,12 +72,16 @@ def rules(tag: str, later_rule_at: int) -> list[dict[str, Any]]:
 
 
 def build(root: Path, template: dict, *, seed: int, tasks: int, compact_at: int, keep_recent: int, prompt: str,
-          later_rule_at: int, task_calls: int) -> dict[str, Any]:
+          later_rule_at: int, task_calls: int, images: Path | None = None) -> dict[str, Any]:
+    """``images`` is a folder of each task's image already fetched once, as <task>.sif. Many sessions at once fetching from the
+    registry hit its limit for an anonymous address."""
     chosen = _eligible(root)
     random.Random(seed).shuffle(chosen)
     chosen = chosen[:tasks]
     if len(chosen) < tasks:
         raise ValueError(f"only {len(chosen)} tasks qualify, {tasks} asked for")
+    if images is not None:
+        chosen = [{**task, "image": str(Path(images) / f"{task['name']}.sif")} for task in chosen]
     tag = hashlib.sha256(f"session-tag-{seed}".encode()).hexdigest()[:12]
     for number, task in enumerate(chosen):
         task["prepare"] = [APT_WORKS]
@@ -98,15 +102,22 @@ def main(argv: list[str] | None = None) -> int:
     import yaml
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ("tasks-root", "agent-config", "out"):
-        parser.add_argument(f"--{name}", required=True)
-    parser.add_argument("--prompt", required=True, choices=("pi_mono", "anthropic"))
+    parser.add_argument("--tasks-root", required=True)
+    parser.add_argument("--list-images", action="store_true", help="print each qualifying task and its registry image, and stop")
+    for name in ("agent-config", "out", "images"):
+        parser.add_argument(f"--{name}")
+    parser.add_argument("--prompt", choices=("pi_mono", "anthropic"))
     for name in ("seed", "tasks", "compact-at", "keep-recent", "later-rule-at", "task-calls"):
-        parser.add_argument(f"--{name}", required=True, type=int)
+        parser.add_argument(f"--{name}", type=int)
     arguments = parser.parse_args(argv)
+    if arguments.list_images:
+        for task in _eligible(Path(arguments.tasks_root)):
+            print(task["name"], task["image"])
+        return 0
     session = build(Path(arguments.tasks_root), yaml.safe_load(Path(arguments.agent_config).read_text()), seed=arguments.seed,
                     tasks=arguments.tasks, compact_at=arguments.compact_at, keep_recent=arguments.keep_recent, prompt=arguments.prompt,
-                    later_rule_at=arguments.later_rule_at, task_calls=arguments.task_calls)
+                    later_rule_at=arguments.later_rule_at, task_calls=arguments.task_calls,
+                    images=Path(arguments.images) if arguments.images else None)
     Path(arguments.out).write_text(json.dumps(session, indent=1))
     print(json.dumps({"seed": arguments.seed, "tasks": [task["name"] for task in session["tasks"]]}))
     return 0

@@ -279,11 +279,18 @@ class LongRunAgent(DefaultAgent):
         to the model: the next task follows as a user message, and only the container changes. A task past its call limit, or
         one where the model stops issuing commands, is left the same way. Anything else ends the session."""
         self.outcomes = []
+        opened = False
         for number, task in enumerate(tasks):
             self.task_name = task["name"]
-            self.env.inner = make_env(task)
+            try:
+                self.env.inner = make_env(task)
+            except Exception as error:  # one machine that will not build leaves its task, not the session
+                self.outcomes.append({"task": task["name"], "exit_status": "MachineFailed", "reason": f"{type(error).__name__}: {error}"[:500],
+                                      "calls": self.n_calls, "compactions": len(self.events)})
+                continue
             text = worded(task, number) if worded else task["instruction"]
-            if number == 0:
+            if not opened:
+                opened = True
                 self.extra_template_vars |= {"task": text}
                 self.messages = []
                 self.add_messages(

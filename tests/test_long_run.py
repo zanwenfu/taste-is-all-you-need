@@ -734,3 +734,36 @@ def test_the_reader_does_not_read_the_harnesss_own_messages_as_the_users_rules(t
     assert rule in system and system.count(rule) == 1
     assert nagging not in system
     assert "\n\n- " not in system.split("\n", 1)[1], "one record to a line"
+
+
+def test_a_machine_that_will_not_build_leaves_its_task_and_the_session_goes_on(tmp_path: Path) -> None:
+    def make_env(task):
+        if task["name"] == "one":
+            raise RuntimeError("the image could not be fetched")
+        return _Shell()
+
+    script = _Script([_bash(DONE, "c1")])
+    summary = run_session(load_session({**SESSION, "rules": [], "compact_at_tokens": 0}), arm="compaction", chat=_routed(script), make_env=make_env,
+                          count=_count, out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert [o["exit_status"] for o in summary["outcomes"]] == ["MachineFailed", "Submitted"]
+    assert "the image could not be fetched" in summary["outcomes"][0]["reason"]
+    assert summary["ended_by"] is None
+    first = script.sent[0]["messages"]
+    assert [m["role"] for m in first] == ["system", "user"], "the next task opens the conversation"
+    assert "Do two." in first[1]["content"]
+
+
+def test_the_session_file_can_point_at_images_fetched_once(tmp_path: Path) -> None:
+    from studies.long_run.make_session import build
+
+    root = tmp_path / "tb"
+    folder = root / "alpha"
+    (folder / "environment").mkdir(parents=True)
+    (folder / "task.toml").write_text('[environment]\ndocker_image = "owner/alpha:1"\ncpus = 1\nmemory_mb = 2048\n')
+    (folder / "instruction.md").write_text("Do alpha.\n")
+    (folder / "environment" / "Dockerfile").write_text("FROM python:3.13\n")
+    template = {"agent": {"system_template": "You help.", "instance_template": "Solve: {{task}}"},
+                "model": {"observation_template": "{{output.output}}", "format_error_template": "{{error}}"}}
+    session = build(root, template, seed=1, tasks=1, compact_at=8000, keep_recent=2000, prompt="anthropic", later_rule_at=20, task_calls=40,
+                    images=tmp_path / "images")
+    assert session["tasks"][0]["image"] == str(tmp_path / "images" / "alpha.sif")
