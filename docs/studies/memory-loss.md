@@ -122,6 +122,10 @@ the plain requests run under conditions vi, vii and viii with the turns searched
 reads what each harness-searched arm delivers. Every case keeps its record, and the first full cell is read before any other
 starts. Cued, moved, revised and withdrawn cases follow, once each has been read on the first 50.
 
+Added after the first full cell was read, before any other cell ran, because the small runs showed the search over every notes version
+favours short early versions: the newest notes read whole, with and without one search of the older versions after them, under both
+wordings. They run on every cell, the first included.
+
 ## The long run
 
 mini-swe-agent 2.4.6, its default agent, with three hooks: a compaction step at a stated token count, using the two
