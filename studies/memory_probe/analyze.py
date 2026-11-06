@@ -29,10 +29,10 @@ def _rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
-def load_run(root: Path, prompt: str, k: int) -> dict[str, list[dict]]:
-    """Every row of this prompt and depth, by label."""
+def load_run(root: Path, prompt: str, k: int, budget: int = 4096) -> dict[str, list[dict]]:
+    """Every row of this prompt, depth and budget, by label."""
     found: dict[str, list[dict]] = {}
-    for path in sorted(Path(root).glob(f"*/*-{prompt}-k{k}-b*/results.jsonl")):
+    for path in sorted(Path(root).glob(f"*/*-{prompt}-k{k}-b{budget}/results.jsonl")):
         rows = _rows(path)
         verdicts = path.with_name("found.served.jsonl")
         if verdicts.exists():
@@ -82,7 +82,7 @@ def row_entry(label: str, rows: list[dict], *, floor: dict[str, bool | None], ba
         entry["held"] = len(held)
         entry["obeyed_if_held"] = [_obeyed(held), len(held)]
         entry["obeyed_if_not"] = [obeyed - _obeyed(held), n - len(held)]
-    if base is not None and label != BASE and {row["id"] for row in rows} <= set(base):
+    if base is not None and label != BASE and {row["id"] for row in rows} <= set(base) and any(row["compliant"] is not None for row in rows):
         mine = {row["id"]: row for row in rows}
         shared = {case: base[case] for case in mine}
         entry["against_summary"] = paired(shared, mine, "compliant", "compliant")
@@ -114,6 +114,11 @@ def effective_rounds(rows: list[dict], *, smallest: int = 200) -> dict[str, Any]
             "largest": max(counts, default=None)}
 
 
+def rounds_from(folder: Path, k: int) -> dict[str, Any]:
+    """Effective rounds from the compaction records, ``<history>/results.jsonl``, which hold each case's part sizes for every depth."""
+    return effective_rounds([row for path in sorted(Path(folder).glob("*/results.jsonl")) for row in _rows(path) if row.get("k") == k])
+
+
 def _cell(value: Any) -> str:
     if value is None:
         return "-"
@@ -137,12 +142,23 @@ def render(entries: list[dict[str, Any]], title: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_rules(entries: list[dict[str, Any]]) -> str:
+    """Each rule of every row that has answers, so that a rule the model leaves even when restated is seen as such."""
+    shown = [entry for entry in entries if entry["n"] > entry["unread"]]
+    rules = sorted({rule for entry in shown for rule in entry["per_rule"]}, key=lambda rule: (len(rule), rule))
+    lines = ["| row | " + " | ".join(rules) + " |", "|" + "---|" * (len(rules) + 1)]
+    lines += ["| " + " | ".join([entry["row"], *("/".join(str(n) for n in entry["per_rule"].get(rule, [0, 0])) for rule in rules)]) + " |" for entry in shown]
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in ("run", "inputs", "prompt", "out"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--k", required=True, type=int)
+    parser.add_argument("--budget", type=int, default=4096)
     parser.add_argument("--base-cases", help="the unchanged cases, to tell whether a reversed rule's old text came back")
+    parser.add_argument("--rounds-from", help="the compaction records of this prompt, to report how many rounds folded enough to be a round")
     arguments = parser.parse_args(argv)
     inputs = Path(arguments.inputs)
     floor = {row["id"]: row["floor_compliant"] for row in _rows(inputs / "summaries.jsonl")
@@ -151,9 +167,12 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.base_cases:
         old = {row["id"]: row["sc_text"] for row in _rows(Path(arguments.base_cases))}
         old_text = {f"{case}:{suffix}": text for case, text in old.items() for suffix in ("revised", "withdrawn")}
-    entries = tables(load_run(Path(arguments.run), arguments.prompt, arguments.k), floor, old_text)
+    entries = tables(load_run(Path(arguments.run), arguments.prompt, arguments.k, arguments.budget), floor, old_text)
     out = Path(arguments.out)
-    out.write_text(render(entries, f"{Path(arguments.run).name}, {arguments.prompt}, {arguments.k} round(s)"))
+    text = render(entries, f"{Path(arguments.run).name}, {arguments.prompt}, {arguments.k} round(s), budget {arguments.budget}") + "\n" + render_rules(entries)
+    if arguments.rounds_from:
+        text += f"\nRounds of at least 200 tokens: {json.dumps(rounds_from(Path(arguments.rounds_from), arguments.k))}\n"
+    out.write_text(text)
     out.with_suffix(".json").write_text(json.dumps(entries, indent=1))
     print(f"{len(entries)} rows at {out}")
     return 0

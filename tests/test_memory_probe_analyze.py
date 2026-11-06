@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 from studies.long_run import analyze as long_analyze
-from studies.memory_probe.analyze import effective_rounds, load_run, render, tables
+from studies.memory_probe.analyze import (
+    effective_rounds,
+    load_run,
+    render,
+    render_rules,
+    rounds_from,
+    tables,
+)
 
 
 def _row(case: int, *, obeyed: bool | None, history: str = "h0", rule: str = "sc01", **extra) -> dict:
@@ -60,6 +67,39 @@ def test_only_this_prompt_and_depth_are_read(tmp_path: Path) -> None:
     _write(tmp_path, "turns", [_row(0, obeyed=True)])
     _write(tmp_path, "other", [_row(0, obeyed=False)], name="a5q-i-pi_mono-k16-b4096")
     assert set(load_run(tmp_path, "anthropic", 1)) == {"turns"}
+
+
+def test_a_budget_sweep_beside_the_main_rows_does_not_replace_them(tmp_path: Path) -> None:
+    _write(tmp_path, "turns", [_row(0, obeyed=True)], name="a5q-i-anthropic-k1-b4096")
+    _write(tmp_path, "turns", [_row(0, obeyed=False)], name="a5q-i-anthropic-k1-b8000")
+    assert load_run(tmp_path, "anthropic", 1)["turns"][0]["compliant"] is True
+    assert load_run(tmp_path, "anthropic", 1, budget=8000)["turns"][0]["compliant"] is False
+
+
+def test_a_plain_request_has_no_answer_to_compare_with_the_summary_alone(tmp_path: Path) -> None:
+    _write(tmp_path, "summary", [_row(0, obeyed=True)])
+    _write(tmp_path, "plain-nothing", [_row(0, obeyed=None, action="run a tool")])
+    entries = {entry["row"]: entry for entry in tables(load_run(tmp_path, "anthropic", 1), {"h0:0": False})}
+    assert "against_summary" not in entries["plain-nothing"] and "difference" not in entries["plain-nothing"]
+    assert entries["plain-nothing"]["acted"] == 1
+
+
+def test_each_rule_is_shown_for_every_row_that_has_answers(tmp_path: Path) -> None:
+    _write(tmp_path, "restated", [_row(0, obeyed=True, rule=1), _row(1, obeyed=False, rule=2)])
+    _write(tmp_path, "turns", [_row(0, obeyed=False, rule=1), _row(1, obeyed=False, rule=2)])
+    _write(tmp_path, "plain-nothing", [_row(0, obeyed=None, rule=1), _row(1, obeyed=None, rule=2)])
+    report = render_rules(tables(load_run(tmp_path, "anthropic", 1), {}))
+    lines = report.splitlines()
+    assert "| restated | 1/1 | 0/1 |" in lines and "| turns | 0/1 | 0/1 |" in lines
+    assert "plain-nothing" not in report
+
+
+def test_rounds_are_read_from_the_compaction_records_of_that_depth(tmp_path: Path) -> None:
+    folder = tmp_path / "h00-05"
+    folder.mkdir()
+    rows = [{"id": "a", "k": 2, "part_tokens": [5, 5]}, {"id": "a", "k": 16, "part_tokens": [500, 10, 300]}]
+    (folder / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert rounds_from(tmp_path, 16) == {"cases": 1, "median": 2, "smallest": 2, "largest": 2}
 
 
 def test_a_round_that_folds_almost_nothing_is_not_counted_as_a_round() -> None:
