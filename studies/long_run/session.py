@@ -112,20 +112,27 @@ def make_reader(chat: Callable) -> tuple[Callable[[str], list[str]], list[int]]:
     return read, calls
 
 
+# A long conversation pasted in makes a model that thinks first carry on the work: on the first real sessions of Laguna S 2.1, 6 of 12 versions held tool calls. So the instruction comes
+# again last, as a summary prompt's does, and a reply that is still not notes is not taken for them. Read on real parts of a session before any main run: 0 of 12 with tool text, against 1 of 12.
+_NOTES_LAST = "\n\nThat was the newest part of the conversation. Do not continue it, run nothing and call no tool. Reply now with the new notes file only."
+_NOT_NOTES = re.compile(r"<tool_call>|<arg_key>|</think>")
+_NO_NOTES = "(no notes yet)"
+
+
 def make_note_taker(chat: Callable, style: str, store: NotesStore, skipped: list[int]) -> Callable[[list[dict]], None]:
     """The study's note-taker: the whole file rewritten from what a compaction is about to fold away."""
     from studies.memory_probe.notes import _PROMPT, MAX_TURN_CHARS, STYLES
 
     def keep(older: list[dict]) -> None:
         part = "\n".join(f"[{turn['role']}]: {str(turn['content'])[:MAX_TURN_CHARS]}" for turn in older)
-        wanted = _PROMPT.format(told=STYLES[style], notes=store.newest() or "(no notes yet)", part=part)
+        wanted = _PROMPT.format(told=STYLES[style], notes=store.newest() or _NO_NOTES, part=part) + _NOTES_LAST
         for _ in range(EMPTY_TRIES):
             reply = chat([{"role": "user", "content": wanted}], None)
             text = reply.choices[0].message.content or ""
-            if text.strip() and reply.choices[0].finish_reason != "length":
+            if text.strip() and text.strip() != _NO_NOTES and not _NOT_NOTES.search(text) and reply.choices[0].finish_reason != "length":
                 store.add_version(text)
                 return
-        # An empty reply or a cut-off one says nothing whole about the notes: the file stays as it was, rather than being wiped or halved, and the count is on the record.
+        # An empty reply, a cut-off one or one that is not notes says nothing whole about them: the file stays as it was, rather than being wiped or halved, and the count is on the record.
         skipped[0] += 1
 
     return keep

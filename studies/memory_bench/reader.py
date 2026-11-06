@@ -34,13 +34,16 @@ def _rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
-TRIES = 3  # a model that reasons first can use up its whole cap and show nothing; on full context gpt-oss-120b did so on 2 of 50 at 12,288 tokens, and each answered when asked again
+# A model that reasons first can use up its whole cap and show nothing. On full context gpt-oss-120b did so on 2 of 50 dev questions at 12,288 tokens, and asked three more times each, the two
+# came back with an answer on 4 of 6, so it is chance on questions it is prone to: empty on 4 of 8 asks in all. Eight tries leave about 0.4% of those, under one answer in a row of 450.
+TRIES = 8
 
 
 def read_all(records_path: Path, ask: Callable[[str], dict], out: Path, *, workers: int,
              settings: dict[str, Any] | None = None) -> dict[str, int]:
     """Ask every record's prompt that has no answer yet, and count what came back. A reply with no text is asked again, up to ``TRIES`` in all, the same for every row and on
-    the record, since an empty answer says nothing about the memory it was read from. An answer to a prompt that has since changed stops the stage: mixing the two would be silent.
+    the record, since an empty answer says nothing about the memory it was read from. One still empty stays empty, counts as wrong and is counted. An answer to a prompt that has
+    since changed stops the stage: mixing the two would be silent.
     ``settings`` (model, cap, effort) goes on every answer."""
     records_path, out = Path(records_path), Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)

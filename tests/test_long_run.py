@@ -643,6 +643,45 @@ def test_a_tag_counts_as_back_only_with_its_value_and_the_instruction_is_read_ap
     assert set(second) == {"told_before", "in_block", "instruction_in_block", "in_talk"}
 
 
+def _note_taker(tmp_path: Path, replies: list[str]) -> tuple:
+    from studies.long_run.session import make_note_taker
+    from studies.memory_probe.stores import NotesStore
+
+    asked: list[str] = []
+
+    def chat(messages, tools):
+        asked.append(messages[-1]["content"])
+        return _text(replies.pop(0))
+
+    store, skipped = NotesStore(tmp_path, [], history=True), [0]
+    return make_note_taker(chat, "told", store, skipped), store, skipped, asked
+
+
+def test_the_note_taker_is_told_last_of_all_to_write_notes_and_not_to_carry_on_the_work(tmp_path: Path) -> None:
+    keep, store, skipped, asked = _note_taker(tmp_path, ["# Notes\n- use -B"])
+    keep([{"role": "user", "content": "Do a thing."}, {"role": "assistant", "content": "[bash] {}"}])
+    assert store.newest() == "# Notes\n- use -B" and skipped == [0]
+    assert asked[0].index("Do a thing.") < asked[0].index("Do not continue it")
+    assert asked[0].endswith("Reply now with the new notes file only.")
+    store.close()
+
+
+@pytest.mark.parametrize("bad", ["Let me look.<tool_call>bash<arg_key>command</arg_key>", "Done.</think>next", "(no notes yet)", "  ", ""])
+def test_a_reply_that_carries_on_the_work_or_says_nothing_is_not_taken_for_notes(tmp_path: Path, bad: str) -> None:
+    keep, store, skipped, asked = _note_taker(tmp_path, [bad, "# Notes\n- kept"])
+    keep([{"role": "user", "content": "Do a thing."}])
+    assert store.newest() == "# Notes\n- kept" and len(asked) == 2 and skipped == [0]
+    store.close()
+
+
+def test_a_note_taker_that_never_writes_notes_leaves_the_file_as_it_was_and_the_count_says_so(tmp_path: Path) -> None:
+    keep, store, skipped, asked = _note_taker(tmp_path, ["# Notes\n- first", "<tool_call>x", "<tool_call>x", "<tool_call>x"])
+    keep([{"role": "user", "content": "One."}])
+    keep([{"role": "user", "content": "Two."}])
+    assert store.newest() == "# Notes\n- first" and skipped == [1] and len(asked) == 4
+    store.close()
+
+
 def test_a_search_with_no_hits_shows_nothing_and_a_session_with_no_other_task_still_has_a_true_record(tmp_path: Path) -> None:
     session = load_session({"tasks": [{"name": "one", "instruction": "Do one."}], "rules": [], "compact_at_tokens": 0, "summary_prompt": "anthropic", "step_limit": 40})
     script = _Script([_bash(DONE, "c1")])

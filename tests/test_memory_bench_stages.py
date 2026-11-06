@@ -146,8 +146,8 @@ def test_the_reader_is_asked_as_the_benchmark_asks_and_its_answers_are_kept(tmp_
     assert rows["a"]["prompt_tokens"] == 11 and rows["a"]["completion_tokens"] == 5
 
 
-def test_a_reply_with_no_text_is_asked_again_up_to_three_tries_and_the_tries_are_on_record(tmp_path: Path) -> None:
-    replies = {"a": ["", "", "level 3"], "b": ["", "", ""], "c": ["level 4"]}
+def test_a_reply_with_no_text_is_asked_again_up_to_its_tries_and_the_tries_are_on_record(tmp_path: Path) -> None:
+    replies = {"a": ["", "", "level 3"], "b": [""] * reader.TRIES, "c": ["level 4"]}
 
     def ask(prompt: str) -> dict:
         question = prompt.removeprefix("prompt for ").strip()
@@ -158,7 +158,7 @@ def test_a_reply_with_no_text_is_asked_again_up_to_three_tries_and_the_tries_are
     summary = reader.read_all(_records(tmp_path, "a", "b", "c"), ask, out, workers=1)
     rows = {row["question_id"]: row for row in map(json.loads, out.read_text().splitlines())}
     assert rows["a"]["hypothesis"] == "level 3" and rows["a"]["tries"] == 3 and rows["a"]["finish_reason"] == "stop"
-    assert rows["b"]["hypothesis"] == "" and rows["b"]["tries"] == 3 and rows["b"]["finish_reason"] == "length"
+    assert rows["b"]["hypothesis"] == "" and rows["b"]["tries"] == reader.TRIES and rows["b"]["finish_reason"] == "length"
     assert rows["c"]["tries"] == 1
     assert summary == {"questions": 3, "asked": 3, "failed": 0, "empty": 1, "cut_off": 1, "asked_again": 2}
     assert replies["b"] == [] and replies["c"] == []
