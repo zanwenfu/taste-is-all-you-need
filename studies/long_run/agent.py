@@ -52,6 +52,7 @@ class ToolModel:
     def __init__(self, chat: Callable[[list[dict], list | None], Any], *, memory_tools: bool,
                  observation_template: str = "{{output.output}}", format_error_template: str = "{{error}}") -> None:
         self.chat, self.memory_tools = chat, memory_tools
+        self.last_text = ""
         self.observation_template, self.format_error_template = observation_template, format_error_template
         self.tools = [BASH_TOOL, *(definitions("chat") if memory_tools else [])]
 
@@ -86,6 +87,7 @@ class ToolModel:
         sent = [{key: message[key] for key in _SENT_KEYS if key in message} for message in messages]
         reply = self.chat(sent, self.tools)
         message = reply.choices[0].message
+        self.last_text = message.content or ""
         calls = message.tool_calls or []
         actions = self._actions(calls)
         return {"role": "assistant", "content": message.content or "",
@@ -229,6 +231,7 @@ class LongRunAgent(DefaultAgent):
     def _until_exit(self) -> dict:
         """The default agent's loop, after its first two messages."""
         started = self.n_calls
+        self.n_consecutive_format_errors = 0
         while True:
             if 0 < self.config.stop_at_tokens < self.tokens():
                 return {"exit_status": "WindowFull", "submission": ""}
@@ -238,6 +241,9 @@ class LongRunAgent(DefaultAgent):
                 self.step()
                 self.n_consecutive_format_errors = 0
             except FormatError as error:
+                if self.on_action:
+                    self.on_action({"kind": "no_command", "call": self.n_calls, "task": self.task_name, "compactions": len(self.events),
+                                    "command": "", "output": getattr(self.model, "last_text", "")[:OUTPUT_KEPT]})
                 self.cost += error.messages[0].get("extra", {}).get("cost", 0.0)
                 self.n_consecutive_format_errors += 1
                 limit = self.config.max_consecutive_format_errors
@@ -258,8 +264,8 @@ class LongRunAgent(DefaultAgent):
     def run_tasks(self, tasks: list[dict], make_env: Callable[[dict], Any],
                   worded: Callable[[dict, int], str] | None = None) -> list[dict]:
         """Several tasks in one conversation, each in its own container. A submitted task's exit message is never sent
-        to the model: the next task follows as a user message, and only the container changes. A task past its call limit
-        is left the same way. A task that ends any other way ends the session."""
+        to the model: the next task follows as a user message, and only the container changes. A task past its call limit, or
+        one where the model stops issuing commands, is left the same way. Anything else ends the session."""
         self.outcomes = []
         for number, task in enumerate(tasks):
             self.task_name = task["name"]
@@ -278,7 +284,7 @@ class LongRunAgent(DefaultAgent):
             ended = self._until_exit()
             self.outcomes.append({"task": task["name"], "exit_status": ended.get("exit_status"), "calls": self.n_calls,
                                   "compactions": len(self.events)})
-            if ended.get("exit_status") not in ("Submitted", "TaskCallLimit"):
+            if ended.get("exit_status") not in ("Submitted", "TaskCallLimit", "RepeatedFormatError"):
                 break
         return self.outcomes
 

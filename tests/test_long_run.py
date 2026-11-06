@@ -605,16 +605,25 @@ def test_the_session_file_is_built_the_same_way_from_the_public_tasks(tmp_path: 
         folder.mkdir(parents=True)
         (folder / "task.toml").write_text(f'[environment]\ndocker_image = "owner/{name}:1"\ncpus = {cpus}\nmemory_mb = {memory}\n')
         (folder / "instruction.md").write_text(f"Do {name}.\n")
+        (folder / "environment").mkdir()
+        (folder / "environment" / "Dockerfile").write_text("FROM python:3.13\nWORKDIR /app\n")
+    no_python = root / "epsilon"
+    (no_python / "environment").mkdir(parents=True)
+    (no_python / "task.toml").write_text('[environment]\ndocker_image = "owner/epsilon:1"\ncpus = 1\nmemory_mb = 2048\n')
+    (no_python / "instruction.md").write_text("Do epsilon.\n")
+    (no_python / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nWORKDIR /work\n")
     template = {"agent": {"system_template": "You help.", "instance_template": "Solve: {{task}}"},
                 "model": {"observation_template": "{{output.output}}", "format_error_template": "{{error}}"}}
     one = build(root, template, seed=7, tasks=2, compact_at=16000, keep_recent=4000, prompt="anthropic", later_rule_at=20, task_calls=60)
     assert one == build(root, template, seed=7, tasks=2, compact_at=16000, keep_recent=4000, prompt="anthropic", later_rule_at=20, task_calls=60)
     names = [task["name"] for task in one["tasks"]]
     assert len(names) == 2 and not set(names) & {"delta", "qemu-startup"}, "too big or needs a machine inside the machine"
+    assert "epsilon" not in names, "a machine with no Python never meets the rule about Python"
     assert one["tasks"][0]["image"].startswith("docker://owner/") and one["tasks"][0]["cwd"] == "/app"
     tag = next(rule for rule in one["rules"] if rule["name"] == "session_tag")
-    assert tag["obeys"] in one["tasks"][0]["prepare"][-1] and "prepare" not in one["tasks"][1]
+    assert tag["obeys"] in one["tasks"][0]["prepare"][-1]
     assert tag["obeys"] not in json.dumps(one["tasks"]).replace(one["tasks"][0]["prepare"][-1], "")
+    assert all("APT::Sandbox::User" in task["prepare"][0] for task in one["tasks"]), "the package installer works on every machine"
     assert tag["obeys"] not in tag["text"] and tag["obeys"] in tag["restate"]
     assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in one["system_template"], "a summary may lose the first message"
     assert one["instance_template"] == "Solve: {{task}}" and one["tasks"][1]["instruction"].endswith("\n")
@@ -632,3 +641,16 @@ def test_a_rule_scored_per_task_counts_each_task_once_whether_or_not_it_was_obey
     scored = score_session(actions, rules)["tag"]
     assert scored["applies"] == 2 and scored["obeyed"] == 1
     assert scored["by_compactions"] == {"0": [1, 1], "2": [0, 1]}, "counted under the compactions when the task ended"
+
+
+def test_a_model_that_stops_issuing_commands_leaves_its_task_and_says_so_in_the_record(tmp_path: Path) -> None:
+    silent = _reply([], content="I think this is done.")
+    script = _Script([silent, silent, silent, _bash(DONE, "c1")])
+    session = load_session({**SESSION, "rules": [], "compact_at_tokens": 0})
+    summary = run_session(session, arm="compaction", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert [o["exit_status"] for o in summary["outcomes"]] == ["RepeatedFormatError", "Submitted"]
+    rows = [json.loads(line) for line in (tmp_path / "run" / "actions.jsonl").read_text().splitlines()]
+    silent_rows = [row for row in rows if row["kind"] == "no_command"]
+    assert len(silent_rows) == 3 and silent_rows[0]["output"] == "I think this is done." and silent_rows[0]["task"] == "one"
+    assert score_session(rows, [{"name": "x", "say": "first", "per_task": True, "trigger": "", "obeys": "y"}])["x"]["applies"] == 1
