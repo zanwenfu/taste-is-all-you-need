@@ -10,7 +10,7 @@ unset ANTHROPIC_API_KEY OPENAI_API_KEY
 D=${STUDY_ROOT:?}; S=${SHA:?}
 IMG=$D/images/vllm-v0.32.0.sif
 CODE=$D/code-${S:0:12}
-PR=${PR:?}; K=${K:?}; IN=${IN:?}; OUT=${OUT:?}; NOTES_FROM=${NOTES_FROM:-}; HEADERS_FROM=${HEADERS_FROM:-}; BUDGET=${BUDGET:-4096}; LABEL=${LABEL:-}
+PR=${PR:?}; K=${K:?}; IN=${IN:?}; OUT=${OUT:?}; NOTES_FROM=${NOTES_FROM:-}; HEADERS_FROM=${HEADERS_FROM:-}; BUDGET=${BUDGET:-4096}; LABEL=${LABEL:-}; PROCS=${PROCS:-28}; FAILED=0
 JOB=$OUT/job-$SLURM_JOB_ID; mkdir -p $JOB
 export APPTAINER_CACHEDIR=$D/cache/apptainer APPTAINER_TMPDIR=$D/tmp HF_HOME=$D/cache/hf HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export TIKTOKEN_RS_CACHE_DIR=$D/cache/tiktoken VLLM_CACHE_ROOT=$D/cache/vllm XDG_CACHE_HOME=$D/cache/xdg PYTHONNOUSERSITE=1
@@ -58,12 +58,18 @@ $PY -m studies.memory_probe.headers --inputs $IN --url $URL --model $MODEL --out
 echo "headers seconds $(( $(date +%s) - T1 ))"
 one() {  # label arm condition extra...
   local label=$1 arm=$2 condition=$3; shift 3
-  local name=$arm-$condition-$PR-k$K-b$BUDGET T1=$(date +%s)
-  mkdir -p $OUT/$label/$name
-  $PY -m studies.memory_probe.run --inputs $IN --prompt $PR --k $K --arm $arm --condition $condition --budget $BUDGET \
-      --url $URL --model $MODEL --tokenizer $D/models/gpt-oss-120b/tokenizer.json \
-      --workdir /tmp/aos-probe-$SLURM_JOB_ID-$label-$name --out $OUT/$label/$name/results.jsonl --workers 24 "$@" > $OUT/$label/$name/run.log 2>&1
-  echo "$label $name exit $? seconds $(( $(date +%s) - T1 )) $(tail -1 $OUT/$label/$name/run.log | cut -c1-300)"
+  local name=$arm-$condition-$PR-k$K-b$BUDGET T1=$(date +%s) row=$OUT/$label/$arm-$condition-$PR-k$K-b$BUDGET PIDS=() I code
+  mkdir -p $row
+  for I in $(seq 0 $((PROCS-1))); do
+    $PY -m studies.memory_probe.run --inputs $IN --prompt $PR --k $K --arm $arm --condition $condition --budget $BUDGET --shard $I/$PROCS --workers 1 \
+        --url $URL --model $MODEL --tokenizer $D/models/gpt-oss-120b/tokenizer.json \
+        --workdir /tmp/aos-probe-$SLURM_JOB_ID-$label-$name --out $row/shard$I.jsonl "$@" > $row/shard$I.log 2>&1 &
+    PIDS+=($!)
+  done
+  wait "${PIDS[@]}"
+  $PY -m studies.memory_probe.merge --inputs $IN --out $row/results.jsonl $row/shard*[0-9].jsonl > $row/run.log 2>&1
+  code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
+  echo "$label $name exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $row/run.log | cut -c1-300)"
   rm -rf /tmp/aos-probe-$SLURM_JOB_ID-$label-$name
 }
 judge() {  # label arm
@@ -97,4 +103,5 @@ for style in told neutral; do
 done
 curl -s http://127.0.0.1:$PORT/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $JOB/vllm-metrics.txt
 kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null
-echo "end $(date -u +%FT%TZ)"
+echo "end $(date -u +%FT%TZ) rows failed $FAILED"
+[ $FAILED = 0 ]

@@ -211,6 +211,64 @@ def test_grading_reads_the_last_non_empty_line_as_the_package_does() -> None:
 from studies.memory_probe.cases import LOOK, SENTENCE, case_messages, run_case  # noqa: E402
 
 
+def _shards(tmp_path: Path, cases: list[dict], total: int, budget=lambda index: 500) -> list[Path]:
+    """Real rows from a real run of each shard, with no model behind them."""
+    from studies.memory_probe.run import run_all, shard_of
+
+    (tmp_path / "w").mkdir(exist_ok=True)
+    paths = []
+    for index in range(total):
+        path = tmp_path / f"shard{index}.jsonl"
+        run_all(shard_of(cases, f"{index}/{total}"), {case["id"]: "S" for case in cases}, chat=lambda m, t: _reply("A"), out=path, workers=1,
+                identity={"budget": budget(index), "shard": f"{index}/{total}"},
+                arm="a5", condition="i", workdir=tmp_path / "w", max_rounds=2, budget=500, count=_count, prompt="anthropic", k=1)
+        paths.append(path)
+    return paths
+
+
+def test_shards_hold_every_case_once_and_the_merge_writes_them_in_case_order(tmp_path: Path) -> None:
+    from studies.memory_probe.merge import merge_shards
+    from studies.memory_probe.run import shard_of
+
+    cases = [{**_case(), "id": f"h00:sc0{number}"} for number in range(7)]
+    assert sorted(case["id"] for index in range(3) for case in shard_of(cases, f"{index}/3")) == [case["id"] for case in cases]
+    assert shard_of(cases, None) == cases
+    with pytest.raises(ValueError):
+        shard_of(cases, "3/3")
+    out = tmp_path / "results.jsonl"
+    summary = merge_shards(cases, _shards(tmp_path, cases, 3), out)
+    assert [json.loads(line)["id"] for line in out.read_text().splitlines()] == [case["id"] for case in cases]
+    assert summary["cases"] == 7 and json.loads(out.with_name("results.summary.json").read_text())["cases"] == 7
+    assert json.loads(out.with_name("results.settings.json").read_text()) == {"budget": 500, "shards": 3}
+
+
+def test_a_shard_with_no_cases_is_no_failure(tmp_path: Path) -> None:
+    from studies.memory_probe.merge import merge_shards
+
+    cases = [{**_case(), "id": "h00:sc01"}]
+    assert merge_shards(cases, _shards(tmp_path, cases, 2), tmp_path / "results.jsonl")["cases"] == 1
+
+
+def test_the_merge_refuses_a_lost_case_a_doubled_case_or_shards_that_ran_differently(tmp_path: Path) -> None:
+    from studies.memory_probe.merge import merge_shards
+
+    cases = [{**_case(), "id": f"h00:sc0{number}"} for number in range(2)]
+    first, second = _shards(tmp_path, cases, 2)
+    whole = second.read_text()
+    out = tmp_path / "results.jsonl"
+    second.write_text("")
+    with pytest.raises(ValueError, match="every case"):
+        merge_shards(cases, [first, second], out)
+    second.write_text(first.read_text())
+    with pytest.raises(ValueError, match="every case"):
+        merge_shards(cases, [first, second], out)
+    second.write_text(whole)
+    second.with_name("shard1.settings.json").write_text(json.dumps({"budget": 400, "shard": "1/2"}))
+    with pytest.raises(ValueError, match="budget"):
+        merge_shards(cases, [first, second], out)
+    assert not out.exists()
+
+
 def _case() -> dict:
     return {"id": "h00:sc01", "haystack_id": "h00", "sc_id": "sc01", "sc_type": "process", "sc_text": RULE,
             "compliant_letter": "A", "system_prompt": "You are an assistant.", "developer_prompt": "Be helpful.",

@@ -5,7 +5,9 @@
         --workdir /tmp/probe --out runs/probe/a5-ii-anthropic-k1/results.jsonl --workers 12 [--limit 50]
 
 Each case gets a fresh store. Results are written as they finish, and a stopped run picks up where it was. The
-summary counts the steps (looked, found, obeyed), the tool calls that could not be parsed, and the ledger.
+summary counts the steps (looked, found, obeyed), the tool calls that could not be parsed, and the ledger. Building a store is
+Python work on one core however many threads wait on it, so a row runs fastest as many processes, each with ``--shard I/N``, joined
+by ``studies.memory_probe.merge``.
 """
 
 from __future__ import annotations
@@ -28,6 +30,16 @@ from studies.memory_probe.tool_loop import http_chat
 def history_id(case_id: str) -> str:
     """A cued case has the published case's history word for word, so it shares that case's summaries, records and notes."""
     return case_id.removesuffix(":cued")
+
+
+def shard_of(cases: list[dict], shard: str | None) -> list[dict]:
+    """Every Nth case from the Ith, so that N processes hold every case once."""
+    if shard is None:
+        return cases
+    index, total = (int(part) for part in shard.split("/"))
+    if not 0 <= index < total:
+        raise ValueError(f"no shard {shard}")
+    return cases[index::total]
 
 
 def delivered_blocks(path: Path, prompt: str) -> dict[str, str]:
@@ -82,7 +94,8 @@ def run_all(cases: list[dict], summaries: dict[str, str], *, chat: Callable, out
     out.parent.mkdir(parents=True, exist_ok=True)
     if identity is not None:
         _same_settings(out, identity)
-    done = {json.loads(line)["id"] for line in out.read_text().splitlines()} if out.exists() else set()
+    out.touch()  # a shard with no cases is still a shard
+    done = {json.loads(line)["id"] for line in out.read_text().splitlines()}
     lock = threading.Lock()
 
     def one(case: dict) -> None:
@@ -118,6 +131,7 @@ def main(argv=None) -> int:
     parser.add_argument("--keep", default="newest", choices=("newest", "oldest"), help="a2a: which end is kept")
     parser.add_argument("--condition", required=True, choices=("i", "ii", "iii", "iv", "v", "vi", "vii", "viii"))
     parser.add_argument("--limit", type=int, help="the first N cases in file order, for a smoke run")
+    parser.add_argument("--shard", help="I/N: this process holds every Nth case from the Ith")
     parser.add_argument("--max-rounds", type=int, default=6)
     parser.add_argument("--budget", type=int, default=4096, help="memory tokens a probe may receive in all")
     parser.add_argument("--max-tokens", type=int, default=4096)
@@ -132,7 +146,7 @@ def main(argv=None) -> int:
 
     inputs = Path(arguments.inputs)
     cases = [json.loads(line) for line in (inputs / "cases.jsonl").read_text().splitlines()]
-    cases = cases[: arguments.limit] if arguments.limit else cases
+    cases = shard_of(cases[: arguments.limit] if arguments.limit else cases, arguments.shard)
     summaries = {row["id"]: row["summary"] for row in map(json.loads, (inputs / "summaries.jsonl").read_text().splitlines())
                  if row["prompt"] == arguments.prompt and row["k"] == arguments.k}
     tokenizer = Tokenizer.from_file(arguments.tokenizer)
@@ -155,7 +169,7 @@ def main(argv=None) -> int:
 
     identity = {"arm": arguments.arm, "condition": arguments.condition, "prompt": arguments.prompt, "k": arguments.k,
                 "upper": arguments.upper, "budget": arguments.budget, "keep": arguments.keep, "max_rounds": arguments.max_rounds,
-                "model": arguments.model, "limit": arguments.limit, "cases_sha256": digest(inputs / "cases.jsonl"),
+                "model": arguments.model, "limit": arguments.limit, "shard": arguments.shard, "cases_sha256": digest(inputs / "cases.jsonl"),
                 "summaries_sha256": digest(inputs / "summaries.jsonl"), "notes_sha256": digest(arguments.notes),
                 "headers_sha256": digest(arguments.headers), "commit": code_version()[0], "code_digest": code_digest()}
     summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers, delivered=blocks,
