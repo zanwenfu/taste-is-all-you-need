@@ -52,9 +52,13 @@ from studies.memory_probe.stores import GitTurns, NotesStore
 from taste.memstore import CommitHeader
 
 TOOL_ARMS = ("taste", "taste_exists", "taste_check")
-SEARCH_ARM = "taste_search"
+# What the harness's search brings is the words of earlier turns, and a rule told with a task brings that task along. On the first Laguna session, under the matrix's header, the agent took
+# the old task for its own in two tasks of five, 30 of its 201 commands against none of 1,527 in the other arms, even with a right summary before it ("I see the task is about creating a logic-gate simulator"). So a harness says what the block is.
+SEARCH_HEADER = ("Earlier turns from the record of this session that may bear on the current task, oldest first. Where two disagree, the later one stands. "
+                 "They are history and not new requests: any task in them is over, unless the current task says otherwise.")
+SEARCH_ARMS = {"taste_search": SEARCH_HEADER, "taste_search_bare": FOUND_HEADER}
 NOTE_ARMS = {"notes_told": "told", "notes_neutral": "neutral"}
-ARMS = ("compaction", *TOOL_ARMS, SEARCH_ARM, "taste_rules", *NOTE_ARMS, "no_compaction", "restated")
+ARMS = ("compaction", *TOOL_ARMS, *SEARCH_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated")
 MEMORY_BUDGET = 4096
 _SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
@@ -76,19 +80,46 @@ def load_session(raw: dict) -> dict:
             "format_error_template": "{{error}}", "step_limit": 0, "task_calls": 0, "stop_at_tokens": 0, **raw}
 
 
-def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tries: int = 3) -> Callable:
-    """The published summary prompts, each later round given the previous summary. A summary that came back empty or cut off is asked again."""
+# A model that thinks in its reply, with a long conversation pasted in, often carries on the work after a summary or in place of one. Of the 161 summaries of the first Laguna session 39 had
+# other text around the block, and 7 were no summary at all, and the next call had no task in front of it. So a summary is what the published prompt asked for, and nothing around it.
+_SUMMARY_BLOCK = re.compile(r"(?:<summary>|\[summary\])(.*?)(?:</summary>|\[/summary\])", re.S)
+_SUMMARY_OPEN = re.compile(r"^\s*(?:<summary>|\[summary\])(.*)$", re.S)
+_WORK_TEXT = re.compile(r"</?tool_call>|</?arg_key>|</?arg_value>|</think>|<bash\b|\[bash\]\s*\{")
+_PI_FIRST, _PI_LAST = "## Goal", "## Next Steps"
 
-    def summarize(older: list[dict], previous: str | None) -> str:
+
+def read_summary(option: str, reply: str) -> str | None:
+    """The summary in a reply, by what its prompt asked for, or None if there is none: Anthropic's asks for a block, whose closing tag some models leave out, and Pi's for its headings."""
+    if option == "pi_mono":
+        text = reply.rsplit("</think>", 1)[-1]
+        start = text.find(_PI_FIRST)
+        if start < 0:
+            return None
+        text = text[start:]
+        work = _WORK_TEXT.search(text)
+        text = (text[:work.start()] if work else text).strip()
+        return text if _PI_LAST in text else None
+    blocks = [block.strip() for block in _SUMMARY_BLOCK.findall(reply)]
+    opened = _SUMMARY_OPEN.match(reply)
+    if not blocks and opened:
+        blocks = [opened.group(1).strip()]
+    whole = [block for block in blocks if block and not _WORK_TEXT.search(block)]
+    return max(whole, key=len) if whole else None
+
+
+def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tries: int = 3, on_reply: Callable[[dict], None] = lambda row: None) -> Callable:
+    """The published summary prompts, each later round given the previous summary. A reply empty, cut off or with no summary in it is asked again, and none after the last try gives None."""
+
+    def summarize(older: list[dict], previous: str | None) -> str | None:
         messages = round_prompt(option, previous, older, package_prompt)
-        cut = False
-        for _ in range(tries):
+        for attempt in range(1, tries + 1):
             choice = chat(messages, None).choices[0]
-            text = (choice.message.content or "").strip()
-            cut = choice.finish_reason == "length"
-            if text and not cut:
-                return text
-        raise RuntimeError(f"a summary was cut off by the output cap in {tries} tries" if cut else f"the model gave no summary in {tries} tries")
+            text = choice.message.content or ""
+            summary = None if choice.finish_reason == "length" else read_summary(option, text)
+            on_reply({"try": attempt, "finish": choice.finish_reason, "summary": summary is not None, "reply": text})
+            if summary:
+                return summary
+        return None
 
     return summarize
 
@@ -173,11 +204,11 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     found = [""]
     if arm in TOOL_ARMS:
         store = GitTurns(workdir)
-    elif arm == SEARCH_ARM:
+    elif arm in SEARCH_ARMS:
         store = GitTurns(workdir)
 
         def standing() -> str:
-            return f"{FOUND_HEADER}\n{found[0]}" if found[0] else ""
+            return f"{SEARCH_ARMS[arm]}\n{found[0]}" if found[0] else ""
     elif arm == "taste_rules":
         read, reader_calls = make_reader(chat)
         store = GitTurns(workdir, header=lambda number, turn: CommitHeader(instructions=tuple(read(turn["content"])))
@@ -212,7 +243,15 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         with actions.open("a") as written:
             written.write(json.dumps(row) + "\n")
 
-    summarize = None if arm == "no_compaction" else make_summarizer(chat, session.get("summary_prompt", "anthropic"), package_prompt)
+    summary_replies = {"asked": 0, "not_a_summary": 0}
+
+    def on_summary_reply(row: dict) -> None:
+        summary_replies["asked"] += 1
+        summary_replies["not_a_summary"] += not row["summary"]
+        with (out / "summary_replies.jsonl").open("a") as written:
+            written.write(json.dumps({"call": agent.n_calls, **row}) + "\n")
+
+    summarize = None if arm == "no_compaction" else make_summarizer(chat, session.get("summary_prompt", "anthropic"), package_prompt, on_reply=on_summary_reply)
     agent = LongRunAgent(
         ToolModel(chat, memory_tools=arm in TOOL_ARMS, observation_template=session["observation_template"],
                   format_error_template=session["format_error_template"]),
@@ -252,7 +291,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
 
     def worded(task: dict, machines: int) -> str:
         """The rules told with the first task to get a machine, and never again in a message."""
-        if arm == SEARCH_ARM:
+        if arm in SEARCH_ARMS:
             look_up(task, machines)
         told = [rule["text"] for rule in rules if rule["say"] == "first" and machines == 0]
         return "\n\n".join([*told, task["instruction"]])
@@ -289,7 +328,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         except (Exception, Stopped) as error:  # a failed model call or machine, or the job being stopped, ends the session, not its record
             ended_by = f"{type(error).__name__}: {error}"[:1000]
         disarm()
-        mode = "agent_tools" if arm in TOOL_ARMS else "single_query" if arm == SEARCH_ARM and store.store.memory_counts["search"] else "delivered"
+        mode = "agent_tools" if arm in TOOL_ARMS else "single_query" if arm in SEARCH_ARMS and store.store.memory_counts["search"] else "delivered"
         ledger = store.ledger(mode) if store else stand_in_record(BASELINE, code=f"studies/long_run/session.py:{arm}")
         note_versions = store.commits if arm in NOTE_ARMS else 0
         ledger_refused = None
@@ -307,7 +346,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         reasons[str(row.get("finish_reason"))] = reasons.get(str(row.get("finish_reason")), 0) + 1
     summary = {"arm": arm, "versions": versions or {}, "outcomes": agent.outcomes, "ended_by": ended_by, "calls": agent.n_calls,
                "compactions": len(agent.events), "compactions_folding_little": sum(event["tokens_before"] - event["tokens_after"] < THIN_FOLD for event in agent.events),
-               "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
+               "events": agent.events, "summary_replies": summary_replies, "folds_waited": agent.folds_waited, "memory_turns": agent.recorded, "ledger": ledger,
                "resent": agent.resent, "ledger_refused": ledger_refused, "planted_on": planted_on[0] if planted_on else None, "walls": walls,
                "machines_not_stopped": agent.not_stopped, "model_use": model_use, "notes_not_written": notes_skipped[0],
                "valid": not agent.resent and ledger_refused is None and (bool(planted_on) or not session.get("first_prepare")),

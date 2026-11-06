@@ -313,3 +313,43 @@ def test_one_long_run_table_holds_one_reader_one_summary_prompt_and_one_version_
     for key, other in (("model", {"model": "other", "summary_prompt": "pi", "commit": "c1"}), ("summary_prompt", {"model": "m", "summary_prompt": "other", "commit": "c1"})):
         with pytest.raises(ValueError, match=key):
             long_analyze.one_setup({"s1": {"taste": _with(base, model="m", summary_prompt="pi", commit="c1")}, "s2": {"taste": _with(base, **other)}}, mixed=True)
+
+
+def test_commands_that_go_back_to_an_earlier_tasks_files_are_counted_arm_by_arm(tmp_path: Path) -> None:
+    seed = tmp_path / "s1"
+    tasks = [{"name": "circuit", "instruction": "The file /app/sim.c is a simulator. Create /app/gates.txt and write /app/answer.txt."},
+             {"name": "count", "instruction": "Count the tokens and write /app/answer.txt, with count.py if you like."},
+             {"name": "fix", "instruction": "Fix bottle.py."}]
+    seed.mkdir()
+    (seed / "session.json").write_text(json.dumps({"tasks": tasks}))
+
+    def arm(name: str, rows: list[tuple[str, str, str]]) -> None:
+        (seed / name).mkdir()
+        (seed / name / "actions.jsonl").write_text("\n".join(json.dumps({"kind": kind, "task": task, "command": command}) for task, kind, command in rows))
+
+    arm("compaction", [("circuit", "bash", "cat /app/sim.c"), ("count", "bash", "python3 count.py"), ("fix", "bash", "sed -n 1,9p bottle.py")])
+    arm("taste_search", [("circuit", "bash", "cat /app/gates.txt"),
+                         ("count", "bash", "cat /app/sim.c"),  # back at the first task
+                         ("count", "bash", "gcc sim.c && python3 count.py"),  # names this task's file too: not counted
+                         ("count", "bash", "cat /app/answer.txt"),  # two tasks name it, so it is nobody's own
+                         ("count", "no_command", ""),
+                         ("fix", "bash", "cd /app && cat gates.txt && cat count.py")])  # back at both
+
+    table = long_analyze.went_back([seed])
+    assert table["compaction"]["commands"] == 3 and table["compaction"]["back"] == 0
+    assert table["taste_search"]["commands"] == 5 and table["taste_search"]["back"] == 2
+    assert table["taste_search"]["by_task"] == {"count": 1, "fix": 1}
+    text = long_analyze.render_went_back(table)
+    assert "taste_search" in text and "2/5" in text
+
+
+def test_a_folder_with_no_task_list_has_nothing_to_count_for_going_back(tmp_path: Path) -> None:
+    (tmp_path / "s1" / "compaction").mkdir(parents=True)
+    assert long_analyze.went_back([tmp_path / "s1"]) == {}
+
+
+def test_the_table_shows_summaries_asked_again_and_folds_that_waited(tmp_path: Path) -> None:
+    summary = {**_summary("compaction", {"a": {"obeyed": 1, "applies": 1}}), "summary_replies": {"asked": 9, "not_a_summary": 2}, "folds_waited": [40]}
+    entry = long_analyze.arm_table({"s1": {"compaction": summary}})[0]
+    assert entry["summaries_asked"] == 9 and entry["not_a_summary"] == 2 and entry["folds_waited"] == 1
+    assert "not a summary" in long_analyze.render([entry])

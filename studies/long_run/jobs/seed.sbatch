@@ -23,8 +23,8 @@ WORK=/tmp/aos-long-$SLURM_JOB_ID-$READER-$PROMPT-seed$SEED; mkdir -p $WORK/machi
 trap 'rm -rf "$WORK"' EXIT
 trap 'kill ${PID:-} ${SMI:-} 2>/dev/null; wait; exit 143' TERM
 if [ $READER = laguna ]; then
-  # It thinks before it answers, and a thought counts toward the output cap.
-  FOLDER=$D/models/laguna-s-2.1-nvfp4; MODEL=poolside/laguna-s-2.1; MOST=8192
+  # It thinks before it answers, and a thought counts toward the output cap: at 8,192 a hard task lost three replies in a row to the cap, and so left its machine, in 8 of 10 arms of the first session.
+  FOLDER=$D/models/laguna-s-2.1-nvfp4; MODEL=poolside/laguna-s-2.1; MOST=16384
   SERVE=(--tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs '{"enable_thinking": true}')
 else
   FOLDER=$D/models/gpt-oss-120b; MODEL=openai/gpt-oss-120b; MOST=4096

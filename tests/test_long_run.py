@@ -175,6 +175,25 @@ def test_compaction_replaces_the_older_part_with_a_summary_and_keeps_the_recent_
         assert all(SUMMARY_LEAD not in str(m.get("content")) for m in log[1]["older"])
 
 
+def test_when_no_summary_comes_the_fold_waits_for_the_next_call_and_nothing_is_lost() -> None:
+    answers = iter([None, "summary"])
+    asked = []
+
+    def summarize(older: list[dict], previous: str | None) -> str | None:
+        asked.append(len(older))
+        return next(answers, "summary")
+
+    script = _Script([_bash(f"step {n} " + "word " * 30, f"c{n}") for n in range(6)] + [_bash(DONE, "c9")])
+    folded = []
+    agent, _ = _agent(script, summarize=summarize, compact_at_tokens=150, keep_recent_tokens=60, on_compact=folded.append)
+    agent.run(task=f"Fix it. {RULE}")
+    assert agent.folds_waited == [agent.events[0]["call"] - 1], "the next call folds what this one could not"
+    waited = script.sent[agent.folds_waited[0] - 1]["messages"]
+    assert RULE in json.dumps(waited), "with no summary the conversation stays whole"
+    assert len(folded) == len(agent.events), "a note-taker writes only when a fold happens"
+    assert asked[1] > asked[0], "and the next try has one more turn to read"
+
+
 def test_each_compaction_says_whether_the_watched_texts_survived() -> None:
     script = _Script([_bash(f"step {n} " + "word " * 30, f"c{n}") for n in range(6)] + [_bash(DONE, "c9")])
     agent, _ = _agent(script, summarize=lambda older, previous: "kept: Always run the test suite with -x",
@@ -279,7 +298,7 @@ def test_every_action_is_logged_with_its_call_its_task_and_how_many_compactions_
 
 # ------------------------------------------------------------------ the summary, from the two published prompts
 
-from studies.long_run.session import load_session, make_summarizer, run_session  # noqa: E402
+from studies.long_run.session import load_session, make_summarizer, read_summary, run_session  # noqa: E402
 
 
 def _prompt(option: str, messages: list[dict]) -> list[dict]:
@@ -297,7 +316,7 @@ def test_the_summary_is_the_published_prompt_asked_of_the_served_model_with_no_t
 
     def chat(messages, tools):
         sent.append((messages, tools))
-        return _text("the summary")
+        return _text("<summary>the summary</summary>")
 
     summarize = make_summarizer(chat, "anthropic", _prompt)
     older = [{"role": "user", "content": "the task"}]
@@ -307,25 +326,67 @@ def test_the_summary_is_the_published_prompt_asked_of_the_served_model_with_no_t
     assert {"role": "assistant", "content": "the summary"} in sent[1][0], "the previous summary goes in with the new part"
 
 
-def test_an_empty_summary_is_asked_again_and_stops_the_run_if_it_stays_empty() -> None:
-    replies = iter(["", "fine"])
+def test_an_empty_summary_is_asked_again_and_none_is_given_if_it_stays_empty() -> None:
+    replies = iter(["", "<summary>fine</summary>"])
     assert make_summarizer(lambda m, t: _text(next(replies)), "anthropic", _prompt)([], None) == "fine"
-    with pytest.raises(RuntimeError, match="summary"):
-        make_summarizer(lambda m, t: _text(""), "anthropic", _prompt)([], None)
+    assert make_summarizer(lambda m, t: _text(""), "anthropic", _prompt)([], None) is None
 
 
 def test_a_summary_cut_off_once_is_asked_again() -> None:
-    cut = _text("half a summ")
+    cut = _text("<summary>half a summ")
     cut.choices[0].finish_reason = "length"
-    replies = iter([cut, _text("a whole summary")])
+    replies = iter([cut, _text("<summary>a whole summary</summary>")])
     assert make_summarizer(lambda m, t: next(replies), "anthropic", _prompt)([], None) == "a whole summary"
 
 
-def test_a_summary_cut_off_every_time_stops_the_run() -> None:
-    reply = _text("half a summ")
+def test_a_summary_cut_off_every_time_gives_none() -> None:
+    reply = _text("<summary>half a summ")
     reply.choices[0].finish_reason = "length"
-    with pytest.raises(RuntimeError, match="cut off"):
-        make_summarizer(lambda m, t: reply, "anthropic", _prompt)([], None)
+    assert make_summarizer(lambda m, t: reply, "anthropic", _prompt)([], None) is None
+
+
+# Replies of the first Laguna session, shortened: of 161 summaries, 39 had other text around the block and 7 were no summary at all, which left the agent without its task.
+@pytest.mark.parametrize(("reply", "read"), [
+    ("Hmm, the user is asking me to summarize a transcript.</think><summary>\nthe state\n</summary>", "the state"),
+    ("<summary>the state</summary><tool_call>bash ${\"command\": \"echo 2f6c\"}", "the state"),
+    ("I've made progress.\n\n[summary]\nthe state\n[/summary]<tool_call>bash ${\"command\": \"echo 2f6c\"}", "the state"),
+    ("I must wrap it in a <summary></summary> block.</think><summary>the state</summary>", "the state"),
+    ("<summary>\nthe state, with no closing tag", "the state, with no closing tag"),
+])
+def test_a_summary_is_what_the_published_prompt_asked_for_and_nothing_around_it(reply: str, read: str) -> None:
+    assert read_summary("anthropic", reply) == read
+
+
+@pytest.mark.parametrize("reply", [
+    "<tool_call>bash{\"command\": \"cat > /app/out.txt << 'EOF'\\nEmbossed text\\nEOF\\n\"}",
+    "<bash] {\"command\": \"echo done\"}</arg_value></tool_call>",
+    "[bash] {\"command\": \"grep -c M486 /app/text.gcode\"}\n\nLet me analyze the M486 commands:</think>[bash] {\"command\": \"grep -n M486 /app/text.gcode\"}",
+    "<summary>\nthe state\n</arg_value></tool_call>",
+    "<summary>the state</arg_value>\n\n```summary\nagain\n</summary>",
+    "Looking at this transcript, I need to understand what's happening.",
+    "<summary></summary>",
+    "",
+])
+def test_a_reply_that_carries_on_the_work_is_not_a_summary(reply: str) -> None:
+    assert read_summary("anthropic", reply) is None
+
+
+@pytest.mark.parametrize(("reply", "read"), [
+    ("Let me think.</think>## Goal\nfix it\n\n## Next Steps\n1. run it", "## Goal\nfix it\n\n## Next Steps\n1. run it"),
+    ("## Goal\nfix it\n\n## Next Steps\n1. run it\n<tool_call>bash{\"command\": \"ls\"}", "## Goal\nfix it\n\n## Next Steps\n1. run it"),
+    ("## Goal\nfix it\n\n## Next Steps\n1. run it\n[bash] {\"command\": \"ls\"}", "## Goal\nfix it\n\n## Next Steps\n1. run it"),
+    ("<tool_call>bash{\"command\": \"ls\"}", None),
+    ("## Goal\nfix it, cut before the rest", None),
+])
+def test_the_second_published_prompt_is_read_by_its_own_headings(reply: str, read: str | None) -> None:
+    assert read_summary("pi_mono", reply) == read
+
+
+def test_each_reply_is_on_the_record_and_a_summary_that_was_never_given_says_so(tmp_path: Path) -> None:
+    rows = []
+    replies = iter(["<tool_call>bash{}", "<summary>fine</summary>"])
+    assert make_summarizer(lambda m, t: _text(next(replies)), "anthropic", _prompt, on_reply=rows.append)([], None) == "fine"
+    assert [(row["try"], row["summary"]) for row in rows] == [(1, False), (2, True)] and rows[0]["reply"] == "<tool_call>bash{}"
 
 
 # ------------------------------------------------------------------ one whole session, on a stand-in
@@ -348,7 +409,7 @@ def _session_chat() -> _Script:
 
 
 def _summaries(messages, tools):
-    return _text("a summary")
+    return _text("<summary>a summary</summary>")
 
 
 def _routed(script):
@@ -468,7 +529,7 @@ def _stand_in_server(script: list[dict]) -> HTTPServer:
                     {"id": f"c{len(script)}", "type": "function",
                      "function": {"name": call["name"], "arguments": json.dumps(call["arguments"])}}]}
             else:
-                message = {"role": "assistant", "content": "a summary of the work so far"}
+                message = {"role": "assistant", "content": "<summary>a summary of the work so far</summary>"}
             payload = json.dumps({"choices": [{"message": message, "finish_reason": "stop"}],
                                   "usage": {"prompt_tokens": 1, "completion_tokens": 1}}).encode()
             self.send_response(200)
@@ -587,8 +648,44 @@ def _search_session(**more) -> dict:
                          "compact_at_tokens": 0, "summary_prompt": "anthropic", "step_limit": 40, **more})
 
 
-def test_the_search_arm_looks_up_each_new_tasks_own_words_itself_and_offers_the_agent_no_tools(tmp_path: Path) -> None:
+def test_a_session_says_how_many_summaries_it_asked_again_and_how_many_folds_waited(tmp_path: Path) -> None:
+    session = load_session({**SESSION, "rules": SESSION["rules"][:1], "tasks": [{"name": "one", "instruction": "Fix a Python script."}]})
+    calls = {"summary": 0}
+    script = _Script([_bash("python3 a.py " + "word " * 30, "c1"), _bash("python3 b.py " + "word " * 30, "c2"), _bash("python3 c.py " + "word " * 30, "c3"),
+                      _bash("python3 d.py " + "word " * 30, "c4"), _bash(DONE, "c5")])
+
+    def chat(messages: list[dict], tools: list | None):
+        if tools:
+            return script(messages, tools)
+        calls["summary"] += 1
+        return _text("<tool_call>bash{}" if calls["summary"] <= 4 else "<summary>a summary</summary>")
+
+    summary = run_session(session, arm="compaction", chat=chat, make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["summary_replies"]["asked"] == calls["summary"] and summary["summary_replies"]["not_a_summary"] == 4
+    assert len(summary["folds_waited"]) == 1 and summary["compactions"] > 0 and summary["valid"]
+    written = [json.loads(line) for line in (tmp_path / "run" / "summary_replies.jsonl").read_text().splitlines()]
+    assert len(written) == calls["summary"] and written[0]["reply"] == "<tool_call>bash{}" and written[0]["summary"] is False
+
+
+def test_the_search_block_says_it_is_history_so_that_an_old_task_in_it_is_not_taken_for_this_one(tmp_path: Path) -> None:
+    from studies.long_run.session import SEARCH_HEADER
     from studies.memory_probe.cases import FOUND_HEADER
+
+    told = _Script([_bash(DONE, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    run_session(_search_session(), arm="taste_search", chat=_routed(told), make_env=lambda task: _Shell(), count=_count,
+                out=tmp_path / "told", workdir=tmp_path / "w1", package_prompt=_prompt)
+    assert SEARCH_HEADER in told.sent[1]["messages"][0]["content"] and FOUND_HEADER not in told.sent[1]["messages"][0]["content"]
+    assert "not new requests" in SEARCH_HEADER
+    bare = _Script([_bash(DONE, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    summary = run_session(_search_session(), arm="taste_search_bare", chat=_routed(bare), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "bare", workdir=tmp_path / "w2", package_prompt=_prompt)
+    assert FOUND_HEADER in bare.sent[1]["messages"][0]["content"] and SEARCH_HEADER not in bare.sent[1]["messages"][0]["content"]
+    assert summary["ledger"]["mode"] == "single_query" and len(summary["searches"]) == 3
+
+
+def test_the_search_arm_looks_up_each_new_tasks_own_words_itself_and_offers_the_agent_no_tools(tmp_path: Path) -> None:
+    from studies.long_run.session import SEARCH_HEADER as FOUND_HEADER
 
     script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
     summary = run_session(_search_session(), arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
@@ -1109,7 +1206,7 @@ def _reader_route(script, quotes):
         if "notes file" in messages[0]["content"]:
             asked["notes"].append(messages[0]["content"])
             return _text("Notes: pass -B to Python.")
-        return _text("a summary")
+        return _text("<summary>a summary</summary>")
 
     return chat, asked
 

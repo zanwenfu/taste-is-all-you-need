@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -118,6 +119,9 @@ def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
             "machines_failed": sum(o["exit_status"] == "MachineFailed" for s in summaries for o in s["outcomes"]),
             "looks": max((sum(s["scores"][rule]["looks"] for s in summaries if rule in s["scores"]) for rule in rules), default=0),
             "searched": sum(len(s.get("searches", [])) for s in summaries),
+            "summaries_asked": sum(s.get("summary_replies", {}).get("asked", 0) for s in summaries),
+            "not_a_summary": sum(s.get("summary_replies", {}).get("not_a_summary", 0) for s in summaries),
+            "folds_waited": sum(len(s.get("folds_waited", [])) for s in summaries),
             "rules": {}}
         for rule in rules:
             scores = [s["scores"][rule] for s in summaries if rule in s["scores"]]
@@ -156,6 +160,44 @@ def compaction_table(runs: dict[str, dict[str, dict]]) -> dict[str, dict[str, di
     return table
 
 
+_FILE_NAME = re.compile(r"[\w-]+\.(?:c|cc|cpp|h|py|txt|json|jsonl|gcode|csv|sh|md|yaml|yml|toml|scm|rs|go|js|ts|java|sql|log|dat|html|R|tex|xml|parquet)\b")
+
+
+def went_back(folders: list[Path]) -> dict[str, dict[str, Any]]:
+    """Commands at work on an earlier task, arm by arm: those naming a file only one earlier task's words name, and no file of this task's. An agent can lose its task as it loses a rule, to a
+    bad summary or to what a memory brought back. A file two tasks name is nobody's own, so it says nothing. {arm: {commands, back, by_task}}"""
+    table: dict[str, dict[str, Any]] = {}
+    for folder in folders:
+        path = folder / "session.json"
+        if not path.exists():
+            continue
+        tasks = json.loads(path.read_text())["tasks"]
+        named = {task["name"]: set(_FILE_NAME.findall(task["instruction"])) for task in tasks}
+        order = [task["name"] for task in tasks]
+        counts = {name: sum(name in files for files in named.values()) for name in set().union(*named.values())}
+        own = {task: {name for name in files if counts[name] == 1} for task, files in named.items()}
+        for actions in sorted(folder.glob("*/actions.jsonl")):
+            entry = table.setdefault(actions.parent.name, {"commands": 0, "back": 0, "by_task": {}})
+            for row in (json.loads(line) for line in actions.read_text().splitlines()):
+                if row["kind"] != "bash" or row["task"] not in own:
+                    continue
+                entry["commands"] += 1
+                said = set(_FILE_NAME.findall(row["command"]))
+                earlier = set().union(set(), *(own[task] for task in order[:order.index(row["task"])]))
+                if said & earlier and not said & own[row["task"]]:
+                    entry["back"] += 1
+                    entry["by_task"][row["task"]] = entry["by_task"].get(row["task"], 0) + 1
+    return table
+
+
+def render_went_back(table: dict[str, dict[str, Any]]) -> str:
+    lines = ["", "Commands at work on an earlier task: naming a file only that task's words name, and no file of this task's", "", "| arm | back / commands | tasks |", "|---|---|---|"]
+    for arm in sorted(table):
+        entry = table[arm]
+        lines.append(f"| {arm} | {entry['back']}/{entry['commands']} | " + ", ".join(f"{task} {count}" for task, count in sorted(entry["by_task"].items())) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def render_compactions(table: dict[str, dict[str, dict[str, list[int]]]]) -> str:
     spans = [_span(low) for low, _ in SPANS]
     lines = []
@@ -169,11 +211,11 @@ def render_compactions(table: dict[str, dict[str, dict[str, list[int]]]]) -> str
 
 def render(table: list[dict[str, Any]]) -> str:
     rules = sorted({rule for entry in table for rule in entry["rules"]})
-    head = ["arm", "sessions", "invalid", "ended early", "tasks", "submitted", "machines failed", "calls", "compactions", "no command", "looks"]
+    head = ["arm", "sessions", "invalid", "ended early", "tasks", "submitted", "machines failed", "calls", "compactions", "summaries asked", "not a summary", "folds waited", "no command", "looks"]
     lines = ["| " + " | ".join(head + rules) + " |", "|" + "---|" * (len(head) + len(rules))]
     for entry in table:
         cells = [entry["arm"], entry["sessions"], entry["invalid"], entry["ended_early"], entry["tasks"], entry["submitted"], entry["machines_failed"], entry["calls"], entry["compactions"],
-                 entry["no_command"], entry["looks"]]
+                 entry["summaries_asked"], entry["not_a_summary"], entry["folds_waited"], entry["no_command"], entry["looks"]]
         for rule in rules:
             cell = entry["rules"].get(rule, {})
             text = f"{cell.get('obeyed', 0)}/{cell.get('applies', 0)}"
@@ -197,11 +239,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--mixed", action="store_true", help="allow more than one version of the code, and say so")
     arguments = parser.parse_args(argv)
-    runs = load([Path(folder) for folder in arguments.folders])
+    folders = [Path(folder) for folder in arguments.folders]
+    runs = load(folders)
     setup = one_setup(runs, mixed=arguments.mixed)
     table = arm_table(runs)
     out = Path(arguments.out)
-    out.write_text(f"Reader {setup['model']}, summary prompt {setup['summary_prompt']}, code {setup['commit']}.\n\n" + render(table) + render_compactions(compaction_table(runs)))
+    out.write_text(f"Reader {setup['model']}, summary prompt {setup['summary_prompt']}, code {setup['commit']}.\n\n" + render(table) + render_went_back(went_back(folders)) + render_compactions(compaction_table(runs)))
     out.with_suffix(".json").write_text(json.dumps(table, indent=1))
     print(f"{len(table)} arms at {out}")
     return 0

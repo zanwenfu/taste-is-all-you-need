@@ -161,7 +161,7 @@ class LongRunConfig(AgentConfig):
 
 class LongRunAgent(DefaultAgent):
     def __init__(self, model: Any, env: Any, *, count: Callable[[str], int],
-                 summarize: Callable[[list[dict], str | None], str] | None = None,
+                 summarize: Callable[[list[dict], str | None], str | None] | None = None,
                  record: Callable[[dict], None] | None = None,
                  on_action: Callable[[dict], None] | None = None,
                  standing: Callable[[], str] | None = None,
@@ -175,6 +175,7 @@ class LongRunAgent(DefaultAgent):
         self._system_base: str | None = None
         self.task_name = ""
         self.events: list[dict] = []
+        self.folds_waited: list[int] = []
         self.recorded = 0
         self.previous_summary: str | None = None
         self._summary_message: dict | None = None
@@ -260,6 +261,9 @@ class LongRunAgent(DefaultAgent):
         plain = [{"role": m["role"] if m["role"] in ("system", "user", "assistant") else "user", "content": render(m)}
                  for m in older]
         summary = self.summarize(plain, self.previous_summary)
+        if summary is None:  # no summary in any try: nothing is thrown away, the fold waits for the next call, and the record says so
+            self.folds_waited.append(call)
+            return
         if self.on_compact is not None:
             self.on_compact(plain)
         self.previous_summary = summary
