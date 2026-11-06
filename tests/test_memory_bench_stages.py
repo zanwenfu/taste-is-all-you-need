@@ -137,13 +137,43 @@ def test_the_reader_is_asked_as_the_benchmark_asks_and_its_answers_are_kept(tmp_
     out = tmp_path / "answers.jsonl"
     summary = reader.read_all(_records(tmp_path, "a", "b"), reader.served_ask(client, "m", max_tokens=800), out, workers=2)
 
-    assert summary == {"questions": 2, "asked": 2, "failed": 0, "empty": 0, "cut_off": 0}
+    assert summary == {"questions": 2, "asked": 2, "failed": 0, "empty": 0, "cut_off": 0, "asked_again": 0}
     call = client.calls[0]
     assert call["temperature"] == 0 and call["max_tokens"] == 800 and call["model"] == "m"
     assert call["messages"][0]["role"] == "user" and call["messages"][0]["content"].startswith("prompt for")
     rows = {row["question_id"]: row for row in map(json.loads, out.read_text().splitlines())}
     assert rows["a"]["hypothesis"] == "level 3" and rows["a"]["finish_reason"] == "stop"
     assert rows["a"]["prompt_tokens"] == 11 and rows["a"]["completion_tokens"] == 5
+
+
+def test_a_reply_with_no_text_is_asked_again_up_to_three_tries_and_the_tries_are_on_record(tmp_path: Path) -> None:
+    replies = {"a": ["", "", "level 3"], "b": ["", "", ""], "c": ["level 4"]}
+
+    def ask(prompt: str) -> dict:
+        question = prompt.removeprefix("prompt for ").strip()
+        text = replies[question].pop(0)
+        return {"text": text, "finish_reason": "length" if not text else "stop", "prompt_tokens": 11, "completion_tokens": 5}
+
+    out = tmp_path / "answers.jsonl"
+    summary = reader.read_all(_records(tmp_path, "a", "b", "c"), ask, out, workers=1)
+    rows = {row["question_id"]: row for row in map(json.loads, out.read_text().splitlines())}
+    assert rows["a"]["hypothesis"] == "level 3" and rows["a"]["tries"] == 3 and rows["a"]["finish_reason"] == "stop"
+    assert rows["b"]["hypothesis"] == "" and rows["b"]["tries"] == 3 and rows["b"]["finish_reason"] == "length"
+    assert rows["c"]["tries"] == 1
+    assert summary == {"questions": 3, "asked": 3, "failed": 0, "empty": 1, "cut_off": 1, "asked_again": 2}
+    assert replies["b"] == [] and replies["c"] == []
+
+
+def test_a_reply_cut_off_with_text_stands_since_it_has_an_answer_to_read(tmp_path: Path) -> None:
+    calls = []
+
+    def ask(prompt: str) -> dict:
+        calls.append(prompt)
+        return {"text": "a long answer that ran", "finish_reason": "length", "prompt_tokens": 11, "completion_tokens": 5}
+
+    out = tmp_path / "answers.jsonl"
+    summary = reader.read_all(_records(tmp_path, "a"), ask, out, workers=1)
+    assert len(calls) == 1 and summary["cut_off"] == 1 and summary["empty"] == 0 and summary["asked_again"] == 0
 
 
 def test_reasoning_effort_is_sent_only_when_asked_for(tmp_path: Path) -> None:
@@ -171,7 +201,7 @@ def test_a_failed_call_is_written_down_and_asked_again_next_time(tmp_path: Path)
 
     state["fail"] = False
     second = reader.read_all(records, reader.served_ask(client, "m", max_tokens=8), out, workers=1)
-    assert second == {"questions": 2, "asked": 1, "failed": 0, "empty": 0, "cut_off": 0}
+    assert second == {"questions": 2, "asked": 1, "failed": 0, "empty": 0, "cut_off": 0, "asked_again": 0}
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert [row["hypothesis"] for row in rows if row["question_id"] == "b"] == ["fine"]
 

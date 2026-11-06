@@ -296,8 +296,65 @@ def test_two_judges_are_compared_on_the_answers_both_read(run: Path) -> None:
     second = Path(f"{_answers(run)}.eval-results-gpt-5.4")
     second.write_text(Path(f"{_answers(run)}.eval-results-served").read_text())
     _, data = report(run)
-    assert data["judges"]["oss"] == {"judge": "gpt-5.4", "answers": 5, "agree": 5, "kappa": 1.0}
+    assert data["judges"]["oss"]["answers"] == 5 and data["judges"]["oss"]["agree"] == 5 and data["judges"]["oss"]["kappa"] == 1.0
     assert kappa([True, True, False, False], [True, False, False, False]) == pytest.approx(0.5)
+
+
+def test_a_verdict_a_judge_could_not_read_is_left_out_of_agreement_and_counted(run: Path) -> None:
+    served = Path(f"{_answers(run)}.eval-results-served")
+    second = Path(f"{_answers(run)}.eval-results-gpt-5.4")
+    rows = [json.loads(line) for line in served.read_text().splitlines()]
+    rows[0]["autoeval_label"]["label"] = None
+    second.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    agreed = analyze.judges_agree(run, "oss", "gpt-5.4")
+    assert agreed["answers"] == 4 and agreed["agree"] == 4 and agreed["unread"] == {"served": 0, "gpt-5.4": 1}
+
+
+def _second_judge(root: Path, *, model: str = "global.openai.gpt-5.4", skip: tuple[str, str] | None = None) -> None:
+    for reader, row in analyze.second_judge_rows():
+        if (reader, row) == skip:
+            continue
+        answers = root / f"answers-{reader}" / "lme" / row / "answers.jsonl"
+        rows = [json.loads(line) for line in answers.read_text().splitlines()]
+        path = Path(f"{answers}.eval-results-gpt-5.4")
+        path.write_text("".join(json.dumps({**row_, "autoeval_label": {"label": True, "official_rule_label": True, "model": model}}) + "\n" for row_ in rows))
+
+
+def test_the_second_judge_reads_every_row_it_was_paid_for_or_no_table_is_written(run: Path) -> None:
+    assert analyze.check_second_judge(run) == []  # not run at all: nothing to hold it to
+    _second_judge(run)
+    assert analyze.check_second_judge(run) == []
+    assert check_run(run, part="dev", commit=COMMIT, digest=DIGEST) == []
+
+
+def test_the_second_judge_with_a_row_missing_is_refused(run: Path) -> None:
+    _second_judge(run, skip=("oss", "mem0-8000"))
+    assert any("oss mem0-8000: the second judge has not read it" in problem for problem in analyze.check_second_judge(run))
+    assert any("the second judge" in problem for problem in check_run(run, part="dev", commit=COMMIT, digest=DIGEST))
+
+
+def test_a_second_judge_verdict_on_another_answer_or_by_another_model_or_unread_is_refused(run: Path) -> None:
+    _second_judge(run)
+    path = Path(f"{_answers(run)}.eval-results-gpt-5.4")
+    good = path.read_text()
+    rows = [json.loads(line) for line in good.splitlines()]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows[:-1]))
+    assert any("verdicts" in problem for problem in analyze.check_second_judge(run))
+    path.write_text("".join(json.dumps({**row, "hypothesis": "another"}) + "\n" for row in rows))
+    assert any("another answer" in problem for problem in analyze.check_second_judge(run))
+    path.write_text("".join(json.dumps({**row, "autoeval_label": {**row["autoeval_label"], "model": "stand-in"}}) + "\n" for row in rows))
+    assert any("stand-in" in problem for problem in analyze.check_second_judge(run))
+    path.write_text("".join(json.dumps({**row, "autoeval_label": {**row["autoeval_label"], "label": None}}) + "\n" for row in rows))
+    assert any("could not be read" in problem for problem in analyze.check_second_judge(run))
+
+
+def test_the_report_gives_the_second_judge_row_by_row_with_its_official_rule(run: Path) -> None:
+    _second_judge(run)
+    text, data = report(run)
+    table = {entry["row"]: entry for entry in data["second_judge"]["oss"]}
+    assert set(table) == {row for reader, row in analyze.second_judge_rows() if reader == "oss"}
+    assert table["mem0-8000"]["accuracy"] == 1.0 and table["mem0-8000"]["accuracy_official_rule"] == 1.0 and table["mem0-8000"]["free_judge_accuracy"] == pytest.approx(0.6)
+    assert "second judge, row by row" in text
 
 
 def test_the_ledger_counts_tokens_and_gpu_hours_stage_by_stage(run: Path) -> None:

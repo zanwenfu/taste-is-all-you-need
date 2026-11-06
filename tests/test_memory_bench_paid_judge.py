@@ -38,7 +38,7 @@ def _copy(root: Path, count: int = 10, rows: tuple[tuple[str, str], ...] = (("os
 
 
 def test_it_judges_the_rows_the_main_table_reads_for_both_readers_and_no_sweep() -> None:
-    rows = paid_judge.rows_judged()
+    rows = analyze.second_judge_rows()
     assert len(rows) == 22 and len(rows) * 450 == 9900
     assert sum(reader == "oss" for reader, _ in rows) == 11 and sum(reader == "llama" for reader, _ in rows) == 11
     assert ("oss", f"full_oss-{analyze.OSS_WINDOW}") in rows and ("llama", "full_llama-31000") in rows and ("oss", f"oracle_oss-{analyze.OSS_WINDOW}") in rows
@@ -129,10 +129,67 @@ def test_the_reference_holds_what_a_judge_reads_and_no_history(tmp_path: Path) -
     split = tmp_path / "split.json"
     split.write_text(json.dumps({"dev": ["q0"], "held_out": ["q1", "q2"]}))
     out = tmp_path / "reference.json"
-    assert paid_judge.cut_reference(data, split, "held_out", out) == 2
+    sha = analyze._sha256(data)
+    assert paid_judge.cut_reference(data, split, "held_out", out, sha256=sha, now=paid_judge.OPENS_AT) == 2
     rows = json.loads(out.read_text())
     assert [row["question_id"] for row in rows] == ["q1", "q2"]
     assert set(rows[0]) == {"question_id", "question_type", "question", "answer", "question_date"}
+    assert json.loads(Path(f"{out}.source.json").read_text()) == {"part": "held_out", "data_sha256": sha}
+
+
+def test_the_reference_refuses_another_data_file_and_the_real_tests_gold_before_it_opens(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    data = tmp_path / "data.json"
+    data.write_text(json.dumps([{"question_id": "q1", "question_type": "multi-session", "question": "Q?", "answer": "A", "question_date": "d"}]))
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"dev": ["q1"], "held_out": ["q1"]}))
+    out = tmp_path / "reference.json"
+    with pytest.raises(SystemExit, match="not the benchmark's file"):
+        paid_judge.cut_reference(data, split, "held_out", out, sha256="other", now=paid_judge.OPENS_AT)
+    with pytest.raises(SystemExit, match="opens at"):
+        paid_judge.cut_reference(data, split, "held_out", out, sha256=analyze._sha256(data), now=paid_judge.OPENS_AT - timedelta(seconds=1))
+    assert not out.exists()
+    assert paid_judge.cut_reference(data, split, "dev", out, sha256=analyze._sha256(data), now=paid_judge.OPENS_AT - timedelta(days=1)) == 1
+
+
+def test_a_stand_ins_verdicts_never_count_as_the_paid_judges(tmp_path: Path) -> None:
+    reference = _copy(tmp_path)
+    folder = tmp_path / "answers-oss" / "lme" / "mem0-8000"
+    paid_judge.run_row(tmp_path, reference, "oss", "mem0-8000", _Judge(), allowed=None, first=4, short_name=paid_judge.STAND_IN)
+    assert (folder / "answers.jsonl.eval-results-stand-in").exists() and not (folder / "answers.jsonl.eval-results-gpt-5.4").exists()
+    assert paid_judge.spent(tmp_path) == 0.0
+    real = _Judge()
+    report = paid_judge.run_row(tmp_path, reference, "oss", "mem0-8000", real, allowed=None)
+    assert real.asked == 10 and report["judged"] == 10 and report["spent_total"] == pytest.approx(0.10)
+
+
+def test_verdicts_by_another_model_in_the_file_are_refused_before_any_call(tmp_path: Path) -> None:
+    reference = _copy(tmp_path)
+    paid_judge.run_row(tmp_path, reference, "oss", "mem0-8000", _Judge(), allowed=None, first=2)
+    other = _Judge()
+    other.model = "another"
+    with pytest.raises(ValueError, match="another model"):
+        paid_judge.run_row(tmp_path, reference, "oss", "mem0-8000", other, allowed=None)
+    assert other.asked == 0
+
+
+def test_answers_that_changed_under_verdicts_are_refused_before_any_call(tmp_path: Path) -> None:
+    reference = _copy(tmp_path)
+    paid_judge.run_row(tmp_path, reference, "oss", "mem0-8000", _Judge(), allowed=None, first=2)
+    answers = tmp_path / "answers-oss" / "lme" / "mem0-8000" / "answers.jsonl"
+    answers.write_text(answers.read_text().replace('"x"', '"y"'))
+    judge = _Judge()
+    with pytest.raises(ValueError, match="settings"):
+        paid_judge.run_row(tmp_path, reference, "oss", "mem0-8000", judge, allowed=None)
+    assert judge.asked == 0
+
+
+def test_a_second_copy_of_the_job_cannot_run_beside_the_first(tmp_path: Path) -> None:
+    reference = _copy(tmp_path)
+    with paid_judge.only_one(tmp_path), pytest.raises(RuntimeError, match="already running"):
+        paid_judge.run_row(tmp_path, reference, "oss", "mem0-8000", _Judge(), allowed=None)
+    assert paid_judge.run_row(tmp_path, reference, "oss", "mem0-8000", _Judge(), allowed=None, first=1)["judged"] == 1
 
 
 def test_the_whole_job_runs_from_the_command_line_on_a_stand_in_with_no_key(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -140,8 +197,10 @@ def test_the_whole_job_runs_from_the_command_line_on_a_stand_in_with_no_key(tmp_
     reference = _copy(tmp_path)
     assert paid_judge.main(["run", "--root", str(tmp_path), "--reference", str(reference), "--row", "oss/mem0-8000", "--first", "2", "--stand-in"]) == 0
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["judged"] == 2
-    assert paid_judge.main(["status", "--root", str(tmp_path)]) == 0
+    assert paid_judge.main(["status", "--root", str(tmp_path), "--stand-in"]) == 0
     assert "mem0-8000" in capsys.readouterr().out
+    assert paid_judge.main(["status", "--root", str(tmp_path)]) == 0
+    assert "mem0-8000" not in capsys.readouterr().out  # a stand-in's verdicts are not the paid judge's
     # The real judge is never reached with no key and no yes: it needs the key, which this refuses to run without.
     with pytest.raises(RuntimeError, match="AWS_BEARER_TOKEN_BEDROCK"):
         paid_judge.main(["run", "--root", str(tmp_path), "--reference", str(reference), "--row", "oss/mem0-8000", "--first", "1", "--part-split", str(_split(tmp_path))])

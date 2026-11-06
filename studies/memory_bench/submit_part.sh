@@ -36,8 +36,10 @@ case "${1:?ingest or open}" in
     R2=$(sbatch --parsable $GPU $ONE $EXP,READER=oss,ONLY="locomo/.*($MAIN)" $AFTER --output=$L/$PART-read-oss-locomo-%j.out $J/read.sbatch)
     R3=$(sbatch --parsable $GPU $ONE $EXP,READER=oss,ONLY='lme/.*-(2000|4000|16000) ' $AFTER --output=$L/$PART-read-oss-lme-sweep-%j.out $J/read.sbatch)
     R4=$(sbatch --parsable $GPU $ONE $EXP,READER=oss,ONLY='locomo/.*-(2000|4000|16000) ' $AFTER --output=$L/$PART-read-oss-locomo-sweep-%j.out $J/read.sbatch)
-    R5=$(sbatch --parsable $GPU --gres=gpu:rtx_pro_6000:2 --exclude=compsci-cluster-fitz-47,compsci-cluster-fitz-48 $EXP,READER=llama --time=08:00:00 $AFTER --output=$L/$PART-read-llama-%j.out $J/read.sbatch)
-    JU=$(sbatch --parsable $GPU $ONE $EXP --dependency=afterok:$R1:$R2:$R3:$R4:$R5 --output=$L/$PART-judge-%j.out $J/judge.sbatch)
-    echo "records $REC read $R1 $R2 $R3 $R4 $R5 judge $JU"
+    R5=$(sbatch --parsable $GPU --gres=gpu:rtx_pro_6000:2 --exclude=compsci-cluster-fitz-47,compsci-cluster-fitz-48 $EXP,READER=llama --time=12:00:00 $AFTER --output=$L/$PART-read-llama-%j.out $J/read.sbatch)
+    # The first judge does not wait on Llama, whose two GPUs may come late; the second follows it, since two judges must not write one verdict file at once, and asks only what has no verdict.
+    JU=$(sbatch --parsable $GPU $ONE $EXP --dependency=afterok:$R1:$R2:$R3:$R4 --output=$L/$PART-judge-%j.out $J/judge.sbatch)
+    JL=$(sbatch --parsable $GPU $ONE $EXP --dependency=afterok:$R5,afterany:$JU --output=$L/$PART-judge-llama-%j.out $J/judge.sbatch)
+    echo "records $REC read $R1 $R2 $R3 $R4 $R5 judge $JU $JL"
     ;;
 esac

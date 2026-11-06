@@ -34,10 +34,14 @@ def _rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+TRIES = 3  # a model that reasons first can use up its whole cap and show nothing; on full context gpt-oss-120b did so on 2 of 50 at 12,288 tokens, and each answered when asked again
+
+
 def read_all(records_path: Path, ask: Callable[[str], dict], out: Path, *, workers: int,
              settings: dict[str, Any] | None = None) -> dict[str, int]:
-    """Ask every record's prompt that has no answer yet, and count what came back. An answer to a prompt that has since
-    changed stops the stage: mixing the two would be silent. ``settings`` (model, cap, effort) goes on every answer."""
+    """Ask every record's prompt that has no answer yet, and count what came back. A reply with no text is asked again, up to ``TRIES`` in all, the same for every row and on
+    the record, since an empty answer says nothing about the memory it was read from. An answer to a prompt that has since changed stops the stage: mixing the two would be silent.
+    ``settings`` (model, cap, effort) goes on every answer."""
     records_path, out = Path(records_path), Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     failed_path = out.with_name(out.name + ".failed")
@@ -55,13 +59,18 @@ def read_all(records_path: Path, ask: Callable[[str], dict], out: Path, *, worke
         base = {"question_id": record["question_id"], "qid": record["qid"], "system": record["system"],
                 "prompt_sha256": record["prompt_sha256"]}
         try:
-            reply = ask(record["prompt"])
+            tries = 0
+            while tries < TRIES:
+                tries += 1
+                reply = ask(record["prompt"])
+                if reply["text"].strip():
+                    break
         except Exception as error:
             with lock, failed_path.open("a") as written:
                 failed[0] += 1
                 written.write(json.dumps({**base, "error": f"{type(error).__name__}: {error}"}) + "\n")
             return
-        row = {**base, **(settings or {}), "hypothesis": reply["text"], "finish_reason": reply["finish_reason"],
+        row = {**base, **(settings or {}), "hypothesis": reply["text"], "finish_reason": reply["finish_reason"], "tries": tries,
                "prompt_tokens": reply["prompt_tokens"], "completion_tokens": reply["completion_tokens"]}
         with lock, out.open("a") as written:
             written.write(json.dumps(row) + "\n")
@@ -71,7 +80,7 @@ def read_all(records_path: Path, ask: Callable[[str], dict], out: Path, *, worke
     answers = _rows(out)
     return {"questions": len(records), "asked": len(todo), "failed": failed[0],
             "empty": sum(not row["hypothesis"].strip() for row in answers),
-            "cut_off": sum(row["finish_reason"] == "length" for row in answers)}
+            "cut_off": sum(row["finish_reason"] == "length" for row in answers), "asked_again": sum(row.get("tries", 1) > 1 for row in answers)}
 
 
 class _Reply:

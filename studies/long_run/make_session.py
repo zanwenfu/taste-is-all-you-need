@@ -91,6 +91,7 @@ def build(root: Path, template: dict, *, seed: int, tasks: int, compact_at: int,
     tag = hashlib.sha256(f"session-tag-{seed}".encode()).hexdigest()[:12]
     for number, task in enumerate(chosen):
         task["prepare"] = [APT_WORKS]
+        task["own_words"] = task["instruction"]  # what a search at this task reads: the sentence below is in every later task's message, and would match them all
         if number:
             task["instruction"] = f"{NEXT_TASK}\n\n{task['instruction']}"
     agent, model = template["agent"], template["model"]

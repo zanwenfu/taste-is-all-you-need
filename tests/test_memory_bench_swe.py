@@ -251,6 +251,16 @@ def test_an_answer_read_from_the_same_block_is_kept_and_one_whose_block_changed_
     assert sorted(calls) == ["new text", "third"] and summary["cases"] == 3
 
 
+def test_a_missing_file_of_answers_is_refused_rather_than_read_as_never_asked(tmp_path: Path) -> None:
+    from studies.memory_bench.swe import carry
+
+    blocks = tmp_path / "blocks.jsonl"
+    blocks.write_text(_lines([_block(_case(0), "text")]))
+    with pytest.raises(FileNotFoundError):
+        carry(blocks, tmp_path / "not-there.jsonl", tmp_path / "out.jsonl")
+    assert not (tmp_path / "out.jsonl").exists()
+
+
 def test_carrying_answers_twice_changes_nothing_and_a_verdict_goes_only_with_its_block(tmp_path: Path) -> None:
     from studies.memory_bench.swe import carry, carry_verdicts
 
@@ -294,6 +304,12 @@ def _whole_run(root: Path, cases: list[dict], *, commit: str = "c1", digest: str
     for name in {row.rsplit("-", 1)[0] for row in swe.required_rows()} - {"none"}:
         versions = {"study_commit": swe.MEM0_INGEST_COMMIT, **swe.MEM0_INGEST} if name.startswith("mem0") else {"study_commit": commit, "code_digest": digest}
         (root / "rankings" / f"{name}.jsonl").write_text(_lines([{"qid": swe.neutral("q", case["id"]), "system": name, "items": [], "versions": versions} for case in cases]))
+    for row in swe.required_rows():
+        name, cap = row.rsplit("-", 1)
+        rankings = root / "rankings" / f"{name}.jsonl"
+        if not rankings.exists():
+            rankings.write_text(_lines([{"qid": swe.neutral("q", case["id"]), "system": name, "items": []} for case in cases]))
+        Path(root / "blocks" / f"{row}.jsonl.settings.json").write_text(json.dumps({"cap": int(cap), "rankings_sha256": hashlib.sha256(rankings.read_bytes()).hexdigest()}))
     for prompt in swe.BASELINE_PROMPTS:
         (root / "baselines" / f"baseline-{prompt}.report.json").write_text(json.dumps({"instances": len(cases), "package_summary": [
             {"source": "swe_natural", "sc_type": "all", "n": len(cases), "full_with_sc_compliance_pct": 50.0, "full_without_sc_compliance_pct": 50.0, "compaction_compliance_pct": 100.0, "upper_bound_compliance_pct": 100.0}]}))
@@ -326,6 +342,11 @@ def test_one_table_needs_every_row_every_case_each_answer_to_its_block_and_one_c
     broken(lambda r: (r / "rankings" / "flat_free.jsonl").write_text(_lines([{"qid": "q", "system": "flat_free", "items": [], "versions": {"study_commit": "other", "code_digest": "d1"}}])), "flat_free: rankings made by")
     broken(lambda r: (r / "rankings" / "mem0f_free.jsonl").write_text(_lines([{"qid": "q", "system": "mem0_free", "items": [], "versions": {"study_commit": swe.MEM0_INGEST_COMMIT, **swe.MEM0_INGEST, "top_k": 10}}])), "mem0f_free: rankings made with")
     broken(lambda r: (r / "baselines" / "baseline-pi_mono.report.json").unlink(), "no baseline for pi_mono")
+    broken(lambda r: (r / "baselines" / "baseline-pi_mono.report.json").write_text(json.dumps({"instances": 9, "package_summary": [{"source": "swe_natural", "sc_type": "all", "n": 9}]})), "pi_mono: the baseline holds 9 cases")
+    broken(lambda r: (r / "rankings" / "flat_free.jsonl").write_text(_lines([{"qid": swe.neutral("q", cases[0]["id"]), "system": "flat_free", "items": [], "versions": {"study_commit": "c1", "code_digest": "d1"}}])), "flat_free: rankings hold 1 of 3")
+    broken(lambda r: (r / "blocks" / "flat_free-1000.jsonl.settings.json").write_text(json.dumps({"cap": 8000, "rankings_sha256": "x"})), "flat_free-1000: blocks made at cap 8000")
+    broken(lambda r: (r / "blocks" / "flat_free-1000.jsonl.settings.json").unlink(), "flat_free-1000: no record of how its blocks were made")
+    broken(lambda r: (r / "blocks" / "flat_free-1000.jsonl.settings.json").write_text(json.dumps({"cap": 1000, "rankings_sha256": "x"})), "flat_free-1000: blocks made from other rankings")
     broken(lambda r: (r / "blocks" / "stray-1000.jsonl").write_text(""), "stray-1000: not a row of the protocol")
 
 
@@ -351,6 +372,24 @@ def test_the_table_counts_obeyed_unread_and_held_and_compares_each_row_with_no_m
     assert "flat_free-1000" in text and "compaction" in text and "pi_mono" in text
 
 
+def test_the_blocks_stage_says_at_what_cap_and_from_which_rankings(tmp_path: Path, monkeypatch) -> None:
+    import argparse
+
+    from studies.memory_bench import swe
+
+    case = _case()
+    (unit,) = views_of([case])
+    rankings = tmp_path / "r.jsonl"
+    rankings.write_text(_lines([{"qid": unit["queries"][0]["qid"], "system": "s", "ledger": {"name": "baseline"}, "items": [{"session": "a", "date": FIXED_DATE, "rounds": [], "source": "x", "turns": [{"role": "memory", "content": "one two"}]}]}]))
+    cases = tmp_path / "c.jsonl"
+    cases.write_text(_lines([case]))
+    monkeypatch.setitem(__import__("sys").modules, "tokenizers", SimpleNamespace(Tokenizer=SimpleNamespace(from_file=lambda path: SimpleNamespace(encode=lambda text, add_special_tokens=False: SimpleNamespace(ids=text.split())))))
+    out = tmp_path / "blocks" / "s-1000.jsonl"
+    swe.blocks_stage(argparse.Namespace(rankings=str(rankings), cases=str(cases), tokenizer=str(tmp_path / "t.json"), cap=1000, out=str(out)))
+    settings = json.loads(Path(f"{out}.settings.json").read_text())
+    assert settings == {"cap": 1000, "rankings_sha256": hashlib.sha256(rankings.read_bytes()).hexdigest()}
+
+
 def test_the_job_makes_every_row_the_table_needs() -> None:
     from studies.memory_bench import swe
 
@@ -358,6 +397,7 @@ def test_the_job_makes_every_row_the_table_needs() -> None:
     labels = next(line for line in job.splitlines() if line.startswith("for LABEL in ")).removeprefix("for LABEL in ").removesuffix("; do").split()
     assert labels == [*swe.FREE_ROWS, *swe.SEARCH_ROWS]
     assert "row none 1000" in job and swe.NONE_ROW == "none-1000" and swe.CAPS == (1000, 8000) and "for CAP in 1000 8000;" in job
+    assert 'LINE=$($PY -m studies.memory_bench.swe carry' in job and "FAILED=$((FAILED + 1))" in job  # a crashed carry fails the job: an echo of it could not
 
 
 def test_mem0s_adapter_differs_from_the_commit_of_its_one_ingest_only_in_its_docstrings() -> None:

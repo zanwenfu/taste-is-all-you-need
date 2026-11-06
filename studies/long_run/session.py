@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from studies.context_rot.repeated import round_prompt
-from studies.long_run.agent import LongRunAgent, MemoryEnvironment, Stopped, ToolModel
+from studies.long_run.agent import LongRunAgent, MemoryEnvironment, Stopped, ToolModel, render
 from studies.long_run.score import score_session
 from studies.memory_bench.core import fill
 from studies.memory_ledger import BASELINE, ClaimRefused, check, stand_in_record
@@ -222,19 +222,31 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         mentions={rule["name"]: rule["mentions"] for rule in rules if rule.get("mentions")})
     agent.extra_template_vars |= platform.uname()._asdict()  # mini-swe-agent's own templates ask for these
 
-    def look_up(task: dict) -> None:
-        """The harness's own look, as a new task comes in and before it goes into the store: one search with the task's words. Before anything is stored there is nothing to search."""
-        hits, tokens = [], 0
+    def where_it_is(rule: dict, machines: int) -> dict[str, bool]:
+        """Whether a rule had been told before this search, and where it stands now: in what the search brought, and in the conversation. A fact watched by its value is back
+        only with that value; whether the words asking for it came too is read apart."""
+        watched = (rule.get("watch") or rule["text"]).casefold()
+        told = machines > 0 if rule["say"] == "first" else agent.n_calls >= rule["say"]
+        talk = [render(message) for message in agent.messages[1:]]
+        return {"told_before": told, "in_block": watched in found[0].casefold(), "instruction_in_block": rule["text"].casefold() in found[0].casefold(),
+                "in_talk": any(watched in text.casefold() or (rule.get("mentions") and re.search(rule["mentions"], text)) for text in talk)}
+
+    def look_up(task: dict, machines: int) -> None:
+        """The harness's own look, as a new task comes in and before it goes into the store: one search with the task's own words, every call and what came back on the record.
+        Before anything is stored there is nothing to search."""
+        hits, tokens, calls = [], 0, []
         found[0] = ""
         if store.commits:
-            found[0], _, hits, tokens = search_with(store, task["instruction"], MEMORY_BUDGET, count)
+            found[0], calls, hits, tokens = search_with(store, task.get("own_words") or task["instruction"], MEMORY_BUDGET, count)
         searches.append({"task": task["name"], "call": agent.n_calls, "compactions": len(agent.events), "hits": len(hits), "tokens": tokens,
-                         "rules_in_block": {rule["name"]: (rule.get("watch") or rule["text"]).casefold() in found[0].casefold() for rule in rules}})
+                         "rules": {rule["name"]: where_it_is(rule, machines) for rule in rules}})
+        with (out / "searches.jsonl").open("a") as written:
+            written.write(json.dumps({"task": task["name"], "call": agent.n_calls, "block": found[0], "calls": calls}) + "\n")
 
     def worded(task: dict, machines: int) -> str:
         """The rules told with the first task to get a machine, and never again in a message."""
         if arm == SEARCH_ARM:
-            look_up(task)
+            look_up(task, machines)
         told = [rule["text"] for rule in rules if rule["say"] == "first" and machines == 0]
         return "\n\n".join([*told, task["instruction"]])
 

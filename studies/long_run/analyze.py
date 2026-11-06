@@ -87,17 +87,19 @@ def compare_rule(runs: dict[str, dict[str, dict]], arm: str, rule: str) -> dict[
     return pooled
 
 
-def _with_and_without(summaries: list[dict], rule: str) -> tuple[list[int], list[int]]:
-    """A rule's commands under a harness search that brought it back, and under one that did not, task by task: obeyed, of how many."""
-    held, other = [0, 0], [0, 0]
+def _with_and_without(summaries: list[dict], rule: str) -> tuple[list[int], list[int], list[int]]:
+    """A rule's commands task by task, obeyed of how many, at tasks that began after it was told: with a harness search that brought it back, with one that did not while it was
+    still in the conversation, and with it in neither. A task the rule is told in is left out: the rule is live there whatever a search brought."""
+    held, talk, neither = [0, 0], [0, 0], [0, 0]
     for summary in summaries:
         tasks = summary["scores"].get(rule, {}).get("by_task", {})
         for row in summary.get("searches", []):
-            if row["task"] in tasks:
-                side = held if row["rules_in_block"].get(rule) else other
+            where = row["rules"].get(rule)
+            if where and where["told_before"] and row["task"] in tasks:
+                side = held if where["in_block"] else talk if where["in_talk"] else neither
                 side[0] += tasks[row["task"]]["obeyed"]
                 side[1] += tasks[row["task"]]["applies"]
-    return held, other
+    return held, talk, neither
 
 
 def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
@@ -124,8 +126,9 @@ def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
             if any("knows" in x for x in scores):
                 cell["knows"], cell["knows_of"] = sum(x.get("knows", 0) for x in scores), sum(x.get("knows_of", 0) for x in scores)
             if entry["searched"]:
-                cell["in_block"] = sum(bool(row["rules_in_block"].get(rule)) for s in summaries for row in s.get("searches", []))
-                cell["obeyed_with_block"], cell["obeyed_without_block"] = _with_and_without(summaries, rule)
+                told = [row["rules"][rule] for s in summaries for row in s.get("searches", []) if rule in row["rules"] and row["rules"][rule]["told_before"]]
+                cell["could_be_back"], cell["in_block"] = len(told), sum(where["in_block"] for where in told)
+                cell["obeyed_with_block"], cell["obeyed_in_talk_only"], cell["obeyed_in_neither"] = _with_and_without(summaries, rule)
             if arm != BASE:
                 cell["against_compaction"] = compare_rule(runs, arm, rule)
             entry["rules"][rule] = cell
@@ -177,8 +180,9 @@ def render(table: list[dict[str, Any]]) -> str:
             if "knows" in cell:
                 text += f" knows {cell['knows']}/{cell['knows_of']}"
             if "in_block" in cell:
-                held, other = cell["obeyed_with_block"], cell["obeyed_without_block"]
-                text += f"; came back at {cell['in_block']} of {entry['searched']} searches, obeyed {held[0]}/{held[1]} with it, {other[0]}/{other[1]} without"
+                held, talk, neither = cell["obeyed_with_block"], cell["obeyed_in_talk_only"], cell["obeyed_in_neither"]
+                text += (f"; back at {cell['in_block']} of {cell['could_be_back']} searches after it was told, "
+                         f"obeyed {held[0]}/{held[1]} with it, {talk[0]}/{talk[1]} in the talk only, {neither[0]}/{neither[1]} in neither")
             pair = cell.get("against_compaction")
             if pair:
                 text += f" (paired over {pair['sessions']} sessions, +{pair['sessions_better']} -{pair['sessions_worse']}, p {pair['sessions_p']:.3f}; over {pair['tasks']} tasks, +{pair['better']} -{pair['worse']})"

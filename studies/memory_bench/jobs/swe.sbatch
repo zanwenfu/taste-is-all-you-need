@@ -10,6 +10,7 @@ set -uo pipefail
 export PART=swe
 source $STUDY_ROOT/code-${SHA:0:12}/studies/memory_bench/jobs/env.sh
 FROM=${FROM:?the first run}; FROM_ANSWERS=${FROM_ANSWERS:?its answers}; FROM_JUDGED=${FROM_JUDGED:?its verdicts}
+case "$FROM_ANSWERS $FROM_JUDGED" in "$FROM"/*" $FROM"/*) ;; *) fail "the answers and verdicts carried over are not from the run named" ;; esac
 mkdir -p $R/cases $R/rankings $R/blocks $R/answers $R/judged $R/baselines $R/headers
 export MEMPALACE_CONFIG_DIR=$R/mempalace-config MEMPALACE_EMBEDDING_MODEL=minilm MEMPALACE_EMBEDDING_DEVICE=cpu MEMPALACE_EMBEDDING_THREADS=2
 mkdir -p $MEMPALACE_CONFIG_DIR
@@ -23,7 +24,7 @@ $INSIDE $D/venv/bin/python -m studies.memory_bench.swe export --out $R/cases | c
 cmp $C $FROM/cases/cases.jsonl && cmp $CASES $FROM/cases/views.jsonl || fail "the cases are not the first run's"
 cp $FROM/headers/swe.jsonl $R/headers/swe.jsonl || fail "headers"
 cp $FROM/rankings/mem0f_free.jsonl $FROM/rankings/mem0f_search.jsonl $R/rankings/ || fail "Mem0's rankings"
-cp $FROM_ANSWERS/../baseline-*.report.json $R/baselines/ || fail "the benchmark's own rows"
+cp ${FROM_BASELINES:-$FROM_ANSWERS/..}/baseline-*.report.json $R/baselines/ || fail "the benchmark's own rows"
 finished() {  # label start
   cat $R/rankings/$1.shard*[0-9].jsonl > $R/rankings/$1.jsonl
   echo "$1: $(wc -l < $R/rankings/$1.jsonl) cases, $(( $(date +%s) - $2 )) s"
@@ -68,7 +69,8 @@ row() {  # label cap
   $PY -m studies.memory_bench.swe blocks --rankings $R/rankings/$1.jsonl --cases $C --tokenizer $TOK --cap $2 --out $R/blocks/$name.jsonl > /dev/null || { FAILED=$((FAILED + 1)); echo "$name: no blocks"; return; }
   local JUDGED=(--judged $FROM_JUDGED/$name --judged-out $R/judged/$name)
   [ "$1" = none ] && JUDGED=()
-  echo "$name $($PY -m studies.memory_bench.swe carry --blocks $R/blocks/$name.jsonl --answers $FROM_ANSWERS/$name.jsonl --out $R/answers/$name.jsonl ${JUDGED[@]+"${JUDGED[@]}"})" || FAILED=$((FAILED + 1))
+  LINE=$($PY -m studies.memory_bench.swe carry --blocks $R/blocks/$name.jsonl --answers $FROM_ANSWERS/$name.jsonl --out $R/answers/$name.jsonl ${JUDGED[@]+"${JUDGED[@]}"} 2>&1) || FAILED=$((FAILED + 1))
+  echo "$name $LINE" | cut -c1-300
 }
 row none 1000
 for LABEL in flat_free taste_free taste_headers_free mem0f_free mempalace_free flat_search taste_search taste_headers_search dense_search mem0f_search mempalace_search; do

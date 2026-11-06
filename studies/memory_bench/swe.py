@@ -135,7 +135,7 @@ def carry(blocks: Path, answers: Path, out: Path) -> dict[str, int]:
     """Keep each answer on record whose block this code makes again byte for byte. A case whose block changed, or that was never read, is left for
     the answer stage, which asks only what has no answer, so nothing that stands is read twice and the set's cases are read once."""
     wanted = {row["id"]: _block_sha(row["block"]) for row in _rows_of(blocks)}
-    old = {row["id"]: row for row in _rows_of(answers)} if Path(answers).exists() else {}
+    old = {row["id"]: row for row in _rows_of(answers)}
     kept = [old[case] for case, sha in wanted.items() if case in old and old[case]["prompt_sha256"] == sha]
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -172,10 +172,13 @@ def required_rows() -> list[str]:
     return [NONE_ROW, *(f"{row}-{cap}" for row in (*FREE_ROWS, *SEARCH_ROWS) for cap in CAPS)]
 
 
-def _check_rankings(path: Path, name: str, *, commit: str, digest: str) -> list[str]:
+def _check_rankings(path: Path, name: str, ids: list[str], *, commit: str, digest: str) -> list[str]:
     if not path.exists():
         return [f"{name}: no rankings"]
     problems: list[str] = []
+    held = [row["qid"] for row in _rows_of(path)]
+    if sorted(held) != sorted(neutral("q", case) for case in ids):
+        problems.append(f"{name}: rankings hold {len(set(held))} of {len(ids)}")
     for versions in {json.dumps(row.get("versions", {}), sort_keys=True) for row in _rows_of(path)}:
         made = json.loads(versions)
         if name.startswith("mem0"):
@@ -207,6 +210,16 @@ def check_coding(root: Path, *, commit: str, digest: str) -> list[str]:
         blocks = {item["id"]: item["block"] for item in _rows_of(blocks_path)}
         if sorted(blocks) != ids:
             problems.append(f"{row}: blocks hold {len(blocks)} of {len(ids)}")
+        made = Path(f"{blocks_path}.settings.json")
+        if not made.exists():
+            problems.append(f"{row}: no record of how its blocks were made")
+        else:
+            settings = json.loads(made.read_text())
+            if settings.get("cap") != int(row.rsplit("-", 1)[1]):
+                problems.append(f"{row}: blocks made at cap {settings.get('cap')}")
+            rankings = root / "rankings" / f"{name}.jsonl"
+            if rankings.exists() and settings.get("rankings_sha256") != hashlib.sha256(rankings.read_bytes()).hexdigest():
+                problems.append(f"{row}: blocks made from other rankings")
         if not answers_path.exists():
             problems.append(f"{row}: no answers")
             continue
@@ -228,10 +241,15 @@ def check_coding(root: Path, *, commit: str, digest: str) -> list[str]:
             if sorted(item["id"] for item in _rows_of(folder / "found.served.jsonl")) != ids:
                 problems.append(f"{row}: verdicts do not hold every case once")
     for name in (*FREE_ROWS, *SEARCH_ROWS):
-        problems += _check_rankings(root / "rankings" / f"{name}.jsonl", name, commit=commit, digest=digest)
+        problems += _check_rankings(root / "rankings" / f"{name}.jsonl", name, ids, commit=commit, digest=digest)
     for prompt in BASELINE_PROMPTS:
-        if not (root / "baselines" / f"baseline-{prompt}.report.json").exists():
+        path = root / "baselines" / f"baseline-{prompt}.report.json"
+        if not path.exists():
             problems.append(f"no baseline for {prompt}")
+            continue
+        row = next(item for item in json.loads(path.read_text())["package_summary"] if item["source"] == "swe_natural" and item["sc_type"] == "all")
+        if row["n"] != len(ids):
+            problems.append(f"{prompt}: the baseline holds {row['n']} cases")
     return problems
 
 
@@ -359,6 +377,7 @@ def blocks_stage(arguments: argparse.Namespace) -> int:
     out = Path(arguments.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(json.dumps({"id": key, **value}) + "\n" for key, value in blocks.items()))
+    Path(f"{out}.settings.json").write_text(json.dumps({"cap": arguments.cap, "rankings_sha256": hashlib.sha256(Path(arguments.rankings).read_bytes()).hexdigest()}))
     print(json.dumps({"cases": len(blocks), "tokens_mean": sum(b["tokens"] for b in blocks.values()) / len(blocks),
                       "empty": sum(not b["block"].strip() for b in blocks.values())}))
     return 0

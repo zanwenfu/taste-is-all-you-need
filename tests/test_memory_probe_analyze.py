@@ -237,16 +237,21 @@ def test_the_long_run_totals_leave_out_invalid_sessions_and_say_how_sessions_end
     assert table["taste"]["invalid"] == 1 and table["taste"]["sessions"] == 2 and table["taste"]["ended_early"] == 1
 
 
-def test_the_long_runs_search_arm_says_how_often_the_rule_came_back_and_what_the_agent_did_with_and_without_it() -> None:
-    summary = _summary("taste_search", {"a": {"obeyed": 1, "applies": 2}, "b": {"obeyed": 0, "applies": 3}, "c": {"obeyed": 2, "applies": 2}})
-    summary["searches"] = [{"task": task, "rules_in_block": {"rule": found}} for task, found in (("first", False), ("a", True), ("b", False), ("gone", True))]
+def _search(task: str, told: bool, block: bool, talk: bool) -> dict:
+    return {"task": task, "rules": {"rule": {"told_before": told, "in_block": block, "instruction_in_block": block, "in_talk": talk}}}
+
+
+def test_the_long_runs_search_arm_reads_only_tasks_that_began_after_the_rule_was_told() -> None:
+    summary = _summary("taste_search", {"first": {"obeyed": 3, "applies": 3}, "a": {"obeyed": 1, "applies": 2}, "b": {"obeyed": 0, "applies": 3}, "c": {"obeyed": 2, "applies": 2}, "d": {"obeyed": 4, "applies": 5}})
+    summary["searches"] = [_search("first", False, False, False), _search("a", True, True, True), _search("b", True, False, False), _search("c", True, False, True),
+                           _search("d", True, True, False), _search("gone", True, True, False)]
     entry = long_analyze.arm_table({"s1": {"taste_search": summary}})[0]
     cell = entry["rules"]["rule"]
-    assert entry["searched"] == 4
-    assert cell["in_block"] == 2
-    assert cell["obeyed_with_block"] == [1, 2] and cell["obeyed_without_block"] == [0, 3]
+    assert entry["searched"] == 6
+    assert cell["could_be_back"] == 5 and cell["in_block"] == 3  # the first task is where it is told, so its search could not hold it
+    assert cell["obeyed_with_block"] == [5, 7] and cell["obeyed_in_talk_only"] == [2, 2] and cell["obeyed_in_neither"] == [0, 3]
     text = long_analyze.render([entry])
-    assert "came back at 2 of 4 searches" in text and "obeyed 1/2 with it, 0/3 without" in text
+    assert "back at 3 of 5 searches after it was told" in text and "obeyed 5/7 with it, 2/2 in the talk only, 0/3 in neither" in text
     other = long_analyze.arm_table({"s1": {"taste": _summary("taste", {"a": {"obeyed": 1, "applies": 1}})}})[0]
     assert other["searched"] == 0 and "in_block" not in other["rules"]["rule"]
 

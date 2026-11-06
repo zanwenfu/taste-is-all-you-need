@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from examples.refactor_demo.bootstrap import bootstrap
+
+# mini-swe-agent loads a .env from its global config folder when imported, so tests that import it would pull in whatever a laptop keeps there. Point it at a folder of nothing.
+os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = tempfile.mkdtemp(prefix="mswea-test-config-")
+os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
 #: The verification command every fixture that actually *runs* a check must use.
 #:

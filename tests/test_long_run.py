@@ -578,17 +578,20 @@ def test_a_fact_in_the_first_machine_is_found_by_the_agent_and_never_sent_by_the
     assert "The tag is tag-7f3a" in json.dumps(restated.sent[-1]["messages"])
 
 
+def _search_session(**more) -> dict:
+    return load_session({"tasks": [{"name": "one", "instruction": "Write a Python script that counts words."},
+                                   {"name": "two", "instruction": "A new task, on a new machine.\n\nFix the Python script that counts lines.", "own_words": "Fix the Python script that counts lines."},
+                                   {"name": "three", "instruction": "A new task, on a new machine.\n\nTune the kernel scheduler.", "own_words": "Tune the kernel scheduler."}],
+                         "rules": [{"name": "bytes", "say": "first", "text": "Whenever you run a Python script, pass -B to Python.",
+                                    "trigger": r"\bpython3?\s", "obeys": r"\bpython3?\s+-B\b", "mentions": r"-B\b"}],
+                         "compact_at_tokens": 0, "summary_prompt": "anthropic", "step_limit": 40, **more})
+
+
 def test_the_search_arm_looks_up_each_new_tasks_own_words_itself_and_offers_the_agent_no_tools(tmp_path: Path) -> None:
     from studies.memory_probe.cases import FOUND_HEADER
 
-    session = load_session({"tasks": [{"name": "one", "instruction": "Write a Python script that counts words."},
-                                      {"name": "two", "instruction": "Fix the Python script that counts lines."},
-                                      {"name": "three", "instruction": "Tune the kernel scheduler."}],
-                            "rules": [{"name": "bytes", "say": "first", "text": "Whenever you run a Python script, pass -B to Python.",
-                                       "trigger": r"\bpython3?\s", "obeys": r"\bpython3?\s+-B\b"}],
-                            "compact_at_tokens": 0, "summary_prompt": "anthropic", "step_limit": 40})
     script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
-    summary = run_session(session, arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+    summary = run_session(_search_session(), arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
                           out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
     assert summary["valid"] and summary["resent"] == {}
     assert all([tool["function"]["name"] for tool in call["tools"]] == ["bash"] for call in script.sent)
@@ -599,10 +602,45 @@ def test_the_search_arm_looks_up_each_new_tasks_own_words_itself_and_offers_the_
     assert "pass -B to Python" not in system[2].split(FOUND_HEADER)[-1]
     rows = summary["searches"]
     assert [row["task"] for row in rows] == ["one", "two", "three"]
-    assert [row["rules_in_block"]["bytes"] for row in rows] == [False, True, False]
     assert rows[0]["hits"] == 0 and rows[1]["hits"] > 0 and rows[1]["tokens"] > 0
     assert summary["ledger"]["name"] == "Taste memory, study-driven" and summary["ledger"]["mode"] == "single_query"
     assert summary["ledger"]["search_calls"] == 2
+
+
+def test_each_search_says_whether_the_rule_had_been_told_where_it_is_and_what_was_shown(tmp_path: Path) -> None:
+    script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    summary = run_session(_search_session(), arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    rules = [row["rules"]["bytes"] for row in summary["searches"]]
+    assert [rule["told_before"] for rule in rules] == [False, True, True]  # the first task is where it is told
+    assert [rule["in_block"] for rule in rules] == [False, True, False]
+    assert [rule["in_talk"] for rule in rules] == [False, True, True]  # no compaction here, so it is still in the conversation
+    whole = [json.loads(line) for line in (tmp_path / "run" / "searches.jsonl").read_text().splitlines()]
+    assert [row["task"] for row in whole] == ["one", "two", "three"]
+    assert whole[0]["calls"] == [] and whole[0]["block"] == ""
+    assert "pass -B to Python" in whole[1]["block"]
+    asked = json.loads(whole[1]["calls"][0]["arguments"])
+    assert asked["description"] == "Fix the Python script that counts lines."  # its own words, not the harness's sentence that every task's message holds
+    assert all("output" in call for call in whole[1]["calls"])
+
+
+def test_a_rule_told_later_counts_as_told_only_at_a_task_that_starts_after_its_call(tmp_path: Path) -> None:
+    session = _search_session(rules=[{"name": "ls", "say": 2, "text": "From now on, list a folder with ls -1.", "trigger": r"(^|[;&|]\s*)ls\b", "obeys": r"\bls\s+-1\b"}])
+    script = _Script([_bash(DONE, "c1"), _bash("ls -1", "c2"), _bash(DONE, "c3"), _bash(DONE, "c4")])
+    summary = run_session(session, arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    # Call 1 is task one's, and the rule is told just before call 2, the first of task two, after task two's search.
+    assert [row["rules"]["ls"]["told_before"] for row in summary["searches"]] == [False, False, True]
+
+
+def test_a_tag_counts_as_back_only_with_its_value_and_the_instruction_is_read_apart(tmp_path: Path) -> None:
+    session = _search_session(rules=[{"name": "tag", "say": "first", "per_task": True, "from_task": 1, "trigger": "", "obeys": "abc123", "watch": "abc123", "mentions": "abc123",
+                                      "text": "This machine has a file holding this session's tag. In every task, run echo TAG once before you submit."}])
+    script = _Script([_bash("cat /opt/session_tag; echo abc123 python script", "c1"), _bash(DONE, "c2"), _bash(DONE, "c3"), _bash(DONE, "c4")])
+    summary = run_session(session, arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    second = summary["searches"][1]["rules"]["tag"]
+    assert set(second) == {"told_before", "in_block", "instruction_in_block", "in_talk"}
 
 
 def test_a_search_with_no_hits_shows_nothing_and_a_session_with_no_other_task_still_has_a_true_record(tmp_path: Path) -> None:
@@ -610,9 +648,26 @@ def test_a_search_with_no_hits_shows_nothing_and_a_session_with_no_other_task_st
     script = _Script([_bash(DONE, "c1")])
     summary = run_session(session, arm="taste_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
                           out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
-    assert summary["searches"] == [{"task": "one", "call": 0, "compactions": 0, "hits": 0, "tokens": 0, "rules_in_block": {}}]
+    assert summary["searches"] == [{"task": "one", "call": 0, "compactions": 0, "hits": 0, "tokens": 0, "rules": {}}]
     assert summary["ledger"]["mode"] == "delivered" and summary["ledger"]["search_calls"] == 0
     assert summary["valid"]
+
+
+def test_a_later_task_keeps_its_own_words_apart_from_what_the_harness_says(tmp_path: Path) -> None:
+    from studies.long_run.make_session import NEXT_TASK, build
+
+    root = tmp_path / "tasks"
+    for name in ("alpha", "beta"):
+        folder = root / name
+        (folder / "environment").mkdir(parents=True)
+        (folder / "task.toml").write_text('[environment]\ndocker_image = "x"\n')
+        (folder / "environment" / "Dockerfile").write_text("FROM python:3.11\nWORKDIR /app\n")
+        (folder / "instruction.md").write_text(f"Do {name}.")
+    template = {"agent": {"system_template": "s", "instance_template": "{{task}}"}, "model": {"observation_template": "o", "format_error_template": "f"}}
+    session = build(root, template, seed=1, tasks=2, compact_at=100, keep_recent=10, prompt="anthropic", later_rule_at=5, task_calls=5)
+    first, second = session["tasks"]
+    assert second["instruction"] == f"{NEXT_TASK}\n\n{second['own_words']}" and first["instruction"] == first["own_words"]
+    assert second["own_words"].startswith("Do ")
 
 
 def test_a_block_from_the_search_survives_compaction_and_never_brings_it_forward(tmp_path: Path) -> None:

@@ -77,7 +77,7 @@ to keyword search, not to version control. Only the header can move Taste's row.
   These cases were read on earlier code, so the frozen code makes every ranking and block again (`jobs/swe.sbatch`), with the cases exported again and compared byte for byte, and an answer or a verdict stands only if
   its block is the same bytes; those whose block changed are asked again, once (`jobs/swe_read.sbatch`). Of 2,898 answers 58 were: 57 on MemPalace's search, which now asks for 1,000 drawers rather than 200 (the number
   reaches its ranking: the top five change on 11 of 126), and 1 on the keyword list, which now holds the first copy of identical text. Mem0's one ingest of this set stands on the commit it ran on, whose adapter differs only in a docstring, which a test holds.
-  Taste's headers for these logs were written first, at an output cap of 1,024 with no fixed temperature; the other two sets' at 800 and temperature 0, from the same prompt. `swe.py report` writes no table unless every row holds every case, each answer read from the block on record and each verdict on it. A cap counts each piece's tokens and not the separators between them, so a block may pass it by up to about 1%.
+  Taste's headers for these logs were written first, at an output cap of 1,024 with no fixed temperature; the other two sets' at 800 and temperature 0, from the same prompt. `swe.py report` writes no table unless every row holds every case, each answer read from the block on record and each verdict on it. A cap counts each piece's tokens and not the separators between them, so the words stay within it and a whole block may pass it: by at most 0.5% on most rows and 3.2% on Mem0's many short memories (1,032 at 1,000, 8,198 at 8,000).
 
 ## Ingest
 
@@ -105,7 +105,7 @@ own timestamp field. Mem0 gets a system line and the date through `prompt`, sinc
   tokens; the sweep goes to gpt-oss-120b. The two rows with the same prompts, the keyword list and Taste with headers off, are read
   separately on purpose: what differs between them is the reader's own noise, and it is reported as the floor under every gap. Output caps: gpt-oss-120b 4,096
   with reasoning effort low, since its reasoning counts toward the cap, and 12,288 on full context; Llama 800 on LongMemEval, the authors' own for this reading method, and 50 on LoCoMo,
-  LoCoMo's own per-answer budget. Each row reports its empty and cut-off answers, and more than 2% empty, or cut off on a reader that reasons first, stops the row.
+  LoCoMo's own per-answer budget. A reply with no text is asked again, up to three tries in all, for every row alike, with the tries on record: on full context gpt-oss-120b's reasoning used up its whole cap on 2 of 50 dev questions, and each answered when asked again. Each row reports its empty, cut-off and asked-again answers, and more than 2% empty, or cut off on a reader that reasons first, stops the row.
 - **Prompts**: LongMemEval's own reader prompt with its reading method, byte for byte; LoCoMo's own question
   prompts. Never a system's own prompt. What came from one session sits under one heading, in that session's order where a system can name its rounds, and in its rank order where it cannot, as with MemPalace's drawers.
 

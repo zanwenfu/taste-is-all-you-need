@@ -98,6 +98,45 @@ def readers_of(row: str) -> tuple[str, ...]:
     return ("llama", "oss") if int(budget) == MAIN_BUDGET else ("oss",)
 
 
+SECOND_JUDGE = "gpt-5.4"
+SECOND_JUDGE_MODEL = "global.openai.gpt-5.4"
+
+
+def second_judge_rows() -> list[tuple[str, str]]:
+    """(reader, row) for every row the main table reads, but no memory, which holds nothing for a memory's judge to tell apart."""
+    rows = [f"{arm}-{MAIN_BUDGET}" for arm in (*OURS, *ARMS["lme"])] + [row for row in ALONE["lme"] if row != f"none-{MAIN_BUDGET}"]
+    return sorted((reader, row) for row in rows for reader in readers_of(row))
+
+
+def check_second_judge(root: Path) -> list[str]:
+    """If the second judge ran at all, it read every row it was paid for, every answer on record, by the model named. Not running it at all is not a fault of the run."""
+    name = f"answers.jsonl.eval-results-{SECOND_JUDGE}"
+    if not any(root.glob(f"answers-*/lme/*/{name}")):
+        return []
+    problems: list[str] = []
+    for reader, row in second_judge_rows():
+        where = f"{reader} {row}"
+        path = root / f"answers-{reader}" / "lme" / row / name
+        if not path.exists():
+            problems.append(f"{where}: the second judge has not read it")
+            continue
+        said = {a["question_id"]: a for a in _rows(path.with_name("answers.jsonl"))}
+        judged = _rows(path)
+        ids = [r["question_id"] for r in judged]
+        if sorted(ids) != sorted(said):
+            problems.append(f"{where}: the second judge holds {len(set(ids))} verdicts for {len(said)} answers")
+        other = sum(r["question_id"] in said and r.get("hypothesis") != said[r["question_id"]].get("hypothesis") for r in judged)
+        if other:
+            problems.append(f"{where}: {other} of the second judge's verdicts are of another answer")
+        models = {r["autoeval_label"].get("model") for r in judged}
+        if models - {SECOND_JUDGE_MODEL}:
+            problems.append(f"{where}: verdicts by {sorted(map(str, models))}, not {SECOND_JUDGE_MODEL}")
+        unread = sum(r["autoeval_label"].get("label") is None for r in judged)
+        if unread > MOST_EMPTY * max(1, len(said)):
+            problems.append(f"{where}: {unread} of the second judge's verdicts could not be read")
+    return problems
+
+
 def check_run(root: Path, *, part: str, commit: str, digest: str, ingest_commit: str | None = None, ingest_digest: str | None = None) -> list[str]:
     """Everything wrong with this run, in words. An empty list means the tables may be written."""
     problems: list[str] = []
@@ -114,6 +153,7 @@ def check_run(root: Path, *, part: str, commit: str, digest: str, ingest_commit:
             problems += _check_row(root, view, folder / row, part=part, commit=commit, digest=digest)
         problems += _check_rankings(root / "rankings" / view, view, part=part, stamp=stamp)
         problems += _check_headers(root / "headers" / f"{view}.jsonl", view, stamp=stamp)
+    problems += check_second_judge(root)
     return problems
 
 
@@ -333,6 +373,11 @@ def verdicts(path: Path) -> dict[str, bool]:
     return {row["question_id"]: row["autoeval_label"]["label"] is True for row in _rows(path)}
 
 
+def _labels(path: Path) -> dict[str, bool | None]:
+    """Yes, no or unread per question, for a comparison of judges, where an unread verdict is neither."""
+    return {row["question_id"]: row["autoeval_label"]["label"] for row in _rows(path)}
+
+
 def kappa(a: Sequence[bool], b: Sequence[bool]) -> float | None:
     """Cohen's kappa of two judges over the same answers."""
     n = len(a)
@@ -349,16 +394,20 @@ def judges_agree(root: Path, reader: str, other: str) -> dict[str, Any] | None:
     folder = root / f"answers-{reader}" / "lme"
     first: list[bool] = []
     second: list[bool] = []
+    unread = {"served": 0, other: 0}
     for row in sorted(p for p in folder.iterdir() if p.is_dir()):
         theirs = row / f"answers.jsonl.eval-results-{other}"
         if theirs.exists():
-            a, b = verdicts(row / "answers.jsonl.eval-results-served"), verdicts(theirs)
+            a, b = _labels(row / "answers.jsonl.eval-results-served"), _labels(theirs)
             for question in sorted(set(a) & set(b)):
-                first.append(a[question])
-                second.append(b[question])
+                unread["served"] += a[question] is None
+                unread[other] += b[question] is None
+                if a[question] is not None and b[question] is not None:
+                    first.append(a[question])
+                    second.append(b[question])
     if not first:
         return None
-    return {"judge": other, "answers": len(first), "agree": sum(x == y for x, y in zip(first, second, strict=True)), "kappa": kappa(first, second)}
+    return {"judge": other, "answers": len(first), "agree": sum(x == y for x, y in zip(first, second, strict=True)), "kappa": kappa(first, second), "unread": unread}
 
 
 def cost_ledger(root: Path) -> dict[str, Any]:
@@ -393,7 +442,8 @@ def _reference_row(row: str, rows: Iterable[str]) -> str:
 
 def _empty_and_cut(path: Path) -> dict[str, int]:
     answers = _rows(path)
-    return {"empty": sum(not str(a.get("hypothesis", "")).strip() for a in answers), "cut_off": sum(a.get("finish_reason") == "length" for a in answers)}
+    return {"empty": sum(not str(a.get("hypothesis", "")).strip() for a in answers), "cut_off": sum(a.get("finish_reason") == "length" for a in answers),
+            "asked_again": sum(a.get("tries", 1) > 1 for a in answers)}
 
 
 def _base(question_id: str) -> str:
@@ -519,6 +569,23 @@ def _lines(header: Sequence[str], rows: Iterable[Sequence[Any]]) -> list[str]:
             *("| " + " | ".join(_number(cell) for cell in row) + " |" for row in rows)]
 
 
+def second_judge_table(root: Path, reader: str, free: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """What the second judge says of each row it read, beside the free judge: an unread verdict counts as no here, as it does in the free judge's table, and is counted."""
+    folder = root / f"answers-{reader}" / "lme"
+    table = []
+    for row in sorted(row for who, row in second_judge_rows() if who == reader and (folder / row / f"answers.jsonl.eval-results-{SECOND_JUDGE}").exists()):
+        rows = _rows(folder / row / f"answers.jsonl.eval-results-{SECOND_JUDGE}")
+        labels = {r["question_id"]: r["autoeval_label"]["label"] for r in rows}
+        theirs = _labels(folder / row / "answers.jsonl.eval-results-served")
+        both = [q for q, label in labels.items() if label is not None and theirs.get(q) is not None]
+        official = [r["autoeval_label"].get("official_rule_label") for r in rows]
+        table.append({"row": row, "n": len(rows), "yes": sum(label is True for label in labels.values()), "accuracy": statistics.fmean(label is True for label in labels.values()),
+                      "accuracy_official_rule": statistics.fmean(value is True for value in official) if None not in official else None,
+                      "unread": sum(label is None for label in labels.values()), "free_judge_accuracy": free[row]["accuracy"],
+                      "agree": sum(labels[q] == theirs[q] for q in both) / len(both) if both else None})
+    return table
+
+
 def report(root: Path, readers: Sequence[str] = ("llama", "oss")) -> tuple[str, dict[str, Any]]:
     data: dict[str, Any] = {"lme": {}, "locomo": {}, "noise": {}}
     out = [f"# Comparison tables: {root.name}", ""]
@@ -528,19 +595,27 @@ def report(root: Path, readers: Sequence[str] = ("llama", "oss")) -> tuple[str, 
         lme, locomo = lme_table(root, reader), locomo_table(root, reader)
         data["lme"][reader], data["locomo"][reader], data["noise"][reader] = lme, locomo, noise_floor(root, reader)
         out += [f"## LongMemEval, reader {reader}, free judge", ""]
-        out += _lines(("row", "n", "yes", "accuracy", "official rule", "tokens", "empty", "cut off", "session any@1", "any@3", "any@5", "any@10", "any@30", "any@50", "session all@budget", "round all@budget (n)", "evidence kept", "enough",
+        out += _lines(("row", "n", "yes", "accuracy", "official rule", "tokens", "empty", "cut off", "asked again", "session any@1", "any@3", "any@5", "any@10", "any@30", "any@50", "session all@budget", "round all@budget (n)", "evidence kept", "enough",
                        "right/right", "right/wrong", "wrong/right", "wrong/wrong", "against Taste", "p"),
-                      [(e["row"], e["n"], e["yes"], e["accuracy"], e["accuracy_official_rule"], round(e["tokens"]), e["empty"], e["cut_off"],
+                      [(e["row"], e["n"], e["yes"], e["accuracy"], e["accuracy_official_rule"], round(e["tokens"]), e["empty"], e["cut_off"], e["asked_again"],
                         e["session_recall_any@1"], e["session_recall_any@3"], e["session_recall_any@5"], e["session_recall_any@10"], e["session_recall_any@30"], e["session_recall_any@50"],
                         e["session_recall_all@budget"], f"{_number(e['round_recall_all@budget'])} ({e['n round_recall_all@budget']})", e["evidence_survived"], e.get("enough_to_answer"), *e["retrieval_by_answer"].values(),
                         _number(e.get("against_reference", {}).get("difference")), _number(e.get("against_reference", {}).get("p")))
                        for e in lme])
         v4 = [e["without_named_questions"] for e in lme if "without_named_questions" in e]
         out += ["", f"v4 without the questions it was tuned on: {v4}", ""]
-        data.setdefault("judges", {})[reader] = judges_agree(root, reader, "gpt-5.4")
-        out += [f"The second judge, reader {reader}: {data['judges'][reader] or 'not run'}", "", f"## LoCoMo, reader {reader}, judge-free F1", ""]
-        out += _lines(("row", "n", "F1", "F1 without audit flags", "tokens", "empty", "cut off", "temporal", "adversarial", "session@1", "@3", "@5", "@10", "@30", "@50", "session@budget", "turn@budget", "against Taste"),
-                      [(e["row"], e["n"], e["f1"], e["f1_without_audit_flags"], round(e["tokens"]), e["empty"], e["cut_off"], e["per_category"].get("2"), e["adversarial"],
+        data.setdefault("judges", {})[reader] = judges_agree(root, reader, SECOND_JUDGE)
+        out += [f"The second judge, reader {reader}: {data['judges'][reader] or 'not run'}", ""]
+        if data["judges"][reader]:
+            second = second_judge_table(root, reader, {e["row"]: e for e in lme})
+            data.setdefault("second_judge", {})[reader] = second
+            out += [f"The second judge, row by row, reader {reader}", ""]
+            out += _lines(("row", "n", "yes", "accuracy", "official rule", "unread", "free judge", "agree"),
+                          [(e["row"], e["n"], e["yes"], e["accuracy"], e["accuracy_official_rule"], e["unread"], e["free_judge_accuracy"], e["agree"]) for e in second])
+            out += [""]
+        out += [f"## LoCoMo, reader {reader}, judge-free F1", ""]
+        out += _lines(("row", "n", "F1", "F1 without audit flags", "tokens", "empty", "cut off", "asked again", "temporal", "adversarial", "session@1", "@3", "@5", "@10", "@30", "@50", "session@budget", "turn@budget", "against Taste"),
+                      [(e["row"], e["n"], e["f1"], e["f1_without_audit_flags"], round(e["tokens"]), e["empty"], e["cut_off"], e["asked_again"], e["per_category"].get("2"), e["adversarial"],
                         *(e["retrieval"].get(f"session_recall@{cut}") for cut in (1, 3, 5, 10, 30, 50)),
                         e["retrieval"].get("session_recall@budget"), e["retrieval"].get("turn_recall@budget"),
                         _number(e.get("against_reference", {}).get("difference"))) for e in locomo])
