@@ -135,7 +135,7 @@ no budget runs out first. MemPalace's benchmark arms rank what its runner ranks,
 
 - MemPalace raw on LongMemEval-S: `recall_any@5` 0.966, `@10` 0.982, NDCG@10 0.889, as published.
 - MemPalace on LoCoMo, top 10: session 0.603, dialog 0.480. Its own runner gave 0.60287 and 0.47882 here. The adapter is held to the lists it committed on all ten conversations with captions
-  left out, as its runner leaves them; it committed no list at dialog level, so that arm stands on its runner's number. With captions in, as the study runs it, top tens differ, which is why captions are left out for this check.
+  left out, as its runner leaves them: 1,986 of 1,986 top tens alike, raw and hybrid at session level. It committed no list at dialog level, so that arm stands on its runner's number. With captions in, as the study runs it, top tens differ, which is why captions are left out for this check.
 - A gap over 0.5 points blocks that system's numbers until it is explained.
 - The MemPalace adapter is checked against the per-question ranked lists MemPalace committed at its release.
   This ranks all 500 LongMemEval questions, held-out included, for MemPalace alone and with its published
