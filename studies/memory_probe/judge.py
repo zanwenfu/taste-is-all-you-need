@@ -6,9 +6,10 @@ each case delivered. That is the judge the study already calibrated against GPT-
 
     python -m studies.memory_probe.judge --results run/results.jsonl --cases inputs/cases.jsonl --url URL --model NAME
     python -m studies.memory_probe.judge --notes notes-told.jsonl --out stored-told.served.jsonl --cases inputs/cases.jsonl --url URL --model NAME
+    python -m studies.memory_probe.judge --results run/results.jsonl --summaries inputs/summaries.jsonl --prompt anthropic --k 1 --cases inputs/cases.jsonl --url URL --model NAME
 
 The second form asks whether a notes file holds the rule at all, in its newest version and in any version: the "stored" step, which an append-only record has by
-construction and a file a model rewrites may not.
+construction and a file a model rewrites may not. The third reads a summary row's own summaries, whose block is the summary itself: what compaction kept.
 """
 
 from __future__ import annotations
@@ -22,9 +23,21 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
+def summaries_of(path: Path, prompt: str, k: int) -> dict[str, str]:
+    """This prompt's and this depth's summaries, by case. A case found twice is refused."""
+    found: dict[str, str] = {}
+    for row in map(json.loads, Path(path).read_text().splitlines()):
+        if row["prompt"] == prompt and row["k"] == k:
+            if row["id"] in found:
+                raise ValueError(f"{row['id']} has two summaries at {prompt}, {k} rounds: found twice")
+            found[row["id"]] = row["summary"]
+    return found
+
+
 def judge_found(results: Path, rules: dict[str, str], verdict: Callable[[str, list[dict]], bool | None], *,
-                workers: int) -> dict[str, int]:
-    """One row per case in found.served.jsonl beside the results. Nothing delivered is not found, with no call."""
+                workers: int, texts: dict[str, str] | None = None) -> dict[str, int]:
+    """One row per case in found.served.jsonl beside the results. Nothing delivered is not found, with no call. A row whose memory is its summary delivers no
+    block of its own, so ``texts`` gives the judge the summary to read, and a case with none is refused."""
     results = Path(results)
     out = results.with_name("found.served.jsonl")
     done = {json.loads(line)["id"] for line in out.read_text().splitlines()} if out.exists() else set()
@@ -34,7 +47,7 @@ def judge_found(results: Path, rules: dict[str, str], verdict: Callable[[str, li
     asked = [0]
 
     def one(row: dict) -> None:
-        text = row.get("delivered_text") or ""
+        text = texts[row["id"]] if texts is not None else row.get("delivered_text") or ""
         answer = False
         if text.strip():
             answer = verdict(rules[row["id"]], [{"role": "assistant", "content": text}])
@@ -42,6 +55,9 @@ def judge_found(results: Path, rules: dict[str, str], verdict: Callable[[str, li
             written.write(json.dumps({"id": row["id"], "found_by_judge": answer}) + "\n")
             asked[0] += bool(text.strip())
 
+    if texts is not None:
+        for row in todo:
+            texts[row["id"]]  # before any call
     with ThreadPoolExecutor(max(1, workers)) as pool:
         list(pool.map(one, todo))
     verdicts = [json.loads(line)["found_by_judge"] for line in out.read_text().splitlines()]
@@ -89,12 +105,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in ("cases", "url", "model"):
         parser.add_argument(f"--{name}", required=True)
-    for name in ("results", "notes", "out"):
+    for name in ("results", "notes", "out", "summaries", "prompt"):
         parser.add_argument(f"--{name}")
+    parser.add_argument("--k", type=int)
     parser.add_argument("--workers", type=int, default=16)
     arguments = parser.parse_args(argv)
     if bool(arguments.results) == bool(arguments.notes) or bool(arguments.notes) != bool(arguments.out):
         parser.error("give --results, or --notes and --out")
+    if arguments.summaries and (arguments.notes or not arguments.prompt or arguments.k is None):
+        parser.error("--summaries goes with --results, --prompt and --k")
 
     from conpact import Endpoint
     from conpact.prompts import judge_prompts
@@ -112,7 +131,8 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.notes:
         print(json.dumps(judge_stored(Path(arguments.notes), rules, verdict, Path(arguments.out), workers=arguments.workers)))
     else:
-        print(json.dumps(judge_found(Path(arguments.results), rules, verdict, workers=arguments.workers)))
+        texts = summaries_of(Path(arguments.summaries), arguments.prompt, arguments.k) if arguments.summaries else None
+        print(json.dumps(judge_found(Path(arguments.results), rules, verdict, workers=arguments.workers, texts=texts)))
     return 0
 
 

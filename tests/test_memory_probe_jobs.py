@@ -79,10 +79,23 @@ def test_the_rows_asked_for_are_the_only_ones_run(world: dict) -> None:
 def test_every_rule_list_row_and_every_notes_file_goes_to_the_judge(world: dict) -> None:
     assert _run(world).returncode == 0
     calls = world["log"].read_text()
-    for row in ("rules/a6-", "rules-in-headers/a6h-", "rules-and-search/a7q-", "turns/a5q-", "notes-newest-told/a2cw-"):
+    for row in ("rules/a6-", "rules-in-headers/a6h-", "rules-and-search/a7q-", "turns/a5q-", "notes-newest-told/a2cw-", "flat-newest/a2a-"):
         assert any("studies.memory_probe.judge" in line and row in line for line in calls.splitlines()), row
     for style in ("told", "neutral"):
         assert any("studies.memory_probe.judge" in line and "--notes" in line and f"notes-{style}.jsonl" in line for line in calls.splitlines()), style
+
+
+def test_the_header_list_goes_to_the_judge_since_a_header_may_say_the_rule_in_passing(world: dict) -> None:
+    assert _run(world, SMALL="0").returncode == 0
+    calls = world["log"].read_text()
+    assert any("studies.memory_probe.judge" in line and "header-list/a3-" in line for line in calls.splitlines())
+
+
+def test_each_summary_row_has_its_own_summaries_read_by_the_judge(world: dict) -> None:
+    assert _run(world).returncode == 0
+    judged = [line for line in world["log"].read_text().splitlines() if "studies.memory_probe.judge" in line and "--summaries" in line]
+    assert any("/summary/a1-" in line and "cases/summaries.jsonl --prompt anthropic --k 1 " in line for line in judged), judged
+    assert any("/summary-told/a1-" in line and "told-anthropic/summaries.jsonl --prompt anthropic --k 1 " in line for line in judged), judged
 
 
 def test_a_summary_told_to_keep_rules_gets_its_own_row_at_one_round(world: dict) -> None:

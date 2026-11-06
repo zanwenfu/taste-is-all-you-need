@@ -798,6 +798,15 @@ def test_a_command_that_is_not_one_string_is_told_so_and_the_session_goes_on(tmp
     assert summary["no_command"] == 1 and (tmp_path / "out" / "summary.json").exists()
 
 
+def test_a_tool_call_that_would_not_parse_is_kept_as_the_model_wrote_it(tmp_path: Path) -> None:
+    session = load_session({"tasks": [{"name": "one", "instruction": "A"}], "instance_template": "{{task}}"})
+    broken = SimpleNamespace(id="c0", type="function", function=SimpleNamespace(name="bash", arguments='{"command": "echo "hi""}'))
+    summary = run_session(session, arm="compaction", chat=_routed(_Script([_reply([broken]), _bash(DONE, "c1")])), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "out", workdir=tmp_path / "work", package_prompt=lambda: _prompt)
+    rows = [json.loads(line) for line in (tmp_path / "out" / "actions.jsonl").read_text().splitlines()]
+    assert summary["no_command"] == 1 and rows[0]["kind"] == "no_command" and rows[0]["arguments"] == '{"command": "echo "hi""}'
+
+
 def test_a_session_stopped_by_its_job_still_writes_its_record_and_closes_its_machine(tmp_path: Path) -> None:
     from studies.long_run.agent import Stopped
 

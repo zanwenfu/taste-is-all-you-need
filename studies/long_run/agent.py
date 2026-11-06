@@ -59,7 +59,7 @@ class ToolModel:
     def __init__(self, chat: Callable[[list[dict], list | None], Any], *, memory_tools: bool,
                  observation_template: str = "{{output.output}}", format_error_template: str = "{{error}}") -> None:
         self.chat, self.memory_tools = chat, memory_tools
-        self.last_text = self.last_finish = self.last_error = ""
+        self.last_text = self.last_finish = self.last_error = self.last_arguments = ""
         self.observation_template, self.format_error_template = observation_template, format_error_template
         self.tools = [BASH_TOOL, *(definitions("chat") if memory_tools else [])]
 
@@ -81,6 +81,7 @@ class ToolModel:
             try:
                 arguments = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError as error:
+                self.last_arguments = call.function.arguments or ""
                 raise self._refuse(f"Error parsing tool call arguments: {error}.") from None
             if name not in allowed:
                 raise self._refuse(f"Unknown tool '{name}'.")
@@ -101,7 +102,7 @@ class ToolModel:
         sent = [{key: message[key] for key in _SENT_KEYS if key in message} for message in messages]
         reply = self.chat(sent, self.tools)
         message = reply.choices[0].message
-        self.last_text, self.last_finish = message.content or "", reply.choices[0].finish_reason or ""
+        self.last_text, self.last_finish, self.last_arguments = message.content or "", reply.choices[0].finish_reason or "", ""
         calls = message.tool_calls or []
         actions = self._actions(calls)
         return {"role": "assistant", "content": message.content or "",
@@ -315,7 +316,7 @@ class LongRunAgent(DefaultAgent):
                     self.on_action({"kind": "no_command", "call": self.n_calls, "task": self.task_name, "compactions": len(self.events),
                                     "command": "", "output": getattr(self.model, "last_text", "")[:OUTPUT_KEPT],
                                     "finish_reason": getattr(self.model, "last_finish", ""),
-                                    "error": getattr(self.model, "last_error", "")})
+                                    "error": getattr(self.model, "last_error", ""), "arguments": getattr(self.model, "last_arguments", "")[:OUTPUT_KEPT]})
                 self.cost += error.messages[0].get("extra", {}).get("cost", 0.0)
                 self.n_consecutive_format_errors += 1
                 limit = self.config.max_consecutive_format_errors

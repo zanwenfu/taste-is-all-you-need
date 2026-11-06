@@ -933,7 +933,7 @@ def test_an_agent_that_acts_at_once_did_not_look_and_one_that_only_replies_has_n
 
 # ------------------------------------------------------------------ a notes file may say the rule in its own words
 
-from studies.memory_probe.judge import judge_found  # noqa: E402
+from studies.memory_probe.judge import judge_found, summaries_of  # noqa: E402
 
 
 def test_the_package_s_judge_reads_what_was_delivered_and_a_run_resumes(tmp_path: Path) -> None:
@@ -954,6 +954,37 @@ def test_the_package_s_judge_reads_what_was_delivered_and_a_run_resumes(tmp_path
             for line in (tmp_path / "found.served.jsonl").read_text().splitlines()}
     assert rows == {"a": True, "b": False}
     assert judge_found(results, rules, verdict, workers=2)["asked"] == 0
+
+
+def test_a_summary_row_delivers_nothing_of_its_own_so_the_judge_reads_its_summary(tmp_path: Path) -> None:
+    results = tmp_path / "results.jsonl"
+    results.write_text("".join(json.dumps(row) + "\n" for row in [{"id": "a", "delivered_text": ""}, {"id": "b", "delivered_text": ""}]))
+    summaries = tmp_path / "summaries.jsonl"
+    summaries.write_text("".join(json.dumps(row) + "\n" for row in [
+        {"id": "a", "prompt": "anthropic", "k": 1, "summary": "keeps drafts"}, {"id": "b", "prompt": "anthropic", "k": 1, "summary": "says nothing of it"},
+        {"id": "a", "prompt": "anthropic", "k": 16, "summary": "the deeper one"}, {"id": "a", "prompt": "pi_mono", "k": 1, "summary": "the other prompt's"}]))
+    asked = []
+
+    def verdict(rule: str, delivered: list[dict]) -> bool | None:
+        asked.append(delivered[0]["content"])
+        return "keeps" in delivered[0]["content"]
+
+    counts = judge_found(results, {"a": "Draft emails.", "b": "Use metric."}, verdict, workers=1, texts=summaries_of(summaries, "anthropic", 1))
+    assert counts == {"cases": 2, "asked": 2, "found": 1, "unclear": 0}
+    assert sorted(asked) == ["keeps drafts", "says nothing of it"], "only this prompt's and this depth's"
+
+
+def test_a_summary_found_twice_or_a_row_with_no_summary_is_refused(tmp_path: Path) -> None:
+    summaries = tmp_path / "summaries.jsonl"
+    row = json.dumps({"id": "a", "prompt": "anthropic", "k": 1, "summary": "s"}) + "\n"
+    summaries.write_text(row + row)
+    with pytest.raises(ValueError, match="twice"):
+        summaries_of(summaries, "anthropic", 1)
+    summaries.write_text(row)
+    results = tmp_path / "results.jsonl"
+    results.write_text(json.dumps({"id": "b", "delivered_text": ""}) + "\n")
+    with pytest.raises(KeyError):
+        judge_found(results, {"b": "Use metric."}, lambda rule, delivered: True, workers=1, texts=summaries_of(summaries, "anthropic", 1))
 
 
 def test_the_note_taker_can_be_told_to_keep_instructions_or_only_what_may_be_needed() -> None:

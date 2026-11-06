@@ -117,6 +117,13 @@ judge() {  # label arm
   [ $code = 0 ] || FAILED=$((FAILED + 1))
   echo "judge $1 exit $code $(echo "$said" | tail -1 | cut -c1-200)"
 }
+judge_summary() {  # label summaries: a summary row's block is its summary, so that is what the judge reads
+  wanted $1 || return 0
+  local results=$OUT/$1/a1-i-$PR-k$K-b$BUDGET/results.jsonl said code
+  said=$($RUN $D/venv/bin/python -m studies.memory_probe.judge --results $results --summaries $2 --prompt $PR --k $K --cases $IN/cases.jsonl --url $URL --model $MODEL 2>&1); code=$?
+  [ $code = 0 ] || FAILED=$((FAILED + 1))
+  echo "judge $1 exit $code $(echo "$said" | tail -1 | cut -c1-200)"
+}
 stored() {  # the wording of the note-taker: what its notes hold at all
   local said code
   said=$($RUN $D/venv/bin/python -m studies.memory_probe.judge --notes $OUT/notes-$1.jsonl --out $OUT/stored-$1.served.jsonl --cases $IN/cases.jsonl --url $URL --model $MODEL 2>&1); code=$?
@@ -144,7 +151,9 @@ if [ "${SMALL:-0}" = 0 ]; then
   one plain-exists a5 vii
   one plain-check a5 viii
 fi
-judge turns a5q; judge turns-headers a4q; judge rules a6; judge rules-in-headers a6h; judge rules-and-search a7q
+judge_summary summary $IN/summaries.jsonl
+judge flat-newest a2a; judge turns a5q; judge turns-headers a4q; judge rules a6; judge rules-in-headers a6h; judge rules-and-search a7q
+[ "${SMALL:-0}" = 0 ] && judge header-list a3
 for style in told neutral; do
   judge notes-last-$style a2cq; judge notes-every-$style a2dq; judge notes-newest-$style a2cw; judge notes-newest-and-older-$style a2dw
   [ "${WRITERS:-1}" = 1 ] && needs notes- && stored $style
@@ -158,6 +167,7 @@ if [ "$K" = 1 ] && [ "$BUDGET" = 4096 ] && [ "${WRITERS:-1}" = 1 ] && wanted sum
   echo "told summaries exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/told-$PR.log | cut -c1-200)"
   PUBLISHED=$IN; IN=$OUT/told-$PR
   one summary-told a1 i
+  judge_summary summary-told $OUT/told-$PR/summaries.jsonl
   IN=$PUBLISHED
 fi
 curl -s ${URL%/v1}/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $JOB/vllm-metrics.txt
