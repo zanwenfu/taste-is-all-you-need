@@ -67,7 +67,8 @@ OPTIONS = {"prefix": str, "model": str, "mode": str, "calibration_report": str, 
            "concurrent": int, "min_steps": int, "large_edit_lines": int, "attempts_factor": int, "checks_from": str,
            "prior_checkpoints": str, "arm_order_seed": int, "tests_feedback_chars": int, "tests_code_chars": int,
            "tests_full_chars": int, "save_final": lambda raw: truth(raw), "max_active_runs": int,
-           "equal_allowance": lambda raw: truth(raw), "keep_base_saves": lambda raw: truth(raw), "base_outcome": str}
+           "equal_allowance": lambda raw: truth(raw), "keep_base_saves": lambda raw: truth(raw), "base_outcome": str,
+           "first_only_checked": lambda raw: truth(raw)}
 
 
 def truth(raw):

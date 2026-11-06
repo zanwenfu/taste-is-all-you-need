@@ -90,6 +90,46 @@ def test_a_first_only_reviewer_arm_is_checked_even_with_no_round_left(tmp_path):
         [("first_only", 1)] * 2
 
 
+def test_a_first_only_arm_can_go_unchecked_when_the_hidden_tests_alone_are_read(tmp_path):
+    # One-sentence test: only the first attempt's hidden tests are measured, so no verdict is paid for after it.
+    arms = ["continue", "continue_wide"]
+    jobs_dir, trials, given, run_id = messages_study(tmp_path, recoveries=arms, first_only=arms,
+                                                     first_only_checked=False, budget_runs=2.0)
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, graded_recoveries()))
+    for arm in arms:
+        assert [(e["end"], e["rounds"], e["verdicts"]) for e in episodes(driver, run_id, arm)] == \
+            [("first_only", 1, [])] * 2, arm
+    # The base run's own check is the only one left.
+    assert checked_arms(driver) == {None}
+    assert not [job for job in driver.jobs.values() if job["purpose"] == "round"]
+
+
+def test_an_unchecked_first_only_arm_still_ends_no_submission_and_arms_outside_it_are_still_checked(tmp_path):
+    jobs_dir, trials, given, run_id = messages_study(tmp_path, recoveries=["continue", "continue_wide"],
+                                                     first_only=["continue_wide"], first_only_checked=False,
+                                                     budget_runs=2.0)
+    base = graded_recoveries()
+
+    def stopped(spec, task, settings, harbor):
+        fields = base(spec, task, settings, harbor)
+        if settings.get("agent") != "checker" and "-cw-" in spec.name:
+            fields["exit_status"] = "Stopped"
+        return fields
+
+    driver, _ = drive(tmp_path / "rec.json", given, jobs_dir, FakeHarbor(trials, stopped))
+    assert [e["end"] for e in episodes(driver, run_id, "continue_wide")] == ["no_submission"] * 2
+    assert "continue" in checked_arms(driver)
+    assert "continue_wide" not in checked_arms(driver)
+
+
+def test_first_only_rounds_are_checked_unless_told_otherwise_and_the_setting_is_a_true_or_false(tmp_path):
+    assert DEFAULTS["first_only_checked"] is True
+    _, _, given, _ = runs_study(tmp_path)
+    with pytest.raises(ValueError, match="first_only_checked"):
+        RecoveryDriver.open(tmp_path / "rec.json", {**given, "first_only_checked": "no"})
+    assert cli.OPTIONS["first_only_checked"]("false") is False
+
+
 def test_first_only_names_known_arms_and_not_the_rewind_tools_arm(tmp_path):
     _, _, given, _ = runs_study(tmp_path)
     for wrong in (["retry_bare", "no_such_arm"], ["agentrewind"]):

@@ -90,7 +90,9 @@ An arm listed in ``first_only`` is the first attempt after the message and
 nothing more: its episode ends after round one ("first_only", or "done" when
 the reviewer accepts or, for a tests arm, the hidden tests pass), with no
 later round. A reviewer arm's round one is checked all the same, whatever
-budget is left, so that its verdicts can be compared with the other arms'.
+budget is left, so that its verdicts can be compared with the other arms';
+with ``first_only_checked`` false it is not, for a study that reads only the
+first attempt's hidden tests, and the episode ends "first_only" at once.
 
 The checker's trials take ``checker_env`` over the study's ``env``: the
 reviewer can run on another model route than the agent (its own secrets file
@@ -210,6 +212,8 @@ DEFAULTS = {
     "recoveries": ["retry", "retry_feedback", "rewind", "continue"],
     # Arms whose episodes are round one only (the first attempt after the message); a reviewer arm's is checked.
     "first_only": [],
+    # False: no check after a first_only round, for a study that reads only its hidden tests (no verdict to pay for).
+    "first_only_checked": True,
     "rewind_sources": list(SOURCES),
     "oracle": "highest_v",      # or "latest": which of the map's r* the oracle rewinds to
     "repeats": 3,
@@ -348,6 +352,8 @@ class RecoveryDriver(Driver):
             raise ValueError("equal_allowance must be true or false")
         if not isinstance(settings["save_final"], bool):
             raise ValueError("save_final must be true or false")
+        if not isinstance(settings["first_only_checked"], bool):
+            raise ValueError("first_only_checked must be true or false")
         if settings["repeats"] < 1 or settings["check_attempts"] < 1:
             raise ValueError("repeats and check_attempts must be positive")
         if not 0 <= settings["min_round_share"] < 1:
@@ -750,6 +756,9 @@ class RecoveryDriver(Driver):
                 return
             # Round one only: no later round, but a reviewer arm's round one is checked whatever budget is left.
             first_only = arm["recovery"] in self.settings["first_only"]
+            if first_only and not self.settings["first_only_checked"]:
+                episode["end"] = "first_only"
+                return
             if MESSAGE[arm["recovery"]] == "tests":
                 # No checker: the hidden tests decide, and the next round is told what they failed.
                 if agent["solved"]:
