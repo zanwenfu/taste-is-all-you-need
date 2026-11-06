@@ -506,7 +506,7 @@ def _too_long():
 
 
 def test_a_prompt_the_server_refuses_as_too_long_is_recorded_as_not_served(tmp_path):
-    inner, completions = _fake_client(_too_long())
+    inner, _completions = _fake_client(_too_long())
     log = tmp_path / "not_served.jsonl"
     client = conpact_bridge.WindowGuard(inner, log)
     reply = client.chat.completions.create(model="m", messages=[{"role": "user", "content": "long"}])
@@ -611,3 +611,57 @@ def test_only_the_named_full_history_probe_is_reused(monkeypatch):
     with conpact_bridge.reuse_full_history(stored, conditions=("full_without_sc",)):
         assert evaluate._probe(None, None, inst, inst.messages, "P?") == ("fresh", None)
         assert evaluate._probe(None, None, inst, inst.messages_without_sc, "P?") == ("B", False)
+
+
+# ------------------------------------------------------------------ the paid judge's spend limit
+
+
+class _PricedJudge:
+    """Stands in for the paid model: every answer costs a cent."""
+
+    model, effort, max_tokens = "stand-in", "low", 16
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    def ask(self, prompt: str) -> types.SimpleNamespace:
+        self.asked += 1
+        return types.SimpleNamespace(text="yes", input_tokens=1, output_tokens=1, stop_reason="end_turn", cost=lambda model: 0.01)
+
+
+def _judge_files(tmp_path: Path, count: int) -> tuple[Path, Path]:
+    answers, reference = tmp_path / "answers.jsonl", tmp_path / "reference.json"
+    answers.write_text("".join(json.dumps({"question_id": f"q{n}", "hypothesis": "x"}) + "\n" for n in range(count)))
+    reference.write_text(json.dumps([{"question_id": f"q{n}", "question_type": "multi-session", "question": "Q?", "answer": "A"}
+                                     for n in range(count)]))
+    return answers, reference
+
+
+def test_the_paid_judge_starts_no_call_past_its_spend_limit_and_keeps_what_it_judged(tmp_path: Path) -> None:
+    answers, reference = _judge_files(tmp_path, 10)
+    judge = _PricedJudge()
+    with pytest.raises(lme_judge.SpendLimit, match="7 answers not judged"):
+        lme_judge.judge_file(answers, reference, judge, short_name="stand", workers=1, stop_at_usd=0.03)
+    assert judge.asked == 3
+    written = tmp_path / "answers.jsonl.eval-results-stand"
+    assert len(written.read_text().splitlines()) == 3
+
+
+def test_a_second_run_counts_what_the_first_spent_and_what_other_files_spent(tmp_path: Path) -> None:
+    answers, reference = _judge_files(tmp_path, 10)
+    with pytest.raises(lme_judge.SpendLimit):
+        lme_judge.judge_file(answers, reference, _PricedJudge(), short_name="stand", workers=1, stop_at_usd=0.03)
+    judge = _PricedJudge()
+    with pytest.raises(lme_judge.SpendLimit):
+        lme_judge.judge_file(answers, reference, judge, short_name="stand", workers=1, stop_at_usd=0.03)
+    assert judge.asked == 0
+    with pytest.raises(lme_judge.SpendLimit):
+        lme_judge.judge_file(answers, reference, judge, short_name="stand", workers=1, stop_at_usd=0.05, spent_elsewhere=0.02)
+    assert judge.asked == 0
+
+
+def test_a_job_within_its_limit_finishes_and_says_nothing(tmp_path: Path) -> None:
+    answers, reference = _judge_files(tmp_path, 3)
+    judge = _PricedJudge()
+    assert lme_judge.judge_file(answers, reference, judge, short_name="stand", workers=1, stop_at_usd=1.0).exists()
+    assert judge.asked == 3

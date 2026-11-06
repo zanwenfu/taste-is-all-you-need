@@ -81,11 +81,24 @@ def _load(path: Path) -> list[dict]:
     return value if isinstance(value, list) else [value]
 
 
-def judge_file(hyp_path, ref_path, judge: Converse, *, short_name: str, workers: int = 8) -> Path:
-    """Judge every hypothesis not yet in the output file; return the output file."""
+class SpendLimit(RuntimeError):
+    """The spend limit was reached. Nothing more was asked, and what was judged is kept."""
+
+
+def _spent(path: Path) -> float:
+    if not path.exists():
+        return 0.0
+    return sum(json.loads(line)["autoeval_label"].get("cost_usd_estimate") or 0.0 for line in path.read_text().splitlines())
+
+
+def judge_file(hyp_path, ref_path, judge: Converse, *, short_name: str, workers: int = 8, stop_at_usd: float | None = None,
+               spent_elsewhere: float = 0.0) -> Path:
+    """Judge every hypothesis not yet in the output file; return the output file. With ``stop_at_usd``, no call starts once this file's
+    spend and ``spent_elsewhere`` reach it. Calls already out may finish, so the limit can pass by what ``workers`` calls cost."""
     hyp_path, ref_path = Path(hyp_path), Path(ref_path)
     out = hyp_path.with_name(f"{hyp_path.name}.eval-results-{short_name}")
     done = {json.loads(line)["question_id"] for line in out.read_text().splitlines()} if out.exists() else set()
+    spent = [_spent(out) + spent_elsewhere]
     refs = {entry["question_id"]: entry for entry in _load(ref_path)}
     todo = [entry for entry in _load(hyp_path) if entry["question_id"] in refs and entry["question_id"] not in done]
     skipped = [entry["question_id"] for entry in _load(hyp_path) if entry["question_id"] not in refs]
@@ -94,6 +107,9 @@ def judge_file(hyp_path, ref_path, judge: Converse, *, short_name: str, workers:
     lock = threading.Lock()
 
     def one(entry: dict) -> None:
+        with lock:
+            if stop_at_usd is not None and spent[0] >= stop_at_usd:
+                return
         ref = refs[entry["question_id"]]
         prompt = anscheck_prompt(ref["question_type"], ref["question"], ref["answer"], entry["hypothesis"],
                                  abstention="_abs" in entry["question_id"])
@@ -108,11 +124,16 @@ def judge_file(hyp_path, ref_path, judge: Converse, *, short_name: str, workers:
             "cost_usd_estimate": reply.cost(judge.model)}}
         with lock, out.open("a") as written:
             written.write(json.dumps(entry) + "\n")
+            spent[0] += reply.cost(judge.model) or 0.0
 
     with ThreadPoolExecutor(max(1, workers)) as pool:
         list(pool.map(one, todo))
     if not out.exists():
         out.write_text("")
+    if stop_at_usd is not None and spent[0] >= stop_at_usd:
+        unjudged = len(todo) + len(done) - len(out.read_text().splitlines())
+        if unjudged:
+            raise SpendLimit(f"stopped at ${spent[0]:.4f} of a ${stop_at_usd:.4f} limit, with {unjudged} answers not judged")
     return out
 
 
@@ -124,10 +145,12 @@ def main(argv=None) -> int:
     parser.add_argument("--effort", default="low")
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--stop-at-usd", type=float, help="start no call once this much has been spent, by the prices in bedrock.py")
+    parser.add_argument("--spent-elsewhere", type=float, default=0.0, help="what the same job already spent on other files")
     arguments = parser.parse_args(argv)
     judge = Converse(JUDGES[arguments.judge], effort=arguments.effort, max_tokens=arguments.max_tokens)
-    print(judge_file(arguments.hypotheses, arguments.reference, judge, short_name=arguments.judge,
-                     workers=arguments.workers))
+    print(judge_file(arguments.hypotheses, arguments.reference, judge, short_name=arguments.judge, workers=arguments.workers,
+                     stop_at_usd=arguments.stop_at_usd, spent_elsewhere=arguments.spent_elsewhere))
     return 0
 
 
