@@ -43,7 +43,7 @@ def take_notes(messages: list[dict], ask: Callable[[str], dict], *, style: str =
     if style not in STYLES:
         raise ValueError(f"unknown style {style!r}")
     notes, versions = "", []
-    for part in chunks(messages):
+    for part in chunks([turn for turn in messages if turn["role"] != "system"]):  # the reader has the system prompt already
         text = "\n".join(f"[{turn['role']}]: {str(turn['content'])[:MAX_TURN_CHARS]}" for turn in part)
         for _ in range(EMPTY_TRIES):
             reply = ask(_PROMPT.format(told=STYLES[style], notes=notes or "(no notes yet)", part=text))

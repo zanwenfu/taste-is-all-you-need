@@ -48,6 +48,6 @@ kinds = collections.Counter("parsed" if r["parsed"] else "no text" if r["reply"]
 secs = sorted(r["seconds"] for r in rows)
 print("  replies", len(rows), dict(kinds), "rate", kinds["parsed"] / max(1, len(rows)), "seconds median", secs[len(secs) // 2] if secs else None)
 PY
-kill ${PID:-0} ${EMB:-0} $SMI 2>/dev/null; wait $PID 2>/dev/null
+kill $PID ${EMB:-} $SMI 2>/dev/null; wait $PID 2>/dev/null
 rm -rf /tmp/aos-mem0-$SLURM_JOB_ID-*
 echo "end $(date -u +%FT%TZ)"

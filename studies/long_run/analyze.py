@@ -1,7 +1,8 @@
 """The long run's tables: each arm against compaction alone, across seeds, task by task.
 
-Arms can end early, so a rule's obedience compares only tasks both arms reached, with an exact sign test over tasks. The tag is reported as ran and as known,
-since a reply with no command can hold it. A run the harness made invalid by sending a planted text again is left out and named.
+Arms can end early, so a rule's obedience compares only tasks both arms reached. Tasks of one conversation are not independent, so the test is over sessions, each
+compared on the tasks both arms reached in it; the count over tasks is shown as a description. The tag is reported as ran and as known, since a reply with no command can
+hold it. A session that is invalid (a planted text sent again, a ledger refused, nothing planted) is left out of every total and counted, and so is how many ended early.
 
     python -m studies.long_run.analyze runs/seed2-1 runs/seed3-1 --out report.md
 """
@@ -35,12 +36,19 @@ def _rate(cell: dict[str, int]) -> float:
 
 def compare_rule(runs: dict[str, dict[str, dict]], arm: str, rule: str) -> dict[str, Any]:
     """Pooled obedience, and task by task against compaction alone on tasks both reached where the rule applied in both."""
-    pooled = {"obeyed": 0, "applies": 0, "base_obeyed": 0, "base_applies": 0, "tasks": 0, "better": 0, "worse": 0, "same": 0}
+    pooled = {"obeyed": 0, "applies": 0, "base_obeyed": 0, "base_applies": 0, "tasks": 0, "better": 0, "worse": 0, "same": 0,
+              "sessions": 0, "sessions_better": 0, "sessions_worse": 0}
     for arms in runs.values():
         if arm not in arms or BASE not in arms or not arms[arm].get("valid", True) or not arms[BASE].get("valid", True):
             continue
         mine, theirs = arms[arm]["scores"].get(rule, {}).get("by_task", {}), arms[BASE]["scores"].get(rule, {}).get("by_task", {})
-        for task in sorted(set(mine) & set(theirs)):
+        shared = sorted(set(mine) & set(theirs))
+        if shared:
+            rates = [sum(side[task]["obeyed"] for task in shared) / sum(side[task]["applies"] for task in shared) for side in (mine, theirs)]
+            pooled["sessions"] += 1
+            pooled["sessions_better"] += rates[0] > rates[1]
+            pooled["sessions_worse"] += rates[0] < rates[1]
+        for task in shared:
             a, b = mine[task], theirs[task]
             pooled["obeyed"] += a["obeyed"]
             pooled["applies"] += a["applies"]
@@ -49,6 +57,7 @@ def compare_rule(runs: dict[str, dict[str, dict]], arm: str, rule: str) -> dict[
             pooled["tasks"] += 1
             pooled["better" if _rate(a) > _rate(b) else "worse" if _rate(a) < _rate(b) else "same"] += 1
     pooled["p"] = sign_test(pooled["better"], pooled["worse"])
+    pooled["sessions_p"] = sign_test(pooled["sessions_better"], pooled["sessions_worse"])
     return pooled
 
 
@@ -57,9 +66,10 @@ def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
     rules = sorted({rule for seed in runs.values() for summary in seed.values() for rule in summary["scores"]})
     table = []
     for arm in arms:
-        summaries = [seed[arm] for seed in runs.values() if arm in seed]
+        every = [seed[arm] for seed in runs.values() if arm in seed]
+        summaries = [s for s in every if s.get("valid", True)]
         entry: dict[str, Any] = {
-            "arm": arm, "sessions": len(summaries), "invalid": sum(not s.get("valid", True) for s in summaries),
+            "arm": arm, "sessions": len(every), "invalid": len(every) - len(summaries), "ended_early": sum(bool(s.get("ended_by")) for s in every),
             "calls": sum(s["calls"] for s in summaries), "compactions": sum(s["compactions"] for s in summaries),
             "no_command": sum(s.get("no_command", 0) for s in summaries),
             "submitted": sum(o["exit_status"] == "Submitted" for s in summaries for o in s["outcomes"]),
@@ -113,10 +123,10 @@ def render_compactions(table: dict[str, dict[str, dict[str, list[int]]]]) -> str
 
 def render(table: list[dict[str, Any]]) -> str:
     rules = sorted({rule for entry in table for rule in entry["rules"]})
-    head = ["arm", "sessions", "invalid", "tasks", "submitted", "machines failed", "calls", "compactions", "no command", "looks"]
+    head = ["arm", "sessions", "invalid", "ended early", "tasks", "submitted", "machines failed", "calls", "compactions", "no command", "looks"]
     lines = ["| " + " | ".join(head + rules) + " |", "|" + "---|" * (len(head) + len(rules))]
     for entry in table:
-        cells = [entry["arm"], entry["sessions"], entry["invalid"], entry["tasks"], entry["submitted"], entry["machines_failed"], entry["calls"], entry["compactions"],
+        cells = [entry["arm"], entry["sessions"], entry["invalid"], entry["ended_early"], entry["tasks"], entry["submitted"], entry["machines_failed"], entry["calls"], entry["compactions"],
                  entry["no_command"], entry["looks"]]
         for rule in rules:
             cell = entry["rules"].get(rule, {})
@@ -125,7 +135,7 @@ def render(table: list[dict[str, Any]]) -> str:
                 text += f" knows {cell['knows']}/{cell['knows_of']}"
             pair = cell.get("against_compaction")
             if pair:
-                text += f" (paired {pair['tasks']} tasks, +{pair['better']} -{pair['worse']}, p {pair['p']:.3f})"
+                text += f" (paired over {pair['sessions']} sessions, +{pair['sessions_better']} -{pair['sessions_worse']}, p {pair['sessions_p']:.3f}; over {pair['tasks']} tasks, +{pair['better']} -{pair['worse']})"
             cells.append(text)
         lines.append("| " + " | ".join(str(cell) for cell in cells) + " |")
     return "\n".join(lines) + "\n"

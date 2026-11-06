@@ -4,7 +4,7 @@
 #SBATCH --mem=128G
 #SBATCH --time=06:00:00
 # One cell of the rule-loss matrix: a case set (IN), a summary prompt (PR) and a depth (K), every arm, on the settings frozen in the protocol. Notes and headers are written
-# once per case set, in OUT, and any job can be run again and carries on. Free. Needs STUDY_ROOT and SHA.
+# once per case set, in OUT, and any job can be run again and carries on. ROWS names the rows to run, all of them when empty. A row that fails, or a judge, fails the job. Free. Needs STUDY_ROOT and SHA.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
 D=${STUDY_ROOT:?}; S=${SHA:?}
@@ -56,19 +56,28 @@ PY
 fi
 [ -n "$HEADERS_FROM" ] && [ ! -e $HEADERS ] && cp $HEADERS_FROM/turn-headers.jsonl $HEADERS
 # WRITERS=0: a cued case has the published case's history word for word, so it keeps that case's notes and headers, read by the history they came from.
+wanted() { [ -z "${ROWS:-}" ] || [[ " $ROWS " == *" $1 "* ]]; }
+needs() { [ -z "${ROWS:-}" ] || [[ "$ROWS" =~ $1 ]]; }  # a pattern over the rows asked for
 if [ "${WRITERS:-1}" = 1 ]; then
-  for style in told neutral; do
+  if needs notes-; then
+    for style in told neutral; do
+      T1=$(date +%s)
+      $PY -m studies.memory_probe.notes --inputs $IN --url $URL --model $MODEL --style $style --workers 32 --out $OUT/notes-$style.jsonl > $JOB/notes-$style.log 2>&1
+      code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
+      echo "notes $style exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/notes-$style.log | cut -c1-200)"
+    done
+  fi
+  if needs "headers|rules-and-search|header-list"; then
     T1=$(date +%s)
-    $PY -m studies.memory_probe.notes --inputs $IN --url $URL --model $MODEL --style $style --workers 32 --out $OUT/notes-$style.jsonl 2>&1 | tail -1 | cut -c1-200
-    echo "notes $style seconds $(( $(date +%s) - T1 ))"
-  done
-  T1=$(date +%s)
-  $PY -m studies.memory_probe.headers --inputs $IN --url $URL --model $MODEL --out $HEADERS --workers 32 2>&1 | tail -1 | cut -c1-200
-  echo "headers seconds $(( $(date +%s) - T1 ))"
+    $PY -m studies.memory_probe.headers --inputs $IN --url $URL --model $MODEL --out $HEADERS --workers 32 > $JOB/headers.log 2>&1
+    code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
+    echo "headers exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/headers.log | cut -c1-200)"
+  fi
 fi
 one() {  # label arm condition extra...
   local label=$1 arm=$2 condition=$3; shift 3
-  local name=$arm-$condition-$PR-k$K-b$BUDGET T1=$(date +%s) row=$OUT/$label/$arm-$condition-$PR-k$K-b$BUDGET PIDS=() I code
+  wanted $label || return 0
+  local name=$arm-$condition-$PR-k$K-b$BUDGET T1=$(date +%s) row=$OUT/$label/$arm-$condition-$PR-k$K-b$BUDGET PIDS=() I bad=0 code
   mkdir -p $row
   for I in $(seq 0 $((PROCS-1))); do
     $PY -m studies.memory_probe.run --inputs $IN --prompt $PR --k $K --arm $arm --condition $condition --budget $BUDGET --shard $I/$PROCS --workers 1 \
@@ -76,15 +85,32 @@ one() {  # label arm condition extra...
         --workdir /tmp/aos-probe-$SLURM_JOB_ID-$label-$name --out $row/shard$I.jsonl "$@" > $row/shard$I.log 2>&1 &
     PIDS+=($!)
   done
-  wait "${PIDS[@]}"
-  $PY -m studies.memory_probe.merge --inputs $IN --out $row/results.jsonl $row/shard*[0-9].jsonl > $row/run.log 2>&1
-  code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
+  : > $row/run.log
+  for I in $(seq 0 $((PROCS-1))); do
+    wait ${PIDS[$I]} || { bad=$((bad + 1)); tail -2 $row/shard$I.log >> $row/run.log; }
+  done
+  if [ $bad = 0 ]; then
+    $PY -m studies.memory_probe.merge --inputs $IN --out $row/results.jsonl $row/shard*[0-9].jsonl >> $row/run.log 2>&1
+    code=$?
+  else
+    code="$bad-shards-failed"
+  fi
+  [ "$code" = 0 ] || FAILED=$((FAILED + 1))
   echo "$label $name exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $row/run.log | cut -c1-300)"
   rm -rf /tmp/aos-probe-$SLURM_JOB_ID-$label-$name
 }
 judge() {  # label arm
-  local results=$OUT/$1/$2-i-$PR-k$K-b$BUDGET/results.jsonl
-  echo "judge $1 $($RUN $D/venv/bin/python -m studies.memory_probe.judge --results $results --cases $IN/cases.jsonl --url $URL --model $MODEL 2>&1 | tail -1 | cut -c1-200)"
+  wanted $1 || return 0
+  local results=$OUT/$1/$2-i-$PR-k$K-b$BUDGET/results.jsonl said code
+  said=$($RUN $D/venv/bin/python -m studies.memory_probe.judge --results $results --cases $IN/cases.jsonl --url $URL --model $MODEL 2>&1); code=$?
+  [ $code = 0 ] || FAILED=$((FAILED + 1))
+  echo "judge $1 exit $code $(echo "$said" | tail -1 | cut -c1-200)"
+}
+stored() {  # the wording of the note-taker: what its notes hold at all
+  local said code
+  said=$($RUN $D/venv/bin/python -m studies.memory_probe.judge --notes $OUT/notes-$1.jsonl --out $OUT/stored-$1.served.jsonl --cases $IN/cases.jsonl --url $URL --model $MODEL 2>&1); code=$?
+  [ $code = 0 ] || FAILED=$((FAILED + 1))
+  echo "stored $1 exit $code $(echo "$said" | tail -1 | cut -c1-200)"
 }
 one summary a1 i
 one restated a1 i --upper
@@ -107,10 +133,21 @@ if [ "${SMALL:-0}" = 0 ]; then
   one plain-exists a5 vii
   one plain-check a5 viii
 fi
-judge turns a5q; judge turns-headers a4q
+judge turns a5q; judge turns-headers a4q; judge rules a6; judge rules-in-headers a6h; judge rules-and-search a7q
 for style in told neutral; do
   judge notes-last-$style a2cq; judge notes-every-$style a2dq; judge notes-newest-$style a2cw; judge notes-newest-and-older-$style a2dw
+  [ "${WRITERS:-1}" = 1 ] && needs notes- && stored $style
 done
+# The summary told to keep what the user asked it to keep doing, on the same prompt, so that the store and the instruction can be read apart.
+if [ "$K" = 1 ] && [ "$BUDGET" = 4096 ] && wanted summary-told; then
+  T1=$(date +%s)
+  $RUN $D/venv/bin/python -m studies.memory_probe.told_summary --inputs $IN --prompt $PR --url $URL --model $MODEL --out $OUT/told-$PR > $JOB/told-$PR.log 2>&1
+  code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
+  echo "told summaries exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/told-$PR.log | cut -c1-200)"
+  PUBLISHED=$IN; IN=$OUT/told-$PR
+  one summary-told a1 i
+  IN=$PUBLISHED
+fi
 curl -s ${URL%/v1}/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $JOB/vllm-metrics.txt
 kill $PID $SMI 2>/dev/null; [ -n "$PID" ] && wait $PID 2>/dev/null
 echo "end $(date -u +%FT%TZ) rows failed $FAILED"

@@ -5,6 +5,10 @@ paraphrase, so its arms are read by the benchmark package's own retention judge,
 each case delivered. That is the judge the study already calibrated against GPT-5.4 at one compaction.
 
     python -m studies.memory_probe.judge --results run/results.jsonl --cases inputs/cases.jsonl --url URL --model NAME
+    python -m studies.memory_probe.judge --notes notes-told.jsonl --out stored-told.served.jsonl --cases inputs/cases.jsonl --url URL --model NAME
+
+The second form asks whether a notes file holds the rule at all, in its newest version and in any version: the "stored" step, which an append-only record has by
+construction and a file a model rewrites may not.
 """
 
 from __future__ import annotations
@@ -45,12 +49,52 @@ def judge_found(results: Path, rules: dict[str, str], verdict: Callable[[str, li
             "unclear": sum(value is None for value in verdicts)}
 
 
+def judge_stored(notes: Path, rules: dict[str, str], verdict: Callable[[str, list[dict]], bool | None], out: Path, *, workers: int) -> dict[str, int]:
+    """One row per case. A rule in the newest version is stored, with nothing more to ask; otherwise the older versions are read from the first, until one holds it."""
+    out = Path(out)
+    done = {json.loads(line)["id"] for line in out.read_text().splitlines()} if out.exists() else set()
+    rows = [json.loads(line) for line in Path(notes).read_text().splitlines()]
+    lock = threading.Lock()
+
+    def one(row: dict) -> None:
+        rule = rules[row["id"]]
+
+        def holds_it(version: str) -> bool | None:
+            return verdict(rule, [{"role": "assistant", "content": version}])
+
+        newest = holds_it(row["versions"][-1])
+        anywhere, asked, unclear = newest, 1, newest is None
+        if newest is not True:
+            anywhere = False
+            for version in row["versions"][:-1]:
+                asked += 1
+                answer = holds_it(version)
+                unclear = unclear or answer is None
+                if answer is True:
+                    anywhere = True
+                    break
+            else:
+                anywhere = None if unclear else False
+        with lock, out.open("a") as written:
+            written.write(json.dumps({"id": row["id"], "newest": newest, "any": anywhere, "asked": asked}) + "\n")
+
+    with ThreadPoolExecutor(max(1, workers)) as pool:
+        list(pool.map(one, [row for row in rows if row["id"] not in done]))
+    verdicts = [json.loads(line) for line in out.read_text().splitlines()]
+    return {"cases": len(verdicts), "stored_newest": sum(row["newest"] is True for row in verdicts), "stored_any": sum(row["any"] is True for row in verdicts),
+            "unclear": sum(row["newest"] is None or row["any"] is None for row in verdicts), "asked": sum(row["asked"] for row in verdicts)}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ("results", "cases", "url", "model"):
+    for name in ("cases", "url", "model"):
         parser.add_argument(f"--{name}", required=True)
+    for name in ("results", "notes", "out"):
+        parser.add_argument(f"--{name}")
     parser.add_argument("--workers", type=int, default=16)
     arguments = parser.parse_args(argv)
+    if bool(arguments.results) == bool(arguments.notes) or bool(arguments.notes) != bool(arguments.out):
+        parser.error("give --results, or --notes and --out")
 
     from conpact import Endpoint
     from conpact.prompts import judge_prompts
@@ -61,8 +105,14 @@ def main(argv: list[str] | None = None) -> int:
     client = Endpoint(arguments.model, arguments.url, "EMPTY", {}).client()
     judge = RetentionJudge(ServedChat(client, arguments.model))
     rules = {case["id"]: case["sc_text"] for case in map(json.loads, Path(arguments.cases).read_text().splitlines())}
-    print(json.dumps(judge_found(Path(arguments.results), rules,
-                                 lambda rule, delivered: judge.verdict(*judge_prompts(rule, delivered)), workers=arguments.workers)))
+
+    def verdict(rule: str, delivered: list[dict]) -> bool | None:
+        return judge.verdict(*judge_prompts(rule, delivered))
+
+    if arguments.notes:
+        print(json.dumps(judge_stored(Path(arguments.notes), rules, verdict, Path(arguments.out), workers=arguments.workers)))
+    else:
+        print(json.dumps(judge_found(Path(arguments.results), rules, verdict, workers=arguments.workers)))
     return 0
 
 

@@ -10,7 +10,8 @@ The agent is mini-swe-agent 2.4.6's ``DefaultAgent`` with three hooks, all in ``
   Each compaction is logged: sizes, the summary, and whether each watched text is in the summary or the kept turns.
 * **Memory.** In the memory arms every message is committed to Taste's memory as it is added, so compaction never
   touches it, and the model is offered search and fetch beside bash, answered on the host; nothing runs in the
-  task's container for them.
+  task's container for them. The memory's own traffic is left out of it: a store that holds its searches and their results finds
+  them again, and by the third search they fill most of what it returns.
 
 The agent is no longer "run unchanged": the paper says so. Which name applies (brief, section 2): the compaction-only
 arm is a baseline; an arm whose memory is ``taste.memstore`` is "Taste memory, study-driven".
@@ -36,7 +37,7 @@ from pydantic import Field
 from taste.memstore.tools import FETCH, SEARCH, definitions
 
 SUMMARY_LEAD = "The conversation so far was compacted. Summary of the earlier part:\n\n"
-OUTPUT_KEPT = 2000  # characters of a command's output kept in the action log; a memory call's output is kept whole
+OUTPUT_KEPT = 200_000  # characters of a command's output kept in the action log, and so scored; a memory call's output is kept whole
 _SENT_KEYS = ("role", "content", "tool_calls", "tool_call_id")
 
 
@@ -171,6 +172,7 @@ class LongRunAgent(DefaultAgent):
         self.previous_summary: str | None = None
         self._summary_message: dict | None = None
         self._planted_sent: set[int] = set()
+        self._memory_calls: set[str] = set()
         self.outcomes: list[dict] = []
 
     def add_messages(self, *messages: dict) -> list[dict]:
@@ -179,10 +181,20 @@ class LongRunAgent(DefaultAgent):
             for message in messages:
                 # The system prompt is in front of the model at every call, so a store has no need of it.
                 if message.get("role") not in ("exit", "system"):
-                    self.record({"role": message["role"], "content": render(message),
-                                 "from_harness": "interrupt_type" in message.get("extra", {})})
-                    self.recorded += 1
+                    said = self._talk(message)
+                    if said:
+                        self.record({"role": message["role"], "content": said,
+                                     "from_harness": "interrupt_type" in message.get("extra", {})})
+                        self.recorded += 1
         return added
+
+    def _talk(self, message: dict) -> str:
+        """What a message adds to the memory: all of it but the memory's own calls and their results."""
+        own = {action["tool_call_id"] for action in message.get("extra", {}).get("actions", []) if "memory_tool" in action}
+        self._memory_calls |= own
+        if message.get("role") == "tool" and message.get("tool_call_id") in self._memory_calls:
+            return ""
+        return render({**message, "tool_calls": [call for call in message.get("tool_calls") or [] if call["id"] not in own]})
 
     def tokens(self, *, delivered: bool = True) -> int:
         """What the conversation holds. ``delivered=False`` leaves out a memory's block in the system prompt, so that every arm
@@ -319,34 +331,43 @@ class LongRunAgent(DefaultAgent):
         self.outcomes = []
         opened = False
         machines = 0  # the tasks that got a machine so far: the first of them is where a session's rules are told
-        for task in tasks:
-            self.task_name = task["name"]
-            try:
-                self.env.inner = make_env(task)
-            except Exception as error:  # one machine that will not build leaves its task, not the session
-                self.outcomes.append({"task": task["name"], "exit_status": "MachineFailed", "reason": f"{type(error).__name__}: {error}"[:500],
-                                      "calls": self.n_calls, "compactions": len(self.events)})
-                continue
-            text = worded(task, machines) if worded else task["instruction"]
-            machines += 1
-            if not opened:
-                opened = True
-                self.extra_template_vars |= {"task": text}
-                self.messages = []
-                self.add_messages(
-                    self.model.format_message(role="system", content=self._render_template(self.config.system_template)),
-                    self.model.format_message(role="user", content=self._render_template(self.config.instance_template)))
-                self._told.add(id(self.messages[1]))
-            else:
-                if self.messages[-1].get("role") == "exit":
-                    self.messages.pop()
-                self.add_messages({"role": "user", "content": text})
-            ended = self._until_exit()
-            self.outcomes.append({"task": task["name"], "exit_status": ended.get("exit_status"), "calls": self.n_calls,
-                                  "compactions": len(self.events)})
-            if ended.get("exit_status") not in ("Submitted", "TaskCallLimit", "RepeatedFormatError"):
-                break
+        try:
+            for task in tasks:
+                self.task_name = task["name"]
+                self._close_machine()
+                try:
+                    self.env.inner = make_env(task)
+                except Exception as error:  # one machine that will not build leaves its task, not the session
+                    self.outcomes.append({"task": task["name"], "exit_status": "MachineFailed", "reason": f"{type(error).__name__}: {error}"[:500],
+                                          "calls": self.n_calls, "compactions": len(self.events)})
+                    continue
+                text = worded(task, machines) if worded else task["instruction"]
+                machines += 1
+                if not opened:
+                    opened = True
+                    self.extra_template_vars |= {"task": text}
+                    self.messages = []
+                    self.add_messages(
+                        self.model.format_message(role="system", content=self._render_template(self.config.system_template)),
+                        self.model.format_message(role="user", content=self._render_template(self.config.instance_template)))
+                    self._told.add(id(self.messages[1]))
+                else:
+                    if self.messages[-1].get("role") == "exit":
+                        self.messages.pop()
+                    self.add_messages({"role": "user", "content": text})
+                ended = self._until_exit()
+                self.outcomes.append({"task": task["name"], "exit_status": ended.get("exit_status"), "calls": self.n_calls,
+                                      "compactions": len(self.events)})
+                if ended.get("exit_status") not in ("Submitted", "TaskCallLimit", "RepeatedFormatError"):
+                    break
+        finally:
+            self._close_machine()
         return self.outcomes
+
+    def _close_machine(self) -> None:
+        """A finished task's machine holds memory on a shared node, so it goes before the next one starts."""
+        machine, self.env.inner = self.env.inner, None
+        getattr(machine, "cleanup", lambda: None)()
 
     def serialize(self, *extra_dicts: dict) -> dict:
         return super().serialize({"info": {"compactions": self.events, "recorded_to_memory": self.recorded}},

@@ -7,6 +7,9 @@ scripted model and a stand-in shell, so every hook is checked before any contain
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -583,20 +586,164 @@ def test_the_memory_arms_differ_only_by_what_the_system_prompt_says_about_the_re
     assert seen["taste_check"] == f"{seen['taste']} {SENTENCE} {LOOK}"
 
 
-def test_the_task_containers_use_the_setting_that_works_on_the_cluster(monkeypatch) -> None:
+def _stand_in_apptainer(tmp_path: Path, monkeypatch) -> Path:
+    """Stands in for Apptainer: it builds a folder, keeps a log, and runs a command given to an instance on this machine's shell."""
+    log = tmp_path / "apptainer.log"
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    (folder / "apptainer").write_text(f"""#!/bin/bash
+echo "$*" >> {log}
+[ "$1" = --silent ] && shift
+case "$1 $2" in
+  "build --sandbox") mkdir -p "$3"; exit 0;;
+  "instance start") [ -n "$STAND_IN_WILL_NOT_START" ] && {{ echo "no user namespace"; exit 1; }}; exit 0;;
+  "instance stop") exit 0;;
+esac
+case "$*" in *"/proc/[0-9]*"*) printf '%s\\n' "${{STAND_IN_PROCESSES:-4}}" "${{STAND_IN_FILES:-0}}" 0; exit 0;; esac
+while [ "$1" != bash ]; do shift; done
+exec "$@"
+""")
+    (folder / "apptainer").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}:{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    tempfile.tempdir = None
+    return log
+
+
+def test_a_machine_has_its_own_process_list_and_says_so_in_how_it_starts(tmp_path: Path, monkeypatch) -> None:
     from studies.long_run.session import _environment
 
-    made = {}
+    log = _stand_in_apptainer(tmp_path, monkeypatch)
+    machine = _environment("machine", 30)({"image": "x.sif", "cwd": "/"})
+    machine.execute({"command": "echo hello"})
+    name, lines = machine.name, log.read_text().splitlines()
+    start = next(line for line in lines if "instance start" in line)
+    assert "--contain --cleanenv --fakeroot --ignore-fakeroot-command" in start and "--writable" in start and "--workdir" in start and start.endswith(name)
+    command = next(line for line in lines if "echo hello" in line)
+    assert command.startswith("--silent exec --cleanenv --ignore-fakeroot-command") and f"instance://{name}" in command
+    sandbox, scratch = machine.sandbox_dir, machine.scratch
+    machine.cleanup()
+    assert f"instance stop {name}" in log.read_text() and not sandbox.exists() and not scratch.exists()
 
-    class Stand:
-        def __init__(self, **kwargs) -> None:
-            made.update(kwargs)
 
-    monkeypatch.setattr("minisweagent.environments.singularity.SingularityEnvironment", Stand)
-    _environment("singularity", 300)({"image": "docker://x/y:1", "cwd": "/app"})
-    assert made["executable"] == "apptainer" and made["image"] == "docker://x/y:1" and made["cwd"] == "/app"
-    assert made["exec_args"] == ["--contain", "--cleanenv", "--fakeroot", "--ignore-fakeroot-command"]
-    assert made["global_args"] == ["--silent"], "a warning first in the output would hide a submission"
+def test_a_machine_gives_a_commands_output_and_a_submission_as_the_agent_expects(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.machine import Machine
+
+    _stand_in_apptainer(tmp_path, monkeypatch)
+    machine = Machine(image="x.sif")
+    done = machine.execute({"command": "echo out; echo err >&2; exit 3"})
+    assert (done["returncode"], sorted(done["output"].split())) == (3, ["err", "out"]) and done["exception_info"] == ""
+    with pytest.raises(Submitted):
+        machine.execute({"command": DONE})
+    machine.cleanup()
+
+
+def test_work_left_in_the_background_does_not_hold_a_command_open_and_a_slow_one_times_out(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.machine import Machine
+
+    _stand_in_apptainer(tmp_path, monkeypatch)
+    machine = Machine(image="x.sif", timeout=2)
+    started = time.monotonic()
+    assert machine.execute({"command": "sleep 20 & echo started"})["output"].strip() == "started"
+    assert time.monotonic() - started < 2
+    slow = machine.execute({"command": "echo begun; sleep 20"})
+    assert slow["returncode"] == -1 and "begun" in slow["output"] and "executing the command" in slow["exception_info"]
+    machine.cleanup()
+
+
+def test_a_machine_that_will_not_start_says_why_and_leaves_nothing_behind(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.machine import Machine
+
+    _stand_in_apptainer(tmp_path, monkeypatch)
+    monkeypatch.setenv("STAND_IN_WILL_NOT_START", "1")
+    with pytest.raises(RuntimeError, match="no user namespace"):
+        Machine(image="x.sif")
+    assert not list(tmp_path.glob("minisweagent-*"))
+
+
+def test_a_machine_reads_its_wall_before_anything_else_runs_on_it_and_keeps_what_it_saw(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.machine import Machine
+
+    log = _stand_in_apptainer(tmp_path, monkeypatch)
+    machine = Machine(image="x.sif")
+    assert machine.wall["processes"] == 4 and set(machine.wall["files_outside"]) == {str(Path.home()), str(Path.cwd())}
+    assert not any(machine.wall["files_outside"].values())
+    run_on_it = [line for line in log.read_text().splitlines() if " exec " in f" {line}"]
+    assert len(run_on_it) == 1 and "/proc/[0-9]*" in run_on_it[0], "the check is the first thing a machine runs"
+    assert " kill" not in run_on_it[0], "the check sends no signal"
+    machine.cleanup()
+
+
+@pytest.mark.parametrize(("setting", "value", "says"), [("STAND_IN_PROCESSES", "500", "sees 500 processes"), ("STAND_IN_PROCESSES", "0", "sees 0 processes"),
+                                                       ("STAND_IN_PROCESSES", "no /proc", "would not say"), ("STAND_IN_FILES", "12", "this account's files")])
+def test_a_machine_whose_wall_does_not_hold_is_refused_and_leaves_nothing_behind(tmp_path: Path, monkeypatch, setting: str, value: str, says: str) -> None:
+    from studies.long_run.machine import Machine
+
+    log = _stand_in_apptainer(tmp_path, monkeypatch)
+    monkeypatch.setenv(setting, value)
+    with pytest.raises(RuntimeError, match=says):
+        Machine(image="x.sif")
+    assert "instance stop" in log.read_text() and not list(tmp_path.glob("minisweagent-*"))
+
+
+def test_a_session_goes_on_past_a_machine_with_no_wall_and_keeps_what_each_machine_saw(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.session import _environment
+
+    _stand_in_apptainer(tmp_path, monkeypatch)
+    session = load_session({"tasks": [{"name": "one", "instruction": "A", "image": "x.sif"}, {"name": "two", "instruction": "B", "image": "x.sif"}],
+                            "instance_template": "{{task}}"})
+    broken = {"one"}
+
+    def make(task: dict):
+        monkeypatch.setenv("STAND_IN_PROCESSES", "500" if task["name"] in broken else "4")
+        return _environment("machine", 30)(task)
+
+    summary = run_session(session, arm="compaction", chat=_routed(_Script([_bash(DONE, "c1")])), make_env=make, count=_count,
+                          out=tmp_path / "out", workdir=tmp_path / "work", package_prompt=lambda: _prompt)
+    assert [o["exit_status"] for o in summary["outcomes"]] == ["MachineFailed", "Submitted"]
+    assert "wall does not hold" in summary["outcomes"][0]["reason"] and "sees 500 processes" in summary["outcomes"][0]["reason"]
+    assert [row["task"] for row in summary["walls"]] == ["two"] and summary["walls"][0]["wall"]["processes"] == 4
+    assert not list(tmp_path.glob("minisweagent-*")), "every machine is closed by the session's end"
+
+
+def test_each_machine_is_closed_before_the_next_opens_and_the_last_when_the_session_ends(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    class Shell:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            events.append(f"open {name}")
+
+        def execute(self, action: dict, cwd: str = "", *, timeout=None) -> dict:
+            if DONE in action["command"]:
+                raise Submitted({"role": "exit", "content": "", "extra": {"exit_status": "Submitted", "submission": ""}})
+            return {"output": "", "returncode": 0, "exception_info": ""}
+
+        def get_template_vars(self, **kwargs) -> dict:
+            return {}
+
+        def serialize(self) -> dict:
+            return {}
+
+        def cleanup(self) -> None:
+            events.append(f"close {self.name}")
+
+    session = load_session({"tasks": [{"name": "one", "instruction": "A"}, {"name": "two", "instruction": "B"}]})
+    run_session(session, arm="compaction", chat=_routed(_Script([_bash(DONE, "c1"), _bash(DONE, "c2")])), make_env=lambda task: Shell(task["name"]), count=_count,
+                out=tmp_path / "out", workdir=tmp_path / "work", package_prompt=lambda: _prompt)
+    assert events == ["open one", "close one", "open two", "close two"]
+
+
+def test_tasks_that_open_a_port_are_left_out_since_sessions_share_a_network(tmp_path: Path) -> None:
+    from studies.long_run.make_session import _eligible
+
+    for name, words in (("quiet", "Sort the file."), ("web", "Serve the files on port 8080."), ("rpc", "Build a gRPC service."), ("nginx", "Set up a web server.")):
+        folder = tmp_path / name
+        (folder / "environment").mkdir(parents=True)
+        (folder / "task.toml").write_text(f'[environment]\ndocker_image = "owner/{name}:1"\ncpus = 1\nmemory_mb = 2048\n')
+        (folder / "instruction.md").write_text(words)
+        (folder / "environment" / "Dockerfile").write_text("FROM python:3.13\nWORKDIR /app\n")
+    assert [task["name"] for task in _eligible(tmp_path)] == ["quiet"]
 
 
 def test_the_session_file_is_built_the_same_way_from_the_public_tasks(tmp_path: Path) -> None:
@@ -909,3 +1056,115 @@ def test_an_empty_reply_from_the_note_taker_leaves_the_notes_as_they_were(tmp_pa
         assert store.newest() == "kept and more" and store.commits == 2
     finally:
         store.close()
+
+
+# ------------------------------------------------------------------ the third review
+
+
+def test_the_memory_holds_the_talk_and_not_its_own_searches(tmp_path: Path) -> None:
+    store = GitTurns(tmp_path)
+    script = _Script([_bash("ls deploy", "c1"), _reply([_call(SEARCH, {"description": "deploy"}, "s1")]), _reply([_call(SEARCH, {"description": "deploy"}, "s2")]),
+                      _bash(DONE, "c2")])
+    agent, _ = _agent(script, store=store)
+    agent.run_tasks([{"name": "one", "instruction": "Do the deploy."}], lambda task: _Shell())
+    last = [message for message in script.sent[-1]["messages"] if message["role"] == "tool"][-1]
+    results = json.loads(last["content"])["results"]
+    assert results and not any(SEARCH in json.dumps(result) or "pointer" in result["snippet"] for result in results)
+    assert agent.recorded == 4, "the task, a command, its output and the last command"
+    store.close()
+
+
+def test_when_a_message_holds_a_command_and_a_search_only_the_command_goes_in_the_memory(tmp_path: Path) -> None:
+    store = GitTurns(tmp_path)
+    kept: list[dict] = []
+    script = _Script([_reply([_call("bash", {"command": "ls deploy"}, "c1"), _call(SEARCH, {"description": "deploy"}, "s1")], "I will look."), _bash(DONE, "c2")])
+    agent, _ = _agent(script, store=store)
+    agent.record = kept.append
+    agent.run_tasks([{"name": "one", "instruction": "Do it."}], lambda task: _Shell())
+    both = next(row for row in kept if "ls deploy" in row["content"] and row["role"] == "assistant")
+    assert "I will look." in both["content"] and SEARCH not in both["content"]
+    store.close()
+
+
+def test_a_search_result_merely_shown_is_not_knowing_but_the_agents_own_words_are() -> None:
+    rule = {"name": "tag", "say": "first", "per_task": True, "from_task": 0, "trigger": "", "obeys": "tag-7f3a"}
+    shown = [{"kind": SEARCH, "call": 1, "task": "two", "compactions": 0, "command": f"[{SEARCH}] {{}}", "output": "the tag is tag-7f3a", "said": ""},
+             {"kind": "bash", "call": 2, "task": "two", "compactions": 0, "command": "ls", "output": "x", "said": ""}]
+    assert score_session(shown, [rule])["tag"]["knows"] == 0
+    said = [shown[0], {**shown[1], "said": "the tag is tag-7f3a"}]
+    assert score_session(said, [rule])["tag"]["knows"] == 1
+    silent = [{"kind": "no_command", "call": 1, "task": "two", "compactions": 0, "command": "", "output": "tag-7f3a"}]
+    assert score_session(silent, [rule])["tag"]["knows"] == 1
+
+
+def test_a_plant_that_failed_leaves_that_machine_and_the_next_one_gets_it(tmp_path: Path) -> None:
+    class Full(_Shell):
+        def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict:
+            if "/opt/tag" in action["command"]:
+                return {"output": "No space left on device", "returncode": 1, "exception_info": ""}
+            return super().execute(action, cwd, timeout=timeout)
+
+    shells = [Full(), _Shell()]
+    machines = iter(shells)
+    session = load_session({**SESSION, "rules": [], "compact_at_tokens": 0, "first_prepare": ["echo tag-7f3a > /opt/tag"]})
+    summary = run_session(session, arm="compaction", chat=_routed(_Script([_bash(DONE, "c1")])), make_env=lambda task: next(machines), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert [o["exit_status"] for o in summary["outcomes"]] == ["MachineFailed", "Submitted"]
+    assert "No space left" in summary["outcomes"][0]["reason"]
+    assert shells[1].ran[0] == "echo tag-7f3a > /opt/tag" and summary["planted_on"] == "two"
+
+
+def test_a_session_where_nothing_could_be_planted_is_not_valid(tmp_path: Path) -> None:
+    class Full(_Shell):
+        def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict:
+            return {"output": "No space left on device", "returncode": 1, "exception_info": ""}
+
+    session = load_session({**SESSION, "rules": [], "compact_at_tokens": 0, "first_prepare": ["echo tag-7f3a > /opt/tag"]})
+    summary = run_session(session, arm="compaction", chat=_routed(_Script([])), make_env=lambda task: Full(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["planted_on"] is None and summary["valid"] is False
+
+
+def test_the_whole_output_of_a_long_command_is_scored(tmp_path: Path) -> None:
+    class Long(_Shell):
+        def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict:
+            if action["command"].startswith("echo COMPLETE"):
+                return super().execute(action, cwd, timeout=timeout)
+            return {"output": "x" * 5000 + " tag-7f3a", "returncode": 0, "exception_info": ""}
+
+    tag = {"name": "tag", "say": "first", "text": "Print the tag.", "per_task": True, "trigger": "", "obeys": "tag-7f3a"}
+    session = load_session({**SESSION, "rules": [tag], "compact_at_tokens": 0, "tasks": [{"name": "one", "instruction": "Do one."}]})
+    summary = run_session(session, arm="compaction", chat=_routed(_Script([_bash("build", "c1"), _bash(DONE, "c2")])), make_env=lambda task: Long(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["scores"]["tag"]["obeyed"] == 1
+
+
+def test_a_record_the_ledger_refuses_makes_the_session_invalid(tmp_path: Path, monkeypatch) -> None:
+    from studies import memory_ledger
+
+    monkeypatch.setattr("studies.long_run.session.check", lambda records: (_ for _ in ()).throw(memory_ledger.ClaimRefused("no commit recorded")))
+    summary = run_session(load_session(SESSION), arm="taste", chat=_routed(_session_chat()), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["valid"] is False and "no commit recorded" in summary["ledger_refused"]
+
+
+def test_the_ledger_of_every_arm_passes_its_check(tmp_path: Path) -> None:
+    session = load_session(SESSION)
+    summary = run_session(session, arm="taste", chat=_routed(_session_chat()), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["valid"] is True and summary["ledger_refused"] is None
+
+
+def test_the_command_line_says_when_a_session_ended_badly(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run import session as module
+
+    def ended(*args, **kwargs) -> dict:
+        return {"arm": "taste", "outcomes": [], "calls": 0, "compactions": 0, "memory_turns": 0, "scores": {}, "ended_by": "RuntimeError: no model", "valid": True}
+
+    monkeypatch.setattr(module, "run_session", ended)
+    monkeypatch.setattr(module, "package_prompt", lambda: _prompt)
+    (tmp_path / "s.json").write_text(json.dumps(SESSION))
+    code = module.main(["--session", str(tmp_path / "s.json"), "--url", "http://x", "--model", "m", "--tokenizer", "words", "--out", str(tmp_path / "o"), "--workdir",
+                        str(tmp_path / "w"), "--arm", "taste", "--env", "local"])
+    assert code == 1
+

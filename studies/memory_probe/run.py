@@ -165,21 +165,26 @@ def main(argv=None) -> int:
     items = delivered_items(inputs / "delivered.jsonl", arguments.prompt) if arguments.arm in _NEEDS_ITEMS else None
 
     def digest(path: str | Path | None) -> str | None:
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else None
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path and Path(path).exists() else None
 
     identity = {"arm": arguments.arm, "condition": arguments.condition, "prompt": arguments.prompt, "k": arguments.k,
                 "upper": arguments.upper, "budget": arguments.budget, "keep": arguments.keep, "max_rounds": arguments.max_rounds,
                 "model": arguments.model, "limit": arguments.limit, "shard": arguments.shard, "cases_sha256": digest(inputs / "cases.jsonl"),
                 "summaries_sha256": digest(inputs / "summaries.jsonl"), "notes_sha256": digest(arguments.notes),
-                "headers_sha256": digest(arguments.headers), "commit": code_version()[0], "code_digest": code_digest()}
+                "headers_sha256": digest(arguments.headers), "delivered_sha256": digest(inputs / "delivered.jsonl"),
+                "tokenizer_sha256": digest(arguments.tokenizer), "commit": code_version()[0], "code_digest": code_digest()}
+    headers = StoredTurnHeaders(Path(arguments.headers)) if arguments.headers else None
     summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers, delivered=blocks,
                       notes=versions, items=items, identity=identity,
                       keep=arguments.keep,
                       arm=arguments.arm, condition=arguments.condition, workdir=Path(arguments.workdir),
                       max_rounds=arguments.max_rounds, budget=arguments.budget, count=count,
                       prompt=arguments.prompt, k=arguments.k, upper=arguments.upper,
-                      header=StoredTurnHeaders(Path(arguments.headers)) if arguments.headers else None)
+                      header=headers)
     print(json.dumps({key: summary[key] for key in ("cases", "looked", "found", "compliant", "acted", "unparsed_arguments")}))
+    if headers is not None and headers.missing:
+        print(f"{headers.missing} turns had no header, so this row is not what it says", file=sys.stderr)
+        return 1
     return 0
 
 

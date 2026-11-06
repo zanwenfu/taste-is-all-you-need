@@ -34,8 +34,8 @@ from studies.context_rot.repeated import round_prompt
 from studies.long_run.agent import LongRunAgent, MemoryEnvironment, ToolModel
 from studies.long_run.score import score_session
 from studies.memory_bench.core import fill
-from studies.memory_ledger import BASELINE, stand_in_record
-from studies.memory_probe.cases import DELIVERED_HEADER, FLAT_HEADER, LOOK, SENTENCE, keep_newest
+from studies.memory_ledger import BASELINE, ClaimRefused, check, stand_in_record
+from studies.memory_probe.cases import DELIVERED_HEADER, LOOK, NOTES_HEADER, SENTENCE, keep_newest
 from studies.memory_probe.stores import GitTurns, NotesStore
 from taste.memstore import CommitHeader
 
@@ -44,11 +44,6 @@ NOTE_ARMS = {"notes_told": "told", "notes_neutral": "neutral"}
 ARMS = ("compaction", *TOOL_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated")
 MEMORY_BUDGET = 4096
 _SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
-# Duke's Apptainer has no user-id map, and its fakeroot helper needs a newer C library than the task images have. Without the
-# helper the agent is still root inside and its writes stay; a package whose install changes file owners may only half install.
-CONTAINER_ARGS = ["--contain", "--cleanenv", "--fakeroot", "--ignore-fakeroot-command"]
-# A warning from the container runtime would come first in a command's output, where the agent looks for its submission.
-CONTAINER_GLOBAL_ARGS = ["--silent"]
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 
@@ -153,7 +148,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
 
         def standing() -> str:
             newest = store.newest()
-            return f"{FLAT_HEADER}\n{fill([newest], MEMORY_BUDGET, count)}" if newest else ""
+            return f"{NOTES_HEADER}\n{fill([newest], MEMORY_BUDGET, count)}" if newest else ""
     elif arm == "restated":
 
         def standing() -> str:
@@ -195,18 +190,29 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         told = [rule["text"] for rule in rules if rule["say"] == "first" and machines == 0]
         return "\n\n".join([*told, task["instruction"]])
 
-    planted = [False]
+    planted_on: list[str] = []
+    walls: list[dict] = []
+
+    def must(env: Any, command: str) -> None:
+        done = env.execute({"command": command})
+        if done.get("returncode"):
+            raise RuntimeError(f"the harness's own step failed: {str(done.get('output'))[-300:]}")
 
     def prepared(task: dict) -> Any:
         """A task's machine, with anything the session plants there first: the harness's own step, in no message and no log. What is
-        planted once goes on the first machine that actually opens."""
+        planted once goes on the first machine that actually takes it; one that will not take it leaves its task, like a machine that will not build."""
         env = make_env(task)
-        for command in task.get("prepare", ()):
-            env.execute({"command": command})
-        if not planted[0]:
-            for command in session.get("first_prepare", ()):
-                env.execute({"command": command})
-            planted[0] = True
+        try:
+            for command in task.get("prepare", ()):
+                must(env, command)
+            if not planted_on:
+                for command in session.get("first_prepare", ()):
+                    must(env, command)
+                planted_on.append(task["name"])
+        except Exception:
+            getattr(env, "cleanup", lambda: None)()
+            raise
+        walls.append({"task": task["name"], "wall": getattr(env, "wall", None)})
         return env
 
     ended_by = None
@@ -218,6 +224,11 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         ledger = (store.ledger("agent_tools" if arm in TOOL_ARMS else "delivered") if store
                   else stand_in_record(BASELINE, code=f"studies/long_run/session.py:{arm}"))
         note_versions = store.commits if arm in NOTE_ARMS else 0
+        ledger_refused = None
+        try:
+            check([ledger])
+        except ClaimRefused as error:
+            ledger_refused = str(error)
     finally:
         if store:
             store.close()
@@ -228,7 +239,9 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         reasons[str(row.get("finish_reason"))] = reasons.get(str(row.get("finish_reason")), 0) + 1
     summary = {"arm": arm, "versions": versions or {}, "outcomes": agent.outcomes, "ended_by": ended_by, "calls": agent.n_calls,
                "compactions": len(agent.events), "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
-               "resent": agent.resent, "valid": not agent.resent, "no_command": len(silent), "no_command_finish_reasons": reasons,
+               "resent": agent.resent, "ledger_refused": ledger_refused, "planted_on": planted_on[0] if planted_on else None, "walls": walls,
+               "valid": not agent.resent and ledger_refused is None and (bool(planted_on) or not session.get("first_prepare")),
+               "no_command": len(silent), "no_command_finish_reasons": reasons,
                "reader_calls": reader_calls[0], "note_versions": note_versions,
                "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None,
                "scores": score_session(rows, rules)}
@@ -252,11 +265,10 @@ def _environment(kind: str, timeout: int) -> Callable[[dict], Any]:
             from minisweagent.environments.local import LocalEnvironment
 
             return LocalEnvironment(**settings)
-        if kind == "singularity":
-            from minisweagent.environments.singularity import SingularityEnvironment
+        if kind == "machine":
+            from studies.long_run.machine import Machine
 
-            return SingularityEnvironment(image=task["image"], executable="apptainer", exec_args=CONTAINER_ARGS,
-                                          global_args=CONTAINER_GLOBAL_ARGS, **settings)
+            return Machine(image=task["image"], **settings)
         if kind == "docker":
             from minisweagent.environments.docker import DockerEnvironment
 
@@ -284,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("session", "url", "model", "tokenizer", "out", "workdir"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--arm", required=True, choices=ARMS)
-    parser.add_argument("--env", default="docker", choices=("local", "singularity", "docker"))
+    parser.add_argument("--env", default="docker", choices=("local", "machine", "docker"))
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--command-timeout", type=int, default=300)
     arguments = parser.parse_args(argv)
@@ -297,6 +309,9 @@ def main(argv: list[str] | None = None) -> int:
                           out=Path(arguments.out), workdir=Path(arguments.workdir), package_prompt=package_prompt(),
                           versions={"mini_swe_agent": minisweagent.__version__, "model": arguments.model, "env": arguments.env})
     print(json.dumps({key: summary[key] for key in ("arm", "outcomes", "calls", "compactions", "memory_turns", "scores")}))
+    if summary["ended_by"] or not summary["valid"]:
+        print(f"this session did not end cleanly: ended by {summary['ended_by']}, valid {summary['valid']}", file=sys.stderr)
+        return 1
     return 0
 
 

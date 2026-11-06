@@ -1273,3 +1273,94 @@ def test_a_stopped_run_carries_on_only_with_the_settings_it_started_with(tmp_pat
     run_all([case], {case["id"]: "S"}, chat=lambda m, t: _reply("A"), out=out, workers=1, identity={"budget": 500}, **settings)
     with pytest.raises(SystemExit, match="budget"):
         run_all([case], {case["id"]: "S"}, chat=lambda m, t: _reply("A"), out=out, workers=1, identity={"budget": 400}, **settings)
+
+
+# ------------------------------------------------------------------ the third review
+
+
+def test_the_note_taker_never_sees_the_system_prompt() -> None:
+    asked = []
+
+    def ask(prompt: str) -> dict:
+        asked.append(prompt)
+        return {"text": "notes", "finish_reason": "stop", "prompt_tokens": 1, "completion_tokens": 1}
+
+    versions = take_notes([{"role": "system", "content": "SYSTEM WORDS"}, *_history()], ask)
+    assert len(versions) == 3 and not any("SYSTEM WORDS" in prompt for prompt in asked)
+
+
+def test_every_block_the_harness_delivers_says_the_later_statement_stands_and_names_what_it_is() -> None:
+    from studies.memory_probe.cases import FOUND_HEADER
+
+    for header in (DELIVERED_HEADER, FLAT_HEADER, FOUND_HEADER, INDEX_HEADER):
+        assert "the later one stands" in header
+    assert "notes file" not in FLAT_HEADER
+
+
+def test_a_rule_in_the_list_counts_as_found_and_the_search_half_is_kept_apart(tmp_path: Path) -> None:
+    case = {**_case(), "probe_prompt": REQUEST.replace("send anything to Sarah", "zebra"), "messages": [{"role": "user", "content": "nothing of use"}]}
+    row = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a7q", condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                   prompt="anthropic", k=1, header=_headers, delivered=f"- {RULE}")
+    assert row["found"] is True and row["found_in_search"] is False
+
+
+def test_the_rule_list_keeps_to_the_budget_and_what_it_takes_leaves_less_for_the_search(tmp_path: Path) -> None:
+    lines = "\n".join(f"- rule number {number} about the thing" for number in range(10))
+    listed = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a6", condition="i", workdir=tmp_path, max_rounds=1, budget=15, count=_count,
+                      prompt="anthropic", k=1, delivered=lines)
+    assert listed["memory_tokens"] <= 15 and "rule number 9" in listed["delivered_text"] and "rule number 0" not in listed["delivered_text"]
+    case = {**_case(), "probe_prompt": REQUEST.replace("send anything to Sarah", "offsite")}
+    both = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a7q", condition="i", workdir=tmp_path, max_rounds=1, budget=20, count=_count,
+                    prompt="anthropic", k=1, header=_headers, delivered=lines)
+    assert 7 <= both["memory_tokens"] <= 20
+
+
+def test_every_row_keeps_what_it_delivered_for_the_judge_and_the_count_of_old_text(tmp_path: Path) -> None:
+    for arm, extra in (("a2a", {}), ("a6", {"delivered": f"- {RULE}"})):
+        row = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm=arm, condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                       prompt="anthropic", k=1, **extra)
+        assert RULE in row["delivered_text"] and row["memory_tokens"] == _count(row["delivered_text"])
+    alone = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a1", condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                     prompt="anthropic", k=1)
+    assert alone["delivered_text"] == "" and alone["memory_tokens"] == 0
+
+
+def test_a_header_that_did_not_parse_is_asked_again_and_until_then_it_counts_as_missing(tmp_path: Path) -> None:
+    path = tmp_path / "headers.jsonl"
+
+    def said(text: str):
+        return lambda prompt: {"text": text, "finish_reason": "stop", "prompt_tokens": 1, "completion_tokens": 1}
+
+    assert write_turn_headers([_case()], said("no json here"), path, workers=1)["failed"] == 6
+    missing = StoredTurnHeaders(path)
+    missing(0, _history()[0])
+    assert missing.missing == 1
+    counts = write_turn_headers([_case()], said('{"what": "a turn", "keywords": []}'), path, workers=1)
+    assert counts["calls"] == 6 and counts["failed"] == 0
+    found = StoredTurnHeaders(path)
+    assert found(0, _history()[0]).what == "a turn" and found.missing == 0
+
+
+def test_a_notes_file_is_judged_for_whether_it_stored_the_rule(tmp_path: Path) -> None:
+    from studies.memory_probe.judge import judge_stored
+
+    notes = tmp_path / "notes.jsonl"
+    rows = [{"id": "a", "versions": ["has the rule", "dropped"]}, {"id": "b", "versions": ["nothing", "has the rule"]}, {"id": "c", "versions": ["nothing", "nothing"]}]
+    notes.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    asked = []
+
+    def verdict(rule: str, delivered: list[dict]) -> bool:
+        asked.append(delivered[0]["content"])
+        return "the rule" in delivered[0]["content"]
+
+    out = tmp_path / "stored.jsonl"
+    judge_stored(notes, {"a": "r", "b": "r", "c": "r"}, verdict, out, workers=1)
+    stored = {row["id"]: row for row in map(json.loads, out.read_text().splitlines())}
+    assert (stored["a"]["newest"], stored["a"]["any"]) == (False, True)
+    assert (stored["b"]["newest"], stored["b"]["any"]) == (True, True)
+    assert (stored["c"]["newest"], stored["c"]["any"]) == (False, False)
+    assert stored["b"]["asked"] == 1, "a rule in the newest version is stored, with nothing more to ask"
+    before = len(asked)
+    judge_stored(notes, {"a": "r", "b": "r", "c": "r"}, verdict, out, workers=1)
+    assert len(asked) == before, "a stopped run picks up where it was"
+

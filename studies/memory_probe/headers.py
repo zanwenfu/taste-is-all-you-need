@@ -35,7 +35,7 @@ def turn_key(turn: dict) -> str:
 def write_turn_headers(cases: list[dict], ask: Callable[[str], dict], path: Path, *, workers: int) -> dict[str, int]:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    stored = {json.loads(line)["key"] for line in path.read_text().splitlines()} if path.exists() else set()
+    stored = {row["key"] for row in map(json.loads, path.read_text().splitlines()) if row["ok"]} if path.exists() else set()
     turns = [turn for case in cases for turn in case["messages"]]
     todo = {turn_key(turn): turn for turn in turns if turn_key(turn) not in stored}
     lock, failed = threading.Lock(), [0]
@@ -102,7 +102,7 @@ class StoredTurnHeaders:
 
     def __call__(self, number: int, turn: dict) -> CommitHeader:
         row = self.headers.get(turn_key(turn))
-        if row is None:
+        if row is None or not row["ok"]:
             self.missing += 1
             return CommitHeader()
         return CommitHeader(what=row["what"], keywords=tuple(row["keywords"]))

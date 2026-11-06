@@ -12,6 +12,8 @@ from studies.memory_probe.analyze import (
     effective_rounds,
     floors_from,
     load_run,
+    load_stored,
+    one_code,
     render,
     render_rules,
     rounds_from,
@@ -161,3 +163,86 @@ def test_obedience_is_shown_against_the_compactions_so_far() -> None:
     assert table["python_B"]["compaction"] == {"0": [2, 2], "1-2": [2, 3], "11-20": [0, 4], "21-50": [0, 1]}
     text = long_analyze.render_compactions(table)
     assert "| compaction | 2/2 | 2/3 | - | - | 0/4 | 0/1 | - | - |" in text.splitlines()
+
+
+# ------------------------------------------------------------------ the third review
+
+
+def test_an_unread_answer_leaves_the_rate_as_the_benchmark_leaves_it(tmp_path: Path) -> None:
+    ids = range(20)
+    _write(tmp_path, "summary", [_row(n, obeyed=False) for n in ids])
+    _write(tmp_path, "restated", [_row(n, obeyed=True) for n in ids])
+    _write(tmp_path, "turns", [_row(n, obeyed=None if n < 8 else True) for n in ids])
+    entries = {entry["row"]: entry for entry in tables(load_run(tmp_path, "anthropic", 1), {f"h0:{n}": False for n in ids})}
+    assert entries["turns"]["effective_retention"] == pytest.approx(100.0)
+    assert entries["turns"]["difference"][0] == pytest.approx(100.0), "only the pairs both read"
+
+
+def test_a_withdrawn_row_is_read_against_the_no_rule_rate_and_has_no_effective_retention(tmp_path: Path) -> None:
+    ids = [f"h0:{n}:withdrawn" for n in range(4)]
+
+    def rows(pattern: list[bool]) -> list[dict]:
+        return [{**_row(n, obeyed=value), "id": ids[n]} for n, value in enumerate(pattern)]
+
+    _write(tmp_path, "summary", rows([False, False, False, False]))
+    _write(tmp_path, "restated", rows([False, False, True, False]))
+    _write(tmp_path, "turns", rows([True, True, True, False]))
+    entries = {entry["row"]: entry for entry in tables(load_run(tmp_path, "anthropic", 1), dict.fromkeys(ids, False))}
+    turns = entries["turns"]
+    assert "effective_retention" not in turns and turns["still_obeying"] == 3 and turns["no_rule"] == 0
+    assert "better" not in turns["against_summary"] and turns["against_summary"]["more_often"] == 3
+    report = render(list(entries.values()), "withdrawn")
+    assert "still obeying" in report
+
+
+def test_the_stored_step_is_shown_for_each_kind_of_row(tmp_path: Path) -> None:
+    def row(n: int, arm: str, **extra) -> dict:
+        return _row(n, obeyed=True, arm=arm, rule_turns=[1] if n else [], **extra)
+
+    _write(tmp_path, "turns", [row(n, "a5q") for n in range(2)])
+    _write(tmp_path, "notes-last-told", [row(n, "a2cq") for n in range(2)], name="a2cq-i-anthropic-k1-b4096")
+    _write(tmp_path, "notes-every-told", [row(n, "a2dq") for n in range(2)], name="a2dq-i-anthropic-k1-b4096")
+    _write(tmp_path, "rules", [row(n, "a6") for n in range(2)], [{"id": f"h0:{n}", "found_by_judge": n == 1} for n in range(2)], name="a6-i-anthropic-k1-b4096")
+    _write(tmp_path, "summary", [row(n, "a1") for n in range(2)], name="a1-i-anthropic-k1-b4096")
+    (tmp_path / "stored-told.served.jsonl").write_text("".join(json.dumps(line) + "\n" for line in (
+        {"id": "h0:0", "newest": False, "any": True, "asked": 2}, {"id": "h0:1", "newest": False, "any": False, "asked": 2})))
+    entries = {entry["row"]: entry for entry in tables(load_run(tmp_path, "anthropic", 1), {}, stored=load_stored(tmp_path))}
+    assert entries["turns"]["stored"] == 1, "every turn is there, and the row says how many cases have the rule's whole text in one"
+    assert entries["notes-last-told"]["stored"] == 0 and entries["notes-every-told"]["stored"] == 1
+    assert entries["rules"]["stored"] == 1
+    assert entries["summary"].get("stored") is None
+
+
+def test_a_verdict_the_judge_could_not_give_is_counted_apart(tmp_path: Path) -> None:
+    _write(tmp_path, "turns", [_row(n, obeyed=True) for n in range(3)], [{"id": "h0:0", "found_by_judge": True}, {"id": "h0:1", "found_by_judge": None}, {"id": "h0:2", "found_by_judge": False}])
+    entry = tables(load_run(tmp_path, "anthropic", 1), {})[0]
+    assert (entry["held"], entry["held_unclear"]) == (1, 1) and entry["obeyed_if_not"] == [1, 1]
+
+
+def test_a_table_refuses_rows_from_two_versions_of_the_code(tmp_path: Path) -> None:
+    for label, digest in (("turns", "one"), ("rules", "two")):
+        _write(tmp_path, label, [_row(0, obeyed=True)])
+        (tmp_path / label / "a5q-i-anthropic-k1-b4096" / "results.settings.json").write_text(json.dumps({"code_digest": digest, "commit": digest}))
+    with pytest.raises(ValueError, match="two versions"):
+        one_code(tmp_path, "anthropic", 1)
+    (tmp_path / "rules" / "a5q-i-anthropic-k1-b4096" / "results.settings.json").write_text(json.dumps({"code_digest": "one", "commit": "one"}))
+    assert one_code(tmp_path, "anthropic", 1) == {"code_digest": "one", "commit": "one"}
+
+
+def test_the_long_run_totals_leave_out_invalid_sessions_and_say_how_sessions_ended() -> None:
+    good = {**_summary("taste", {"a": {"obeyed": 1, "applies": 2}}), "ended_by": None}
+    bad = {**_summary("taste", {"b": {"obeyed": 2, "applies": 2}}, valid=False), "ended_by": "RuntimeError: no model"}
+    table = {entry["arm"]: entry for entry in long_analyze.arm_table({"s1": {"taste": good}, "s2": {"taste": bad}})}
+    assert table["taste"]["rules"]["rule"]["obeyed"] == 1 and table["taste"]["rules"]["rule"]["applies"] == 2
+    assert table["taste"]["invalid"] == 1 and table["taste"]["sessions"] == 2 and table["taste"]["ended_early"] == 1
+
+
+def test_the_long_run_compares_sessions_since_tasks_of_one_conversation_are_not_independent() -> None:
+    def seed(mine: int, base: int) -> dict:
+        return {"taste": _summary("taste", {"a": {"obeyed": mine, "applies": 4}}), "compaction": _summary("compaction", {"a": {"obeyed": base, "applies": 4}})}
+
+    runs = {"s1": seed(3, 1), "s2": seed(4, 2), "s3": seed(1, 1), "s4": seed(4, 0)}
+    pair = long_analyze.compare_rule(runs, "taste", "rule")
+    assert (pair["sessions"], pair["sessions_better"], pair["sessions_worse"]) == (4, 3, 0)
+    assert pair["sessions_p"] == pytest.approx(0.25)
+

@@ -4,7 +4,7 @@
 #SBATCH --mem=128G
 #SBATCH --time=06:00:00
 # The long run: one seed per job, TASKS public tasks in one conversation, each arm side by side on this job's own server, each session read before more are run. Real task
-# containers, from the images fetched once. READER is gpt-oss or laguna, which takes two GPUs. Free, no key. Needs STUDY_ROOT, SHA and SEED.
+# machines, each with its own process list, from the images fetched once. READER is gpt-oss or laguna, which takes two GPUs. Free, no key. Needs STUDY_ROOT, SHA and SEED.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
 D=${STUDY_ROOT:?}; S=${SHA:?}; SEED=${SEED:?}; TASKS=${TASKS:-16}; READER=${READER:-gpt-oss}; PROMPT=${PROMPT:-anthropic}; COMPACT_AT=${COMPACT_AT:-8000}; KEEP=${KEEP:-2000}
@@ -17,6 +17,10 @@ export TIKTOKEN_RS_CACHE_DIR=$D/cache/tiktoken VLLM_CACHE_ROOT=$D/cache/vllm PYT
 export TASTE_COMMIT=$S MSWEA_SILENT_STARTUP=1 MSWEA_GLOBAL_CONFIG_DIR=$L/config
 export GIT_AUTHOR_NAME=long-run GIT_AUTHOR_EMAIL=long-run@localhost GIT_COMMITTER_NAME=long-run GIT_COMMITTER_EMAIL=long-run@localhost
 OUT=$L/runs/$READER-$PROMPT-seed$SEED-$SLURM_JOB_ID; mkdir -p $OUT
+# Machines hold memory on a shared node: all of a job's sit in one folder, gone with the job however it ends.
+MACHINES=/tmp/aos-long-$SLURM_JOB_ID-machines; mkdir -p $MACHINES
+trap 'rm -rf "$MACHINES"' EXIT
+trap 'exit 143' TERM
 if [ $READER = laguna ]; then
   FOLDER=$D/models/laguna-s-2.1-nvfp4; MODEL=poolside/laguna-s-2.1
   SERVE=(--tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs '{"enable_thinking": true}')
@@ -24,7 +28,7 @@ else
   FOLDER=$D/models/gpt-oss-120b; MODEL=openai/gpt-oss-120b
   SERVE=(--tool-call-parser openai)
 fi
-fail() { echo "FAILED: $*"; kill ${PID:-0} ${SMI:-0} 2>/dev/null; exit 1; }
+fail() { echo "FAILED: $*"; kill ${PID:-} ${SMI:-} 2>/dev/null; exit 1; }
 echo "start $(date -u +%FT%TZ) on $(hostname) code $S reader $READER prompt $PROMPT seed $SEED tasks $TASKS arms $ARMS"; df -h /tmp | tail -1
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 60 > $OUT/gpu.csv &
 SMI=$!
@@ -43,13 +47,17 @@ $L/venv/bin/python -m studies.long_run.make_session --tasks-root $L/tb/terminal-
 RUNS=()
 for ARM in $ARMS; do
   ( T1=$(date +%s)
-    $L/venv/bin/python -m studies.long_run.session --session $OUT/session.json --arm $ARM --env singularity --url http://127.0.0.1:$PORT/v1 --model $MODEL \
+    TMPDIR=$MACHINES $L/venv/bin/python -m studies.long_run.session --session $OUT/session.json --arm $ARM --env machine --url http://127.0.0.1:$PORT/v1 --model $MODEL \
       --tokenizer $FOLDER/tokenizer.json --out $OUT/$ARM --workdir /tmp/aos-long-$SLURM_JOB_ID-$ARM --command-timeout 300 > $OUT/$ARM.log 2>&1
-    echo "$ARM exit $? seconds $(( $(date +%s) - T1 ))"; tail -1 $OUT/$ARM.log | cut -c1-900
-    rm -rf /tmp/aos-long-$SLURM_JOB_ID-$ARM ) &
+    code=$?
+    echo "$ARM exit $code seconds $(( $(date +%s) - T1 ))"; tail -1 $OUT/$ARM.log | cut -c1-900
+    rm -rf /tmp/aos-long-$SLURM_JOB_ID-$ARM
+    exit $code ) &
   RUNS+=($!)
 done
-wait "${RUNS[@]}"
+FAILED=0
+for RUN in "${RUNS[@]}"; do wait $RUN || FAILED=$((FAILED + 1)); done
 curl -s http://127.0.0.1:$PORT/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $OUT/vllm-metrics.txt
 kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null
-echo "end $(date -u +%FT%TZ)"
+echo "end $(date -u +%FT%TZ) arms failed $FAILED"
+[ $FAILED = 0 ]

@@ -4,7 +4,8 @@
 #SBATCH --mem=96G
 #SBATCH --time=03:00:00
 # A case set's own baselines (no rule, the summary alone, the rule restated) and its compaction records, on the first 10 histories, then the inputs the rows read. Moved,
-# reversed, withdrawn and cued cases need their own, since a later statement changes the history or the question. Free. Needs STUDY_ROOT, SHA, VARIANT and OUT.
+# reversed and withdrawn cases need their own, since a later statement changes the history. A cued case keeps the published case's history, summaries, records and notes
+# (its inputs are built apart), and needs from here only its own no-rule rate, which the analysis reads with --floors. Free. Needs STUDY_ROOT, SHA, VARIANT and OUT.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
 D=${STUDY_ROOT:?}; S=${SHA:?}; V=${VARIANT:?}; OUT=${OUT:?}; PR=${PR:-anthropic}; HISTORIES=${HISTORIES:-0:10}
@@ -36,6 +37,11 @@ T1=$(date +%s)
 $RUN $D/venv/bin/python -m studies.context_rot.conpact_bridge --source hermes --histories $HISTORIES --variant $V --prompt $PR \
   --judge defer --probe-url $URL --workers 16 --out $OUT/full/hermes-$PR/$NAME > $OUT/full-$PR.report.json 2> $OUT/full-$PR.stderr.log || fail "baseline"
 echo "baseline seconds $(( $(date +%s) - T1 ))"
+if [ "$V" = cued ]; then
+  kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null
+  echo "end $(date -u +%FT%TZ)"
+  exit 0
+fi
 T1=$(date +%s)
 $RUN $D/venv/bin/python -m studies.context_rot.repeated --prompt $PR --records-only --histories $HISTORIES --variant $V --probe-url $URL \
   --tokenizer $D/models/gpt-oss-120b --workers 15 --out $OUT/repeated/$PR/$NAME > $OUT/repeated-$PR.stdout 2> $OUT/repeated-$PR.stderr.log || fail "records"

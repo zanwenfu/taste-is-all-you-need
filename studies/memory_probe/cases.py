@@ -109,8 +109,9 @@ _READ_RULES = ("a6", "a6h", "a7", "a7q")
 _LATER_STANDS = "oldest first. Where two disagree, the later one stands:"
 DELIVERED_HEADER = f"Standing instructions the user gave in this session, verbatim, from the record, {_LATER_STANDS}"
 FOUND_HEADER = f"From the record of this session, what may bear on this request, {_LATER_STANDS}"
-INDEX_HEADER = "The record of this session, one line per commit, oldest first. memory_fetch with a line's number brings it back:"
-FLAT_HEADER = "The conversation so far, from a notes file:"
+INDEX_HEADER = "The record of this session, one line per commit, oldest first. Where two disagree, the later one stands. memory_fetch with a line's number brings it back:"
+FLAT_HEADER = f"The conversation so far, {_LATER_STANDS}"
+NOTES_HEADER = "From the notes file kept during this session:"
 
 
 def flat_file(messages: list[dict], *, budget: int, keep: str, count: Callable[[str], int]) -> str:
@@ -254,6 +255,13 @@ def _rule_turns(case: dict) -> list[int]:
     return [n for n, turn in enumerate(case["messages"]) if holds(str(turn.get("content", "")), case["sc_text"])]
 
 
+def _rules_within(block: str, budget: int, count: Callable[[str], int]) -> str:
+    """The rule list cut to the budget, the oldest going first, as a later instruction may replace an earlier one."""
+    if count(block) <= budget:
+        return block
+    return "\n".join(keep_newest(re.split(r"\n(?=- )", block), budget, count)) or "(none)"
+
+
 def _common(case: dict, run: Any, *, arm: str, condition: str, prompt: str, k: int, upper: bool, reached: list[int],
             calls: list[dict], commits: int, seconds: tuple[float, float], ledger: dict, budget: int, summary: str) -> dict[str, Any]:
     rule_turns = _rule_turns(case)
@@ -285,13 +293,16 @@ def _delivered_search(case: dict, summary: str, *, chat: Callable, arm: str, con
             store.ingest(case["messages"])
         ingested = time.perf_counter()
         pointers: list[str] = []
+        listed = _rules_within(delivered, budget, count) if arm == "a7q" else ""
+        left = budget - (count(listed) if listed else 0)
         if arm == "a2cw":
             newest = fill([store.newest()], budget, count)
             found, calls, memory_tokens = f"[newest version]\n{newest}", [], count(newest)
         else:
-            found, calls, pointers, memory_tokens = _search_for_it(store, case, budget, count, first=store.newest() if arm == "a2dw" else None)
+            found, calls, pointers, memory_tokens = _search_for_it(store, case, left, count, first=store.newest() if arm == "a2dw" else None)
         if arm == "a7q":
-            block, block_header = f"{delivered}\n\n{FOUND_HEADER}\n{found}", DELIVERED_HEADER
+            memory_tokens += count(listed)
+            block, block_header = f"{listed}\n\n{FOUND_HEADER}\n{found}", DELIVERED_HEADER
         else:
             block, block_header = found, FOUND_HEADER
         run = _without_tools(chat, case_messages(case, summary, condition=condition, upper=upper, block=block,
@@ -307,7 +318,7 @@ def _delivered_search(case: dict, summary: str, *, chat: Callable, arm: str, con
     return {**_common(case, run, arm=arm, condition=condition, prompt=prompt, k=k, upper=upper, reached=reached, calls=calls,
                       commits=commits, seconds=(ingested - started, asked - ingested), ledger=ledger, budget=budget, summary=summary),
             "delivered_tokens": count(block), "memory_tokens": memory_tokens, "delivered_text": block, "looked": True,
-            "found": holds(found, case["sc_text"]),
+            "found": holds(block, case["sc_text"]), "found_in_search": holds(found, case["sc_text"]),
             "searches": searches, "fetches": fetches, "tool_errors": sum(call["failed"] for call in calls)}
 
 
@@ -426,7 +437,7 @@ def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: s
         return _header_index(case, summary, chat=chat, condition=condition, workdir=workdir, max_rounds=max_rounds, budget=budget,
                              count=count, prompt=prompt, k=k, upper=upper, header=header)
     if arm in ("a6", "a7"):
-        block, block_header = delivered, DELIVERED_HEADER
+        block, block_header = _rules_within(delivered, budget, count), DELIVERED_HEADER
     elif arm == "a2a":
         block, block_header = flat_file(case["messages"], budget=budget, keep=keep, count=count), FLAT_HEADER
     messages = case_messages(case, summary, condition=condition, upper=upper, block=block, block_header=block_header)
@@ -461,6 +472,7 @@ def run_case(case: dict, summary: str, *, chat: Callable, arm: str, condition: s
         **{key: case[key] for key in ("id", "haystack_id", "sc_id", "sc_type", "compliant_letter")},
         "arm": arm, "condition": condition, "prompt": prompt, "k": k, "upper": upper,
         "keep": keep if arm == "a2a" else None, "delivered_tokens": count(block) if block is not None else 0, "budget": budget,
+        "memory_tokens": count(block) if block is not None else 0, "delivered_text": block or "",
         "extractor": READER_NAME if arm in _READ_RULES else None, "in_summary": holds(summary, case["sc_text"]),
         "final": run.final, "finish_reason": run.finish_reason, "action": run.action,
         "compliant": None if condition in PLAIN_CONDITIONS else grade(run.final, case["compliant_letter"]),

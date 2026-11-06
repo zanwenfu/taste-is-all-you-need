@@ -26,7 +26,7 @@ OSS=$D/models/gpt-oss-120b
 OSS_NAME=openai/gpt-oss-120b
 LLAMA_NAME=meta-llama/Meta-Llama-3.1-70B-Instruct
 FROZEN=(); [ "$PART" = held_out ] && FROZEN=(--frozen-config $SHA)
-fail() { echo "FAILED: $*"; kill ${PID:-0} ${EMB:-0} ${SMI:-0} 2>/dev/null; exit 1; }
+fail() { echo "FAILED: $*"; kill ${PID:-} ${EMB:-} ${SMI:-} 2>/dev/null; exit 1; }
 gpu_log() { nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 60 > $1/gpu.csv & SMI=$!; }
 serve_oss() {  # job folder, window, share of the GPU's memory; sets PORT and PID
   PORT=$((20000 + RANDOM % 20000)); local t0=$(date +%s)

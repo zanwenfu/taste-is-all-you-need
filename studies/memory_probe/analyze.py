@@ -4,7 +4,9 @@ A row is ``<label>/<arm>-<condition>-<prompt>-k<k>-b<budget>/results.jsonl``. Co
 never reached obeys it about half the time: every row carries the no-rule rate on the same cases, and effective retention as the benchmark
 defines it. Paired tests are per case against the summary alone, by an exact sign test, with an interval from a bootstrap over histories, since
 the 15 cases of a history share it. A rule the model does not obey even when told at that moment cannot be lost, so each row is also given
-per rule and on the cases the restated row obeyed. Where a later statement reversed a rule, ``old_text`` says whether the old one came back.
+per rule and on the cases the restated row obeyed. Where a later statement reversed a rule, ``old_text`` says whether the old one came back. Rates leave out answers that
+could not be read, as the benchmark's summary does, and say how many. Where a rule was taken back, obeying it is the failure, so such a row has no effective retention, and it is
+read against the no-rule rate. The rows of a table must have run on one version of the code.
 
     python -m studies.memory_probe.analyze --run runs/probe/matrix2 --inputs runs/probe/inputs-items --prompt anthropic --k 1 --out report.md
 """
@@ -42,16 +44,38 @@ def load_run(root: Path, prompt: str, k: int, budget: int = 4096) -> dict[str, l
     return found
 
 
+def one_code(root: Path, prompt: str, k: int, budget: int = 4096) -> dict[str, Any]:
+    """The code the rows of a table ran on. Rows from two versions of it are not one table."""
+    seen: dict[tuple, list[str]] = {}
+    for path in sorted(Path(root).glob(f"*/*-{prompt}-k{k}-b{budget}/results.settings.json")):
+        said = json.loads(path.read_text())
+        seen.setdefault((said.get("commit"), said.get("code_digest")), []).append(path.parent.parent.name)
+    if len(seen) > 1:
+        raise ValueError(f"these rows ran on two versions of the code: {seen}")
+    return next(({"code_digest": digest, "commit": commit} for commit, digest in seen), {})
+
+
+def load_stored(root: Path) -> dict[str, dict[str, dict]]:
+    """What the judge said each notes file holds, by the wording of its note-taker."""
+    found = {}
+    for style in ("told", "neutral"):
+        path = Path(root) / f"stored-{style}.served.jsonl"
+        if path.exists():
+            found[style] = {row["id"]: row for row in _rows(path)}
+    return found
+
+
 def floors_from(paths: list[Path]) -> dict[str, bool | None]:
     """The no-rule answers from a baseline's own run. A cued case keeps the published case's summaries, but its question, and so its no-rule rate, is its own."""
     return {row["id"]: row["full_without_sc_compliant"] for path in paths for row in _rows(Path(path))}
 
 
 def difference_interval(base: dict[str, dict], other: dict[str, dict], *, draws: int = 2000, seed: int = 0) -> tuple[float, float, float]:
-    """(difference in points, and its 95% interval), drawing whole histories with replacement. Unreadable answers count as not obeyed."""
+    """(difference in points, and its 95% interval), drawing whole histories with replacement, over the pairs where both answers could be read."""
     histories: dict[str, list[tuple[bool, bool]]] = {}
     for case, row in base.items():
-        histories.setdefault(row["haystack_id"], []).append((row["compliant"] is True, other[case]["compliant"] is True))
+        if row["compliant"] is not None and other[case]["compliant"] is not None:
+            histories.setdefault(row["haystack_id"], []).append((row["compliant"], other[case]["compliant"]))
     names = sorted(histories)
     def mean(pairs):
         return 100 * statistics.fmean(b - a for a, b in pairs)
@@ -65,34 +89,67 @@ def _obeyed(rows: list[dict]) -> int:
     return sum(row["compliant"] is True for row in rows)
 
 
+_TURN_ARMS = ("a2a", "a3", "a4", "a4q", "a5", "a5q", "a7", "a7q")
+_LAST_NOTES = ("a2c", "a2cq", "a2cw")
+_EVERY_NOTES = ("a2d", "a2dq", "a2dw")
+
+
+def _stored(label: str, rows: list[dict], stored: dict[str, dict[str, dict]] | None) -> int | None:
+    """The stored step: every turn is in a turn store, so how many cases have the rule's whole text in one; a rule list or a notes file holds what the judge read in it."""
+    arm = rows[0].get("arm")
+    if arm in _TURN_ARMS:
+        return sum(bool(row.get("rule_turns")) for row in rows)
+    if arm in ("a6", "a6h") and "held" in rows[0]:
+        return sum(row["held"] is True for row in rows)
+    verdicts = (stored or {}).get(label.rsplit("-", 1)[-1])
+    if verdicts and arm in (*_LAST_NOTES, *_EVERY_NOTES):
+        return sum(verdicts.get(row["id"], {}).get("newest" if arm in _LAST_NOTES else "any") is True for row in rows)
+    return None
+
+
 def row_entry(label: str, rows: list[dict], *, floor: dict[str, bool | None], base: dict[str, dict] | None, ceiling: dict[str, dict] | None,
-              old_text: dict[str, str] | None = None) -> dict[str, Any]:
+              old_text: dict[str, str] | None = None, stored: dict[str, dict[str, dict]] | None = None) -> dict[str, Any]:
     n = len(rows)
     obeyed = _obeyed(rows)
-    entry: dict[str, Any] = {"row": label, "n": n, "obeyed": obeyed, "unread": sum(row["compliant"] is None for row in rows),
+    readable = n - sum(row["compliant"] is None for row in rows)
+    withdrawn = all(str(row["id"]).endswith(":withdrawn") for row in rows)
+    entry: dict[str, Any] = {"row": label, "n": n, "obeyed": obeyed, "unread": n - readable,
                              "looked": sum(bool(row["looked"]) for row in rows), "found": sum(bool(row["found"]) for row in rows),
                              "acted": sum(bool(row.get("action")) for row in rows), "in_summary": sum(bool(row.get("in_summary")) for row in rows),
-                             "wilson": wilson(obeyed, n)}
-    if any(row["compliant"] is not None for row in rows) and {row["id"] for row in rows} <= set(floor):
-        no_rule = sum(floor[row["id"]] is True for row in rows)
+                             "wilson": wilson(obeyed, readable)}
+    in_store = _stored(label, rows, stored)
+    if in_store is not None:
+        entry["stored"] = in_store
+    if withdrawn:
+        entry["still_obeying"] = obeyed
+    if readable and {row["id"] for row in rows} <= set(floor):
+        floors = [floor[row["id"]] for row in rows if floor[row["id"]] is not None]
+        no_rule = sum(value is True for value in floors)
         entry["no_rule"] = no_rule
         if ceiling is not None and {row["id"] for row in rows} <= set(ceiling):
-            top = sum(ceiling[row["id"]]["compliant"] is True for row in rows)
+            tops = [ceiling[row["id"]]["compliant"] for row in rows if ceiling[row["id"]]["compliant"] is not None]
+            top = sum(value is True for value in tops)
             entry["restated"] = top
-            entry["effective_retention"] = effective_retention(100 * obeyed / n, 100 * no_rule / n, 100 * top / n)
+            if floors and tops and not withdrawn:
+                entry["effective_retention"] = effective_retention(100 * obeyed / readable, 100 * no_rule / len(floors), 100 * top / len(tops))
             could = [row for row in rows if ceiling[row["id"]]["compliant"] is True]
             entry["obeyed_where_restated_is"] = [_obeyed(could), len(could)]
     if "held" in rows[0]:
         held = [row for row in rows if row["held"] is True]
+        without = [row for row in rows if row["held"] is False]
         entry["held"] = len(held)
+        entry["held_unclear"] = sum(row["held"] is None for row in rows)
         entry["obeyed_if_held"] = [_obeyed(held), len(held)]
-        entry["obeyed_if_not"] = [obeyed - _obeyed(held), n - len(held)]
-    if base is not None and label != BASE and {row["id"] for row in rows} <= set(base) and any(row["compliant"] is not None for row in rows):
+        entry["obeyed_if_not"] = [_obeyed(without), len(without)]
+    if base is not None and label != BASE and {row["id"] for row in rows} <= set(base) and readable:
         mine = {row["id"]: row for row in rows}
         shared = {case: base[case] for case in mine}
-        entry["against_summary"] = paired(shared, mine, "compliant", "compliant")
+        pair = paired(shared, mine, "compliant", "compliant")
+        if withdrawn:
+            pair["more_often"], pair["less_often"] = pair.pop("better"), pair.pop("worse")
+        entry["against_summary"] = pair
         entry["difference"] = difference_interval(shared, mine)
-    if any(row["compliant"] is not None for row in rows):
+    if readable:
         entry["history_interval"] = cluster_interval(rows, "compliant")
     per_rule: dict[str, list[int]] = {}
     for row in rows:
@@ -105,11 +162,12 @@ def row_entry(label: str, rows: list[dict], *, floor: dict[str, bool | None], ba
     return entry
 
 
-def tables(run: dict[str, list[dict]], floor: dict[str, bool | None], old_text: dict[str, str] | None = None) -> list[dict[str, Any]]:
+def tables(run: dict[str, list[dict]], floor: dict[str, bool | None], old_text: dict[str, str] | None = None,
+           stored: dict[str, dict[str, dict]] | None = None) -> list[dict[str, Any]]:
     def by_id(label):
         return {row["id"]: row for row in run[label]} if label in run else None
     base, ceiling = by_id(BASE), by_id(CEILING)
-    return [row_entry(label, rows, floor=floor, base=base, ceiling=ceiling, old_text=old_text) for label, rows in sorted(run.items())]
+    return [row_entry(label, rows, floor=floor, base=base, ceiling=ceiling, old_text=old_text, stored=stored) for label, rows in sorted(run.items())]
 
 
 def effective_rounds(rows: list[dict], *, smallest: int = 200) -> dict[str, Any]:
@@ -135,11 +193,15 @@ def _cell(value: Any) -> str:
 
 
 def render(entries: list[dict[str, Any]], title: str) -> str:
-    columns = ("row", "n", "obeyed", "unread", "no_rule", "restated", "effective_retention", "obeyed_where_restated_is", "held", "obeyed_if_held", "obeyed_if_not",
-               "looked", "found", "in_summary", "acted", "old_rule_came_back")
-    lines = [f"# {title}", "", "| " + " | ".join(columns) + " | better | worse | p | difference [95%] |", "|" + "---|" * (len(columns) + 4)]
+    columns = ("row", "n", "stored", "looked", "found", "held", "held_unclear", "obeyed", "unread", "no_rule", "restated", "effective_retention", "obeyed_where_restated_is",
+               "obeyed_if_held", "obeyed_if_not", "in_summary", "acted", "old_rule_came_back")
+    withdrawn = any("still_obeying" in entry for entry in entries)
+    more, less = ("more often", "less often") if withdrawn else ("better", "worse")
+    lines = [f"# {title}", "", *(("A rule was taken back here: obeyed means still obeying it, read against the no-rule rate, and lower is closer.", "") if withdrawn else ()),
+             "| " + " | ".join(columns) + f" | {more} | {less} | p | difference [95%] |", "|" + "---|" * (len(columns) + 4)]
     for entry in entries:
-        against = entry.get("against_summary", {})
+        against = dict(entry.get("against_summary", {}))
+        against["better"], against["worse"] = against.get("more_often", against.get("better")), against.get("less_often", against.get("worse"))
         difference = entry.get("difference")
         shown = f"{difference[0]:+.1f} [{difference[1]:+.1f}, {difference[2]:+.1f}]" if difference else "-"
         lines.append("| " + " | ".join(_cell(entry.get(column)) for column in columns)
@@ -162,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--k", required=True, type=int)
     parser.add_argument("--budget", type=int, default=4096)
+    parser.add_argument("--mixed", action="store_true", help="allow rows from two versions of the code, and say so; never for a table in the paper")
     parser.add_argument("--base-cases", help="the unchanged cases, to tell whether a reversed rule's old text came back")
     parser.add_argument("--floors", nargs="+", help="a baseline's results, for cases whose no-rule rate is not in the inputs")
     parser.add_argument("--rounds-from", help="the compaction records of this prompt, to report how many rounds folded enough to be a round")
@@ -175,9 +238,16 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.base_cases:
         old = {row["id"]: row["sc_text"] for row in _rows(Path(arguments.base_cases))}
         old_text = {f"{case}:{suffix}": text for case, text in old.items() for suffix in ("revised", "withdrawn")}
-    entries = tables(load_run(Path(arguments.run), arguments.prompt, arguments.k, arguments.budget), floor, old_text)
+    run = Path(arguments.run)
+    try:
+        code = one_code(run, arguments.prompt, arguments.k, arguments.budget)
+    except ValueError as error:
+        if not arguments.mixed:
+            raise
+        code = {"mixed": str(error)}
+    entries = tables(load_run(run, arguments.prompt, arguments.k, arguments.budget), floor, old_text, load_stored(run))
     out = Path(arguments.out)
-    text = render(entries, f"{Path(arguments.run).name}, {arguments.prompt}, {arguments.k} round(s), budget {arguments.budget}") + "\n" + render_rules(entries)
+    text = render(entries, f"{run.name}, {arguments.prompt}, {arguments.k} round(s), budget {arguments.budget}") + f"\nCode: {json.dumps(code)}\n\n" + render_rules(entries)
     if arguments.rounds_from:
         text += f"\nRounds of at least 200 tokens: {json.dumps(rounds_from(Path(arguments.rounds_from), arguments.k))}\n"
     out.write_text(text)

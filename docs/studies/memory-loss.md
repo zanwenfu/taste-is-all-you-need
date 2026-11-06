@@ -19,8 +19,9 @@ search and fetch still lose, against compaction alone and a flat markdown file, 
 told earlier, measured as the agent not using it correctly at the moment it applies, although the same model does when
 told directly at that moment. Four steps are reported apart:
 
-- **stored**: the record still holds it (true by construction for an append-only record, so it proves little; a notes file or a rule list
-  may not hold it, which the retention judge reads);
+- **stored**: the record still holds it. A store of every turn holds it by construction, so that row counts only the cases with the rule's whole
+  text in a turn and proves little. A notes file or a rule list may not hold it, so the retention judge reads each: the newest version of a notes
+  file first, then its older versions from the first until one holds the rule. Whichever row is read, the judge never sees what the agent did;
 - **looks**: the agent searches, or the system delivers;
 - **finds**: the result holds the statement;
 - **uses**: the action obeys it. On the rule-loss cases this is the A or B choice; only the long run scores actions.
@@ -31,7 +32,8 @@ Effective retention is reported as the rule-loss benchmark defines it: (with mem
 ## Arms
 
 The same model, histories and memory budget in every arm, counted with one tokenizer, on a memory's own words. The system prompt is in no store and no file,
-since the reader has it already. Every row of a run is read against the summary alone and the rule restated in that same run, on the very summaries it was given.
+and the note-taker is not shown it, since the reader has it already. Where a rule list comes with search, the list is paid for first and what the search brings fills what is left, so
+the whole block keeps to the budget. Every row of a run is read against the summary alone and the rule restated in that same run, on the very summaries it was given.
 
 | Arm | Store | How the agent gets it |
 |---|---|---|
@@ -58,7 +60,7 @@ control can separate only where content is overwritten in place, which is what t
 
 The note-taker rewrites the whole file after each round. Whether it is also told to keep what the user asked it to keep
 doing is a setting, since that clause may matter more than the store. Both are run, and the same sentence is run on the
-summary prompts, so that the store and the instruction can be read apart. Whole-text matching cannot see a rule put in the
+summary prompts at one round, with its own summaries, so that the store and the instruction can be read apart. Whole-text matching cannot see a rule put in the
 note-taker's own words, so what each notes arm delivers is read by the benchmark's retention judge, the one the study
 calibrated at one compaction.
 
@@ -95,7 +97,8 @@ usually do. Which of these the full matrix runs is chosen from the small run and
 
 **Cued.** The same history, rule and options, with one hand-written cue inside the request naming the rule's subject
 without its content. The 15 cues are in `studies/memory_probe/variants.py`, written before any run of these cases, after
-the first 100 probes of the unchanged cases had been read.
+the first 100 probes of the unchanged cases had been read. A cue changes only the request, so a cued case keeps the published case's summaries, notes and headers,
+and is read against the no-rule rate of its own question.
 
 **Uncued.** The benchmark as published. Every published case states its rule in the first user turn, so anything that
 keeps the start of a history wins by position alone, and anything that keeps the end loses by it. The flat file keeps
@@ -103,11 +106,12 @@ the newest text, as a context window does, and the same histories are also run w
 last user turn, where the benchmark's own builder puts it.
 
 **Revised and withdrawn.** The same histories with a later statement in the median user turn that reverses the rule
-(the right answer flips) or takes it back (the old rule's option is then read against the no-rule rate). The 15
+(the right answer flips) or takes it back. For a rule taken back, "obeyed" means still obeying what was withdrawn, so that row reports how often
+the old option is chosen beside the no-rule rate, more or less often, and has no effective retention. The 15
 revisions are in the same file and were written at the same point, before any run of these cases and after those 100
-probes had been read. Git keeps old versions, and a search can return a stale one. So what reaches the model says when each piece
-was recorded and whether it has since been replaced, the pieces go oldest first, and every arm that can show two statements is
-told that the later one stands. The analysis counts whether a reversed rule's old text came back. Three reversals (rules 2, 4 and 6) only
+probes had been read. Git keeps old versions, and a search can return a stale one. So what the harness delivers says when each piece
+was recorded, says so if a notes version has since been replaced (a turn never is), goes oldest first, and comes under a line saying that where two
+disagree the later one stands. An agent's own search returns the same marks with no such line, since nothing in any condition mentions rules. The analysis counts whether a reversed rule's old text came back. Three reversals (rules 2, 4 and 6) only
 permit something, and the model often does not take them up even when restated, so each rule is read against its own restated row.
 
 **Long run.** One coding agent with compaction on (below).
@@ -142,7 +146,8 @@ one is invalid. This is checked on what is about to be sent at every model call,
 exists, and with that sentence and one saying to check the record (a flat list searched by the same code holds the same text and
 ranks alike, by the test above, so it is one row with these); with ceilings of no compaction and of every rule told so far restated in the
 system prompt at every call. A block a memory delivers does not count toward the compaction trigger, so every arm compacts at the same point of the
-same talk. Added
+same talk. An agent's search and its results stay in the conversation until folded, and they do count, as they would in a real agent: one that searches compacts
+sooner, a cost of searching that the record shows. They stay out of the store, since a store holding its own searches finds them again. Added
 after the first sessions were read, because those arms hardly searched: the rule list delivered at every call, read back from the
 commit headers and written by the study's reader, and the notes file under both note-taker wordings. Size: a free dry run through
 every stage, then 3 to 5 sessions, then more only after reading them.
@@ -151,7 +156,9 @@ every stage, then 3 to 5 sessions, then more only after reading them.
 fresh machine built from the task's published image, leaving out tasks too big for a share of a shared node, needing a machine
 inside the machine, or with no Python on the machine. Machines run under Apptainer on a shared cluster, not Docker, as root inside
 a user namespace, with the package installer told not to drop to its own user; a package whose install changes file owners may
-only half install. The task's own score plays no part. The model is gpt-oss-120b, served on the same cluster; Laguna S 2.1, a stronger open coding
+only half install. Each machine is an instance with its own process list and its own /tmp, so that files and work left in the background last from one command to the next, and a
+command can signal only that machine. Before anything the agent sends reaches it, a machine reads what it can see, and one that sees more than 30 processes, or this account's home or the
+study's code, is refused like a machine that will not build; what each saw is on the record. The network is the node's, so tasks that open a port are left out, which removes 4 of the 43 usable tasks. The task's own score plays no part. The model is gpt-oss-120b, served on the same cluster; Laguna S 2.1, a stronger open coding
 model, was added on 2026-11-06 after gpt-oss-120b's restated ceiling proved low, and is reported apart. mini-swe-agent's published prompts are used, including its
 message for a reply with no command, with the submit command added to the system prompt, because a summary may lose the first message. Why a reply had no
 command is on record. Sessions run under both summary prompts.
@@ -160,8 +167,8 @@ command is on record. Sessions run under both summary prompts.
 record. Whenever you run Python, pass it -B (told with the first task; agents do not do this unprompted). When you list a folder, use
 ls -1 (told at a chosen model call). A tag in a file on the first machine only, which the agent reads itself and must print in
 every task, scored from the second task on, in commands or their output. No message the harness sends holds the tag. A reply can hold the tag without running
-anything, so the tag is reported as ran and as known. Whether a summary kept a rule is read by a pattern as well as by its exact words, since a summary uses its own.
-Every rule is also scored task by task, and arms compare only on tasks both reached. The first machine that opens gets the rules and the tag.
+anything, so the tag is reported as ran and as known: known reads what the agent ran and said and any command's output, and not what a memory tool merely showed it. A command's output is kept and scored up to its first 200,000 characters. Whether a summary kept a rule is read by a pattern as well as by its exact words, since a summary uses its own.
+Every rule is also scored task by task, and arms compare only on tasks both reached. The first machine that opens gets the rules and the tag; one that fails to take either is left, and the next one gets them. A session is invalid, and left out of every total though still counted, if the harness re-sent a planted text, its ledger was refused, or nothing was planted.
 
 ## Before scaling
 
@@ -175,15 +182,18 @@ Every rule is also scored task by task, and arms compare only on tasks both reac
 Compliance is never read against zero: each probe has two options, so a model the rule never reached obeys it about half
 the time (15 of 30 in the first harness-search probes), and every arm is read against that rate, the benchmark's no-rule
 rate on the same cases.
+Rates are over the answers that could be read, as the benchmark's own summary does, with the unread counted beside them, and a difference is over the pairs where both could be. One table comes from one version of the code and refuses two.
 Paired tests per case against the compaction arm, intervals by a bootstrap over histories, since the 15 cases of a
-history share it (`studies/memory_probe/analyze.py`, `studies/long_run/analyze.py`). Sixteen rounds are not sixteen equal rounds: a history with one very long turn
+history share it (`studies/memory_probe/analyze.py`). In the long run the unit is the session, each compared on the tasks both arms reached, since the tasks of one conversation are not independent; counts over tasks are description only (`studies/long_run/analyze.py`). Sixteen rounds are not sixteen equal rounds: a history with one very long turn
 leaves rounds that fold almost nothing, so effective rounds are reported beside them. Every clean result is reported, whichever way it falls.
 
 An independent review of this harness on 2026-11-06 found that the search also held the system prompt, that what the harness delivered had lost each hit's date and
 replacement mark, and that the long run's message for a reply with no command was not mini-swe-agent's. All were fixed, and the runs before that commit are not reported.
 
+A later review the same day found, among others, that the note-taker was shown the system prompt, that a rule list could pass the budget, and that "found" had been read from less than what was delivered, and the same night all nine long sessions on one node were killed together, most likely by a command of one agent, which had just listed their process numbers, since a machine then shared the node's process list. All of that is fixed as written above. The memory runs and the long sessions before these fixes are not reported, and no earlier number is reused: every cell and session is run again on the frozen code.
+
 ## Record
 
 Every case keeps each tool call whole with its output, the final answer, the steps, the token counts and a ledger entry
-naming the code that ran: a Taste row refuses to count unless its process imported `taste.memstore` and made the calls
+naming the code that ran, in the rule-loss runs and the long sessions alike: a Taste row refuses to count unless its process imported `taste.memstore` and made the calls
 it reports. Zero searches are allowed only where the agent chose, and that rate is what "looks" reports.
