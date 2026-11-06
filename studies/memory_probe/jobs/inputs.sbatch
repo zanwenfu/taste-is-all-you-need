@@ -46,8 +46,10 @@ T1=$(date +%s)
 $RUN $D/venv/bin/python -m studies.context_rot.repeated --prompt $PR --records-only --histories $HISTORIES --variant $V --probe-url $URL \
   --tokenizer $D/models/gpt-oss-120b --workers 15 --out $OUT/repeated/$PR/$NAME > $OUT/repeated-$PR.stdout 2> $OUT/repeated-$PR.stderr.log || fail "records"
 echo "records seconds $(( $(date +%s) - T1 )) $(tail -1 $OUT/repeated-$PR.stdout | cut -c1-200)"
-$RUN $D/venv/bin/python -m studies.memory_probe.export --full $OUT/full --repeated $OUT/repeated --histories $HISTORIES --variant $V --deep 0 --prompts $PR --out $OUT/inputs 2>&1 | tail -1 | cut -c1-200
-[ -s $OUT/inputs/delivered.jsonl ] || fail "export"
+# The inputs are one prompt's, so a second prompt's have a folder of their own.
+INPUTS=$OUT/inputs; [ "$PR" = anthropic ] || INPUTS=$OUT/inputs-$PR
+$RUN $D/venv/bin/python -m studies.memory_probe.export --full $OUT/full --repeated $OUT/repeated --histories $HISTORIES --variant $V --deep 0 --prompts $PR --out $INPUTS 2>&1 | tail -1 | cut -c1-200
+[ -s $INPUTS/delivered.jsonl ] || fail "export"
 curl -s http://127.0.0.1:$PORT/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $JOB/vllm-metrics.txt
 kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null
 echo "end $(date -u +%FT%TZ)"

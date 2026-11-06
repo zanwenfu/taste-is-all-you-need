@@ -78,7 +78,7 @@ def rules(tag: str, later_rule_at: int) -> list[dict[str, Any]]:
 
 
 def build(root: Path, template: dict, *, seed: int, tasks: int, compact_at: int, keep_recent: int, prompt: str,
-          later_rule_at: int, task_calls: int, images: Path | None = None) -> dict[str, Any]:
+          later_rule_at: int, task_calls: int, images: Path | None = None, stop_at: int = 120_000) -> dict[str, Any]:
     """``images`` is a folder of each task's image already fetched once, as <task>.sif. Many sessions at once fetching from the
     registry hit its limit for an anonymous address."""
     chosen = _eligible(root)
@@ -96,7 +96,7 @@ def build(root: Path, template: dict, *, seed: int, tasks: int, compact_at: int,
     agent, model = template["agent"], template["model"]
     return {"seed": seed, "tasks": chosen, "rules": rules(tag, later_rule_at), "first_prepare": [f"mkdir -p /opt && echo {tag} > /opt/session_tag"],
             "compact_at_tokens": compact_at,
-            "keep_recent_tokens": keep_recent, "summary_prompt": prompt, "task_calls": task_calls, "stop_at_tokens": 120_000,
+            "keep_recent_tokens": keep_recent, "summary_prompt": prompt, "task_calls": task_calls, "stop_at_tokens": stop_at,
             "system_template": f"{agent['system_template'].strip()} When a task is done, submit it by running this command on "
                                f"its own: {SUBMIT}",
             "instance_template": agent["instance_template"], "observation_template": model["observation_template"],
@@ -114,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", choices=("pi_mono", "anthropic"))
     for name in ("seed", "tasks", "compact-at", "keep-recent", "later-rule-at", "task-calls"):
         parser.add_argument(f"--{name}", type=int)
+    parser.add_argument("--stop-at", type=int, default=120_000, help="the conversation ends here rather than overflow the window: what a model call adds to a conversation's own tokens must still fit")
     arguments = parser.parse_args(argv)
     if arguments.list_images:
         for task in _eligible(Path(arguments.tasks_root)):
@@ -122,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     session = build(Path(arguments.tasks_root), yaml.safe_load(Path(arguments.agent_config).read_text()), seed=arguments.seed,
                     tasks=arguments.tasks, compact_at=arguments.compact_at, keep_recent=arguments.keep_recent, prompt=arguments.prompt,
                     later_rule_at=arguments.later_rule_at, task_calls=arguments.task_calls,
-                    images=Path(arguments.images) if arguments.images else None)
+                    images=Path(arguments.images) if arguments.images else None, stop_at=arguments.stop_at)
     Path(arguments.out).write_text(json.dumps(session, indent=1))
     print(json.dumps({"seed": arguments.seed, "tasks": [task["name"] for task in session["tasks"]]}))
     return 0

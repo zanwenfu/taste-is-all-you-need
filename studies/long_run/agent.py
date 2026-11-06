@@ -41,6 +41,10 @@ OUTPUT_KEPT = 200_000  # characters of a command's output kept in the action log
 _SENT_KEYS = ("role", "content", "tool_calls", "tool_call_id")
 
 
+class Stopped(BaseException):
+    """The job is being stopped. Not an Exception, so that nothing on the way up takes it for one machine's failure or a task's."""
+
+
 def render(message: dict) -> str:
     """A message as text: what it says, and any tool calls it made."""
     text = str(message.get("content") or "")
@@ -85,6 +89,8 @@ class ToolModel:
             if name == "bash":
                 if "command" not in arguments:
                     raise self._refuse("Missing 'command' argument in bash tool call.")
+                if not isinstance(arguments["command"], str) or "\0" in arguments["command"]:
+                    raise self._refuse("The 'command' argument must be one string, with no NUL byte in it.")
                 actions.append({"command": arguments["command"], "tool_call_id": call.id})
             else:
                 actions.append({"memory_tool": name, "arguments": arguments, "tool_call_id": call.id,
@@ -174,6 +180,7 @@ class LongRunAgent(DefaultAgent):
         self._planted_sent: set[int] = set()
         self._memory_calls: set[str] = set()
         self.outcomes: list[dict] = []
+        self.not_stopped: list[str] = []
 
     def add_messages(self, *messages: dict) -> list[dict]:
         added = super().add_messages(*messages)
@@ -271,10 +278,13 @@ class LongRunAgent(DefaultAgent):
     def execute_actions(self, message: dict) -> list[dict]:
         """As the default agent does, with each action logged: compaction drops old messages, the log keeps them all."""
         outputs = []
-        for action in message.get("extra", {}).get("actions", []):
+        usage = message.get("extra", {}).get("usage")
+        for number, action in enumerate(message.get("extra", {}).get("actions", [])):
             kind = action.get("memory_tool", "bash")
             row = {"kind": kind, "call": self.n_calls, "task": self.task_name, "compactions": len(self.events),
                    "command": action["command"], "said": str(message.get("content") or "")[:OUTPUT_KEPT]}
+            if usage and not number:  # a reply's tokens, once, on the first thing it asked for
+                row["usage"] = usage
             try:
                 output = self.env.execute(action)
             except Exception as error:
@@ -368,6 +378,8 @@ class LongRunAgent(DefaultAgent):
         """A finished task's machine holds memory on a shared node, so it goes before the next one starts."""
         machine, self.env.inner = self.env.inner, None
         getattr(machine, "cleanup", lambda: None)()
+        if getattr(machine, "stop_failed", None):
+            self.not_stopped.append(machine.stop_failed)
 
     def serialize(self, *extra_dicts: dict) -> dict:
         return super().serialize({"info": {"compactions": self.events, "recorded_to_memory": self.recorded}},

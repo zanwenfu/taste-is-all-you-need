@@ -3,6 +3,8 @@
 Arms can end early, so a rule's obedience compares only tasks both arms reached. Tasks of one conversation are not independent, so the test is over sessions, each
 compared on the tasks both arms reached in it; the count over tasks is shown as a description. The tag is reported as ran and as known, since a reply with no command can
 hold it. A session that is invalid (a planted text sent again, a ledger refused, nothing planted) is left out of every total and counted, and so is how many ended early.
+A session with actions and no summary died before it could write one: it counts as invalid and ended early, so that no session goes missing. One table holds one reader, one
+summary prompt and one version of the code, and refuses anything else, unless --mixed is given for the code, which it then says.
 
     python -m studies.long_run.analyze runs/seed2-1 runs/seed3-1 --out report.md
 """
@@ -17,12 +19,36 @@ from pathlib import Path
 from typing import Any
 
 BASE = "compaction"
+DIED = {"valid": False, "ended_by": "it died before writing a summary", "calls": 0, "compactions": 0, "outcomes": [], "scores": {}, "no_command": 0}
 SPANS = ((0, 0), (1, 2), (3, 5), (6, 10), (11, 20), (21, 50), (51, 100), (101, 10**9))
 
 
 def load(folders: list[Path]) -> dict[str, dict[str, dict]]:
     """{seed folder: {arm: summary}}"""
-    return {folder.name: {path.parent.name: json.loads(path.read_text()) for path in sorted(folder.glob("*/summary.json"))} for folder in folders}
+    runs: dict[str, dict[str, dict]] = {}
+    for folder in folders:
+        arms = runs.setdefault(folder.name, {})
+        for path in sorted(folder.glob("*/actions.jsonl")):
+            arms[path.parent.name] = dict(DIED)
+        for path in sorted(folder.glob("*/summary.json")):
+            arms[path.parent.name] = json.loads(path.read_text())
+    return runs
+
+
+def one_setup(runs: dict[str, dict[str, dict]], *, mixed: bool = False) -> dict[str, str]:
+    """The one reader, summary prompt and code these sessions ran on, or a refusal."""
+    seen: dict[str, set[str]] = {"model": set(), "summary_prompt": set(), "commit": set()}
+    for arms in runs.values():
+        for summary in arms.values():
+            for key, values in seen.items():
+                if summary.get("versions", {}).get(key):
+                    values.add(summary["versions"][key])
+    for key in ("model", "summary_prompt"):
+        if len(seen[key]) > 1:
+            raise ValueError(f"these sessions ran on more than one {key}, and each is reported apart: {sorted(seen[key])}")
+    if len(seen["commit"]) > 1 and not mixed:
+        raise ValueError(f"these sessions ran on more than one version of the code: {sorted(seen['commit'])}")
+    return {key: ", ".join(sorted(values)) for key, values in seen.items()}
 
 
 def sign_test(better: int, worse: int) -> float:
@@ -145,11 +171,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("folders", nargs="+")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--mixed", action="store_true", help="allow more than one version of the code, and say so")
     arguments = parser.parse_args(argv)
     runs = load([Path(folder) for folder in arguments.folders])
+    setup = one_setup(runs, mixed=arguments.mixed)
     table = arm_table(runs)
     out = Path(arguments.out)
-    out.write_text(render(table) + render_compactions(compaction_table(runs)))
+    out.write_text(f"Reader {setup['model']}, summary prompt {setup['summary_prompt']}, code {setup['commit']}.\n\n" + render(table) + render_compactions(compaction_table(runs)))
     out.with_suffix(".json").write_text(json.dumps(table, indent=1))
     print(f"{len(table)} arms at {out}")
     return 0

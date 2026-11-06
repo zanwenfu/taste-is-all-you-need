@@ -4,7 +4,8 @@
 #SBATCH --mem=128G
 #SBATCH --time=06:00:00
 # One cell of the rule-loss matrix: a case set (IN), a summary prompt (PR) and a depth (K), every arm, on the settings frozen in the protocol. Notes and headers are written
-# once per case set, in OUT, and any job can be run again and carries on. ROWS names the rows to run, all of them when empty. A row that fails, or a judge, fails the job. Free. Needs STUDY_ROOT and SHA.
+# once per case set, in OUT, and any job can be run again and carries on, so long as what its rows read has not changed: they refuse otherwise. ROWS names the rows to run, all of them
+# when empty. A row that fails, or a judge, fails the job. Free. Needs STUDY_ROOT and SHA.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
 D=${STUDY_ROOT:?}; S=${SHA:?}
@@ -59,20 +60,30 @@ fi
 wanted() { [ -z "${ROWS:-}" ] || [[ " $ROWS " == *" $1 "* ]]; }
 needs() { [ -z "${ROWS:-}" ] || [[ "$ROWS" =~ $1 ]]; }  # a pattern over the rows asked for
 if [ "${WRITERS:-1}" = 1 ]; then
+  # A set's notes and headers are written once, by whichever of its cells gets here first: another waits here, and finds them written. Each writer asks only what it lacks, so
+  # it is run again here, before any row has read its file: a row started on a file that later changes refuses to carry on.
+  exec 9> $OUT/.writers.lock; flock 9
   if needs notes-; then
     for style in told neutral; do
       T1=$(date +%s)
-      $PY -m studies.memory_probe.notes --inputs $IN --url $URL --model $MODEL --style $style --workers 32 --out $OUT/notes-$style.jsonl > $JOB/notes-$style.log 2>&1
-      code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
-      echo "notes $style exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/notes-$style.log | cut -c1-200)"
+      for try in 1 2 3; do
+        $PY -m studies.memory_probe.notes --inputs $IN --url $URL --model $MODEL --style $style --workers 32 --out $OUT/notes-$style.jsonl > $JOB/notes-$style.log 2>&1
+        code=$?; [ $code = 0 ] && break
+      done
+      [ $code = 0 ] || FAILED=$((FAILED + 1))
+      echo "notes $style exit $code tries $try seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/notes-$style.log | cut -c1-200)"
     done
   fi
   if needs "headers|rules-and-search|header-list"; then
     T1=$(date +%s)
-    $PY -m studies.memory_probe.headers --inputs $IN --url $URL --model $MODEL --out $HEADERS --workers 32 > $JOB/headers.log 2>&1
-    code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
-    echo "headers exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/headers.log | cut -c1-200)"
+    for try in 1 2 3; do
+      $PY -m studies.memory_probe.headers --inputs $IN --url $URL --model $MODEL --out $HEADERS --workers 32 > $JOB/headers.log 2>&1
+      code=$?; [ $code = 0 ] && break
+    done
+    [ $code = 0 ] || FAILED=$((FAILED + 1))
+    echo "headers exit $code tries $try seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/headers.log | cut -c1-200)"
   fi
+  flock -u 9
 fi
 one() {  # label arm condition extra...
   local label=$1 arm=$2 condition=$3; shift 3
@@ -138,8 +149,9 @@ for style in told neutral; do
   judge notes-last-$style a2cq; judge notes-every-$style a2dq; judge notes-newest-$style a2cw; judge notes-newest-and-older-$style a2dw
   [ "${WRITERS:-1}" = 1 ] && needs notes- && stored $style
 done
-# The summary told to keep what the user asked it to keep doing, on the same prompt, so that the store and the instruction can be read apart.
-if [ "$K" = 1 ] && [ "$BUDGET" = 4096 ] && wanted summary-told; then
+# The summary told to keep what the user asked it to keep doing, on the same prompt, so that the store and the instruction can be read apart. A cued set has the published
+# case's history word for word, so its summaries are the published case's too, and this row belongs to that set.
+if [ "$K" = 1 ] && [ "$BUDGET" = 4096 ] && [ "${WRITERS:-1}" = 1 ] && wanted summary-told; then
   T1=$(date +%s)
   $RUN $D/venv/bin/python -m studies.memory_probe.told_summary --inputs $IN --prompt $PR --url $URL --model $MODEL --out $OUT/told-$PR > $JOB/told-$PR.log 2>&1
   code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))

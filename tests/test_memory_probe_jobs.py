@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,7 @@ def world(tmp_path: Path) -> dict:
     bin_dir, study = tmp_path / "bin", tmp_path / "study"
     _stub(bin_dir / "curl", "exit 0")
     _stub(bin_dir / "nvidia-smi", "exit 0")
+    _stub(bin_dir / "flock", "exit 0")  # not on every machine this test runs on
     _stub(bin_dir / "apptainer", 'while [[ "$1" != */python ]]; do shift; done; exec "$@"')
     python = f"""echo "$*" >> {log}
 case "$*" in
@@ -50,11 +53,11 @@ def test_a_clean_cell_exits_zero_and_merges_every_row(world: dict) -> None:
     done = _run(world)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "rows failed 0" in done.stdout
-    assert world["log"].read_text().count("studies.memory_probe.merge") >= 10
+    assert world["log"].read_text().count("studies.memory_probe.merge") == 17, "the eight rows, the eight notes rows, and the summary told to keep rules"
 
 
 def test_a_shard_that_fails_fails_its_row_and_the_job_with_no_merge(world: dict) -> None:
-    done = _run(world, FAIL_WHEN="--arm a5q")
+    done = _run(world, FAIL_WHEN="--arm a5q --condition i --budget 4096 --shard 0/")  # one of the row's two shards, and the first waited for
     assert done.returncode == 1 and "rows failed 1" in done.stdout
     assert not any("studies.memory_probe.merge" in line and "/turns/" in line for line in world["log"].read_text().splitlines())
 
@@ -142,7 +145,69 @@ exit 0""")
 
 def test_two_cells_on_one_job_do_not_share_a_working_folder(world: dict) -> None:
     assert _run(world, ROWS="summary").returncode == 0
-    assert re.search(r"--workdir /tmp/aos-probe-1-\d+-summary-", world["log"].read_text())
+    assert _run(world, ROWS="summary").returncode == 0
+    assert len(set(re.findall(r"--workdir (/tmp/aos-probe-1-\d+-summary-\S+)", world["log"].read_text()))) == 2
+
+
+def test_a_writer_that_fails_is_asked_again_before_any_row_reads_its_file(world: dict, tmp_path: Path) -> None:
+    calls = tmp_path / "header-calls"
+    python = (Path(world["env"]["STUDY_ROOT"]) / "venv-probe" / "bin" / "python")
+    body = python.read_text()
+    _stub(python, f"""case "$*" in *studies.memory_probe.headers*) echo x >> {calls}; [ "$(wc -l < {calls})" -lt 3 ] && exit 1;; esac
+{body.split(chr(10), 1)[1]}""")
+    done = _run(world, ROWS="turns-headers")
+    assert done.returncode == 0 and "headers exit 0 tries 3" in done.stdout, done.stdout + done.stderr
+    log = world["log"].read_text()
+    assert log.index("--arm a4q") > 0 and calls.read_text().count("x") == 3
+
+
+def test_a_set_with_no_writers_of_its_own_writes_no_told_summaries(world: dict) -> None:
+    done = _run(world, WRITERS="0", NOTES_FROM="", HEADERS_FROM="")
+    assert "told summaries" not in done.stdout and "summary-told" not in done.stdout
+
+
+def test_a_seed_stopped_by_its_job_waits_for_its_sessions_to_write_before_their_folder_goes(tmp_path: Path) -> None:
+    bin_dir, study = tmp_path / "bin", tmp_path / "study"
+    wrote, seen = tmp_path / "wrote", tmp_path / "work-at-write"
+    _stub(bin_dir / "curl", "exit 0")
+    _stub(bin_dir / "nvidia-smi", "exec sleep 60")
+    # A session as the real one behaves: it sets its own handler, stays until told to stop, then takes a moment to write its record, and looks whether its folder is still there.
+    python = study / "long" / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text(f"""#!/usr/bin/env python3
+import pathlib, signal, sys, time
+arguments = sys.argv[1:]
+if "studies.long_run.make_session" in arguments:
+    sys.exit(0)
+work = pathlib.Path(arguments[arguments.index("--workdir") + 1])
+work.mkdir(parents=True, exist_ok=True)
+def stop(number, frame):
+    time.sleep(1)
+    if work.is_dir():
+        pathlib.Path({str(seen)!r}).write_text("there")
+    pathlib.Path({str(wrote)!r}).write_text("done")
+    sys.exit(1)
+signal.signal(signal.SIGTERM, stop)
+time.sleep(60)
+""")
+    python.chmod(0o755)
+    (study / "long" / "venv" / "lib" / "python3.12" / "site-packages" / "minisweagent" / "config").mkdir(parents=True)
+    (study / "long" / "venv" / "lib" / "python3.12" / "site-packages" / "minisweagent" / "config" / "mini.yaml").write_text("")
+    (study / "code-abcdefabcdef").mkdir()
+    job = f"stand-in-stop-{os.getpid()}"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "SLURM_JOB_ID": job, "ARMS": "compaction", "SERVER_URL": "http://127.0.0.1:1/v1", "SEED": "2"}
+    # In a session of its own: the signal below goes to this job's own group, which Slurm would signal, and to nothing else.
+    running = subprocess.Popen(["bash", str(ROOT / "studies/long_run/jobs/seed.sbatch")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    assert running.pid > 1 and os.getpgid(running.pid) == running.pid and running.pid != os.getpgrp()
+    deadline = time.monotonic() + 30
+    while not Path(f"/tmp/aos-long-{job}-gpt-oss-anthropic-seed2/compaction").exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert Path(f"/tmp/aos-long-{job}-gpt-oss-anthropic-seed2/compaction").exists()
+    time.sleep(0.5)  # the stand-in has set its handler
+    os.killpg(running.pid, signal.SIGTERM)
+    output, _ = running.communicate(timeout=30)
+    assert wrote.read_text() == "done" and seen.read_text() == "there", output
+    assert running.returncode == 143 and not Path(f"/tmp/aos-long-{job}-gpt-oss-anthropic-seed2").exists()
 
 
 def _bench_world(tmp_path: Path, view: bool = True) -> dict:

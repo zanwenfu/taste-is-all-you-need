@@ -107,6 +107,15 @@ def _stored(label: str, rows: list[dict], stored: dict[str, dict[str, dict]] | N
     return None
 
 
+def _stored_unclear(label: str, rows: list[dict], stored: dict[str, dict[str, dict]] | None) -> int:
+    """The notes files the judge could not read either way: not counted as holding the rule, and not lost among those that do not."""
+    arm = rows[0].get("arm")
+    verdicts = (stored or {}).get(label.rsplit("-", 1)[-1])
+    if not verdicts or arm not in (*_LAST_NOTES, *_EVERY_NOTES):
+        return 0
+    return sum(row["id"] in verdicts and verdicts[row["id"]].get("newest" if arm in _LAST_NOTES else "any") is None for row in rows)
+
+
 def row_entry(label: str, rows: list[dict], *, floor: dict[str, bool | None], base: dict[str, dict] | None, ceiling: dict[str, dict] | None,
               old_text: dict[str, str] | None = None, stored: dict[str, dict[str, dict]] | None = None) -> dict[str, Any]:
     n = len(rows)
@@ -120,6 +129,8 @@ def row_entry(label: str, rows: list[dict], *, floor: dict[str, bool | None], ba
     in_store = _stored(label, rows, stored)
     if in_store is not None:
         entry["stored"] = in_store
+    if _stored_unclear(label, rows, stored):
+        entry["stored_unclear"] = _stored_unclear(label, rows, stored)
     if withdrawn:
         entry["still_obeying"] = obeyed
     if readable and {row["id"] for row in rows} <= set(floor):
@@ -132,15 +143,15 @@ def row_entry(label: str, rows: list[dict], *, floor: dict[str, bool | None], ba
             entry["restated"] = top
             if floors and tops and not withdrawn:
                 entry["effective_retention"] = effective_retention(100 * obeyed / readable, 100 * no_rule / len(floors), 100 * top / len(tops))
-            could = [row for row in rows if ceiling[row["id"]]["compliant"] is True]
+            could = [row for row in rows if ceiling[row["id"]]["compliant"] is True and row["compliant"] is not None]
             entry["obeyed_where_restated_is"] = [_obeyed(could), len(could)]
     if "held" in rows[0]:
         held = [row for row in rows if row["held"] is True]
         without = [row for row in rows if row["held"] is False]
         entry["held"] = len(held)
         entry["held_unclear"] = sum(row["held"] is None for row in rows)
-        entry["obeyed_if_held"] = [_obeyed(held), len(held)]
-        entry["obeyed_if_not"] = [_obeyed(without), len(without)]
+        entry["obeyed_if_held"] = [_obeyed(held), sum(row["compliant"] is not None for row in held)]
+        entry["obeyed_if_not"] = [_obeyed(without), sum(row["compliant"] is not None for row in without)]
     if base is not None and label != BASE and {row["id"] for row in rows} <= set(base) and readable:
         mine = {row["id"]: row for row in rows}
         shared = {case: base[case] for case in mine}
@@ -155,7 +166,7 @@ def row_entry(label: str, rows: list[dict], *, floor: dict[str, bool | None], ba
     for row in rows:
         cell = per_rule.setdefault(str(row["sc_id"]), [0, 0])
         cell[0] += row["compliant"] is True
-        cell[1] += 1
+        cell[1] += row["compliant"] is not None
     entry["per_rule"] = per_rule
     if old_text and any("delivered_text" in row for row in rows):
         entry["old_rule_came_back"] = sum(holds(str(row.get("delivered_text", "")), old_text.get(row["id"], "\0")) for row in rows)
@@ -193,7 +204,7 @@ def _cell(value: Any) -> str:
 
 
 def render(entries: list[dict[str, Any]], title: str) -> str:
-    columns = ("row", "n", "stored", "looked", "found", "held", "held_unclear", "obeyed", "unread", "no_rule", "restated", "effective_retention", "obeyed_where_restated_is",
+    columns = ("row", "n", "stored", "stored_unclear", "looked", "found", "held", "held_unclear", "obeyed", "unread", "no_rule", "restated", "effective_retention", "obeyed_where_restated_is",
                "obeyed_if_held", "obeyed_if_not", "in_summary", "acted", "old_rule_came_back")
     withdrawn = any("still_obeying" in entry for entry in entries)
     more, less = ("more often", "less often") if withdrawn else ("better", "worse")

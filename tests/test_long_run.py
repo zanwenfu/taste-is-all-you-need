@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -312,7 +314,14 @@ def test_an_empty_summary_is_asked_again_and_stops_the_run_if_it_stays_empty() -
         make_summarizer(lambda m, t: _text(""), "anthropic", _prompt)([], None)
 
 
-def test_a_summary_cut_off_by_the_output_cap_stops_the_run() -> None:
+def test_a_summary_cut_off_once_is_asked_again() -> None:
+    cut = _text("half a summ")
+    cut.choices[0].finish_reason = "length"
+    replies = iter([cut, _text("a whole summary")])
+    assert make_summarizer(lambda m, t: next(replies), "anthropic", _prompt)([], None) == "a whole summary"
+
+
+def test_a_summary_cut_off_every_time_stops_the_run() -> None:
     reply = _text("half a summ")
     reply.choices[0].finish_reason = "length"
     with pytest.raises(RuntimeError, match="cut off"):
@@ -597,9 +606,9 @@ echo "$*" >> {log}
 case "$1 $2" in
   "build --sandbox") mkdir -p "$3"; exit 0;;
   "instance start") [ -n "$STAND_IN_WILL_NOT_START" ] && {{ echo "no user namespace"; exit 1; }}; exit 0;;
-  "instance stop") exit 0;;
+  "instance stop") [ -n "$STAND_IN_WILL_NOT_STOP" ] && {{ echo "not stopped"; exit 1; }}; exit 0;;
 esac
-case "$*" in *"/proc/[0-9]*"*) printf '%s\\n' "${{STAND_IN_PROCESSES:-4}}" "${{STAND_IN_FILES:-0}}" 0; exit 0;; esac
+case "$*" in *"/proc/[0-9]*"*) printf '%s\\n' "${{STAND_IN_PROCESSES:-4}}" "${{STAND_IN_FILES:-0}}" "${{STAND_IN_CODE_FILES:-0}}"; exit 0;; esac
 while [ "$1" != bash ]; do shift; done
 exec "$@"
 """)
@@ -675,7 +684,8 @@ def test_a_machine_reads_its_wall_before_anything_else_runs_on_it_and_keeps_what
 
 
 @pytest.mark.parametrize(("setting", "value", "says"), [("STAND_IN_PROCESSES", "500", "sees 500 processes"), ("STAND_IN_PROCESSES", "0", "sees 0 processes"),
-                                                       ("STAND_IN_PROCESSES", "no /proc", "would not say"), ("STAND_IN_FILES", "12", "this account's files")])
+                                                       ("STAND_IN_PROCESSES", "no /proc", "would not say"), ("STAND_IN_FILES", "12", "this account's files"),
+                                                       ("STAND_IN_CODE_FILES", "7", "this account's files")])
 def test_a_machine_whose_wall_does_not_hold_is_refused_and_leaves_nothing_behind(tmp_path: Path, monkeypatch, setting: str, value: str, says: str) -> None:
     from studies.long_run.machine import Machine
 
@@ -732,6 +742,112 @@ def test_each_machine_is_closed_before_the_next_opens_and_the_last_when_the_sess
     run_session(session, arm="compaction", chat=_routed(_Script([_bash(DONE, "c1"), _bash(DONE, "c2")])), make_env=lambda task: Shell(task["name"]), count=_count,
                 out=tmp_path / "out", workdir=tmp_path / "work", package_prompt=lambda: _prompt)
     assert events == ["open one", "close one", "open two", "close two"]
+
+
+def test_output_left_in_the_background_stays_out_of_the_next_command_and_holds_nothing_open(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.machine import SETTLE, Machine
+
+    _stand_in_apptainer(tmp_path, monkeypatch)
+    machine = Machine(image="x.sif")
+    started = time.monotonic()
+    first = machine.execute({"command": "(for i in $(seq 1 40); do echo noise; sleep 0.05; done) & echo started"})
+    assert first["output"].startswith("started") and time.monotonic() - started < SETTLE + 1
+    assert machine.execute({"command": "echo next"})["output"].strip() == "next", "what was left running writes to nothing anyone reads"
+    machine.cleanup()
+
+
+def test_only_the_end_of_a_huge_output_is_kept(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.machine import Machine
+
+    _stand_in_apptainer(tmp_path, monkeypatch)
+    monkeypatch.setattr("studies.long_run.machine.MOST_OUTPUT", 1000)
+    machine = Machine(image="x.sif")
+    done = machine.execute({"command": "for i in $(seq 1 3000); do echo line$i; done"})
+    assert len(done["output"]) <= 1000 and done["output"].rstrip().endswith("line3000")
+    machine.cleanup()
+
+
+def test_a_command_that_waits_for_input_gets_none_rather_than_its_whole_time_limit(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.machine import Machine
+
+    _stand_in_apptainer(tmp_path, monkeypatch)
+    machine = Machine(image="x.sif", timeout=20)
+    started = time.monotonic()
+    assert machine.execute({"command": "cat; echo ended"})["output"].strip() == "ended" and time.monotonic() - started < 5
+    machine.cleanup()
+
+
+def test_a_machine_that_would_not_stop_is_on_the_record(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.session import _environment
+
+    _stand_in_apptainer(tmp_path, monkeypatch)
+    monkeypatch.setenv("STAND_IN_WILL_NOT_STOP", "1")
+    session = load_session({"tasks": [{"name": "one", "instruction": "A", "image": "x.sif"}], "instance_template": "{{task}}"})
+    summary = run_session(session, arm="compaction", chat=_routed(_Script([_bash(DONE, "c1")])), make_env=_environment("machine", 30), count=_count,
+                          out=tmp_path / "out", workdir=tmp_path / "work", package_prompt=lambda: _prompt)
+    assert len(summary["machines_not_stopped"]) == 1 and "not stopped" in summary["machines_not_stopped"][0]
+
+
+@pytest.mark.parametrize("bad", [["bash", "-lc", "ls"], "echo a\0b", 7])
+def test_a_command_that_is_not_one_string_is_told_so_and_the_session_goes_on(tmp_path: Path, bad) -> None:
+    session = load_session({"tasks": [{"name": "one", "instruction": "A"}], "instance_template": "{{task}}"})
+    script = _Script([_reply([_call("bash", {"command": bad}, "c0")]), _bash(DONE, "c1")])
+    summary = run_session(session, arm="compaction", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "out", workdir=tmp_path / "work", package_prompt=lambda: _prompt)
+    assert summary["ended_by"] is None and [o["exit_status"] for o in summary["outcomes"]] == ["Submitted"]
+    assert summary["no_command"] == 1 and (tmp_path / "out" / "summary.json").exists()
+
+
+def test_a_session_stopped_by_its_job_still_writes_its_record_and_closes_its_machine(tmp_path: Path) -> None:
+    from studies.long_run.agent import Stopped
+
+    closed: list[bool] = []
+
+    class Closing(_Shell):
+        def cleanup(self) -> None:
+            closed.append(True)
+
+    replies = iter([_bash("ls", "c1")])
+
+    def chat(messages: list[dict], tools: list | None):
+        try:
+            return next(replies)
+        except StopIteration:
+            raise Stopped("signal 15") from None
+
+    disarmed: list[bool] = []
+    session = load_session({"tasks": [{"name": "one", "instruction": "A"}, {"name": "two", "instruction": "B"}], "instance_template": "{{task}}"})
+    summary = run_session(session, arm="compaction", chat=chat, make_env=lambda task: Closing(), count=_count, out=tmp_path / "out", workdir=tmp_path / "work",
+                          package_prompt=lambda: _prompt, disarm=lambda: disarmed.append(True))
+    assert summary["ended_by"] == "Stopped: signal 15" and (tmp_path / "out" / "summary.json").exists()
+    assert closed == [True] and disarmed == [True], "one machine had opened, and the second task never began"
+
+
+def test_the_stop_signal_stops_a_session_once_and_after_that_changes_nothing() -> None:
+    code = """
+import signal
+from studies.long_run.agent import Stopped
+from studies.long_run.session import _stop_on_term
+_stop_on_term()
+try:
+    signal.raise_signal(signal.SIGTERM)
+except Stopped as error:
+    print("stopped:", error)
+signal.raise_signal(signal.SIGTERM)
+print("went on")
+"""
+    done = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0 and "stopped: signal 15\nwent on" in done.stdout, done.stdout + done.stderr
+
+
+def test_every_model_call_and_its_tokens_are_on_the_record(tmp_path: Path) -> None:
+    session = load_session({**SESSION, "rules": [], "compact_at_tokens": 5, "keep_recent_tokens": 0})
+    script = _Script([_bash("ls", "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    summary = run_session(session, arm="compaction", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    rows = [json.loads(line) for line in (tmp_path / "run" / "actions.jsonl").read_text().splitlines()]
+    assert summary["model_use"]["calls"] >= summary["calls"] and summary["model_use"]["prompt_tokens"] > 0
+    assert next(row["usage"] for row in rows if "usage" in row) == [10, 2]
 
 
 def test_tasks_that_open_a_port_are_left_out_since_sessions_share_a_network(tmp_path: Path) -> None:
@@ -1047,13 +1163,29 @@ def test_an_empty_reply_from_the_note_taker_leaves_the_notes_as_they_were(tmp_pa
     from studies.memory_probe.stores import NotesStore
 
     store = NotesStore(tmp_path, ["the rule is -B"], history=True)
+    skipped = [0]
     try:
         replies = iter(["", "", ""])
-        make_note_taker(lambda messages, tools: _text(next(replies)), "told", store)([{"role": "user", "content": "x"}])
-        assert store.newest() == "the rule is -B" and store.commits == 1
+        make_note_taker(lambda messages, tools: _text(next(replies)), "told", store, skipped)([{"role": "user", "content": "x"}])
+        assert store.newest() == "the rule is -B" and store.commits == 1 and skipped == [1]
         replies = iter(["", "kept and more"])
-        make_note_taker(lambda messages, tools: _text(next(replies)), "told", store)([{"role": "user", "content": "x"}])
-        assert store.newest() == "kept and more" and store.commits == 2
+        make_note_taker(lambda messages, tools: _text(next(replies)), "told", store, skipped)([{"role": "user", "content": "x"}])
+        assert store.newest() == "kept and more" and store.commits == 2 and skipped == [1]
+    finally:
+        store.close()
+
+
+def test_a_notes_version_cut_off_by_the_output_cap_is_never_kept_and_the_session_goes_on(tmp_path: Path) -> None:
+    from studies.long_run.session import make_note_taker
+    from studies.memory_probe.stores import NotesStore
+
+    cut = _text("half a no")
+    cut.choices[0].finish_reason = "length"
+    store = NotesStore(tmp_path, ["the rule is -B"], history=True)
+    skipped = [0]
+    try:
+        make_note_taker(lambda messages, tools: cut, "told", store, skipped)([{"role": "user", "content": "x"}])
+        assert store.newest() == "the rule is -B" and skipped == [1]
     finally:
         store.close()
 

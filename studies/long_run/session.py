@@ -23,15 +23,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
+import signal
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from studies.context_rot.repeated import round_prompt
-from studies.long_run.agent import LongRunAgent, MemoryEnvironment, ToolModel
+from studies.long_run.agent import LongRunAgent, MemoryEnvironment, Stopped, ToolModel
 from studies.long_run.score import score_session
 from studies.memory_bench.core import fill
 from studies.memory_ledger import BASELINE, ClaimRefused, check, stand_in_record
@@ -64,18 +66,18 @@ def load_session(raw: dict) -> dict:
 
 
 def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tries: int = 3) -> Callable:
-    """The published summary prompts, each later round given the previous summary. An empty summary is asked again."""
+    """The published summary prompts, each later round given the previous summary. A summary that came back empty or cut off is asked again."""
 
     def summarize(older: list[dict], previous: str | None) -> str:
         messages = round_prompt(option, previous, older, package_prompt)
+        cut = False
         for _ in range(tries):
             choice = chat(messages, None).choices[0]
             text = (choice.message.content or "").strip()
-            if choice.finish_reason == "length":
-                raise RuntimeError("a summary was cut off by the output cap")
-            if text:
+            cut = choice.finish_reason == "length"
+            if text and not cut:
                 return text
-        raise RuntimeError(f"the model gave no summary in {tries} tries")
+        raise RuntimeError(f"a summary was cut off by the output cap in {tries} tries" if cut else f"the model gave no summary in {tries} tries")
 
     return summarize
 
@@ -99,7 +101,7 @@ def make_reader(chat: Callable) -> tuple[Callable[[str], list[str]], list[int]]:
     return read, calls
 
 
-def make_note_taker(chat: Callable, style: str, store: NotesStore) -> Callable[[list[dict]], None]:
+def make_note_taker(chat: Callable, style: str, store: NotesStore, skipped: list[int]) -> Callable[[list[dict]], None]:
     """The study's note-taker: the whole file rewritten from what a compaction is about to fold away."""
     from studies.memory_probe.notes import _PROMPT, MAX_TURN_CHARS, STYLES
 
@@ -108,28 +110,45 @@ def make_note_taker(chat: Callable, style: str, store: NotesStore) -> Callable[[
         wanted = _PROMPT.format(told=STYLES[style], notes=store.newest() or "(no notes yet)", part=part)
         for _ in range(EMPTY_TRIES):
             reply = chat([{"role": "user", "content": wanted}], None)
-            if reply.choices[0].finish_reason == "length":
-                raise RuntimeError("a notes version was cut off by the output cap")
             text = reply.choices[0].message.content or ""
-            if text.strip():
+            if text.strip() and reply.choices[0].finish_reason != "length":
                 store.add_version(text)
                 return
-        # An empty reply says nothing about the notes: the file stays as it was, rather than being wiped by the model's silence.
+        # An empty reply or a cut-off one says nothing whole about the notes: the file stays as it was, rather than being wiped or halved, and the count is on the record.
+        skipped[0] += 1
 
     return keep
 
 
 EMPTY_TRIES = 3
+THIN_FOLD = 1000  # tokens a compaction must take off for it to count as one that folded anything much: a very long summary can leave a run compacting at every turn
+
+
+def _counted(chat: Callable, used: dict[str, int]) -> Callable:
+    """Every model call a session makes, and its tokens, whoever asked: the agent, a summary, the reader or the note-taker."""
+
+    def counting(messages: list[dict], tools: list | None) -> Any:
+        reply = chat(messages, tools)
+        usage = getattr(reply, "usage", None)
+        used["calls"] += 1
+        used["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+        used["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+        return reply
+
+    return counting
 
 
 def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[dict], Any], count: Callable[[str], int],
-                out: Path, workdir: Path, package_prompt: Callable, versions: dict | None = None) -> dict[str, Any]:
+                out: Path, workdir: Path, package_prompt: Callable, versions: dict | None = None, disarm: Callable[[], None] = lambda: None) -> dict[str, Any]:
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
     out, workdir = Path(out), Path(workdir)
     out.mkdir(parents=True, exist_ok=True)
     workdir.mkdir(parents=True, exist_ok=True)
     rules = session["rules"]
+    model_use = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    notes_skipped = [0]
+    chat = _counted(chat, model_use)
     store: Any = None
     standing, on_compact, reader_calls = None, None, [0]
     if arm in TOOL_ARMS:
@@ -144,7 +163,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
             return f"{DELIVERED_HEADER}\n" + "\n".join(kept) if kept else ""
     elif arm in NOTE_ARMS:
         store = NotesStore(workdir, [], history=True)
-        on_compact = make_note_taker(chat, NOTE_ARMS[arm], store)
+        on_compact = make_note_taker(chat, NOTE_ARMS[arm], store, notes_skipped)
 
         def standing() -> str:
             newest = store.newest()
@@ -209,7 +228,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
                 for command in session.get("first_prepare", ()):
                     must(env, command)
                 planted_on.append(task["name"])
-        except Exception:
+        except BaseException:
             getattr(env, "cleanup", lambda: None)()
             raise
         walls.append({"task": task["name"], "wall": getattr(env, "wall", None)})
@@ -219,8 +238,9 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     try:
         try:
             agent.run_tasks(session["tasks"], prepared, worded=worded)
-        except Exception as error:  # a failed model call or machine ends the session, not its record
+        except (Exception, Stopped) as error:  # a failed model call or machine, or the job being stopped, ends the session, not its record
             ended_by = f"{type(error).__name__}: {error}"[:1000]
+        disarm()
         ledger = (store.ledger("agent_tools" if arm in TOOL_ARMS else "delivered") if store
                   else stand_in_record(BASELINE, code=f"studies/long_run/session.py:{arm}"))
         note_versions = store.commits if arm in NOTE_ARMS else 0
@@ -238,8 +258,10 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     for row in silent:
         reasons[str(row.get("finish_reason"))] = reasons.get(str(row.get("finish_reason")), 0) + 1
     summary = {"arm": arm, "versions": versions or {}, "outcomes": agent.outcomes, "ended_by": ended_by, "calls": agent.n_calls,
-               "compactions": len(agent.events), "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
+               "compactions": len(agent.events), "compactions_folding_little": sum(event["tokens_before"] - event["tokens_after"] < THIN_FOLD for event in agent.events),
+               "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
                "resent": agent.resent, "ledger_refused": ledger_refused, "planted_on": planted_on[0] if planted_on else None, "walls": walls,
+               "machines_not_stopped": agent.not_stopped, "model_use": model_use, "notes_not_written": notes_skipped[0],
                "valid": not agent.resent and ledger_refused is None and (bool(planted_on) or not session.get("first_prepare")),
                "no_command": len(silent), "no_command_finish_reasons": reasons,
                "reader_calls": reader_calls[0], "note_versions": note_versions,
@@ -278,6 +300,24 @@ def _environment(kind: str, timeout: int) -> Callable[[dict], Any]:
     return make
 
 
+def _stop_on_term() -> Callable[[], None]:
+    """Until the returned function is called, the job's stop signal ends the session as a failure does, so that its record is still written. After that, or once it has
+    come, it changes nothing: the record is being written, and the job's folder goes only when this process has ended."""
+    armed = [True]
+
+    def stop(number: int, frame: Any) -> None:
+        if armed[0]:
+            armed[0] = False
+            raise Stopped(f"signal {number}")
+
+    signal.signal(signal.SIGTERM, stop)
+
+    def disarm() -> None:
+        armed[0] = False
+
+    return disarm
+
+
 def _counter(tokenizer: str) -> Callable[[str], int]:
     """The reader's own tokenizer; "words" is for dry runs only."""
     if tokenizer == "words":
@@ -298,16 +338,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--arm", required=True, choices=ARMS)
     parser.add_argument("--env", default="docker", choices=("local", "machine", "docker"))
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--writing-tokens", type=int, default=8192, help="the cap on a summary, a notes version or a rule reading: reasoning counts toward a cap, and a cut-off one is useless")
     parser.add_argument("--command-timeout", type=int, default=300)
     arguments = parser.parse_args(argv)
 
     import minisweagent
 
-    summary = run_session(load_session(json.loads(Path(arguments.session).read_text())), arm=arguments.arm,
-                          chat=http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens),
+    acting = http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
+    writing = http_chat(arguments.url, arguments.model, max_tokens=arguments.writing_tokens)
+    session = load_session(json.loads(Path(arguments.session).read_text()))
+    disarm = _stop_on_term()
+    summary = run_session(session, arm=arguments.arm, chat=lambda messages, tools: acting(messages, tools) if tools else writing(messages, None),
                           make_env=_environment(arguments.env, arguments.command_timeout), count=_counter(arguments.tokenizer),
-                          out=Path(arguments.out), workdir=Path(arguments.workdir), package_prompt=package_prompt(),
-                          versions={"mini_swe_agent": minisweagent.__version__, "model": arguments.model, "env": arguments.env})
+                          out=Path(arguments.out), workdir=Path(arguments.workdir), package_prompt=package_prompt(), disarm=disarm,
+                          versions={"mini_swe_agent": minisweagent.__version__, "model": arguments.model, "env": arguments.env,
+                                    "commit": os.environ.get("TASTE_COMMIT", ""), "summary_prompt": session.get("summary_prompt", "")})
     print(json.dumps({key: summary[key] for key in ("arm", "outcomes", "calls", "compactions", "memory_turns", "scores")}))
     if summary["ended_by"] or not summary["valid"]:
         print(f"this session did not end cleanly: ended by {summary['ended_by']}, valid {summary['valid']}", file=sys.stderr)

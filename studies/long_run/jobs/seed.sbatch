@@ -7,7 +7,7 @@
 # machines, each with its own process list, from the images fetched once. READER is gpt-oss or laguna, which takes two GPUs. Free, no key. Needs STUDY_ROOT, SHA and SEED.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
-D=${STUDY_ROOT:?}; S=${SHA:?}; SEED=${SEED:?}; TASKS=${TASKS:-16}; READER=${READER:-gpt-oss}; PROMPT=${PROMPT:-anthropic}; COMPACT_AT=${COMPACT_AT:-8000}; KEEP=${KEEP:-2000}
+D=${STUDY_ROOT:?}; S=${SHA:?}; SEED=${SEED:?}; TASKS=${TASKS:-16}; READER=${READER:-gpt-oss}; PROMPT=${PROMPT:-anthropic}; COMPACT_AT=${COMPACT_AT:-8000}; KEEP=${KEEP:-2000}; TASK_CALLS=${TASK_CALLS:-40}
 ARMS=${ARMS:-compaction taste taste_exists taste_check taste_rules notes_told notes_neutral restated no_compaction}
 L=$D/long
 IMG=$D/images/vllm-v0.32.0.sif
@@ -19,8 +19,9 @@ export GIT_AUTHOR_NAME=long-run GIT_AUTHOR_EMAIL=long-run@localhost GIT_COMMITTE
 OUT=$L/runs/$READER-$PROMPT-seed$SEED-$SLURM_JOB_ID; mkdir -p $OUT
 # Machines hold memory on a shared node: all of a seed's sit in one folder, gone with it however it ends. Seeds sharing a job's server each have their own.
 WORK=/tmp/aos-long-$SLURM_JOB_ID-$READER-$PROMPT-seed$SEED; mkdir -p $WORK/machines
+# When the job is stopped, each session gets the signal too and writes its record: this waits for them before their folder goes.
 trap 'rm -rf "$WORK"' EXIT
-trap 'exit 143' TERM
+trap 'kill ${PID:-} ${SMI:-} 2>/dev/null; wait; exit 143' TERM
 if [ $READER = laguna ]; then
   # It thinks before it answers, and a thought counts toward the output cap.
   FOLDER=$D/models/laguna-s-2.1-nvfp4; MODEL=poolside/laguna-s-2.1; MOST=8192
@@ -51,12 +52,13 @@ else
 fi
 cd $CODE
 $L/venv/bin/python -m studies.long_run.make_session --tasks-root $L/tb/terminal-bench-2-1 --agent-config $(ls $L/venv/lib/python3*/site-packages/minisweagent/config/mini.yaml) \
-  --seed $SEED --tasks $TASKS --compact-at $COMPACT_AT --keep-recent $KEEP --prompt $PROMPT --later-rule-at 20 --task-calls 40 --images $L/images-sif --out $OUT/session.json | cut -c1-400
+  --seed $SEED --tasks $TASKS --compact-at $COMPACT_AT --keep-recent $KEEP --prompt $PROMPT --later-rule-at 20 --task-calls $TASK_CALLS --images $L/images-sif --stop-at $((131072 - MOST - 8000)) --out $OUT/session.json | cut -c1-400
 RUNS=()
 for ARM in $ARMS; do
-  ( T1=$(date +%s)
+  ( trap '' TERM  # this shell stays until its session has written its record; the session sets its own handler
+    T1=$(date +%s)
     TMPDIR=$WORK/machines $L/venv/bin/python -m studies.long_run.session --session $OUT/session.json --arm $ARM --env machine --url $URL --model $MODEL \
-      --tokenizer $FOLDER/tokenizer.json --out $OUT/$ARM --workdir $WORK/$ARM --command-timeout 300 --max-tokens $MOST > $OUT/$ARM.log 2>&1
+      --tokenizer $FOLDER/tokenizer.json --out $OUT/$ARM --workdir $WORK/$ARM --command-timeout 300 --max-tokens $MOST --writing-tokens $((2 * MOST)) > $OUT/$ARM.log 2>&1
     code=$?
     echo "$ARM exit $code seconds $(( $(date +%s) - T1 ))"; tail -1 $OUT/$ARM.log | cut -c1-900
     rm -rf $WORK/$ARM

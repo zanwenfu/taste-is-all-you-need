@@ -246,3 +246,51 @@ def test_the_long_run_compares_sessions_since_tasks_of_one_conversation_are_not_
     assert (pair["sessions"], pair["sessions_better"], pair["sessions_worse"]) == (4, 3, 0)
     assert pair["sessions_p"] == pytest.approx(0.25)
 
+
+# ------------------------------------------------------------------ the fourth review
+
+def test_every_rate_by_rule_and_by_what_was_held_leaves_out_unread_answers(tmp_path: Path) -> None:
+    ids = range(10)
+    _write(tmp_path, "summary", [_row(n, obeyed=False) for n in ids])
+    _write(tmp_path, "restated", [_row(n, obeyed=True) for n in ids])
+    _write(tmp_path, "turns", [_row(n, obeyed=True if n < 3 else False if n < 5 else None, held=True) for n in ids])
+    entry = next(e for e in tables(load_run(tmp_path, "anthropic", 1), {f"h0:{n}": False for n in ids}) if e["row"] == "turns")
+    assert entry["per_rule"] == {"sc01": [3, 5]} and entry["obeyed_if_held"] == [3, 5] and entry["obeyed_where_restated_is"] == [3, 5]
+
+
+def test_a_notes_file_the_judge_could_not_read_is_counted_apart_from_one_without_the_rule(tmp_path: Path) -> None:
+    ids = range(4)
+    _write(tmp_path, "notes-newest-told", [_row(n, obeyed=True, arm="a2cw") for n in ids], name="a2cw-i-anthropic-k1-b4096")
+    stored = {"told": {"h0:0": {"id": "h0:0", "newest": True, "any": True}, "h0:1": {"id": "h0:1", "newest": None, "any": None}, "h0:2": {"id": "h0:2", "newest": False, "any": False},
+                       "h0:3": {"id": "h0:3", "newest": True, "any": True}}}
+    entry = tables(load_run(tmp_path, "anthropic", 1), {f"h0:{n}": False for n in ids}, None, stored)[0]
+    assert (entry["stored"], entry["stored_unclear"]) == (2, 1)
+
+
+def test_a_session_that_died_with_no_summary_is_counted_rather_than_lost(tmp_path: Path) -> None:
+    for arm, whole in (("compaction", True), ("taste", False)):
+        folder = tmp_path / "s1" / arm
+        folder.mkdir(parents=True)
+        (folder / "actions.jsonl").write_text("{}\n")
+        if whole:
+            (folder / "summary.json").write_text(json.dumps(_summary(arm, {"a": {"obeyed": 1, "applies": 1}})))
+    table = {entry["arm"]: entry for entry in long_analyze.arm_table(long_analyze.load([tmp_path / "s1"]))}
+    assert (table["taste"]["sessions"], table["taste"]["invalid"], table["taste"]["ended_early"], table["taste"]["calls"]) == (1, 1, 1, 0)
+    assert table["compaction"]["sessions"] == 1 and table["compaction"]["invalid"] == 0
+
+
+def _with(summary: dict, **versions) -> dict:
+    return {**summary, "versions": versions}
+
+
+def test_one_long_run_table_holds_one_reader_one_summary_prompt_and_one_version_of_the_code() -> None:
+    base = _summary("taste", {"a": {"obeyed": 1, "applies": 1}})
+    same = {"s1": {"taste": _with(base, model="m", summary_prompt="pi", commit="c1")}, "s2": {"taste": _with(base, model="m", summary_prompt="pi", commit="c1")}}
+    assert long_analyze.one_setup(same) == {"model": "m", "summary_prompt": "pi", "commit": "c1"}
+    two_codes = {"s1": {"taste": _with(base, model="m", summary_prompt="pi", commit="c1")}, "s2": {"taste": _with(base, model="m", summary_prompt="pi", commit="c2")}}
+    with pytest.raises(ValueError, match="version of the code"):
+        long_analyze.one_setup(two_codes)
+    assert long_analyze.one_setup(two_codes, mixed=True)["commit"] == "c1, c2"
+    for key, other in (("model", {"model": "other", "summary_prompt": "pi", "commit": "c1"}), ("summary_prompt", {"model": "m", "summary_prompt": "other", "commit": "c1"})):
+        with pytest.raises(ValueError, match=key):
+            long_analyze.one_setup({"s1": {"taste": _with(base, model="m", summary_prompt="pi", commit="c1")}, "s2": {"taste": _with(base, **other)}}, mixed=True)
