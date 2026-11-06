@@ -347,3 +347,10 @@ def test_no_job_script_can_aim_a_signal_at_its_own_process_group_or_everything(s
             if "kill" in words and "-0" not in words:
                 aimed = words[words.index("kill") + 1:]
                 assert not any(word in ("0", "-1") or word.endswith(":-0}") for word in aimed), line
+
+
+def test_the_long_runs_shared_server_has_the_same_settings_as_a_seeds_own() -> None:
+    seed = (ROOT / "studies/long_run/jobs/seed.sbatch").read_text()
+    serve = (ROOT / "studies/long_run/jobs/serve.sbatch").read_text()
+    for line in ("--tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs", "--tool-call-parser openai", "--max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice"):
+        assert line in seed and line in serve
