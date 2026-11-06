@@ -57,8 +57,9 @@ to keyword search, not to version control. Only the header can move Taste's row.
 - **ConPact SWE-Natural** (126 cases): compliance after one compaction, every system given the same token cap.
   These logs give no question, so the main table has no query: Mem0 all its memories newest first, MemPalace
   `wake_up`, the flat list and Taste their newest records. A second table, apart, uses the request as the query.
-  Each round of a log is one unit. The cap is set on the small run from the sizes of the compaction summaries, so
-  that a system is held to about what a summary may take.
+  Each round of a log is one unit. The cap is 1,000 tokens, about what a summary may take: the benchmark's summaries
+  run at a median of 694 tokens under the Anthropic prompt and 628 under Pi's, largest 1,253 and 1,129. It was set from
+  those sizes before any system's compliance was read, and the same cases at 8,000 tokens are reported beside it.
 
 ## Ingest
 
