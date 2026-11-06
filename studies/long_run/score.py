@@ -2,8 +2,9 @@
 
 A rule counts from the model call it was told at. Each command is matched by the rule's own patterns, written before
 any run, and is counted under the number of compactions that came before it. A rule marked ``per_task`` counts each task
-once, obeyed if any of its commands matches, under the compactions at the task's last command. A memory call is a look, and
-a find only if the rule's whole text, or the fact it watches, came back in it, whatever the case.
+once, from the ``from_task``-th on, obeyed if any of its commands or their output matches, under the compactions at the task's
+last command. A memory call is a look, and a find only if the rule's whole text, or the fact it watches, came back in it,
+whatever the case.
 """
 
 from __future__ import annotations
@@ -23,11 +24,13 @@ def score_session(actions: list[dict], rules: list[dict]) -> dict[str, dict[str,
         by_compactions: dict[str, list[int]] = {}
         marks: list[tuple[bool, int]] = []
         if rule.get("per_task"):
+            order = list(dict.fromkeys(action["task"] for action in actions))
             tasks: dict[str, list] = {}
             for action in actions:
-                if action["kind"] == "bash" and action["call"] >= told_at:
+                if (action["kind"] == "bash" and action["call"] >= told_at
+                        and action["task"] not in order[:rule.get("from_task", 0)]):
                     cell = tasks.setdefault(action["task"], [False, 0])
-                    cell[0] = cell[0] or bool(obeys.search(action["command"]))
+                    cell[0] = cell[0] or bool(obeys.search(action["command"])) or bool(obeys.search(str(action.get("output", ""))))
                     cell[1] = action["compactions"]
             marks = [(ok, compactions) for ok, compactions in tasks.values()]
         else:

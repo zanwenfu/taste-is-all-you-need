@@ -63,7 +63,7 @@ def rules(tag: str, later_rule_at: int) -> list[dict[str, Any]]:
          "trigger": rf"{_STARTS}(?:sudo\s+|timeout\s+\S+\s+|env\s+\S+\s+)?{_PYTHON}(?:\s|$)", "obeys": rf"{_PYTHON}\s+-\w*B"},
         {"name": "ls_one", "say": later_rule_at, "text": "From now on, when you list a folder, use ls -1 and no other form of ls.",
          "trigger": rf"{_STARTS}ls(?:\s|$)", "obeys": rf"{_STARTS}ls\s+-\w*1"},
-        {"name": "session_tag", "say": "first", "per_task": True, "trigger": "", "obeys": tag, "watch": tag,
+        {"name": "session_tag", "say": "first", "per_task": True, "from_task": 1, "trigger": "", "obeys": tag, "watch": tag,
          "text": "This machine has a file, /opt/session_tag, holding this session's tag. Later machines do not have it, so read it "
                  "now. For the rest of this session, in every task, run echo TAG once before you submit, with the real tag in "
                  "place of TAG.",

@@ -654,3 +654,14 @@ def test_a_model_that_stops_issuing_commands_leaves_its_task_and_says_so_in_the_
     silent_rows = [row for row in rows if row["kind"] == "no_command"]
     assert len(silent_rows) == 3 and silent_rows[0]["output"] == "I think this is done." and silent_rows[0]["task"] == "one"
     assert score_session(rows, [{"name": "x", "say": "first", "per_task": True, "trigger": "", "obeys": "y"}])["x"]["applies"] == 1
+
+
+def test_a_fact_is_scored_from_the_task_after_it_was_read_in_commands_or_their_output() -> None:
+    rule = {"name": "tag", "say": "first", "per_task": True, "from_task": 1, "trigger": "", "obeys": "tag-7f3a"}
+    actions = [{"kind": "bash", "call": 1, "task": "one", "compactions": 0, "command": "cat /opt/tag", "output": "tag-7f3a\n"},
+               {"kind": "bash", "call": 2, "task": "two", "compactions": 0, "command": "echo tag-7f3a", "output": "tag-7f3a\n"},
+               {"kind": "bash", "call": 3, "task": "three", "compactions": 1, "command": "echo $(cat notes)", "output": "tag-7f3a\n"},
+               {"kind": "bash", "call": 4, "task": "four", "compactions": 2, "command": "cat /opt/tag", "output": "no such file\n"}]
+    scored = score_session(actions, [rule])["tag"]
+    assert scored["applies"] == 3 and scored["obeyed"] == 2
+    assert scored["by_compactions"] == {"0": [1, 1], "1": [1, 1], "2": [0, 1]}
