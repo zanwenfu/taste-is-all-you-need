@@ -37,6 +37,8 @@ the test in its repository and finds nothing):
 - ``continue_both``: the reviewer's feedback, then what the hidden tests said
   of the same submission (the tests message, or that every required test
   passes). Decided by the checker, as ``continue``;
+- ``continue_wide``: the reviewer's feedback as ``continue`` tells it, then one sentence saying the reviewer may
+  have missed other problems. Decided by the checker, as ``continue``.
 - ``continue_tests_hidden``: the tests message as it is, with one sentence
   saying the tests are hidden (added only at grading, so they may be missing or
   different in the agent's copy): the framing alone. Decided by the hidden tests.
@@ -136,7 +138,7 @@ from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver, own_
 RECOVERIES = ("retry", "retry_feedback", "rewind", "continue", "continue_bare",
               "retry_bare", "rewind_bare", "retry_tests", "rewind_tests", "continue_tests",
               "continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden", "agentrewind",
-              "agentrewind_tests")
+              "agentrewind_tests", "continue_wide")
 # The rewind arm and its twin, which the first commit of each of its episodes forks; and the same pair decided by
 # the hidden tests, told Phase 1b's code message where the reviewer's feedback was.
 AGENTREWIND, NORESTORE = "agentrewind", "agentrewind_norestore"
@@ -148,13 +150,13 @@ SOURCES = ("oracle", "reader", "rules")
 SLUG = {"retry": "rt", "retry_feedback": "rf", "continue": "ct", "continue_bare": "cb",
         "retry_bare": "rb", "retry_tests": "rx", "continue_tests": "cx",
         "continue_tests_code": "cc", "continue_tests_full": "cf", "continue_both": "cr", "continue_tests_hidden": "ch",
-        AGENTREWIND: "ar", NORESTORE: "an", AGENTREWIND_TESTS: "ax", NORESTORE_TESTS: "nx"}
+        "continue_wide": "cw", AGENTREWIND: "ar", NORESTORE: "an", AGENTREWIND_TESTS: "ax", NORESTORE_TESTS: "nx"}
 # What each recovery tells the agent: the checker's feedback, its bare rejection, the failed tests, or both.
 MESSAGE = {"retry": "reviewer", "retry_feedback": "reviewer", "rewind": "reviewer", "continue": "reviewer",
            "retry_bare": "bare", "rewind_bare": "bare", "continue_bare": "bare",
            "retry_tests": "tests", "rewind_tests": "tests", "continue_tests": "tests",
            "continue_tests_code": "tests", "continue_tests_full": "tests", "continue_both": "both",
-           "continue_tests_hidden": "tests", AGENTREWIND: "reviewer", NORESTORE: "reviewer",
+           "continue_tests_hidden": "tests", "continue_wide": "reviewer", AGENTREWIND: "reviewer", NORESTORE: "reviewer",
            AGENTREWIND_TESTS: "tests", NORESTORE_TESTS: "tests"}
 # The form of a tests message: the excerpt, or with the failing tests' code, or the wide excerpt.
 TESTS_FORM = {"continue_tests_code": "code", "continue_tests_full": "full", AGENTREWIND_TESTS: "code",
@@ -162,10 +164,13 @@ TESTS_FORM = {"continue_tests_code": "code", "continue_tests_full": "full", AGEN
 # The rewind arms' one sentence, after what they are told.
 REWIND_SENTENCE = ("You may also return to an earlier point of this run with backtrack_candidates and backtrack_commit, "
                    "or repair the current state.")
+# continue_wide: the reasons, then one sentence saying they may not be everything. Nothing about tests or rules.
+WIDE_SENTENCE = "The reviewer may have missed other problems. Check the whole task before you submit again."
 NOTES = {"retry_feedback": "A previous attempt was rejected by a reviewer: {feedback}",
          "rewind": "Note: an attempt that continued from here was rejected by a reviewer: {feedback}",
          "continue": "Submission rejected by a reviewer: {feedback}",
          "continue_both": "Submission rejected by a reviewer: {feedback}",
+         "continue_wide": "Submission rejected by a reviewer: {feedback}\n\n" + WIDE_SENTENCE,
          # The sentence is the study's: AgentRewind's after-rejection prompt is not public.
          AGENTREWIND: "Submission rejected by a reviewer: {feedback}\n\n" + REWIND_SENTENCE}
 BARE_NOTES = {"retry_bare": "A previous attempt was rejected by a reviewer.",

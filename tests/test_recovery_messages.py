@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from taste.agents.checker import BARE_FEEDBACK, parse_submission
-from taste.recovery_study.recovery_driver import BOTH_PASSED, HIDDEN_HEAD, RecoveryDriver, note
+from taste.recovery_study.recovery_driver import BOTH_PASSED, HIDDEN_HEAD, WIDE_SENTENCE, RecoveryDriver, note
 from taste.recovery_study.test_failures import CODE_HEAD
 from tests.recovery_fakes import FakeHarbor, agent_steps, base_jobs, recoveries, submission
 from tests.test_recovery_runs import FEEDBACK, drive, rounds_of, step
@@ -271,3 +271,17 @@ def test_the_richer_forms_caps_are_settings_with_a_floor(tmp_path):
 def test_the_report_names_the_richer_forms():
     for name in ("continue_tests_code", "continue_tests_full", "continue_both", "continue_tests_hidden"):
         assert name in report.VIEWS
+
+
+def test_continue_wide_is_the_reasons_and_one_sentence_from_where_the_agent_stopped(tmp_path):
+    """The same reasons as ``continue``, then one sentence saying they may not be everything; nothing about tests."""
+    rejected = parse_submission(submission("not_done"))
+    assert note("continue_wide", rejected) == note("continue", rejected) + "\n\n" + WIDE_SENTENCE
+    assert "test" not in WIDE_SENTENCE.lower() and "rule" not in WIDE_SENTENCE.lower()
+    _driver, _run_id, first, saved = first_round(tmp_path, ["continue", "continue_wide"], output=FAR)
+    assert sorted(first) == ["ct", "cw"]
+    plain, wide = first["ct"], first["cw"]
+    for settings in (plain, wide):
+        assert (settings["branch_step"], settings["branch_override"], settings["branch_checkpoint"]) == (
+            "6", "reject", saved.name)
+    assert Path(wide["branch_note"]).read_text() == Path(plain["branch_note"]).read_text() + "\n\n" + WIDE_SENTENCE
