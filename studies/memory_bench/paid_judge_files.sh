@@ -18,7 +18,7 @@ case "${1:?fetch or push}" in
     COPY=${2:?}; RUN=${3:?}
     FILES=$(cd "$COPY" && for ROW in $ROWS; do ls $ROW/$NAME.eval-results-gpt-5.4 $ROW/$NAME.eval-results-gpt-5.4.settings.json 2>/dev/null || true; done)
     [ -n "$FILES" ] || { echo "no verdicts to send"; exit 1; }
-    (cd "$COPY" && tar cf - $FILES) | ssh $SSH_OPTS "$HOST" "tar xf - -C $RUN"
+    (cd "$COPY" && COPYFILE_DISABLE=1 tar cf - $FILES) | ssh $SSH_OPTS "$HOST" "tar xf - -C $RUN"
     HERE=$(cd "$COPY" && md5sum $FILES 2>/dev/null || (cd "$COPY" && md5 -r $FILES))
     THERE=$(ssh $SSH_OPTS "$HOST" "cd $RUN && md5sum $(echo $FILES)")
     [ "$(echo "$HERE" | awk '{print $1}' | sort)" = "$(echo "$THERE" | awk '{print $1}' | sort)" ] || { echo "the copy differs"; exit 1; }
