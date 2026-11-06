@@ -126,10 +126,22 @@ published summary prompts; a user message at a chosen model call; and the memory
 nothing run in the task's container for them. The paper says the agent was changed. A rule stated once in the first
 message, a rule given at a later call, and a fact the agent finds out itself and needs later are planted, and the harness
 never sends them again; after each compaction the raw prompt is checked for that, and a run where the harness re-sent
-one is invalid. Rules are chosen so that their trigger occurs in every chosen task and can be scored from the command
-record. Arms: compaction only; a flat list searched by the same code; Taste's memory; with ceilings of no compaction and
-of the statement restated. Size: a free dry run with a stand-in model through every stage, then 3 to 5 sessions, then
-more only after reading them.
+one is invalid. Arms: compaction only; a flat list searched by the same code; Taste's memory, with nothing said about it, with
+one sentence saying a searchable record exists, and with that sentence and one saying to check the record; with ceilings of no
+compaction and of the statement restated. Size: a free dry run through every stage, then 3 to 5 sessions, then more only after
+reading them.
+
+**Tasks and machines.** A session chains public Terminal-Bench 2.1 tasks in one conversation, in an order a seed fixes, each on a
+fresh machine built from the task's published image, leaving out tasks too big for a share of a shared node, needing a machine
+inside the machine, or with no Python on the machine. Machines run under Apptainer on a shared cluster, not Docker, as root inside
+a user namespace, with the package installer told not to drop to its own user; a package whose install changes file owners may
+only half install. The task's own score plays no part. The model is gpt-oss-120b, served on the same cluster. mini-swe-agent's
+published prompts are used, with the submit command added to the system prompt, because a summary may lose the first message.
+
+**What is planted and how it is scored.** All three were chosen before any session ran, and scored by patterns over the command
+record. Whenever you run Python, pass it -B (told with the first task; agents do not do this unprompted). When you list a folder, use
+ls -1 (told at a chosen model call). A tag in a file on the first machine only, which the agent reads itself and must print in
+every task, scored from the second task on, in commands or their output. No message the harness sends holds the tag.
 
 ## Before scaling
 
