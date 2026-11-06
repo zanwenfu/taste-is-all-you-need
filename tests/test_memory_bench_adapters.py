@@ -407,8 +407,8 @@ class _Memory:
     def reset(self) -> None:
         self.resets += 1
 
-    def add(self, messages, *, user_id, infer, metadata):
-        self.adds.append({"messages": messages, "user_id": user_id, "infer": infer, "metadata": metadata})
+    def add(self, messages, *, user_id, infer, metadata, **extra):
+        self.adds.append({"messages": messages, "user_id": user_id, "infer": infer, "metadata": metadata, **extra})
         return {"results": []}
 
     def search(self, query, *, filters, top_k, threshold):
@@ -429,6 +429,23 @@ def test_mem0_gets_one_add_per_round_with_the_date_and_the_session_in_metadata()
                                      {"role": "assistant", "content": "Noted."}]
     assert first["metadata"] == {"session_id": "sB", "round": "0", "session_date": "2023/05/02 (Tue) 10:30"}
     assert first["infer"] is True and memory.adds[2]["metadata"]["round"] == "1"
+
+
+def test_the_session_date_goes_through_adds_prompt_only_when_asked_for() -> None:
+    plain, dated = _Memory(), _Memory()
+    Mem0Arm(plain).ingest(_sessions())
+    Mem0Arm(dated, date_prompt=True).ingest(_sessions())
+    assert all("prompt" not in add for add in plain.adds)
+    assert "2023/05/02 (Tue) 10:30" in dated.adds[1]["prompt"] and "Observation Date" in dated.adds[1]["prompt"]
+    assert [{k: v for k, v in add.items() if k != "prompt"} for add in dated.adds] == plain.adds
+
+
+def test_mem0_asks_for_more_memories_than_any_budget_here_can_hold() -> None:
+    memory = _Memory()
+    arm = Mem0Arm(memory)
+    arm.ingest(_sessions())
+    arm.retrieve("Where did I park?")
+    assert memory.searches[0]["top_k"] == 1000
 
 
 def test_a_conversation_between_two_people_maps_them_to_user_and_assistant_with_names_kept() -> None:

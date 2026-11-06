@@ -19,9 +19,10 @@ public benchmarks, in retrieval and in final-answer accuracy?
 
 ## Systems
 
-- **No memory**; **full context** (when the budget cuts, the newest sessions are kept, and how many were cut is
-  reported per question; every prompt is checked to fit the reader's window); **LongMemEval oracle** (the
-  evidence sessions only).
+- **No memory**; **full context**, as much of the history as the reader's window holds, whatever the budget (31,000 tokens
+  for Llama, whose window here is 32,768; 126,000 for gpt-oss, whose window is 131,072 and whose output cap is 4,096): when it
+  cuts, the newest sessions are kept, and how many were cut is reported per question; **the newest text**, the same list cut
+  to the budget, as a context window would; **LongMemEval oracle** (the evidence sessions only).
 - **Flat keyword**: the same units as Taste's store in a plain list, ranked by the same code
   (`taste/memstore/keyword.py`: letters and digits, Porter's stemmer, BM25 with k1 1.5 and b 0.75).
 - **Flat dense**: the same units ranked by cosine similarity under one shared local embedder (chosen on dev).
@@ -33,8 +34,9 @@ public benchmarks, in retrieval and in final-answer accuracy?
   (mining and search), reported apart.
 - **Mem0 open source 2.2.1**: a locally served model, a local embedder and a local vector store, with no
   route to any paid service. One `add` with inference per round, as Mem0's own LongMemEval harness does, each
-  with a system line giving the session's date, since `timestamp` is platform-only. `search` with `top_k` 200 and
-  `threshold` 0, and each memory goes to the reader as written, in Mem0's rank order. gpt-oss-120b reasons inside
+  with a system line giving the session's date, since `timestamp` is platform-only. `search` with `top_k` 1,000 and
+  `threshold` 0, and each memory goes to the reader as written, in Mem0's rank order until the budget is full. At first
+  this asked for 200, which on LoCoMo's short memories ran out at about 6,000 tokens, so dev was run again. gpt-oss-120b reasons inside
   its output cap, so the cap is 4,096 tokens with reasoning effort low: at Mem0's default of 2,000 the reasoning
   used it up on 84 of 776 extractions, and at 4,096 all 1,835 replies parsed. The extraction prompt gives today as
   the observation date whatever the system line says, so a relative date in an old session is grounded to today;

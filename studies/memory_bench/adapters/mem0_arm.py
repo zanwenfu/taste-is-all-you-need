@@ -77,9 +77,15 @@ class Counted:
         return getattr(self.llm, name)
 
 
+DATE_PROMPT = "The Observation Date of these messages is {}. Use it, and not the date given above, for every relative time."
+
+
 class Mem0Arm:
-    def __init__(self, memory: Any, *, top_k: int = 200) -> None:
-        self.memory, self.top_k = memory, top_k
+    """``date_prompt`` gives each session's date through ``add``'s ``prompt`` argument, which the open source release
+    sends as custom instructions, "highest priority". Without it the prompt says the messages were observed today."""
+
+    def __init__(self, memory: Any, *, top_k: int = 1000, date_prompt: bool = False) -> None:
+        self.memory, self.top_k, self.date_prompt = memory, top_k, date_prompt
 
     def ingest(self, sessions: list[dict]) -> None:
         self.memory.reset()
@@ -94,9 +100,10 @@ class Mem0Arm:
                     else:
                         role = "user" if people and turn["role"] == people[0] else "assistant"
                         messages.append({"role": role, "content": f"{turn['role']}: {turn['content']}"})
+                extra = {"prompt": DATE_PROMPT.format(session["date"])} if self.date_prompt else {}
                 self.memory.add(messages, user_id=USER, infer=True,
                                 metadata={"session_id": session["sid"], "round": str(number),
-                                          "session_date": session["date"]})
+                                          "session_date": session["date"]}, **extra)
 
     def retrieve(self, query: str, *, date: str | None = None) -> list[Item]:
         found = self.memory.search(query, filters={"user_id": USER}, top_k=self.top_k, threshold=0.0)
@@ -127,13 +134,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--dims", type=int, required=True)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--top-k", type=int, default=200)
+    parser.add_argument("--top-k", type=int, default=1000,
+                        help="asks for more memories than any budget here can hold: at 200, LoCoMo's short memories ran out first")
     parser.add_argument("--max-tokens", type=int, default=2000, help="the output cap; Mem0's default is 2,000")
     parser.add_argument("--effort", help="the model's reasoning effort, for a model that reasons")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--shard", default="0/1", help="i/n: every n-th unit from the i-th")
     parser.add_argument("--query-free", action="store_true", help="all memories, no search, for the rule-loss cases")
     parser.add_argument("--free-out", help="also write all memories, from the same ingest, to this rankings file")
+    parser.add_argument("--date-prompt", action="store_true", help="give each session's date through add's prompt argument")
     arguments = parser.parse_args(argv)
     shard = tuple(int(part) for part in arguments.shard.split("/"))
 
@@ -157,10 +166,11 @@ def main(argv: list[str] | None = None) -> int:
                       extra={"reasoning_effort": arguments.effort} if arguments.effort else None)
     memory.llm = counted
     versions = {"mem0ai": mem0.__version__, "embedder": arguments.embedder, "model": arguments.model,
-                "max_tokens": arguments.max_tokens, "effort": arguments.effort}
+                "max_tokens": arguments.max_tokens, "effort": arguments.effort, "top_k": arguments.top_k,
+                "date_prompt": arguments.date_prompt}
 
     def make() -> Any:
-        arm = Mem0Arm(memory, top_k=arguments.top_k)
+        arm = Mem0Arm(memory, top_k=arguments.top_k, date_prompt=arguments.date_prompt)
         return QueryFree(arm) if arguments.query_free else arm
 
     counts = run_adapter(Path(arguments.views), Path(arguments.out), make,
