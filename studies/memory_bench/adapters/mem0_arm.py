@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--shard", default="0/1", help="i/n: every n-th unit from the i-th")
     parser.add_argument("--query-free", action="store_true", help="all memories, no search, for the rule-loss cases")
+    parser.add_argument("--free-out", help="also write all memories, from the same ingest, to this rankings file")
     arguments = parser.parse_args(argv)
     shard = tuple(int(part) for part in arguments.shard.split("/"))
 
@@ -165,7 +166,8 @@ def main(argv: list[str] | None = None) -> int:
     counts = run_adapter(Path(arguments.views), Path(arguments.out), make,
                          system="mem0_free" if arguments.query_free else "mem0",
                          code="studies/memory_bench/adapters/mem0_arm.py", versions=versions,
-                         limit=arguments.limit, shard=shard)
+                         limit=arguments.limit, shard=shard,
+                         also=(Path(arguments.free_out), "mem0_free") if arguments.free_out else None)
     counts |= {"llm_calls": counted.calls, "llm_unparsed": counted.unparsed}
     Path(arguments.out).with_suffix(".counts.json").write_text(json.dumps(counts, indent=1))
     print(json.dumps(counts))

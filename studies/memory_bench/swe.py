@@ -183,6 +183,17 @@ def blocks_stage(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def headers_stage(arguments: argparse.Namespace) -> int:
+    from studies.memory_bench.headers import write_all
+    from studies.memory_probe.headers import served_ask
+
+    views = [json.loads(line) for line in Path(arguments.views).read_text().splitlines()]
+    counts = write_all(views, served_ask(arguments.url, arguments.model, max_tokens=arguments.max_tokens), Path(arguments.out),
+                       workers=arguments.workers)
+    print(json.dumps(counts))
+    return 0 if counts["failed"] == 0 else 1
+
+
 def answer(arguments: argparse.Namespace) -> int:
     from studies.memory_probe.tool_loop import http_chat
 
@@ -214,6 +225,13 @@ def main(argv: list[str] | None = None) -> int:
         stage.add_argument(f"--{name}", required=True)
     stage.add_argument("--cap", type=int, default=CAP)
     stage.set_defaults(run=blocks_stage)
+    stage = stages.add_parser("headers")
+    for name in ("views", "url", "model", "out"):
+        stage.add_argument(f"--{name}", required=True)
+    stage.add_argument("--max-tokens", type=int, default=1024)
+    stage.add_argument("--workers", type=int, default=16)
+    stage.set_defaults(run=headers_stage)
+
     stage = stages.add_parser("answer")
     for name in ("blocks", "cases", "url", "model", "out"):
         stage.add_argument(f"--{name}", required=True)

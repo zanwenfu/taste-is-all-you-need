@@ -196,3 +196,17 @@ def test_blocks_are_cut_to_the_cap_from_a_rankings_file_with_each_turns_words(tm
     blocks = read_blocks(path, [case], cap=4, count=lambda text: len(text.split()))
     assert blocks[case["id"]]["block"] == "one two\n\nuser: three"
     assert blocks[case["id"]]["tokens"] == 4
+
+
+def test_the_header_writer_takes_the_coding_logs_round_by_round(tmp_path: Path) -> None:
+    from studies.memory_bench.headers import write_all
+
+    asked: list[str] = []
+
+    def ask(prompt: str) -> dict:
+        asked.append(prompt)
+        return {"text": '{"what": "a round", "keywords": ["k"]}', "finish_reason": "stop", "prompt_tokens": 1, "completion_tokens": 1}
+
+    views = views_of([_case()])
+    counts = write_all(views, ask, tmp_path / "headers.jsonl", workers=2)
+    assert counts["failed"] == 0 and counts["calls"] == len({json.dumps(s["turns"]) for s in views[0]["sessions"]})

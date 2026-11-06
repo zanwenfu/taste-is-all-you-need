@@ -540,3 +540,24 @@ def test_shards_split_the_units_between_processes(tmp_path: Path) -> None:
     views, out = _views(tmp_path), tmp_path / "a.jsonl"
     run_adapter(views, out, _Stand, system="s", code="c", versions={}, shard=(1, 2))
     assert sorted({json.loads(line)["qid"][:2] for line in out.read_text().splitlines()}) == ["q1"]
+
+
+class _WithMemories(_Stand):
+    def memories(self) -> list[str]:
+        return ["newest memory", "older memory"]
+
+
+def test_one_ingest_can_write_both_the_search_and_what_is_handed_over_with_no_query(tmp_path: Path) -> None:
+    """A system whose ingest is a model call per round costs too much to run twice for the same store."""
+    _Stand.made = []
+    out, free = tmp_path / "rankings.jsonl", tmp_path / "free.jsonl"
+    run_adapter(_views(tmp_path), out, _WithMemories, system="stand", code="tests:stand", versions={"stand": "1"},
+                also=(free, "stand_free"))
+    rows = [json.loads(line) for line in free.read_text().splitlines()]
+    assert len(_Stand.made) == 3, "one store per unit, not two"
+    assert [row["qid"] for row in rows] == [json.loads(line)["qid"] for line in out.read_text().splitlines()]
+    assert rows[0]["system"] == "stand_free"
+    assert [item["turns"][0]["content"] for item in rows[0]["items"]] == ["newest memory", "older memory"]
+    run_adapter(_views(tmp_path), out, _WithMemories, system="stand", code="tests:stand", versions={"stand": "1"},
+                also=(free, "stand_free"))
+    assert len(free.read_text().splitlines()) == 6, "a second run adds nothing"

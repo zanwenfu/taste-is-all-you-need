@@ -47,8 +47,11 @@ class QueryFree:
 
 
 def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: str, code: str,
-                versions: dict[str, Any], limit: int | None = None, shard: tuple[int, int] = (0, 1)) -> dict[str, int]:
-    """``shard`` (i, n) runs every n-th unit from the i-th, so n processes can share a views file."""
+                versions: dict[str, Any], limit: int | None = None, shard: tuple[int, int] = (0, 1),
+                also: tuple[Path, str] | None = None) -> dict[str, int]:
+    """``shard`` (i, n) runs every n-th unit from the i-th, so n processes can share a views file. ``also`` (path, system)
+    writes a second rankings file from the same ingest, what ``QueryFree`` hands over, for a system whose ingest costs
+    too much to run twice. It follows the main file: a unit counts as done by the main file alone."""
     units = [json.loads(line) for line in Path(views).read_text().splitlines()]
     units = (units[:limit] if limit else units)[shard[0]::shard[1]]
     out = Path(out)
@@ -70,7 +73,7 @@ def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: 
             started = time.perf_counter()
             adapter.ingest(unit["sessions"])
             ingest_seconds = time.perf_counter() - started
-            lines = []
+            lines, free_lines = [], []
             for query in unit["queries"]:
                 asked = time.perf_counter()
                 items = adapter.retrieve(query["query"], date=query.get("date"))
@@ -79,8 +82,19 @@ def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: 
                 lines.append(rankings_line(query["qid"], system, items, ingest_seconds=ingest_seconds,
                                            retrieve_seconds=seconds, ledger=own() if own else default,
                                            versions=versions))
+                if also:
+                    free = QueryFree(adapter)
+                    free.first = unit["sessions"][0]
+                    asked = time.perf_counter()
+                    items = free.retrieve(query["query"])
+                    free_lines.append(rankings_line(query["qid"], also[1], items, ingest_seconds=ingest_seconds,
+                                                    retrieve_seconds=time.perf_counter() - asked,
+                                                    ledger=own() if own else default, versions=versions))
         finally:
             adapter.close()
+        if also:
+            with Path(also[0]).open("a") as written:
+                written.write("".join(line + "\n" for line in free_lines))
         with out.open("a") as written:
             written.write("".join(line + "\n" for line in lines))
         ran += 1
