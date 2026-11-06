@@ -6,6 +6,8 @@ score it from the command record.
 
     compaction     the summary alone: a baseline
     taste          the same, and every message committed to Taste's memory, with search and fetch offered beside bash
+    taste_exists   the same, and the system prompt says a searchable record exists
+    taste_check    the same, and it also says to check that record before answering a request
     no_compaction  a ceiling: the whole conversation, as long as it fits
     restated       a ceiling: compaction, with every rule told so far said again at each task
 
@@ -27,9 +29,14 @@ from studies.context_rot.repeated import round_prompt
 from studies.long_run.agent import LongRunAgent, MemoryEnvironment, ToolModel
 from studies.long_run.score import score_session
 from studies.memory_ledger import BASELINE, stand_in_record
+from studies.memory_probe.cases import LOOK, SENTENCE
 from studies.memory_probe.stores import GitTurns
 
-ARMS = ("compaction", "taste", "no_compaction", "restated")
+ARMS = ("compaction", "taste", "taste_exists", "taste_check", "no_compaction", "restated")
+_SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
+# Duke's Apptainer has no user-id map, and its fakeroot helper needs a newer C library than the task images have. Without the
+# helper the agent is still root inside and its writes stay; a package whose install changes file owners may only half install.
+CONTAINER_ARGS = ["--contain", "--cleanenv", "--fakeroot", "--ignore-fakeroot-command"]
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 
@@ -46,7 +53,7 @@ def load_session(raw: dict) -> dict:
         re.compile(rule["trigger"])
         re.compile(rule["obeys"])
     return {"rules": [], "system_template": _SYSTEM, "instance_template": "{{task}}", "observation_template": "{{output.output}}",
-            "format_error_template": "{{error}}", "step_limit": 0, **raw}
+            "format_error_template": "{{error}}", "step_limit": 0, "task_calls": 0, "stop_at_tokens": 0, **raw}
 
 
 def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tries: int = 3) -> Callable:
@@ -74,7 +81,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     out.mkdir(parents=True, exist_ok=True)
     workdir.mkdir(parents=True, exist_ok=True)
     rules = session["rules"]
-    store = GitTurns(workdir) if arm == "taste" else None
+    store = GitTurns(workdir) if arm.startswith("taste") else None
     actions = out / "actions.jsonl"
 
     def on_action(row: dict) -> None:
@@ -87,28 +94,41 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
                   format_error_template=session["format_error_template"]),
         MemoryEnvironment(None, store.answer if store else None),
         count=count, summarize=summarize, record=store.add if store else None, on_action=on_action,
-        system_template=session["system_template"], instance_template=session["instance_template"],
-        step_limit=session["step_limit"], cost_limit=0,
+        system_template=session["system_template"] + _SAID_ABOUT_THE_RECORD.get(arm, ""),
+        instance_template=session["instance_template"], step_limit=session["step_limit"], cost_limit=0,
         compact_at_tokens=0 if arm == "no_compaction" else session.get("compact_at_tokens", 0),
-        keep_recent_tokens=session.get("keep_recent_tokens", 0),
+        keep_recent_tokens=session.get("keep_recent_tokens", 0), task_calls=session["task_calls"],
+        stop_at_tokens=session["stop_at_tokens"],
         planted={rule["say"]: rule["text"] for rule in rules if isinstance(rule["say"], int)},
-        watch={rule["name"]: rule["text"] for rule in rules})
+        watch={rule["name"]: rule.get("watch") or rule["text"] for rule in rules})
     agent.extra_template_vars |= platform.uname()._asdict()  # mini-swe-agent's own templates ask for these
 
     def worded(task: dict, number: int) -> str:
-        told = [rule["text"] for rule in rules if rule["say"] == "first" and (number == 0 or arm == "restated")]
+        says = (lambda rule: rule.get("restate") or rule["text"]) if arm == "restated" else (lambda rule: rule["text"])
+        told = [says(rule) for rule in rules if rule["say"] == "first" and (number == 0 or arm == "restated")]
         if arm == "restated":
-            told += [rule["text"] for rule in rules if isinstance(rule["say"], int) and agent.n_calls >= rule["say"]]
+            told += [says(rule) for rule in rules if isinstance(rule["say"], int) and agent.n_calls >= rule["say"]]
         return "\n\n".join([*told, task["instruction"]])
 
+    def prepared(task: dict) -> Any:
+        """A task's machine, with anything the session plants there first: the harness's own step, in no message and no log."""
+        env = make_env(task)
+        for command in task.get("prepare", ()):
+            env.execute({"command": command})
+        return env
+
+    ended_by = None
     try:
-        outcomes = agent.run_tasks(session["tasks"], make_env, worded=worded)
+        try:
+            agent.run_tasks(session["tasks"], prepared, worded=worded)
+        except Exception as error:  # a failed model call or machine ends the session, not its record
+            ended_by = f"{type(error).__name__}: {error}"[:1000]
         ledger = store.ledger() if store else stand_in_record(BASELINE, code=f"studies/long_run/session.py:{arm}")
     finally:
         if store:
             store.close()
     rows = [json.loads(line) for line in actions.read_text().splitlines()] if actions.exists() else []
-    summary = {"arm": arm, "versions": versions or {}, "outcomes": outcomes, "calls": agent.n_calls,
+    summary = {"arm": arm, "versions": versions or {}, "outcomes": agent.outcomes, "ended_by": ended_by, "calls": agent.n_calls,
                "compactions": len(agent.events), "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
                "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
@@ -134,7 +154,7 @@ def _environment(kind: str, timeout: int) -> Callable[[dict], Any]:
         if kind == "singularity":
             from minisweagent.environments.singularity import SingularityEnvironment
 
-            return SingularityEnvironment(image=task["image"], executable="apptainer", **settings)
+            return SingularityEnvironment(image=task["image"], executable="apptainer", exec_args=CONTAINER_ARGS, **settings)
         if kind == "docker":
             from minisweagent.environments.docker import DockerEnvironment
 

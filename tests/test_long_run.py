@@ -494,3 +494,140 @@ def test_a_whole_session_from_the_command_line_with_a_real_shell(tmp_path: Path,
     assert summary["compactions"] > 0 and summary["ledger"]["search_calls"] == 1
     assert summary["scores"]["bytes"]["looks"] == 1 and summary["scores"]["bytes"]["finds"] == 1
     assert summary["versions"]["mini_swe_agent"] == "2.4.6"
+
+
+# ------------------------------------------------------------------ the real sessions, on Duke
+
+
+def test_a_task_past_its_call_limit_is_left_and_the_next_task_follows(tmp_path: Path) -> None:
+    script = _Script([_bash("echo a", "c1"), _bash("echo b", "c2"), _bash(DONE, "c3")])
+    session = load_session({**SESSION, "rules": [], "task_calls": 2, "compact_at_tokens": 0})
+    summary = run_session(session, arm="compaction", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert [o["exit_status"] for o in summary["outcomes"]] == ["TaskCallLimit", "Submitted"]
+    last = script.sent[-1]["messages"]
+    assert last[-1]["role"] == "user" and "Do two." in last[-1]["content"]
+    assert all(m["role"] != "exit" for m in last)
+
+
+def test_the_ceiling_with_no_compaction_ends_when_the_window_is_full_and_keeps_its_record(tmp_path: Path) -> None:
+    script = _Script([_bash("word " * 200, "c1"), _bash(DONE, "c2")])
+    session = load_session({**SESSION, "rules": [], "stop_at_tokens": 100})
+    summary = run_session(session, arm="no_compaction", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert [o["exit_status"] for o in summary["outcomes"]] == ["WindowFull"]
+    assert json.loads((tmp_path / "run" / "summary.json").read_text())["calls"] == 1
+
+
+def test_a_model_failure_ends_the_session_but_not_its_record(tmp_path: Path) -> None:
+    calls = [0]
+
+    def chat(messages, tools):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise TimeoutError("the server went away")
+        return _bash("python3 a.py", "c1")
+
+    summary = run_session(load_session({**SESSION, "compact_at_tokens": 0}), arm="compaction", chat=chat,
+                          make_env=lambda task: _Shell(), count=_count, out=tmp_path / "run", workdir=tmp_path / "w",
+                          package_prompt=_prompt)
+    assert "the server went away" in summary["ended_by"]
+    assert summary["scores"]["bytes"]["applies"] == 1
+    assert json.loads((tmp_path / "run" / "summary.json").read_text())["ended_by"] == summary["ended_by"]
+
+
+def test_a_fact_in_the_first_machine_is_found_by_the_agent_and_never_sent_by_the_harness(tmp_path: Path) -> None:
+    shells: list[_Shell] = []
+
+    def make_env(task):
+        shells.append(_Shell())
+        return shells[-1]
+
+    tag = {"name": "tag", "say": "first", "text": "This machine has a file /opt/tag. Read it. Run echo TAG in every task.",
+           "per_task": True, "trigger": "", "obeys": "tag-7f3a", "watch": "tag-7f3a",
+           "restate": "The tag is tag-7f3a. Run echo tag-7f3a in every task."}
+    session = load_session({**SESSION, "rules": [tag], "compact_at_tokens": 0,
+                            "tasks": [{"name": "one", "instruction": "Do one.", "prepare": ["echo tag-7f3a > /opt/tag"]},
+                                      {"name": "two", "instruction": "Do two."}]})
+    script = _Script([_bash("cat /opt/tag", "c1"), _bash("echo tag-7f3a", "c2"), _bash(DONE, "c3"), _bash(DONE, "c4")])
+    summary = run_session(session, arm="compaction", chat=_routed(script), make_env=make_env, count=_count, out=tmp_path / "run",
+                          workdir=tmp_path / "w", package_prompt=_prompt)
+    assert shells[0].ran[0] == "echo tag-7f3a > /opt/tag" and shells[1].ran == [DONE]
+    assert "tag-7f3a" not in json.dumps(script.sent[0]["messages"])
+    assert summary["scores"]["tag"]["applies"] == 2 and summary["scores"]["tag"]["obeyed"] == 1
+    rows = [json.loads(line) for line in (tmp_path / "run" / "actions.jsonl").read_text().splitlines()]
+    assert "echo tag-7f3a > /opt/tag" not in [row["command"] for row in rows], "the harness's own step is not the agent's"
+    restated = _Script([_bash(DONE, "c1"), _bash(DONE, "c2")])
+    run_session(session, arm="restated", chat=_routed(restated), make_env=make_env, count=_count, out=tmp_path / "r2",
+                workdir=tmp_path / "w", package_prompt=_prompt)
+    assert "The tag is tag-7f3a" in json.dumps(restated.sent[-1]["messages"])
+
+
+def test_the_memory_arms_differ_only_by_what_the_system_prompt_says_about_the_record(tmp_path: Path) -> None:
+    from studies.long_run.session import ARMS
+    from studies.memory_probe.cases import LOOK, SENTENCE
+
+    seen = {}
+    for arm in ("taste", "taste_exists", "taste_check"):
+        assert arm in ARMS
+        script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2")])
+        run_session(load_session({**SESSION, "compact_at_tokens": 0}), arm=arm, chat=_routed(script), make_env=lambda task: _Shell(),
+                    count=_count, out=tmp_path / arm, workdir=tmp_path / "w", package_prompt=_prompt)
+        seen[arm] = script.sent[0]["messages"][0]["content"]
+        assert [t["function"]["name"] for t in script.sent[0]["tools"]] == ["bash", SEARCH, FETCH]
+    assert SENTENCE not in seen["taste"] and LOOK not in seen["taste"]
+    assert seen["taste_exists"] == f"{seen['taste']} {SENTENCE}"
+    assert seen["taste_check"] == f"{seen['taste']} {SENTENCE} {LOOK}"
+
+
+def test_the_task_containers_use_the_setting_that_works_on_the_cluster(monkeypatch) -> None:
+    from studies.long_run.session import _environment
+
+    made = {}
+
+    class Stand:
+        def __init__(self, **kwargs) -> None:
+            made.update(kwargs)
+
+    monkeypatch.setattr("minisweagent.environments.singularity.SingularityEnvironment", Stand)
+    _environment("singularity", 300)({"image": "docker://x/y:1", "cwd": "/app"})
+    assert made["executable"] == "apptainer" and made["image"] == "docker://x/y:1" and made["cwd"] == "/app"
+    assert made["exec_args"] == ["--contain", "--cleanenv", "--fakeroot", "--ignore-fakeroot-command"]
+
+
+def test_the_session_file_is_built_the_same_way_from_the_public_tasks(tmp_path: Path) -> None:
+    from studies.long_run.make_session import build
+
+    root = tmp_path / "tb"
+    for name, cpus, memory in (("alpha", 1, 2048), ("beta", 1, 2048), ("gamma", 1, 2048), ("delta", 4, 8192), ("qemu-startup", 1, 2048)):
+        folder = root / name
+        folder.mkdir(parents=True)
+        (folder / "task.toml").write_text(f'[environment]\ndocker_image = "owner/{name}:1"\ncpus = {cpus}\nmemory_mb = {memory}\n')
+        (folder / "instruction.md").write_text(f"Do {name}.\n")
+    template = {"agent": {"system_template": "You help.", "instance_template": "Solve: {{task}}"},
+                "model": {"observation_template": "{{output.output}}", "format_error_template": "{{error}}"}}
+    one = build(root, template, seed=7, tasks=2, compact_at=16000, keep_recent=4000, prompt="anthropic", later_rule_at=20, task_calls=60)
+    assert one == build(root, template, seed=7, tasks=2, compact_at=16000, keep_recent=4000, prompt="anthropic", later_rule_at=20, task_calls=60)
+    names = [task["name"] for task in one["tasks"]]
+    assert len(names) == 2 and not set(names) & {"delta", "qemu-startup"}, "too big or needs a machine inside the machine"
+    assert one["tasks"][0]["image"].startswith("docker://owner/") and one["tasks"][0]["cwd"] == "/app"
+    tag = next(rule for rule in one["rules"] if rule["name"] == "session_tag")
+    assert tag["obeys"] in one["tasks"][0]["prepare"][-1] and "prepare" not in one["tasks"][1]
+    assert tag["obeys"] not in json.dumps(one["tasks"]).replace(one["tasks"][0]["prepare"][-1], "")
+    assert tag["obeys"] not in tag["text"] and tag["obeys"] in tag["restate"]
+    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in one["system_template"], "a summary may lose the first message"
+    assert one["instance_template"] == "Solve: {{task}}" and one["tasks"][1]["instruction"].endswith("\n")
+    assert load_session(one)["task_calls"] == 60
+    assert build(root, template, seed=8, tasks=2, compact_at=16000, keep_recent=4000, prompt="anthropic", later_rule_at=20,
+                 task_calls=60)["rules"] != one["rules"]
+
+
+def test_a_rule_scored_per_task_counts_each_task_once_whether_or_not_it_was_obeyed() -> None:
+    rules = [{"name": "tag", "say": "first", "per_task": True, "trigger": "", "obeys": "tag-7f3a"}]
+    actions = [{"kind": "bash", "call": 1, "task": "one", "compactions": 0, "command": "cat /opt/tag"},
+               {"kind": "bash", "call": 2, "task": "one", "compactions": 0, "command": "echo tag-7f3a"},
+               {"kind": "bash", "call": 3, "task": "two", "compactions": 1, "command": "echo x"},
+               {"kind": "bash", "call": 4, "task": "two", "compactions": 2, "command": "echo y"}]
+    scored = score_session(actions, rules)["tag"]
+    assert scored["applies"] == 2 and scored["obeyed"] == 1
+    assert scored["by_compactions"] == {"0": [1, 1], "2": [0, 1]}, "counted under the compactions when the task ended"

@@ -1,8 +1,9 @@
 """A long run's score, read from its record alone: which commands a rule applied to, and which obeyed it.
 
 A rule counts from the model call it was told at. Each command is matched by the rule's own patterns, written before
-any run, and is counted under the number of compactions that came before it. A memory call is a look, and a find only
-if the rule's whole text came back in it, whatever the case.
+any run, and is counted under the number of compactions that came before it. A rule marked ``per_task`` counts each task
+once, obeyed if any of its commands matches, under the compactions at the task's last command. A memory call is a look, and
+a find only if the rule's whole text, or the fact it watches, came back in it, whatever the case.
 """
 
 from __future__ import annotations
@@ -20,16 +21,25 @@ def score_session(actions: list[dict], rules: list[dict]) -> dict[str, dict[str,
         trigger, obeys = re.compile(rule["trigger"]), re.compile(rule["obeys"])
         applies = obeyed = 0
         by_compactions: dict[str, list[int]] = {}
-        for action in actions:
-            if action["kind"] != "bash" or action["call"] < told_at or not trigger.search(action["command"]):
-                continue
-            ok = bool(obeys.search(action["command"]))
+        marks: list[tuple[bool, int]] = []
+        if rule.get("per_task"):
+            tasks: dict[str, list] = {}
+            for action in actions:
+                if action["kind"] == "bash" and action["call"] >= told_at:
+                    cell = tasks.setdefault(action["task"], [False, 0])
+                    cell[0] = cell[0] or bool(obeys.search(action["command"]))
+                    cell[1] = action["compactions"]
+            marks = [(ok, compactions) for ok, compactions in tasks.values()]
+        else:
+            marks = [(bool(obeys.search(action["command"])), action["compactions"]) for action in actions
+                     if action["kind"] == "bash" and action["call"] >= told_at and trigger.search(action["command"])]
+        for ok, compactions in marks:
             applies += 1
             obeyed += ok
-            cell = by_compactions.setdefault(str(action["compactions"]), [0, 0])
+            cell = by_compactions.setdefault(str(compactions), [0, 0])
             cell[0] += ok
             cell[1] += 1
-        text = rule.get("text", "").casefold()
+        text = (rule.get("watch") or rule.get("text", "")).casefold()
         looks = [action for action in actions if action["kind"] in MEMORY_CALLS]
         scores[rule["name"]] = {"applies": applies, "obeyed": obeyed, "by_compactions": by_compactions,
                                 "looks": len(looks),

@@ -137,6 +137,8 @@ class LongRunConfig(AgentConfig):
     keep_recent_tokens: int = 0
     planted: dict[int, str] = Field(default_factory=dict)  # model call -> one user message added just before it
     watch: dict[str, str] = Field(default_factory=dict)  # texts whose survival each compaction reports
+    task_calls: int = 0  # 0: a task may take any number of model calls; past it the next task follows
+    stop_at_tokens: int = 0  # 0: never; the conversation ends here rather than overflow the model's window
 
 
 class LongRunAgent(DefaultAgent):
@@ -152,6 +154,7 @@ class LongRunAgent(DefaultAgent):
         self.previous_summary: str | None = None
         self._summary_message: dict | None = None
         self._planted_sent: set[int] = set()
+        self.outcomes: list[dict] = []
 
     def add_messages(self, *messages: dict) -> list[dict]:
         added = super().add_messages(*messages)
@@ -212,9 +215,10 @@ class LongRunAgent(DefaultAgent):
                    "command": action["command"]}
             try:
                 output = self.env.execute(action)
-            except Exception:
+            except Exception as error:
                 if self.on_action:
-                    self.on_action(row)
+                    extra = (getattr(error, "messages", None) or [{}])[0].get("extra", {})
+                    self.on_action({**row, "submission": extra["submission"]} if "submission" in extra else row)
                 raise
             if self.on_action:
                 self.on_action({**row, "returncode": output.get("returncode"), "output": str(output.get("output", ""))
@@ -224,7 +228,12 @@ class LongRunAgent(DefaultAgent):
 
     def _until_exit(self) -> dict:
         """The default agent's loop, after its first two messages."""
+        started = self.n_calls
         while True:
+            if 0 < self.config.stop_at_tokens < self.tokens():
+                return {"exit_status": "WindowFull", "submission": ""}
+            if 0 < self.config.task_calls <= self.n_calls - started:
+                return {"exit_status": "TaskCallLimit", "submission": ""}
             try:
                 self.step()
                 self.n_consecutive_format_errors = 0
@@ -249,9 +258,9 @@ class LongRunAgent(DefaultAgent):
     def run_tasks(self, tasks: list[dict], make_env: Callable[[dict], Any],
                   worded: Callable[[dict, int], str] | None = None) -> list[dict]:
         """Several tasks in one conversation, each in its own container. A submitted task's exit message is never sent
-        to the model: the next task follows as a user message, and only the container changes. A task that ends any
-        other way ends the session."""
-        outcomes = []
+        to the model: the next task follows as a user message, and only the container changes. A task past its call limit
+        is left the same way. A task that ends any other way ends the session."""
+        self.outcomes = []
         for number, task in enumerate(tasks):
             self.task_name = task["name"]
             self.env.inner = make_env(task)
@@ -263,14 +272,15 @@ class LongRunAgent(DefaultAgent):
                     self.model.format_message(role="system", content=self._render_template(self.config.system_template)),
                     self.model.format_message(role="user", content=self._render_template(self.config.instance_template)))
             else:
-                self.messages.pop()
+                if self.messages[-1].get("role") == "exit":
+                    self.messages.pop()
                 self.add_messages({"role": "user", "content": text})
             ended = self._until_exit()
-            outcomes.append({"task": task["name"], "exit_status": ended.get("exit_status"), "calls": self.n_calls,
-                             "compactions": len(self.events)})
-            if ended.get("exit_status") != "Submitted":
+            self.outcomes.append({"task": task["name"], "exit_status": ended.get("exit_status"), "calls": self.n_calls,
+                                  "compactions": len(self.events)})
+            if ended.get("exit_status") not in ("Submitted", "TaskCallLimit"):
                 break
-        return outcomes
+        return self.outcomes
 
     def serialize(self, *extra_dicts: dict) -> dict:
         return super().serialize({"info": {"compactions": self.events, "recorded_to_memory": self.recorded}},
