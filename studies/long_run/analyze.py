@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 BASE = "compaction"
+SPANS = ((0, 0), (1, 2), (3, 5), (6, 10), (11, 20), (21, 50), (51, 100), (101, 10**9))
 
 
 def load(folders: list[Path]) -> dict[str, dict[str, dict]]:
@@ -79,6 +80,37 @@ def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
     return table
 
 
+def _span(compactions: int) -> str:
+    low, high = next(span for span in SPANS if span[0] <= compactions <= span[1])
+    return str(low) if low == high else f"{low}-{high}" if high < 10**9 else f"{low}+"
+
+
+def compaction_table(runs: dict[str, dict[str, dict]]) -> dict[str, dict[str, dict[str, list[int]]]]:
+    """{rule: {arm: {compactions so far: [obeyed, applies]}}}, over the valid runs: the question is what is lost as compactions add up."""
+    table: dict[str, dict[str, dict[str, list[int]]]] = {}
+    for arms in runs.values():
+        for arm, summary in arms.items():
+            if not summary.get("valid", True):
+                continue
+            for rule, score in summary["scores"].items():
+                for compactions, (obeyed, applies) in score.get("by_compactions", {}).items():
+                    cell = table.setdefault(rule, {}).setdefault(arm, {}).setdefault(_span(int(compactions)), [0, 0])
+                    cell[0] += obeyed
+                    cell[1] += applies
+    return table
+
+
+def render_compactions(table: dict[str, dict[str, dict[str, list[int]]]]) -> str:
+    spans = [_span(low) for low, _ in SPANS]
+    lines = []
+    for rule in sorted(table):
+        lines += ["", f"{rule}, obeyed by compactions so far", "", "| arm | " + " | ".join(spans) + " |", "|" + "---|" * (len(spans) + 1)]
+        for arm in sorted(table[rule]):
+            cells = [("/".join(str(n) for n in table[rule][arm][span]) if span in table[rule][arm] else "-") for span in spans]
+            lines.append("| " + " | ".join([arm, *cells]) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def render(table: list[dict[str, Any]]) -> str:
     rules = sorted({rule for entry in table for rule in entry["rules"]})
     head = ["arm", "sessions", "invalid", "tasks", "submitted", "machines failed", "calls", "compactions", "no command", "looks"]
@@ -104,9 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("folders", nargs="+")
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args(argv)
-    table = arm_table(load([Path(folder) for folder in arguments.folders]))
+    runs = load([Path(folder) for folder in arguments.folders])
+    table = arm_table(runs)
     out = Path(arguments.out)
-    out.write_text(render(table))
+    out.write_text(render(table) + render_compactions(compaction_table(runs)))
     out.with_suffix(".json").write_text(json.dumps(table, indent=1))
     print(f"{len(table)} arms at {out}")
     return 0

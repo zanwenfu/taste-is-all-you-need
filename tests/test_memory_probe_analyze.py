@@ -141,3 +141,16 @@ def test_the_arm_table_pools_seeds_and_shows_ran_and_known(tmp_path: Path) -> No
     assert taste["sessions"] == 2 and taste["rules"]["rule"]["obeyed"] == 2 and taste["rules"]["rule"]["knows"] == 2
     assert taste["rules"]["rule"]["against_compaction"]["tasks"] == 2
     assert "knows 2/2" in long_analyze.render(table)
+
+
+def test_obedience_is_shown_against_the_compactions_so_far() -> None:
+    def summary(cells: dict[str, list[int]]) -> dict:
+        return {"valid": True, "calls": 1, "compactions": 1, "outcomes": [],
+                "scores": {"python_B": {"obeyed": 0, "applies": 0, "finds": 0, "looks": 0, "by_task": {}, "by_compactions": cells}}}
+
+    runs = {"seed1": {"compaction": summary({"0": [2, 2], "2": [1, 2], "12": [0, 4]})},
+            "seed2": {"compaction": summary({"1": [1, 1], "30": [0, 1]})}}
+    table = long_analyze.compaction_table(runs)
+    assert table["python_B"]["compaction"] == {"0": [2, 2], "1-2": [2, 3], "11-20": [0, 4], "21-50": [0, 1]}
+    text = long_analyze.render_compactions(table)
+    assert "| compaction | 2/2 | 2/3 | - | - | 0/4 | 0/1 | - | - |" in text.splitlines()
