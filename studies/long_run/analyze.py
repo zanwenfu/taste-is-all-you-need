@@ -1,0 +1,116 @@
+"""The long run's tables: each arm against compaction alone, across seeds, task by task.
+
+Arms can end early, so a rule's obedience compares only tasks both arms reached, with an exact sign test over tasks. The tag is reported as ran and as known,
+since a reply with no command can hold it. A run the harness made invalid by sending a planted text again is left out and named.
+
+    python -m studies.long_run.analyze runs/seed2-1 runs/seed3-1 --out report.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from pathlib import Path
+from typing import Any
+
+BASE = "compaction"
+
+
+def load(folders: list[Path]) -> dict[str, dict[str, dict]]:
+    """{seed folder: {arm: summary}}"""
+    return {folder.name: {path.parent.name: json.loads(path.read_text()) for path in sorted(folder.glob("*/summary.json"))} for folder in folders}
+
+
+def sign_test(better: int, worse: int) -> float:
+    n = better + worse
+    return min(1.0, 2 * sum(math.comb(n, i) for i in range(min(better, worse) + 1)) / 2**n) if n else 1.0
+
+
+def _rate(cell: dict[str, int]) -> float:
+    return cell["obeyed"] / cell["applies"]
+
+
+def compare_rule(runs: dict[str, dict[str, dict]], arm: str, rule: str) -> dict[str, Any]:
+    """Pooled obedience, and task by task against compaction alone on tasks both reached where the rule applied in both."""
+    pooled = {"obeyed": 0, "applies": 0, "base_obeyed": 0, "base_applies": 0, "tasks": 0, "better": 0, "worse": 0, "same": 0}
+    for arms in runs.values():
+        if arm not in arms or BASE not in arms or not arms[arm].get("valid", True) or not arms[BASE].get("valid", True):
+            continue
+        mine, theirs = arms[arm]["scores"].get(rule, {}).get("by_task", {}), arms[BASE]["scores"].get(rule, {}).get("by_task", {})
+        for task in sorted(set(mine) & set(theirs)):
+            a, b = mine[task], theirs[task]
+            pooled["obeyed"] += a["obeyed"]
+            pooled["applies"] += a["applies"]
+            pooled["base_obeyed"] += b["obeyed"]
+            pooled["base_applies"] += b["applies"]
+            pooled["tasks"] += 1
+            pooled["better" if _rate(a) > _rate(b) else "worse" if _rate(a) < _rate(b) else "same"] += 1
+    pooled["p"] = sign_test(pooled["better"], pooled["worse"])
+    return pooled
+
+
+def arm_table(runs: dict[str, dict[str, dict]]) -> list[dict[str, Any]]:
+    arms = sorted({arm for seed in runs.values() for arm in seed})
+    rules = sorted({rule for seed in runs.values() for summary in seed.values() for rule in summary["scores"]})
+    table = []
+    for arm in arms:
+        summaries = [seed[arm] for seed in runs.values() if arm in seed]
+        entry: dict[str, Any] = {
+            "arm": arm, "sessions": len(summaries), "invalid": sum(not s.get("valid", True) for s in summaries),
+            "calls": sum(s["calls"] for s in summaries), "compactions": sum(s["compactions"] for s in summaries),
+            "no_command": sum(s.get("no_command", 0) for s in summaries),
+            "submitted": sum(o["exit_status"] == "Submitted" for s in summaries for o in s["outcomes"]),
+            "tasks": sum(len(s["outcomes"]) for s in summaries),
+            "machines_failed": sum(o["exit_status"] == "MachineFailed" for s in summaries for o in s["outcomes"]),
+            "looks": max((sum(s["scores"][rule]["looks"] for s in summaries if rule in s["scores"]) for rule in rules), default=0),
+            "rules": {}}
+        for rule in rules:
+            scores = [s["scores"][rule] for s in summaries if rule in s["scores"]]
+            cell: dict[str, Any] = {"obeyed": sum(x["obeyed"] for x in scores), "applies": sum(x["applies"] for x in scores),
+                                    "finds": sum(x["finds"] for x in scores)}
+            if any("knows" in x for x in scores):
+                cell["knows"], cell["knows_of"] = sum(x.get("knows", 0) for x in scores), sum(x.get("knows_of", 0) for x in scores)
+            if arm != BASE:
+                cell["against_compaction"] = compare_rule(runs, arm, rule)
+            entry["rules"][rule] = cell
+        table.append(entry)
+    return table
+
+
+def render(table: list[dict[str, Any]]) -> str:
+    rules = sorted({rule for entry in table for rule in entry["rules"]})
+    head = ["arm", "sessions", "invalid", "tasks", "submitted", "machines failed", "calls", "compactions", "no command", "looks"]
+    lines = ["| " + " | ".join(head + rules) + " |", "|" + "---|" * (len(head) + len(rules))]
+    for entry in table:
+        cells = [entry["arm"], entry["sessions"], entry["invalid"], entry["tasks"], entry["submitted"], entry["machines_failed"], entry["calls"], entry["compactions"],
+                 entry["no_command"], entry["looks"]]
+        for rule in rules:
+            cell = entry["rules"].get(rule, {})
+            text = f"{cell.get('obeyed', 0)}/{cell.get('applies', 0)}"
+            if "knows" in cell:
+                text += f" knows {cell['knows']}/{cell['knows_of']}"
+            pair = cell.get("against_compaction")
+            if pair:
+                text += f" (paired {pair['tasks']} tasks, +{pair['better']} -{pair['worse']}, p {pair['p']:.3f})"
+            cells.append(text)
+        lines.append("| " + " | ".join(str(cell) for cell in cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("folders", nargs="+")
+    parser.add_argument("--out", required=True)
+    arguments = parser.parse_args(argv)
+    table = arm_table(load([Path(folder) for folder in arguments.folders]))
+    out = Path(arguments.out)
+    out.write_text(render(table))
+    out.with_suffix(".json").write_text(json.dumps(table, indent=1))
+    print(f"{len(table)} arms at {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -19,7 +19,8 @@ search and fetch still lose, against compaction alone and a flat markdown file, 
 told earlier, measured as the agent not using it correctly at the moment it applies, although the same model does when
 told directly at that moment. Four steps are reported apart:
 
-- **stored**: the record still holds it (true by construction for an append-only record, so it proves little);
+- **stored**: the record still holds it (true by construction for an append-only record, so it proves little; a notes file or a rule list
+  may not hold it, which the retention judge reads);
 - **looks**: the agent searches, or the system delivers;
 - **finds**: the result holds the statement;
 - **uses**: the action obeys it. On the rule-loss cases this is the A or B choice; only the long run scores actions.
@@ -29,11 +30,12 @@ Effective retention is reported as the rule-loss benchmark defines it: (with mem
 
 ## Arms
 
-The same model, histories and memory budget in every arm, counted with one tokenizer.
+The same model, histories and memory budget in every arm, counted with one tokenizer, on a memory's own words. The system prompt is in no store and no file,
+since the reader has it already. Every row of a run is read against the summary alone and the rule restated in that same run, on the very summaries it was given.
 
 | Arm | Store | How the agent gets it |
 |---|---|---|
-| Compaction | none | the summary |
+| Compaction | none | the summary alone, no tools |
 | Compaction, told | none | the summary, from the same prompt with one sentence added: keep anything the user asked the assistant to keep doing |
 | Flat, delivered | the whole conversation as a flat file | read whole, cut to the budget |
 | Notes, last version | a notes file one model keeps as the conversation goes | search and fetch over its last version |
@@ -103,7 +105,10 @@ last user turn, where the benchmark's own builder puts it.
 **Revised and withdrawn.** The same histories with a later statement in the median user turn that reverses the rule
 (the right answer flips) or takes it back (the old rule's option is then read against the no-rule rate). The 15
 revisions are in the same file and were written at the same point, before any run of these cases and after those 100
-probes had been read. Git keeps old versions, and a search can return a stale one; each hit says when it was recorded.
+probes had been read. Git keeps old versions, and a search can return a stale one. So what reaches the model says when each piece
+was recorded and whether it has since been replaced, the pieces go oldest first, and every arm that can show two statements is
+told that the later one stands. The analysis counts whether a reversed rule's old text came back. Three reversals (rules 2, 4 and 6) only
+permit something, and the model often does not take them up even when restated, so each rule is read against its own restated row.
 
 **Long run.** One coding agent with compaction on (below).
 
@@ -133,9 +138,11 @@ published summary prompts; a user message at a chosen model call; and the memory
 nothing run in the task's container for them. The paper says the agent was changed. A rule stated once in the first
 message, a rule given at a later call, and a fact the agent finds out itself and needs later are planted, and the harness
 never sends them again; after each compaction the raw prompt is checked for that, and a run where the harness re-sent
-one is invalid. Arms: compaction only; Taste's memory, with nothing said about it, with one sentence saying a searchable record
+one is invalid. This is checked on what is about to be sent at every model call, and the whole prompt after each compaction is kept. Arms: compaction only; Taste's memory, with nothing said about it, with one sentence saying a searchable record
 exists, and with that sentence and one saying to check the record (a flat list searched by the same code holds the same text and
-ranks alike, by the test above, so it is one row with these); with ceilings of no compaction and of the statement restated. Added
+ranks alike, by the test above, so it is one row with these); with ceilings of no compaction and of every rule told so far restated in the
+system prompt at every call. A block a memory delivers does not count toward the compaction trigger, so every arm compacts at the same point of the
+same talk. Added
 after the first sessions were read, because those arms hardly searched: the rule list delivered at every call, read back from the
 commit headers and written by the study's reader, and the notes file under both note-taker wordings. Size: a free dry run through
 every stage, then 3 to 5 sessions, then more only after reading them.
@@ -144,13 +151,17 @@ every stage, then 3 to 5 sessions, then more only after reading them.
 fresh machine built from the task's published image, leaving out tasks too big for a share of a shared node, needing a machine
 inside the machine, or with no Python on the machine. Machines run under Apptainer on a shared cluster, not Docker, as root inside
 a user namespace, with the package installer told not to drop to its own user; a package whose install changes file owners may
-only half install. The task's own score plays no part. The model is gpt-oss-120b, served on the same cluster. mini-swe-agent's
-published prompts are used, with the submit command added to the system prompt, because a summary may lose the first message.
+only half install. The task's own score plays no part. The model is gpt-oss-120b, served on the same cluster; Laguna S 2.1, a stronger open coding
+model, was added on 2026-11-06 after gpt-oss-120b's restated ceiling proved low, and is reported apart. mini-swe-agent's published prompts are used, including its
+message for a reply with no command, with the submit command added to the system prompt, because a summary may lose the first message. Why a reply had no
+command is on record. Sessions run under both summary prompts.
 
 **What is planted and how it is scored.** All three were chosen before any session ran, and scored by patterns over the command
 record. Whenever you run Python, pass it -B (told with the first task; agents do not do this unprompted). When you list a folder, use
 ls -1 (told at a chosen model call). A tag in a file on the first machine only, which the agent reads itself and must print in
-every task, scored from the second task on, in commands or their output. No message the harness sends holds the tag.
+every task, scored from the second task on, in commands or their output. No message the harness sends holds the tag. A reply can hold the tag without running
+anything, so the tag is reported as ran and as known. Whether a summary kept a rule is read by a pattern as well as by its exact words, since a summary uses its own.
+Every rule is also scored task by task, and arms compare only on tasks both reached. The first machine that opens gets the rules and the tag.
 
 ## Before scaling
 
@@ -160,12 +171,16 @@ every task, scored from the second task on, in commands or their output. No mess
 
 ## Claims and analysis
 
-"Stored: 0 of N lost, by construction." For any other step, "0 of N (95% upper bound about 3/N)", naming the step.
+"Stored: 0 of N lost, by construction", for the append-only store only. For any other step, "0 of N (95% upper bound about 3/N)", naming the step.
 Compliance is never read against zero: each probe has two options, so a model the rule never reached obeys it about half
 the time (15 of 30 in the first harness-search probes), and every arm is read against that rate, the benchmark's no-rule
 rate on the same cases.
 Paired tests per case against the compaction arm, intervals by a bootstrap over histories, since the 15 cases of a
-history share it. Every clean result is reported, whichever way it falls.
+history share it (`studies/memory_probe/analyze.py`, `studies/long_run/analyze.py`). Sixteen rounds are not sixteen equal rounds: a history with one very long turn
+leaves rounds that fold almost nothing, so effective rounds are reported beside them. Every clean result is reported, whichever way it falls.
+
+An independent review of this harness on 2026-11-06 found that the search also held the system prompt, that what the harness delivered had lost each hit's date and
+replacement mark, and that the long run's message for a reply with no command was not mini-swe-agent's. All were fixed, and the runs before that commit are not reported.
 
 ## Record
 
