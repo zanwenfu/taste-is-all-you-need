@@ -21,15 +21,22 @@ fail() { echo "FAILED: $*"; kill ${PID:-} ${SMI:-} 2>/dev/null; exit 1; }
 echo "start $(date -u +%FT%TZ) on $(hostname) code $TASTE_COMMIT variant $V prompt $PR histories $HISTORIES out $OUT"
 nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv -l 60 > $JOB/gpu.csv &
 SMI=$!
-PORT=$((20000 + RANDOM % 20000)); URL=http://127.0.0.1:$PORT/v1; T0=$(date +%s)
-apptainer exec --nv --home $D/cache/home --bind $D $IMG vllm serve $D/models/gpt-oss-120b --served-model-name $MODEL --host 127.0.0.1 --port $PORT \
-  --max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice --tool-call-parser openai > $JOB/vllm.log 2>&1 &
-PID=$!
-until curl -sf http://127.0.0.1:$PORT/health >/dev/null; do
-  sleep 5; kill -0 $PID 2>/dev/null || { tail -40 $JOB/vllm.log; fail "server died"; }
-  [ $(( $(date +%s) - T0 )) -gt 1800 ] && fail "load timeout"
-done
-echo "load_seconds $(( $(date +%s) - T0 ))"
+# SERVER_URL: use a server another of this study's jobs is already running with this reader and these settings, as the memory cell can.
+if [ -n "${SERVER_URL:-}" ]; then
+  URL=$SERVER_URL; PID=
+  curl -sf ${URL%/v1}/health >/dev/null || fail "no server at $URL"
+  echo "using the running server at $URL"
+else
+  PORT=$((20000 + RANDOM % 20000)); URL=http://127.0.0.1:$PORT/v1; T0=$(date +%s)
+  apptainer exec --nv --home $D/cache/home --bind $D $IMG vllm serve $D/models/gpt-oss-120b --served-model-name $MODEL --host 127.0.0.1 --port $PORT \
+    --max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice --tool-call-parser openai > $JOB/vllm.log 2>&1 &
+  PID=$!
+  until curl -sf http://127.0.0.1:$PORT/health >/dev/null; do
+    sleep 5; kill -0 $PID 2>/dev/null || { tail -40 $JOB/vllm.log; fail "server died"; }
+    [ $(( $(date +%s) - T0 )) -gt 1800 ] && fail "load timeout"
+  done
+  echo "load_seconds $(( $(date +%s) - T0 ))"
+fi
 cd $CODE
 printf -v NAME 'h%02d-%02d' ${HISTORIES%%:*} ${HISTORIES##*:}  # the name the export looks for
 mkdir -p $OUT/full/hermes-$PR $OUT/repeated/$PR
@@ -50,6 +57,6 @@ echo "records seconds $(( $(date +%s) - T1 )) $(tail -1 $OUT/repeated-$PR.stdout
 INPUTS=$OUT/inputs; [ "$PR" = anthropic ] || INPUTS=$OUT/inputs-$PR
 $RUN $D/venv/bin/python -m studies.memory_probe.export --full $OUT/full --repeated $OUT/repeated --histories $HISTORIES --variant $V --deep 0 --prompts $PR --out $INPUTS 2>&1 | tail -1 | cut -c1-200
 [ -s $INPUTS/delivered.jsonl ] || fail "export"
-curl -s http://127.0.0.1:$PORT/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $JOB/vllm-metrics.txt
+curl -s ${URL%/v1}/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $JOB/vllm-metrics.txt
 kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null
 echo "end $(date -u +%FT%TZ)"
