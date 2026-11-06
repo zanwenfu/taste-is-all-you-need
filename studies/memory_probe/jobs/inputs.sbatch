@@ -30,7 +30,7 @@ until curl -sf http://127.0.0.1:$PORT/health >/dev/null; do
 done
 echo "load_seconds $(( $(date +%s) - T0 ))"
 cd $CODE
-NAME=h${HISTORIES%%:*}-${HISTORIES##*:}
+printf -v NAME 'h%02d-%02d' ${HISTORIES%%:*} ${HISTORIES##*:}  # the name the export looks for
 mkdir -p $OUT/full/hermes-$PR $OUT/repeated/$PR
 T1=$(date +%s)
 $RUN $D/venv/bin/python -m studies.context_rot.conpact_bridge --source hermes --histories $HISTORIES --variant $V --prompt $PR \

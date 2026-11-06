@@ -55,14 +55,17 @@ for name in ("notes-told.jsonl", "notes-neutral.jsonl"):
 PY
 fi
 [ -n "$HEADERS_FROM" ] && [ ! -e $HEADERS ] && cp $HEADERS_FROM/turn-headers.jsonl $HEADERS
-for style in told neutral; do
+# WRITERS=0: a cued case has the published case's history word for word, so it keeps that case's notes and headers, read by the history they came from.
+if [ "${WRITERS:-1}" = 1 ]; then
+  for style in told neutral; do
+    T1=$(date +%s)
+    $PY -m studies.memory_probe.notes --inputs $IN --url $URL --model $MODEL --style $style --workers 32 --out $OUT/notes-$style.jsonl 2>&1 | tail -1 | cut -c1-200
+    echo "notes $style seconds $(( $(date +%s) - T1 ))"
+  done
   T1=$(date +%s)
-  $PY -m studies.memory_probe.notes --inputs $IN --url $URL --model $MODEL --style $style --workers 32 --out $OUT/notes-$style.jsonl 2>&1 | tail -1 | cut -c1-200
-  echo "notes $style seconds $(( $(date +%s) - T1 ))"
-done
-T1=$(date +%s)
-$PY -m studies.memory_probe.headers --inputs $IN --url $URL --model $MODEL --out $HEADERS --workers 32 2>&1 | tail -1 | cut -c1-200
-echo "headers seconds $(( $(date +%s) - T1 ))"
+  $PY -m studies.memory_probe.headers --inputs $IN --url $URL --model $MODEL --out $HEADERS --workers 32 2>&1 | tail -1 | cut -c1-200
+  echo "headers seconds $(( $(date +%s) - T1 ))"
+fi
 one() {  # label arm condition extra...
   local label=$1 arm=$2 condition=$3; shift 3
   local name=$arm-$condition-$PR-k$K-b$BUDGET T1=$(date +%s) row=$OUT/$label/$arm-$condition-$PR-k$K-b$BUDGET PIDS=() I code
