@@ -92,8 +92,8 @@ def _spent(path: Path) -> float:
 
 
 def judge_file(hyp_path, ref_path, judge: Converse, *, short_name: str, workers: int = 8, stop_at_usd: float | None = None,
-               spent_elsewhere: float = 0.0) -> Path:
-    """Judge every hypothesis not yet in the output file; return the output file. With ``stop_at_usd``, no call starts once this file's
+               spent_elsewhere: float = 0.0, first: int | None = None) -> Path:
+    """Judge every hypothesis not yet in the output file, or the next ``first`` of them; return the output file. With ``stop_at_usd``, no call starts once this file's
     spend and ``spent_elsewhere`` reach it. Calls already out may finish, so the limit can pass by what ``workers`` calls cost."""
     hyp_path, ref_path = Path(hyp_path), Path(ref_path)
     out = hyp_path.with_name(f"{hyp_path.name}.eval-results-{short_name}")
@@ -104,6 +104,8 @@ def judge_file(hyp_path, ref_path, judge: Converse, *, short_name: str, workers:
     skipped = [entry["question_id"] for entry in _load(hyp_path) if entry["question_id"] not in refs]
     if skipped:
         print(f"warning: {len(skipped)} hypotheses are not in the reference data", file=sys.stderr)
+    if first is not None:
+        todo = todo[:first]
     lock = threading.Lock()
 
     def one(entry: dict) -> None:

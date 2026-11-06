@@ -120,7 +120,7 @@ own timestamp field. Mem0 gets a system line and the date through `prompt`, sinc
   row reports retrieval against the answer as a two-by-two table. Abstention and adversarial questions have no retrieval score.
 - **LongMemEval answers**: the official per-type judge prompts, byte for byte. The official judge model
   (`gpt-4o-2024-08-06`) is not available to this study, so gpt-oss-120b, served here at the official temperature of 0, judges every row, and GPT-5.4 on Amazon Bedrock, which takes no
-  temperature, reads the same answers as a second judge, with agreement and kappa reported, a strict parse, and the official "yes anywhere" rule kept beside it. Every judge reads the question, its date
+  temperature, reads the answers of the main table's rows, both readers, leaving out the budget sweep and no memory, as a second judge, with agreement and kappa reported, a strict parse, and the official "yes anywhere" rule kept beside it (`paid_judge.py`, AWS credit, on the user's yes of Nov 6: about 9,900 verdicts, about $13 by the 50-answer sample, stopping by itself at $20, in ordinary calls, since Bedrock's batch table lists no GPT-5.4). Every judge reads the question, its date
   and its answer from the same cleaned file the reader's prompt came from.
 - **LoCoMo answers**: the benchmark's own token F1, which needs no judge, leads, with the stemmer of its
   evaluation script (NLTK 3.10.4, default Porter stemmer). Adversarial questions are scored by their own rule.
