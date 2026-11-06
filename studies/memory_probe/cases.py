@@ -93,11 +93,13 @@ ARMS = {
     "a7q": "a4q and a6 together",
     "a2cq": "a2c's notes file, searched once by the harness with the request's own words; no tools",
     "a2dq": "a2d's notes file with every version, searched once by the harness with the request's own words; no tools",
+    "a2cw": "a2c's notes file, its newest version read whole with no search; no tools",
+    "a2dw": "a2d's notes file: the newest version read whole, then what one search with the request's words finds in older ones",
 }
-_HARNESS_SEARCHES = ("a5q", "a4q", "a7q", "a2cq", "a2dq")
+_HARNESS_SEARCHES = ("a5q", "a4q", "a7q", "a2cq", "a2dq", "a2cw", "a2dw")
 _NEEDS_HEADERS = ("a4", "a7", "a3", "a4q", "a7q")
 _NEEDS_RECORDS = ("a6", "a7", "a7q")
-_NEEDS_NOTES = ("a2c", "a2d", "a2cq", "a2dq")
+_NEEDS_NOTES = ("a2c", "a2d", "a2cq", "a2dq", "a2cw", "a2dw")
 _NEEDS_ITEMS = ("a6h",)
 TOOL_ARMS = ("a5", "a4", "a7", "a2c", "a2d")
 # The same words the earlier record arms used, so a6 is the same delivery measured in this harness.
@@ -164,15 +166,18 @@ def case_messages(case: dict, summary: str, *, condition: str, upper: bool, bloc
             {"role": "user", "content": case["post_sc_probe_prompt"] if upper else case["probe_prompt"]}]
 
 
-def _search_for_it(store: Any, case: dict, budget: int, count: Callable[[str], int]) -> tuple[str, list[dict]]:
+def _search_for_it(store: Any, case: dict, budget: int, count: Callable[[str], int], *, first: str | None = None) -> tuple[str, list[dict]]:
     """One search with the request's own words, each hit fetched in rank order, page by page until the budget could be
-    full, and all of it cut to the budget."""
+    full, and all of it cut to the budget. ``first`` goes ahead of the hits, and a hit on the current version of it is not
+    fetched again."""
     request = _REQUEST.search(case["probe_prompt"]).group(1)
     arguments = {"description": request, "limit": MAX_RESULTS}
     output, failed = store.answer(SEARCH, arguments)
     calls = [{"name": SEARCH, "arguments": json.dumps(arguments), "output": output, "failed": failed}]
-    pieces: list[str] = []
+    pieces: list[str] = [first] if first is not None else []
     for hit in json.loads(output).get("results", []):
+        if first is not None and hit.get("current"):
+            continue
         text, offset = "", 0
         while count("".join(pieces) + text) <= budget:
             arguments = {"pointer": hit["pointer"], "offset": offset}
@@ -243,15 +248,18 @@ def _delivered_search(case: dict, summary: str, *, chat: Callable, arm: str, con
     """The arms ending in q: the store is searched by the harness, so "looked" is true by construction and "found" says
     whether the search brought the rule back. The text delivered is kept, since a notes file may paraphrase the rule."""
     started = time.perf_counter()
-    if arm in ("a2cq", "a2dq"):
-        store: Any = NotesStore(Path(workdir), notes or [], history=arm == "a2dq")
+    if arm in ("a2cq", "a2dq", "a2cw", "a2dw"):
+        store: Any = NotesStore(Path(workdir), notes or [], history=arm in ("a2dq", "a2dw"))
     else:
         store = GitTurns(Path(workdir), header=header if arm in ("a4q", "a7q") else None)
     try:
         if isinstance(store, GitTurns):
             store.ingest(case["messages"])
         ingested = time.perf_counter()
-        found, calls = _search_for_it(store, case, budget, count)
+        if arm == "a2cw":
+            found, calls = fill([(notes or [""])[-1]], budget, count), []
+        else:
+            found, calls = _search_for_it(store, case, budget, count, first=(notes or [""])[-1] if arm == "a2dw" else None)
         if arm == "a7q":
             block, block_header = f"{delivered}\n\n{FOUND_HEADER}\n{found}", DELIVERED_HEADER
         else:
@@ -259,16 +267,17 @@ def _delivered_search(case: dict, summary: str, *, chat: Callable, arm: str, con
         run = _without_tools(chat, case_messages(case, summary, condition=condition, upper=upper, block=block,
                                                  block_header=block_header))
         asked = time.perf_counter()
-        run.calls, run.searches = calls, 1
+        searches = sum(call["name"] == SEARCH for call in calls)
+        run.calls, run.searches = calls, searches
         reached = _turns_reached(store, run)
-        ledger, commits = store.ledger("single_query"), store.commits
+        ledger, commits = store.ledger("single_query" if searches else "delivered"), store.commits
     finally:
         store.close()
     fetches = sum(call["name"] == FETCH for call in calls)
     return {**_common(case, run, arm=arm, condition=condition, prompt=prompt, k=k, upper=upper, reached=reached, calls=calls,
                       commits=commits, seconds=(ingested - started, asked - ingested), ledger=ledger),
             "delivered_tokens": count(block), "delivered_text": block, "looked": True, "found": holds(found, case["sc_text"]),
-            "searches": 1, "fetches": fetches, "tool_errors": sum(call["failed"] for call in calls)}
+            "searches": searches, "fetches": fetches, "tool_errors": sum(call["failed"] for call in calls)}
 
 
 def _index_lines(rows: list[dict], budget: int, count: Callable[[str], int]) -> tuple[list[str], list[dict]]:

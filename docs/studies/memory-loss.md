@@ -38,6 +38,8 @@ The same model, histories and memory budget in every arm, counted with one token
 | Flat, delivered | the whole conversation as a flat file | read whole, cut to the budget |
 | Notes, last version | a notes file one model keeps as the conversation goes | search and fetch over its last version |
 | Notes, every version | the same writes, every version kept in git | search and fetch across all its versions |
+| Notes, newest read whole | the same writes | the newest version whole, with no search |
+| Notes, newest and older | the same writes, every version kept in git | the newest version whole, then what one search finds in older ones |
 | Taste memory | each turn a commit in `taste.memstore` | search and fetch tools |
 | Taste memory, headers | the same, with a model-written header per commit | search and fetch tools |
 | Delivered rules | rule records from a named reader | put in front of the agent at every call |

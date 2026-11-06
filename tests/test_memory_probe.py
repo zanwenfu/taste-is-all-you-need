@@ -1053,3 +1053,31 @@ def test_a_small_run_can_be_exported_with_no_deeper_depth_at_all(tmp_path: Path)
     empty = tmp_path / "empty"
     (empty / "anthropic").mkdir(parents=True)
     assert len(export_summaries(tmp_path / "full", empty, {"a"}, deep=0, prompts=("anthropic",))) == 1
+
+
+def test_the_newest_notes_can_be_read_whole_with_or_without_the_older_versions_searched_after_them(tmp_path: Path) -> None:
+    """The search over every version favours short early ones, which flatters a rule stated first and hurts one stated last.
+    Reading the newest version whole, then what search finds in older ones, is what version control can add to a notes file."""
+    case = _case()
+    case["probe_prompt"] = 'Request from the user:\n"Email the venue."\n\nTwo candidate replies.'
+    versions = ["The venue wants an email and the rule was stated here.", "Nothing relevant to the request at all in this one."]
+
+    def asked(arm: str) -> tuple[dict, str]:
+        seen: list = []
+
+        def chat(messages, tools):
+            seen.append(messages)
+            assert tools is None
+            return _reply("A")
+
+        row = run_case(case, "S", chat=chat, arm=arm, condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                       prompt="anthropic", k=1, notes=versions)
+        return row, json.dumps(seen[0])
+
+    whole, sent = asked("a2cw")
+    assert versions[1] in sent and versions[0] not in sent, "the newest version, whole, needing no match"
+    assert whole["delivered_text"] == versions[1] and whole["looked"] is True and whole["searches"] == 0
+    both, sent = asked("a2dw")
+    assert sent.index(versions[1]) < sent.index(versions[0]), "the newest first, then what search finds in older versions"
+    assert both["delivered_text"].count(versions[1]) == 1 and both["searches"] == 1
+    assert both["ledger"]["search_calls"] == 1
