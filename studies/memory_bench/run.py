@@ -37,7 +37,11 @@ from studies.memory_bench.systems import (
     System,
     TasteGit,
 )
-from studies.memory_ledger import code_version
+from studies.memory_ledger import code_digest, code_version
+
+# The files every number stands on. The held-out part refuses any other.
+DATA_SHA256 = {"lme": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+               "locomo": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"}
 
 
 def make_system(name: str, gold: lme.Gold | None, workdir: Path, *, unit: str = "round", commit_per: str = "session",
@@ -87,8 +91,8 @@ def _one(job: tuple[dict, Any, dict[str, Any]]) -> list[dict[str, Any]]:
                          rankings=Path(settings["rankings"]) if settings["rankings"] else None)
     count = _counter(settings["tokenizer"])
     if single:
-        return [retrieve_one(view, gold, system, budget=settings["budget"], count=count)]
-    return retrieve_conversation(view, gold, system, budget=settings["budget"], count=count)
+        return [retrieve_one(view, gold, system, budget=settings["budget"], count=count, charge=settings["charge"])]
+    return retrieve_conversation(view, gold, system, budget=settings["budget"], count=count, charge=settings["charge"])
 
 
 def _pool(workers: int) -> Executor:
@@ -101,7 +105,7 @@ def _pool(workers: int) -> Executor:
 def _summary(rows: list[dict[str, Any]], settings: dict[str, Any], ledger: dict[str, Any]) -> dict[str, Any]:
     keys = sorted({key for row in rows for key in row["scores"]})
     return {
-        **{key: settings[key] for key in ("benchmark", "system", "part", "budget", "tokenizer", "unit", "commit_per")},
+        **{key: settings[key] for key in ("benchmark", "system", "part", "budget", "charge", "tokenizer", "unit", "commit_per")},
         "questions": len(rows),
         "ledger": ledger,
         "means": {key: fmean(row["scores"][key] for row in rows if key in row["scores"]) for key in keys},
@@ -114,11 +118,34 @@ def _summary(rows: list[dict[str, Any]], settings: dict[str, Any], ledger: dict[
     }
 
 
+def _sha256(path: str | None) -> str | None:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else None
+
+
+def _guard(arguments: argparse.Namespace) -> None:
+    """The held-out part runs on committed code and on the benchmark's own file, whichever stage opens it."""
+    if arguments.part != "held_out":
+        return
+    commit, dirty = code_version()
+    if arguments.frozen_config != commit or dirty:
+        raise SystemExit("held-out runs once, on committed settings: --frozen-config must name the clean commit in use")
+    if _sha256(arguments.data) != DATA_SHA256[arguments.benchmark]:
+        raise SystemExit(f"{arguments.data} is not the benchmark's own file")
+
+
+def _same_settings(out: Path, settings: dict[str, Any]) -> None:
+    """A second run of a stage carries on only with what the first was told, or two budgets would sit in one file."""
+    path = out.with_name(out.stem + ".settings.json")
+    if path.exists():
+        before = json.loads(path.read_text())
+        changed = sorted(key for key in settings if before.get(key) != settings[key])
+        if changed:
+            raise SystemExit(f"{out} was started with other settings: {changed}")
+    path.write_text(json.dumps(settings, indent=1))
+
+
 def retrieve(arguments: argparse.Namespace) -> int:
-    if arguments.part == "held_out":
-        commit, dirty = code_version()
-        if arguments.frozen_config != commit or dirty:
-            raise SystemExit("held-out runs once, on committed settings: --frozen-config must name the clean commit in use")
+    _guard(arguments)
     wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
     field, loader = ("question_id", lme.load) if arguments.benchmark == "lme" else ("sample_id", locomo.load)
     views, golds = loader([item for item in json.loads(Path(arguments.data).read_text()) if item[field] in wanted])
@@ -127,8 +154,11 @@ def retrieve(arguments: argparse.Namespace) -> int:
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
     done = {json.loads(line)["qid"] for line in out.read_text().splitlines()} if out.exists() else set()
     settings = {key: getattr(arguments, key) for key in
-                ("benchmark", "system", "part", "budget", "tokenizer", "unit", "commit_per", "workdir", "headers",
+                ("benchmark", "system", "part", "budget", "charge", "tokenizer", "unit", "commit_per", "workdir", "headers",
                  "rankings")}
+    _same_settings(out, {**{key: value for key, value in settings.items() if key != "workdir"},
+                         "commit": code_version()[0], "code_digest": code_digest(), "data_sha256": _sha256(arguments.data),
+                         "rankings_sha256": _sha256(arguments.rankings), "headers_sha256": _sha256(arguments.headers)})
     if arguments.benchmark == "lme":
         jobs = [(view, golds[view["qid"]], settings) for view in views if view["qid"] not in done]
     else:
@@ -155,6 +185,8 @@ def _client(url: str) -> Any:
 def views(arguments: argparse.Namespace) -> int:
     """The one ingest every system shares, with nothing a memory may not see: per unit its sessions, oldest first,
     and each question's own words. Systems that run in environments of their own read this file."""
+    if arguments.part == "held_out" and _sha256(arguments.data) != DATA_SHA256[arguments.benchmark]:
+        raise SystemExit(f"{arguments.data} is not the benchmark's own file")
     split = json.loads(Path(arguments.split).read_text())
     wanted = set(split["dev"]) | set(split["held_out"]) if arguments.part == "all" else set(split[arguments.part])
     data = json.loads(Path(arguments.data).read_text())
@@ -185,14 +217,18 @@ def headers(arguments: argparse.Namespace) -> int:
     field, loader = ("question_id", lme.load) if arguments.benchmark == "lme" else ("sample_id", locomo.load)
     views, _ = loader([item for item in json.loads(Path(arguments.data).read_text()) if item[field] in wanted])
     ask = served_ask(_client(arguments.url), arguments.model, max_tokens=arguments.max_tokens, effort=arguments.effort)
-    print(json.dumps(write_all(views, ask, Path(arguments.out), workers=arguments.workers)))
-    return 0
+    counts = write_all(views, ask, Path(arguments.out), workers=arguments.workers)
+    print(json.dumps(counts))
+    return 1 if counts["errors"] else 0  # a call that failed left no row; the next run asks it again
 
 
 def read(arguments: argparse.Namespace) -> int:
     ask = served_ask(_client(arguments.url), arguments.model, max_tokens=arguments.max_tokens, effort=arguments.effort)
-    print(json.dumps(read_all(Path(arguments.records), ask, Path(arguments.out), workers=arguments.workers)))
-    return 0
+    summary = read_all(Path(arguments.records), ask, Path(arguments.out), workers=arguments.workers,
+                       settings={"model": arguments.model, "max_tokens": arguments.max_tokens, "effort": arguments.effort,
+                                 "study_commit": code_version()[0], "code_digest": code_digest()})
+    print(json.dumps(summary))
+    return 1 if summary["failed"] else 0  # a call that failed left no answer; the next run asks it again
 
 
 def judge(arguments: argparse.Namespace) -> int:
@@ -201,6 +237,19 @@ def judge(arguments: argparse.Namespace) -> int:
     served = ServedJudge(_client(arguments.url), arguments.model)
     print(judge_file(arguments.answers, arguments.reference, served, short_name="served", workers=arguments.workers))
     return 0
+
+
+def enough(arguments: argparse.Namespace) -> int:
+    """Whether what each record delivered holds enough to answer, by Mem0's published judge, on the served model. Free."""
+    from studies.memory_bench import enough as enough_module
+
+    records = [json.loads(line) for line in Path(arguments.records).read_text().splitlines()]
+    references = {entry["question_id"]: entry for entry in json.loads(Path(arguments.reference).read_text())}
+    served = ServedJudge(_client(arguments.url), arguments.model, max_tokens=arguments.max_tokens)
+    summary = enough_module.judge_all(records, references, enough_module.load_prompts(Path(arguments.prompts)), served.ask, Path(arguments.out),
+                                      workers=arguments.workers)
+    print(json.dumps(summary))
+    return 1 if summary["errors"] else 0
 
 
 def score(arguments: argparse.Namespace) -> int:
@@ -234,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
     stage.add_argument("--part", required=True, choices=("dev", "held_out"))
     stage.add_argument("--benchmark", default="lme", choices=("lme", "locomo"))
     stage.add_argument("--budget", required=True, type=int)
+    stage.add_argument("--charge", default="text", choices=("text", "prompt"),
+                       help="text: a memory's own words, for every system alike; prompt: what the prompt holds, for a row at the reader's window")
     stage.add_argument("--unit", default="round", choices=("round", "session"))
     stage.add_argument("--commit-per", default="session", choices=("round", "session"))
     stage.add_argument("--headers")
@@ -255,6 +306,13 @@ def main(argv: list[str] | None = None) -> int:
         stage.add_argument("--effort")
         stage.add_argument("--workers", type=int, default=12)
         stage.set_defaults(run=run)
+
+    stage = stages.add_parser("enough", help="the same retrieval judge for every system's delivered text")
+    for argument in ("records", "reference", "prompts", "url", "model", "out"):
+        stage.add_argument(f"--{argument}", required=True)
+    stage.add_argument("--max-tokens", type=int, default=2048)
+    stage.add_argument("--workers", type=int, default=24)
+    stage.set_defaults(run=enough)
 
     stage = stages.add_parser("views", help="the shared, memory-visible ingest file")
     for argument in ("data", "split", "out"):

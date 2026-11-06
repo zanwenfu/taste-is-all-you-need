@@ -1,7 +1,10 @@
-"""Retrieval scores: session and round level, any and all, at a rank and at the budget.
+"""Retrieval scores: sessions at a rank and at the budget, rounds at the budget only.
 
 LongMemEval's own Recall@k is ``recall_all``, and MemPalace's 96.6 is ``recall_any``, so both are always
-printed. Abstention questions have no right place to look, and have no retrieval score.
+printed. Abstention questions have no right place to look, and have no retrieval score. Five whole sessions hold far more
+rounds than five rounds do, so a round score at a rank would compare unlike things; at the budget every system has paid the
+same. A system that cannot say which round it drew on gets no round score, not a zero. For a memory that names its round, a
+round score means something drawn from that round arrived, not that the fact survived: reading the answers tells that.
 """
 
 from __future__ import annotations
@@ -44,12 +47,13 @@ def retrieval_scores(ranked: Sequence[Item], delivered: Sequence[Item], gold: Go
     scores: dict[str, float] = {}
     for cut in CUTS:
         scores.update(_recalls("session", sessions[:cut], gold.sessions, str(cut)))
-        scores.update(_recalls("round", _round_keys(ranked[:cut]), gold.rounds, str(cut)))
     scores["session_ndcg@10"] = _ndcg(sessions, gold.sessions, 10)
     scores.update(_recalls("session", (item.session for item in delivered), gold.sessions, "budget"))
-    scores.update(_recalls("round", _round_keys(delivered), gold.rounds, "budget"))
-    if gold.evidence:
-        # Judge-free: a memory can name the right session and still have lost the fact.
+    if any(item.rounds for item in delivered):
+        scores.update(_recalls("round", _round_keys(delivered), gold.rounds, "budget"))
+    if gold.evidence and not any(turn.get("role") == "memory" for item in delivered for turn in item.turns):
+        # Judge-free, for systems that hand over the words as they were said. A memory in other words can never hold a whole
+        # turn, so asking it would read zero by construction.
         text = "\n".join(str(turn.get("content", "")) for item in delivered for turn in item.turns)
         scores["evidence_survived"] = sum(words in text for words in gold.evidence) / len(gold.evidence)
     return scores

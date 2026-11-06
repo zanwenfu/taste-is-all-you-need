@@ -1,7 +1,7 @@
 """Mem0 open source 2.2.1, run in its own environment on the shared ingest file, with no route to a paid service.
 
 One ``Memory`` per process, reset for every unit. Each round (a user turn and its replies; one turn in LoCoMo,
-whose two speakers become user and assistant with their names in the text, as Mem0's own harness does) is one
+whose speaker_a becomes the user and speaker_b the assistant, with their names in the text, as Mem0's own harness does) is one
 ``add`` with ``infer=True``: exactly one call to the served model, which writes the memories. A system line gives
 the session's date, and the session's id, round and date go in the metadata, which every hit carries back. Search
 asks for the whole ranked list (``threshold`` 0) of this unit's memories, and each memory reaches the reader as
@@ -32,12 +32,14 @@ USER = "eval"  # one store per unit, reset in between, so one user id serves eve
 ALL = 100_000
 
 
-def mem0_config(url: str, model: str, embedder: str, dims: int, device: str, *, max_tokens: int = 2000) -> dict[str, Any]:
+def mem0_config(url: str, model: str, embedder: str, dims: int, device: str, *, max_tokens: int = 2000,
+                embedder_url: str | None = None) -> dict[str, Any]:
+    """``embedder_url``: an embedder served elsewhere, for one too slow to run on a CPU beside every process."""
+    served = {"huggingface_base_url": embedder_url, "api_key": "EMPTY"} if embedder_url else {"model_kwargs": {"device": device}}
     return {
         "llm": {"provider": "vllm", "config": {"model": model, "vllm_base_url": url, "api_key": "EMPTY",
                                                "temperature": 0.0, "max_tokens": max_tokens, "top_p": 1.0}},
-        "embedder": {"provider": "huggingface", "config": {"model": embedder, "embedding_dims": dims,
-                                                           "model_kwargs": {"device": device}}},
+        "embedder": {"provider": "huggingface", "config": {"model": embedder, "embedding_dims": dims, **served}},
         "vector_store": {"provider": "qdrant", "config": {"collection_name": "mem0_eval", "embedding_model_dims": dims,
                                                           "path": ":memory:", "on_disk": False}},
         "history_db_path": ":memory:",
@@ -90,15 +92,15 @@ class Mem0Arm:
     def ingest(self, sessions: list[dict]) -> None:
         self.memory.reset()
         self.by_sid = {session["sid"]: session for session in sessions}
-        people = list(dict.fromkeys(t["role"] for s in sessions for t in s["turns"] if t["role"] not in ("user", "assistant")))
         for session in sessions:
+            first = (session.get("speakers") or [None])[0]
             for number, part in enumerate(rounds(session)):
                 messages = [{"role": "system", "content": f"Session date: {session['date']}"}]
                 for turn in part:
                     if turn["role"] in ("user", "assistant"):
                         messages.append({"role": turn["role"], "content": turn["content"]})
                     else:
-                        role = "user" if people and turn["role"] == people[0] else "assistant"
+                        role = "user" if turn["role"] == first else "assistant"
                         messages.append({"role": role, "content": f"{turn['role']}: {turn['content']}"})
                 extra = {"prompt": DATE_PROMPT.format(session["date"])} if self.date_prompt else {}
                 self.memory.add(messages, user_id=USER, infer=True,
@@ -126,6 +128,16 @@ class Mem0Arm:
         pass
 
 
+def check_search_parts(memory: Any) -> None:
+    """Mem0 goes quiet when a part of its search is missing, so each part is called once before any work starts."""
+    from mem0.utils.spacy_models import get_nlp_full, get_nlp_lemma
+
+    if memory.vector_store._encode_bm25("a probe of the keyword encoder") is None:
+        raise SystemExit("Mem0's keyword search is off; install fastembed and its model")
+    if get_nlp_full() is None or get_nlp_lemma() is None:
+        raise SystemExit("Mem0's entity boost or lemmatizer is off; install spaCy and en_core_web_sm")
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -143,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--query-free", action="store_true", help="all memories, no search, for the rule-loss cases")
     parser.add_argument("--free-out", help="also write all memories, from the same ingest, to this rankings file")
     parser.add_argument("--date-prompt", action="store_true", help="give each session's date through add's prompt argument")
+    parser.add_argument("--embedder-url", help="an embedder served elsewhere, with an OpenAI-compatible endpoint")
     arguments = parser.parse_args(argv)
     shard = tuple(int(part) for part in arguments.shard.split("/"))
 
@@ -157,11 +170,11 @@ def main(argv: list[str] | None = None) -> int:
     from mem0 import Memory
 
     memory = Memory.from_config(mem0_config(arguments.url, arguments.model, arguments.embedder, arguments.dims,
-                                            arguments.device, max_tokens=arguments.max_tokens))
+                                            arguments.device, max_tokens=arguments.max_tokens,
+                                            embedder_url=arguments.embedder_url))
     if type(memory.llm).__name__ != "VllmLLM" or type(memory.embedding_model).__name__ != "HuggingFaceEmbedding":
         raise SystemExit("Mem0 is not using the served model and the local embedder")
-    if not getattr(memory.vector_store, "_has_bm25_slot", False):
-        raise SystemExit("Mem0's keyword search is off; install fastembed")
+    check_search_parts(memory)
     counted = Counted(memory.llm, log=Path(arguments.out).with_suffix(".replies.jsonl"),
                       extra={"reasoning_effort": arguments.effort} if arguments.effort else None)
     memory.llm = counted

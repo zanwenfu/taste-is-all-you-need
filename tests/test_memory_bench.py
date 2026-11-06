@@ -12,7 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from studies.memory_bench.core import Item, chunk_text, deliver, no_memory_prompt, reader_prompt
+from studies.memory_bench.core import (
+    Item,
+    chunk_text,
+    deliver,
+    item_text,
+    no_memory_prompt,
+    reader_prompt,
+)
 from studies.memory_bench.lme import Gold, load, rounds, unit_text
 from studies.memory_bench.metrics import retrieval_scores
 from studies.memory_bench.runner import retrieve_one, validate
@@ -138,6 +145,22 @@ def test_the_reader_prompt_is_the_benchmarks_own_and_sorts_by_date() -> None:
     )
 
 
+def test_what_came_from_one_session_sits_under_one_heading_in_its_own_order() -> None:
+    late = Item("s1", "2023/05/01 (Mon) 09:00", ({"role": "user", "content": "B"},), (4,))
+    early = Item("s1", "2023/05/01 (Mon) 09:00", ({"role": "user", "content": "A"},), (1,))
+    other = Item("s2", "2023/05/03 (Wed) 09:00", ({"role": "memory", "content": "C"},), (0,))
+    prompt = reader_prompt([other, late, early], "2023/06/01 (Thu) 10:00", "Why?")
+    assert prompt.count("### Session") == 2
+    assert '[{"role": "user", "content": "A"}, {"role": "user", "content": "B"}]' in prompt
+    assert prompt.index("### Session 1:") < prompt.index('"A"') < prompt.index("### Session 2:") < prompt.index('"C"')
+
+
+def test_a_piece_with_no_round_number_follows_the_rest_of_its_session() -> None:
+    cut = Item("s1", "d", ({"role": "user", "content": "Z"},))
+    whole = Item("s1", "d", ({"role": "user", "content": "A"},), (7,))
+    assert '[{"role": "user", "content": "A"}, {"role": "user", "content": "Z"}]' in reader_prompt([cut, whole], "d", "Why?")
+
+
 def test_with_no_memory_the_prompt_is_the_question_alone() -> None:
     assert no_memory_prompt("Why?") == "Why?Answer step by step."
 
@@ -151,18 +174,31 @@ def _item(session: str, *words: str) -> Item:
 
 def test_the_budget_fills_in_rank_order_and_counts_tokens_not_items() -> None:
     a, b, c = _item("a", "one two"), _item("b", "three"), _item("c", "four")
-    cost = _count(chunk_text(a))
-    delivered = deliver([a, b, c], cost + _count(chunk_text(b)), _count)
+    delivered = deliver([a, b, c], 3, _count)
     assert [i.session for i in delivered.items] == ["a", "b"]
-    assert delivered.tokens == cost + _count(chunk_text(b))
+    assert delivered.tokens == 3
     assert delivered.offered == 3
+
+
+def test_the_budget_counts_a_memorys_own_words_so_small_pieces_pay_no_heading() -> None:
+    pieces = [_item(f"s{number}", "one two") for number in range(4)]
+    whole = _item("s", "one two", "one two", "one two", "one two")
+    assert deliver(pieces, 8, _count).tokens == deliver([whole], 8, _count).tokens == 8
+    assert len(deliver(pieces, 8, _count).items) == 4
+    assert item_text(whole).split() == ["one", "two"] * 4
+
+
+def test_a_row_that_must_fit_the_readers_window_can_charge_the_whole_prompt() -> None:
+    item = _item("a", "one two")
+    cost = _count(chunk_text(item))
+    assert deliver([item], cost, _count, chunk_text).items == (item,)
+    assert deliver([item], cost - 1, _count, chunk_text).items == ()
 
 
 def test_an_item_that_does_not_fit_is_cut_between_turns_and_filling_stops() -> None:
     first = _item("a", "alpha", "beta beta beta beta beta beta beta beta")
     later = _item("b", "x")
-    budget = _count(chunk_text(_item("a", "alpha"))) + 2
-    delivered = deliver([first, later], budget, _count)
+    delivered = deliver([first, later], 3, _count)
     assert [i.turns for i in delivered.items] == [({"role": "user", "content": "alpha"},)]
     assert delivered.cut == 1
 
@@ -200,6 +236,36 @@ def test_taste_with_headers_off_ranks_exactly_as_the_flat_file(question, tmp_pat
             assert [i.turns for i in flat_items] == [i.turns for i in taste_items]
     finally:
         taste.close()
+
+
+@pytest.mark.parametrize("commit_per", ["session", "round"])
+def test_identical_rounds_are_held_once_by_both_so_they_still_rank_alike(tmp_path: Path, commit_per: str) -> None:
+    """Git stores the same bytes once. Dev holds no such round and 27 held-out questions do, so this has its own test."""
+    instance = _instance()
+    pasta = [{"role": "user", "content": "Any good pasta recipes?"}, {"role": "assistant", "content": "Try carbonara."}]
+    instance["haystack_sessions"][0] = [*pasta, *pasta, {"role": "user", "content": "Thanks a lot."},
+                                        {"role": "assistant", "content": "Enjoy it."}]
+    views, _ = load([instance])
+    flat, taste = FlatBm25(), TasteGit(tmp_path, commit_per=commit_per)
+    flat.ingest(views[0]["sessions"])
+    taste.ingest(views[0]["sessions"])
+    try:
+        for query in ("pasta recipes", "thanks", "park the rental"):
+            flat_items, taste_items = flat.retrieve(query), taste.retrieve(query)
+            assert flat_items and [(i.session, i.rounds) for i in flat_items] == [(i.session, i.rounds) for i in taste_items], query
+        assert len([i for i in flat.retrieve("pasta") if i.rounds in ((0,), (1,))]) == 1
+    finally:
+        taste.close()
+
+
+def test_the_flat_list_still_hands_over_every_record_with_no_question_asked() -> None:
+    instance = _instance()
+    pasta = [{"role": "user", "content": "Any good pasta recipes?"}, {"role": "assistant", "content": "Try carbonara."}]
+    instance["haystack_sessions"][0] = [*pasta, *pasta]
+    views, _ = load([instance])
+    flat = FlatBm25()
+    flat.ingest(views[0]["sessions"])
+    assert len(flat.memories()) == sum(len(rounds(session)) for session in views[0]["sessions"])
 
 
 def test_taste_stores_one_commit_per_session_and_still_points_at_the_round(question, tmp_path: Path) -> None:
@@ -300,7 +366,7 @@ def test_full_context_keeps_the_newest_sessions_when_it_must_cut(question) -> No
     system.ingest(view["sessions"])
     items = system.retrieve("anything")
     assert [i.date for i in items] == sorted((s["date"] for s in view["sessions"]), reverse=True)
-    newest = _count(chunk_text(items[0]))
+    newest = _count(item_text(items[0]))
     delivered = deliver(items, newest + 1, _count)
     assert [i.session for i in delivered.items] == [view["sessions"][2]["sid"]]
     assert delivered.dropped == 2
@@ -327,8 +393,25 @@ def test_retrieval_scores_at_a_cut_and_at_the_budget(question) -> None:
     assert scores["session_recall_all@5"] == 1.0
     assert scores["session_recall_any@budget"] == 1.0
     assert scores["round_recall_any@budget"] == 0.0  # the session arrived, its evidence round did not
-    assert scores["round_recall_any@5"] == 1.0
     assert scores["session_ndcg@10"] == pytest.approx(0.6309, abs=1e-3)
+
+
+def test_round_scores_exist_only_at_the_budget_where_every_system_has_paid_the_same(question) -> None:
+    """Five whole sessions hold far more rounds than five rounds do, so a round score at a rank compares unlike things."""
+    view, gold = question
+    parked = view["sessions"][1]["sid"]
+    item = Item(parked, "d", (), (0,))
+    scores = retrieval_scores([item], [item], gold)
+    assert scores["round_recall_any@budget"] == 1.0
+    assert not [key for key in scores if key.startswith("round_") and not key.endswith("@budget")]
+
+
+def test_a_system_that_cannot_say_which_round_gets_no_round_score_rather_than_a_zero(question) -> None:
+    view, gold = question
+    drawer = Item(view["sessions"][1]["sid"], "d", ({"role": "memory", "content": "text"},))
+    scores = retrieval_scores([drawer], [drawer], gold)
+    assert scores["session_recall_any@budget"] == 1.0
+    assert "round_recall_any@budget" not in scores
 
 
 def test_abstention_questions_have_no_retrieval_score() -> None:
@@ -341,8 +424,15 @@ def test_evidence_survival_looks_for_the_answers_own_words_in_what_was_delivered
     parked = view["sessions"][1]
     kept = Item(parked["sid"], "d", tuple(rounds(parked)[0]), (0,))
     assert retrieval_scores([kept], [kept], gold)["evidence_survived"] == 1.0
-    summary = Item(parked["sid"], "d", ({"role": "memory", "content": "User drives."},))
-    assert retrieval_scores([summary], [summary], gold)["evidence_survived"] == 0.0
+    other = Item(parked["sid"], "d", tuple(rounds(parked)[1]), (1,))
+    assert retrieval_scores([other], [other], gold)["evidence_survived"] == 0.0
+
+
+def test_evidence_survival_is_not_asked_of_a_memory_written_in_other_words(question) -> None:
+    """A whole turn can never be a substring of a memory, so this would read zero by construction."""
+    view, gold = question
+    summary = Item(view["sessions"][1]["sid"], "d", ({"role": "memory", "content": "User parked on level 3."},), (0,))
+    assert "evidence_survived" not in retrieval_scores([summary], [summary], gold)
 
 
 # ------------------------------------------------------------------ one question, start to finish
@@ -383,6 +473,28 @@ def test_validation_refuses_missing_duplicate_empty_and_unledgered_records(quest
         validate([{**good, "prompt": ""}], expected={view["qid"]})
     with pytest.raises(ValueError, match="not one of the allowed names"):
         validate([{**good, "ledger": {"name": "our memory layer"}}], expected={view["qid"]})
+
+
+def test_validation_refuses_an_arm_that_delivered_nothing(question) -> None:
+    view, gold = question
+    good = retrieve_one(view, gold, FlatBm25(), budget=200, count=_count)
+    with pytest.raises(ValueError, match="delivered nothing"):
+        validate([{**good, "tokens_delivered": 0}], expected={view["qid"]})
+
+
+def test_validation_refuses_a_row_of_headers_that_lost_its_headers(question) -> None:
+    view, gold = question
+    good = retrieve_one(view, gold, FlatBm25(), budget=200, count=_count)
+    with pytest.raises(ValueError, match="headers"):
+        validate([{**good, "headers_missing": 3}], expected={view["qid"]})
+
+
+def test_validation_refuses_records_from_two_commits(question) -> None:
+    view, gold = question
+    good = retrieve_one(view, gold, FlatBm25(), budget=200, count=_count)
+    other = {**good, "qid": "other", "ledger": {**good["ledger"], "taste_commit": "def456"}}
+    with pytest.raises(ValueError, match="commit"):
+        validate([good, other], expected={view["qid"], "other"})
 
 
 # ------------------------------------------------------------------ splits

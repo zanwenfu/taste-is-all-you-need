@@ -34,13 +34,19 @@ def _rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
-def read_all(records_path: Path, ask: Callable[[str], dict], out: Path, *, workers: int) -> dict[str, int]:
-    """Ask every record's prompt that has no answer yet, and count what came back."""
+def read_all(records_path: Path, ask: Callable[[str], dict], out: Path, *, workers: int,
+             settings: dict[str, Any] | None = None) -> dict[str, int]:
+    """Ask every record's prompt that has no answer yet, and count what came back. An answer to a prompt that has since
+    changed stops the stage: mixing the two would be silent. ``settings`` (model, cap, effort) goes on every answer."""
     records_path, out = Path(records_path), Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     failed_path = out.with_name(out.name + ".failed")
     records = _rows(records_path)
-    done = {row["question_id"] for row in _rows(out)}
+    hashes = {record["question_id"]: record["prompt_sha256"] for record in records}
+    done = {row["question_id"]: row.get("prompt_sha256") for row in _rows(out)}
+    stale = [question for question, seen in done.items() if question in hashes and hashes[question] != seen]
+    if stale:
+        raise ValueError(f"{len(stale)} stale answers in {out}: their prompts have changed, for example {stale[0]}")
     todo = [record for record in records if record["question_id"] not in done]
     lock = threading.Lock()
     failed = [0]
@@ -55,7 +61,7 @@ def read_all(records_path: Path, ask: Callable[[str], dict], out: Path, *, worke
                 failed[0] += 1
                 written.write(json.dumps({**base, "error": f"{type(error).__name__}: {error}"}) + "\n")
             return
-        row = {**base, "hypothesis": reply["text"], "finish_reason": reply["finish_reason"],
+        row = {**base, **(settings or {}), "hypothesis": reply["text"], "finish_reason": reply["finish_reason"],
                "prompt_tokens": reply["prompt_tokens"], "completion_tokens": reply["completion_tokens"]}
         with lock, out.open("a") as written:
             written.write(json.dumps(row) + "\n")

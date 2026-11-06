@@ -17,6 +17,7 @@ from studies.memory_bench.locomo import (
     adversarial_score,
     audit_flags,
     conversation_split,
+    dialog_text,
     f1_multi,
     f1_score,
     load,
@@ -273,7 +274,7 @@ def test_retrieval_is_the_share_of_evidence_found_and_no_evidence_counts_as_foun
     ranked = [Item(first["sid"], first["date"], (), (1,)), Item(second["sid"], second["date"], (), (1,))]
     scores = locomo_scores(ranked, ranked[:1], multi)
     assert scores["session_recall@1"] == 0.5 and scores["session_recall@10"] == 1.0
-    assert scores["turn_recall@1"] == 0.5 and scores["turn_recall@10"] == 0.5
+    assert "turn_recall@10" not in scores  # a round score at a rank compares whole sessions with single turns
     assert scores["session_recall@budget"] == 0.5 and scores["turn_recall@budget"] == 0.5
     open_domain = golds[view["questions"][3]["qid"]]
     assert locomo_scores([], [], open_domain)["session_recall@10"] == 1.0
@@ -285,7 +286,23 @@ def test_an_evidence_id_that_names_no_turn_counts_as_not_found() -> None:
     views, golds = load([sample])
     gold = golds[views[0]["questions"][1]["qid"]]
     item = Item(views[0]["sessions"][1]["sid"], "d", (), (0,))
-    assert locomo_scores([item], [item], gold)["turn_recall@10"] == 0.5
+    assert locomo_scores([item], [item], gold)["turn_recall@budget"] == 0.5
+
+
+def test_a_question_with_no_right_place_to_look_has_no_retrieval_score(conversation) -> None:
+    view, golds = conversation
+    adversarial = golds[view["questions"][4]["qid"]]
+    assert locomo_scores([], [], adversarial) == {}
+
+
+def test_a_memory_is_shown_as_written_and_a_turn_as_said() -> None:
+    assert dialog_text(Item("s", "d", ({"role": "memory", "content": "Caroline likes tea."},))) == "Caroline likes tea.\n"
+    assert dialog_text(Item("s", "d", ({"role": "Caroline", "content": "Hi."},))) == 'Caroline said, "Hi."\n'
+
+
+def test_each_session_names_the_conversations_two_speakers_in_the_benchmarks_order() -> None:
+    views, _ = load([_sample()])
+    assert [tuple(s["speakers"]) for s in views[0]["sessions"]] == [("Caroline", "Melanie")] * 2
 
 
 # ------------------------------------------------------------------ one store per conversation

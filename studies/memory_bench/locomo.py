@@ -75,7 +75,7 @@ def _sessions(conversation: dict, sample_id: str, captions: bool = True) -> tupl
             turns.append({"role": dialog["speaker"], "content": text})
             turn_of[dialog["dia_id"]] = (sid, index)
         sessions.append({"sid": sid, "date": conversation[f"session_{number}_date_time"], "turns": turns,
-                         "each_turn_is_a_round": True})
+                         "each_turn_is_a_round": True, "speakers": [conversation["speaker_a"], conversation["speaker_b"]]})
     return sessions, session_of, turn_of
 
 
@@ -133,7 +133,8 @@ def reference(samples: list[dict]) -> list[dict]:
 
 
 def dialog_text(item: Item) -> str:
-    return "".join(f'{turn["role"]} said, "{turn["content"]}"\n' for turn in item.turns)
+    return "".join(f'{turn["content"]}\n' if turn["role"] == "memory" else f'{turn["role"]} said, "{turn["content"]}"\n'
+                   for turn in item.turns)
 
 
 def reader_prompt(items: Iterable[Item], view: dict, question: dict) -> str:
@@ -257,18 +258,18 @@ def _share(found: set, wanted: Sequence) -> float:
 
 def locomo_scores(ranked: Sequence[Item], delivered: Sequence[Item], gold: Gold) -> dict[str, float]:
     """The share of the evidence found, as the benchmark and MemPalace's runner count it: a question with no
-    evidence scores 1. An evidence id that names no turn counts as not found."""
+    evidence scores 1. An evidence id that names no turn counts as not found. An adversarial question has no right
+    place to look and no score, and it is reported apart. Turns are scored at the budget only, where every system has paid
+    the same, and not for a system that cannot say which turn it drew on (see ``metrics``)."""
+    if gold.adversarial:
+        return {}
     sessions = list(dict.fromkeys(item.session for item in ranked))
-    scores: dict[str, float] = {}
-    for cut in CUTS:
-        scores[f"session_recall@{cut}"] = _share(set(sessions[:cut]), gold.evidence_sessions)
-        scores[f"turn_recall@{cut}"] = _share(
-            {(item.session, number) for item in ranked[:cut] for number in item.rounds}, gold.evidence_rounds
-        )
+    scores = {f"session_recall@{cut}": _share(set(sessions[:cut]), gold.evidence_sessions) for cut in CUTS}
     scores["session_recall@budget"] = _share({item.session for item in delivered}, gold.evidence_sessions)
-    scores["turn_recall@budget"] = _share(
-        {(item.session, number) for item in delivered for number in item.rounds}, gold.evidence_rounds
-    )
+    if any(item.rounds for item in delivered):
+        scores["turn_recall@budget"] = _share(
+            {(item.session, number) for item in delivered for number in item.rounds}, gold.evidence_rounds
+        )
     return scores
 
 

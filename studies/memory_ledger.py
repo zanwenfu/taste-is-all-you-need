@@ -16,6 +16,7 @@ say yes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -50,6 +51,20 @@ def code_version() -> tuple[str, bool]:
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout.strip()
 
     return git("rev-parse", "HEAD"), bool(git("status", "--porcelain", "--", "taste", "studies"))
+
+
+def code_digest(root: Path | None = None) -> str:
+    """A hash of the code actually on disk: every Python file under taste/ and studies/. ``TASTE_COMMIT`` only says what a job
+    was told, so this is what shows that all of a run's stages ran one copy of the code, and that it is the commit's."""
+    base = Path(root) if root else Path(__file__).resolve().parent.parent
+    digest = hashlib.sha256()
+    for folder in ("taste", "studies"):
+        for path in sorted((base / folder).rglob("*.py")):
+            digest.update(str(path.relative_to(base)).encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def process_facts() -> dict[str, Any]:

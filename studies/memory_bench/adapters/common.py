@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from studies.memory_bench.core import Item, rankings_line
-from studies.memory_ledger import BASELINE, stand_in_record
+from studies.memory_ledger import BASELINE, code_digest, code_version, stand_in_record
 
 
 class Adapter(Protocol):
@@ -64,6 +64,7 @@ def run_adapter(views: Path, out: Path, make: Callable[[], Adapter], *, system: 
         out.write_text("".join(json.dumps(row) + "\n" for row in rows if row["qid"] not in partial))
         done -= partial
     default = stand_in_record(BASELINE, code=code)
+    versions = {**versions, "study_commit": code_version()[0], "code_digest": code_digest()}
     ran = 0
     for unit in units:
         if all(q["qid"] in done for q in unit["queries"]):

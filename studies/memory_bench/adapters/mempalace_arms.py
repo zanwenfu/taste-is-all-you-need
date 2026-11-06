@@ -59,7 +59,7 @@ def iso_date(date: str) -> str:
 
 def claude_code_jsonl(session: dict, speakers: tuple[str, str] | None = None) -> str:
     """One session in the Claude Code shape MemPalace's miner reads with both roles and the session's date.
-    A LoCoMo session has two people: the first speaker is the user, the second the assistant, names in the text."""
+    A LoCoMo session has two people: speaker_a is the user, speaker_b the assistant, names in the text, as Mem0's arm has it."""
     lines = []
     for number, turn in enumerate(session["turns"]):
         if speakers is None:
@@ -181,7 +181,7 @@ class ProductArm:
     """MemPalace as a user runs it: mine the sessions, search the palace, hand the reader the drawers found. A drawer
     MemPalace folded from several sessions (identical text) is delivered once, and its source names the others."""
 
-    def __init__(self, mine: Any, search: Any, workdir: Path, *, n_results: int = 200, stack: Any = None) -> None:
+    def __init__(self, mine: Any, search: Any, workdir: Path, *, n_results: int = 1000, stack: Any = None) -> None:
         self.mine, self.search, self.n_results, self.stack = mine, search, n_results, stack
         self.folder = Path(tempfile.mkdtemp(prefix="palace-", dir=workdir))
 
@@ -189,9 +189,8 @@ class ProductArm:
         self.by_sid = {s["sid"]: s for s in sessions}
         conversations = self.folder / "conversations"
         conversations.mkdir()
-        people = tuple(dict.fromkeys(t["role"] for s in sessions for t in s["turns"] if t["role"] not in ("user", "assistant")))
         for session in sessions:
-            (conversations / f"{session['sid']}.jsonl").write_text(claude_code_jsonl(session, people or None))
+            (conversations / f"{session['sid']}.jsonl").write_text(claude_code_jsonl(session, session.get("speakers")))
         self.mine(convo_dir=str(conversations), palace_path=str(self.folder / "palace"), wing="eval", agent="adapter")
 
     def retrieve(self, query: str, *, date: str | None = None) -> list[Item]:
@@ -223,7 +222,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("views", "repo", "out", "workdir"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--arm", required=True, choices=ARMS)
-    parser.add_argument("--n-results", type=int, default=200, help="product arm: drawers asked for")
+    parser.add_argument("--n-results", type=int, default=1000,
+                        help="product arm: drawers asked for, more than any budget here can hold: at 200, LoCoMo ran short at 16,000")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--shard", default="0/1", help="i/n: every n-th unit from the i-th")
     parser.add_argument("--query-free", action="store_true", help="product arm: its wake-up text, for the rule-loss cases")

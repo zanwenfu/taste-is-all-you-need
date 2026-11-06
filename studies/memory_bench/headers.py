@@ -54,6 +54,7 @@ def write_all(views: list[dict], ask: Callable[[str], dict], path: Path, *, work
     todo = {_key(session): session for session in sessions if _key(session) not in stored}
     lock = threading.Lock()
     failed = [0]
+    errors = [0]
     tokens = [0, 0]
 
     def one(item: tuple[str, dict]) -> None:
@@ -63,6 +64,7 @@ def write_all(views: list[dict], ask: Callable[[str], dict], path: Path, *, work
         except Exception:
             with lock:
                 failed[0] += 1
+                errors[0] += 1
             return
         parsed = None if reply.get("finish_reason") == "length" else _parsed(reply["text"])
         row = {"key": key, "what": parsed[0] if parsed else "", "keywords": parsed[1] if parsed else [],
@@ -76,8 +78,8 @@ def write_all(views: list[dict], ask: Callable[[str], dict], path: Path, *, work
 
     with ThreadPoolExecutor(max(1, workers)) as pool:
         list(pool.map(one, todo.items()))
-    return {"sessions": len(sessions), "calls": len(todo), "failed": failed[0], "prompt_tokens": tokens[0],
-            "completion_tokens": tokens[1]}
+    return {"sessions": len(sessions), "calls": len(todo), "failed": failed[0], "errors": errors[0],
+            "prompt_tokens": tokens[0], "completion_tokens": tokens[1]}
 
 
 class StoredHeaders:

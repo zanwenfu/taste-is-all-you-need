@@ -12,16 +12,24 @@ from collections.abc import Callable
 from typing import Any
 
 from studies.memory_bench import locomo
-from studies.memory_bench.core import deliver, no_memory_prompt, reader_prompt
+from studies.memory_bench.core import (
+    chunk_text,
+    deliver,
+    item_text,
+    no_memory_prompt,
+    reader_prompt,
+)
 from studies.memory_bench.lme import Gold
 from studies.memory_bench.metrics import retrieval_scores
 from studies.memory_bench.systems import System
 from studies.memory_ledger import check
 
 MAX_RANKED_KEPT = 200
+MOST_EMPTY = 0.05  # one question in twenty delivering nothing is a system's own right; more than that is a broken arm
 
 
-def retrieve_one(view: dict, gold: Gold, system: System, *, budget: int, count: Callable[[str], int]) -> dict[str, Any]:
+def retrieve_one(view: dict, gold: Gold, system: System, *, budget: int, count: Callable[[str], int],
+                 charge: str = "text") -> dict[str, Any]:
     try:
         started = time.perf_counter()
         system.ingest(view["sessions"], unit=view["qid"])
@@ -32,12 +40,13 @@ def retrieve_one(view: dict, gold: Gold, system: System, *, budget: int, count: 
         ingest_seconds, retrieve_seconds = (
             measured(view["qid"]) if measured else (ingested - started, retrieved - ingested)
         )
-        delivered = deliver(ranked, budget, count)
+        delivered = deliver(ranked, budget, count, chunk_text if charge == "prompt" else item_text)
         if system.no_retrieval:
             prompt = no_memory_prompt(view["question"])
         else:
             prompt = reader_prompt(delivered.items, view["question_date"], view["question"])
         ledger = system.ledger()
+        headers_missing = getattr(system, "headers_missing", 0)
     finally:
         system.close()
     return {
@@ -46,6 +55,9 @@ def retrieve_one(view: dict, gold: Gold, system: System, *, budget: int, count: 
         "question_type": gold.question_type,
         "system": getattr(system, "label", None) or type(system).__name__,
         "budget": budget,
+        "charge": charge,
+        "no_retrieval": system.no_retrieval,
+        "headers_missing": headers_missing,
         "ranked": [{"session": i.session, "rounds": list(i.rounds)} for i in ranked[:MAX_RANKED_KEPT]],
         "delivered": [{"session": i.session, "rounds": list(i.rounds)} for i in delivered.items],
         "offered": delivered.offered,
@@ -61,8 +73,8 @@ def retrieve_one(view: dict, gold: Gold, system: System, *, budget: int, count: 
     }
 
 
-def retrieve_conversation(view: dict, golds: dict, system: System, *, budget: int,
-                          count: Callable[[str], int]) -> list[dict[str, Any]]:
+def retrieve_conversation(view: dict, golds: dict, system: System, *, budget: int, count: Callable[[str], int],
+                          charge: str = "text") -> list[dict[str, Any]]:
     """One LoCoMo conversation: one store, one ingest, every question of it in turn."""
     records = []
     try:
@@ -78,7 +90,7 @@ def retrieve_conversation(view: dict, golds: dict, system: System, *, budget: in
             ingest_seconds, retrieve_seconds = (
                 measured(question["qid"]) if measured else (ingested, retrieved - asked)
             )
-            delivered = deliver(ranked, budget, count, locomo.dialog_text)
+            delivered = deliver(ranked, budget, count, locomo.dialog_text if charge == "prompt" else item_text)
             prompt = locomo.reader_prompt(delivered.items, view, question)
             records.append({
                 "qid": question["qid"],
@@ -88,6 +100,9 @@ def retrieve_conversation(view: dict, golds: dict, system: System, *, budget: in
                 "conversation": view["conversation"],
                 "system": getattr(system, "label", None) or type(system).__name__,
                 "budget": budget,
+                "charge": charge,
+                "no_retrieval": system.no_retrieval,
+                "headers_missing": getattr(system, "headers_missing", 0),
                 "ranked": [{"session": i.session, "rounds": list(i.rounds)} for i in ranked[:MAX_RANKED_KEPT]],
                 "delivered": [{"session": i.session, "rounds": list(i.rounds)} for i in delivered.items],
                 "offered": delivered.offered,
@@ -107,7 +122,8 @@ def retrieve_conversation(view: dict, golds: dict, system: System, *, budget: in
 
 
 def validate(records: list[dict[str, Any]], *, expected: set[str]) -> dict[str, Any]:
-    """Every question exactly once, no empty prompt, every record's ledger clean. Before any aggregate."""
+    """Every question exactly once, no empty prompt, no lost header, one commit, an arm that delivered something, every
+    record's ledger clean. Before any aggregate."""
     seen: set[str] = set()
     for record in records:
         if record["qid"] in seen:
@@ -120,4 +136,12 @@ def validate(records: list[dict[str, Any]], *, expected: set[str]) -> dict[str, 
     for record in records:
         if not record["prompt"].strip():
             raise ValueError(f"{record['qid']} has an empty prompt")
+        if record.get("headers_missing"):
+            raise ValueError(f"{record['qid']}: {record['headers_missing']} sessions lost their stored headers")
+    empty = [r["qid"] for r in records if not r["tokens_delivered"] and not r.get("no_retrieval")]
+    if records and len(empty) > MOST_EMPTY * len(records):
+        raise ValueError(f"{len(empty)} of {len(records)} questions delivered nothing")
+    commits = {record["ledger"].get("taste_commit") for record in records}
+    if len(commits) > 1:
+        raise ValueError(f"records from more than one commit: {sorted(map(str, commits))}")
     return check([record["ledger"] for record in records])

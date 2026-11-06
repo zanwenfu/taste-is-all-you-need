@@ -6,6 +6,7 @@ again, never skipped: one benchmark's script silently leaves failed answers out 
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ import pytest
 
 from studies.context_rot.lme_judge import judge_file
 from studies.memory_bench import headers, reader
+from studies.memory_bench import run as run_module
 from studies.memory_bench.lme import load
 from studies.memory_bench.run import main as run_main
 from studies.memory_bench.run import make_system
@@ -171,6 +173,24 @@ def test_a_failed_call_is_written_down_and_asked_again_next_time(tmp_path: Path)
     assert [row["hypothesis"] for row in rows if row["question_id"] == "b"] == ["fine"]
 
 
+def test_an_answer_to_a_prompt_that_has_since_changed_stops_the_stage(tmp_path: Path) -> None:
+    records = _records(tmp_path, "a")
+    out = tmp_path / "answers.jsonl"
+    reader.read_all(records, reader.served_ask(_Client(), "m", max_tokens=8), out, workers=1)
+    rows = [json.loads(line) for line in records.read_text().splitlines()]
+    records.write_text("".join(json.dumps({**row, "prompt_sha256": "changed"}) + "\n" for row in rows))
+    with pytest.raises(ValueError, match="stale"):
+        reader.read_all(records, reader.served_ask(_Client(), "m", max_tokens=8), out, workers=1)
+
+
+def test_every_answer_says_which_model_and_cap_wrote_it(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    reader.read_all(_records(tmp_path, "a"), reader.served_ask(_Client(), "m", max_tokens=8), out, workers=1,
+                    settings={"model": "m", "max_tokens": 8, "effort": "low"})
+    row = json.loads(out.read_text().splitlines()[0])
+    assert (row["model"], row["max_tokens"], row["effort"]) == ("m", 8, "low")
+
+
 def test_empty_answers_and_answers_cut_off_are_counted(tmp_path: Path) -> None:
     client = _Client(lambda m: _completion("" if "prompt for a" in m[0]["content"] else "partial", "length"))
     summary = reader.read_all(
@@ -240,9 +260,10 @@ def test_a_run_of_the_real_store_end_to_end_with_a_word_count_tokenizer(tmp_path
     assert len(out.read_text().splitlines()) == 2
 
 
-def test_the_held_out_part_refuses_to_run_without_saying_so(tmp_path: Path) -> None:
+def test_the_held_out_part_refuses_to_run_without_saying_so(tmp_path: Path, monkeypatch) -> None:
     data = tmp_path / "data.json"
     data.write_text(json.dumps([_instance("c")]))
+    monkeypatch.setitem(run_module.DATA_SHA256, "lme", hashlib.sha256(data.read_bytes()).hexdigest())
     split = tmp_path / "split.json"
     split.write_text(json.dumps({"dev": [], "held_out": ["c"]}))
     arguments = ["retrieve", "--data", str(data), "--split", str(split), "--part", "held_out", "--system", "flat_bm25",
@@ -251,6 +272,46 @@ def test_the_held_out_part_refuses_to_run_without_saying_so(tmp_path: Path) -> N
     with pytest.raises(SystemExit, match="held-out"):
         run_main(arguments)
     assert run_main([*arguments, "--frozen-config", "abc123"]) == 0
+
+
+def test_the_held_out_part_refuses_any_file_but_the_benchmarks_own(tmp_path: Path) -> None:
+    data = tmp_path / "data.json"
+    data.write_text(json.dumps([_instance("c")]))
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"dev": [], "held_out": ["c"]}))
+    with pytest.raises(SystemExit, match="not the benchmark's own file"):
+        run_main(["retrieve", "--data", str(data), "--split", str(split), "--part", "held_out", "--system", "flat_bm25",
+                  "--budget", "500", "--tokenizer", "words", "--workdir", str(tmp_path / "w"), "--out", str(tmp_path / "o.jsonl"),
+                  "--workers", "1", "--frozen-config", "abc123"])
+
+
+def test_a_run_carries_on_only_with_the_settings_it_started_with(tmp_path: Path) -> None:
+    data = tmp_path / "data.json"
+    data.write_text(json.dumps([_instance("c")]))
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"dev": ["c"], "held_out": []}))
+    arguments = ["retrieve", "--data", str(data), "--split", str(split), "--part", "dev", "--system", "flat_bm25",
+                 "--tokenizer", "words", "--workdir", str(tmp_path / "w"), "--out", str(tmp_path / "o.jsonl"), "--workers", "1"]
+    assert run_main([*arguments, "--budget", "500"]) == 0
+    assert run_main([*arguments, "--budget", "500"]) == 0
+    with pytest.raises(SystemExit, match="budget"):
+        run_main([*arguments, "--budget", "400"])
+
+
+def test_a_row_at_the_readers_window_charges_what_the_prompt_will_hold(tmp_path: Path) -> None:
+    data = tmp_path / "data.json"
+    data.write_text(json.dumps([_instance("c")]))
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"dev": ["c"], "held_out": []}))
+    tokens = {}
+    for charge in ("text", "prompt"):
+        out = tmp_path / f"{charge}.jsonl"
+        assert run_main(["retrieve", "--data", str(data), "--split", str(split), "--part", "dev", "--system", "full", "--budget", "500",
+                         "--charge", charge, "--tokenizer", "words", "--workdir", str(tmp_path / "w"), "--out", str(out), "--workers", "1"]) == 0
+        row = json.loads(out.read_text())
+        assert row["charge"] == charge
+        tokens[charge] = row["tokens_delivered"]
+    assert tokens["prompt"] > tokens["text"]
 
 
 def test_the_budget_counts_with_the_readers_own_tokenizer_file(tmp_path: Path) -> None:
@@ -266,8 +327,6 @@ def test_the_budget_counts_with_the_readers_own_tokenizer_file(tmp_path: Path) -
 
 def test_the_headers_stage_also_reads_locomo_conversations(tmp_path: Path, monkeypatch) -> None:
     from types import SimpleNamespace
-
-    from studies.memory_bench import run as run_module
 
     data = tmp_path / "locomo.json"
     data.write_text(json.dumps([{"sample_id": "conv-1", "qa": [], "conversation": {

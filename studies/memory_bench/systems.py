@@ -66,13 +66,16 @@ class Oracle(System):
 
 
 class FlatBm25(System):
-    """The same units in a plain list, ranked by the code Taste's search uses."""
+    """The same units in a plain list, ranked by the code Taste's search uses. Git stores identical bytes once, so this
+    searches the first copy of identical text only, or the two could not rank alike. With no question asked it hands over
+    every record, as Taste's store does."""
 
     def __init__(self, unit: str = "round") -> None:
         self.unit = unit
 
     def ingest(self, sessions: list[dict], unit: str | None = None) -> None:
-        self.units = [unit for session in sessions for unit in units_of(session, self.unit)]
+        self.every = [unit for session in sessions for unit in units_of(session, self.unit)]
+        self.units = list({unit.text: unit for unit in reversed(self.every)}.values())[::-1]
         self.index = Bm25()
         for unit in self.units:
             self.index.add(tokens(unit.text))
@@ -81,7 +84,7 @@ class FlatBm25(System):
         return [self.units[doc].item() for doc, _ in self.index.rank(tokens(query))]
 
     def memories(self) -> list[str]:
-        return [unit.text for unit in reversed(self.units)]
+        return [unit.text for unit in reversed(self.every)]
 
 
 class TasteGit(System):
@@ -148,6 +151,10 @@ class TasteGit(System):
             return [self.store.state(state).header for state in reversed(self.files_of)]
         return [self.store.fetch(Pointer("memory-bench", "memory", state, "file", path, 1)).text
                 for state in reversed(self.files_of) for path in reversed(self.files_of[state])]
+
+    @property
+    def headers_missing(self) -> int:
+        return getattr(self.header_writer, "missing", 0)
 
     def ledger(self) -> dict[str, Any]:
         return taste_record(self.store, mode=self.mode)

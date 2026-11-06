@@ -54,7 +54,8 @@ def test_each_unit_gets_a_fresh_store_and_each_question_one_line(tmp_path: Path)
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert counts == {"units": 3, "ran": 3, "questions": 6} and len(rows) == 6
     assert len(_Stand.made) == 3 and all(s.closed for s in _Stand.made)
-    assert rows[0]["ledger"]["name"] == "baseline" and rows[0]["versions"] == {"stand": "1"}
+    assert rows[0]["ledger"]["name"] == "baseline" and rows[0]["versions"]["stand"] == "1"
+    assert rows[0]["versions"]["study_commit"] == "abc123" and len(rows[0]["versions"]["code_digest"]) == 64
     assert rows[0]["items"][0]["session"] == "s0" and rows[0]["items"][0]["rounds"] == [0]
 
 
@@ -159,7 +160,7 @@ def test_the_product_arm_mines_the_files_and_maps_each_drawer_to_its_session(tmp
         mined.update(files=sorted(p.name for p in Path(convo_dir).iterdir()), palace=palace_path)
 
     def search(query, palace_path, n_results):
-        assert palace_path == mined["palace"] and n_results == 200
+        assert palace_path == mined["palace"] and n_results == 1000
         return {"results": [{"text": "> Parked on level 3.\nNoted.", "source_path": "/x/sB.jsonl", "drawer_id": "d1"},
                             {"text": "> My dog is Biscuit.\nNice.", "source_path": "/x/sA.jsonl", "drawer_id": "d2"}]}
 
@@ -185,13 +186,13 @@ def test_a_drawer_mempalace_folded_from_several_sessions_says_which(tmp_path: Pa
     assert item.session == "sB" and item.source == "mempalace:product:d1|also:sA"
 
 
-def test_the_product_arm_finds_the_two_people_of_a_talk_itself(tmp_path: Path) -> None:
+def test_the_product_arm_takes_the_two_people_of_a_talk_as_the_benchmark_names_them(tmp_path: Path) -> None:
     written = {}
 
     def mine(convo_dir, palace_path, wing, agent):
         written.update({f.stem: f.read_text() for f in Path(convo_dir).iterdir()})
 
-    two = [{"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True,
+    two = [{"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True, "speakers": ["Caroline", "Melanie"],
             "turns": [{"role": "Caroline", "content": "Hi."}, {"role": "Melanie", "content": "Hello."}]}]
     arm = ProductArm(mine, lambda *a, **k: {"results": []}, tmp_path)
     arm.ingest(two)
@@ -450,11 +451,20 @@ def test_mem0_asks_for_more_memories_than_any_budget_here_can_hold() -> None:
 
 def test_a_conversation_between_two_people_maps_them_to_user_and_assistant_with_names_kept() -> None:
     memory = _Memory()
-    sessions = [{"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True,
+    sessions = [{"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True, "speakers": ["Caroline", "Melanie"],
                  "turns": [{"role": "Caroline", "content": "Hi."}, {"role": "Melanie", "content": "Hello."}]}]
     Mem0Arm(memory).ingest(sessions)
     assert [a["messages"][1] for a in memory.adds] == [{"role": "user", "content": "Caroline: Hi."},
                                                        {"role": "assistant", "content": "Melanie: Hello."}]
+
+
+def test_the_first_speaker_named_by_the_benchmark_is_the_user_whoever_speaks_first() -> None:
+    """As Mem0's own harness maps LoCoMo: speaker_a. The first to speak differs on 6 of its 10 conversations."""
+    memory = _Memory()
+    sessions = [{"sid": "s1", "date": "1:56 pm on 8 May, 2023", "each_turn_is_a_round": True, "speakers": ["Caroline", "Melanie"],
+                 "turns": [{"role": "Melanie", "content": "Hello."}, {"role": "Caroline", "content": "Hi."}]}]
+    Mem0Arm(memory).ingest(sessions)
+    assert [a["messages"][1]["role"] for a in memory.adds] == ["assistant", "user"]
 
 
 def test_every_memory_found_reaches_the_reader_tagged_with_its_session_and_round() -> None:

@@ -4,7 +4,8 @@ resolved the issue, and whether an agent still obeys the rule after its history 
 The main table asks no question. Each system hands over what it would put in front of an agent (``memories``), cut to
 one token cap in its own order, and that takes the place of the history. A second table lets each system search with
 the probe's request, the same cap, and is never pooled with the first. There is no rule-free baseline in these logs, so
-this reports compliance and retention, not effective retention.
+this reports compliance, and whether the block holds the rule by the retention judge in ``studies.memory_probe.judge``, run on the
+blocks as a stage of its own; it reports no effective retention.
 
     python -m studies.memory_bench.swe export --out cases/                      # inside the container: it needs conpact
     python -m studies.memory_bench.swe rank --views cases/views.jsonl --system taste --query-free --workdir /tmp/x --out r.jsonl

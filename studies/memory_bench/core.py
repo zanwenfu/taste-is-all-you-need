@@ -42,11 +42,18 @@ def chunk_text(item: Item, number: int = 1) -> str:
     return _CHUNK.format(number, item.date, "\n" + json.dumps(list(item.turns)))
 
 
+def item_text(item: Item) -> str:
+    """What a budget charges: the memory's own words, with no heading or role, so a system that returns many small pieces
+    pays the same per word as one that returns a few large ones."""
+    return "\n".join(str(turn["content"]) for turn in item.turns)
+
+
 def deliver(items: Iterable[Item], budget: int, count: Callable[[str], int],
-            render: Callable[[Item], str] = chunk_text) -> Delivered:
+            render: Callable[[Item], str] = item_text) -> Delivered:
     """Fill the budget in the system's own rank order, in tokens, and stop at the first item that does
     not fit whole. That item is cut between turns, never inside one, and the cut part cannot claim its
-    rounds: what arrived is no longer known round by round."""
+    rounds: what arrived is no longer known round by round. A row that must fit the reader's window charges what
+    the prompt will hold instead, through ``render``."""
     offered = list(items)
     taken: list[Item] = []
     used = cut = 0
@@ -69,10 +76,18 @@ def deliver(items: Iterable[Item], budget: int, count: Callable[[str], int],
 
 
 def reader_prompt(items: Iterable[Item], question_date: str, question: str) -> str:
-    """The benchmark's prompt. Like its own script, it shows what was retrieved in date order."""
-    ordered = sorted(items, key=lambda item: item.date)
-    history = "".join(chunk_text(item, number) for number, item in enumerate(ordered, 1))
-    return _READER.format(history, question_date, question)
+    """The benchmark's prompt. Like its own script, it shows what was retrieved in date order. What came from one session
+    sits under one heading in that session's own order, as LoCoMo's prompt does, so that pieces of a session are not shown
+    as sessions of their own."""
+    groups: dict[str, list[Item]] = {}
+    for item in items:
+        groups.setdefault(item.session, []).append(item)
+    history = []
+    for number, parts in enumerate(sorted(groups.values(), key=lambda parts: parts[0].date), 1):
+        parts = sorted(parts, key=lambda part: part.rounds[0] if part.rounds else 1 << 30)
+        turns = [turn for part in parts for turn in part.turns]
+        history.append(_CHUNK.format(number, parts[0].date, "\n" + json.dumps(turns)))
+    return _READER.format("".join(history), question_date, question)
 
 
 def rankings_line(qid: str, system: str, items: Sequence[Item], *, ingest_seconds: float, retrieve_seconds: float,
