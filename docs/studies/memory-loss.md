@@ -107,9 +107,17 @@ probes had been read. Git keeps old versions, and a search can return a stale on
 ## Rule-loss matrix
 
 Hermes, the first 10 histories (150 cases); one and 16 rounds of compaction; the Pi and Anthropic summary prompts.
-Reader gpt-oss-120b on vLLM 0.32.0, as in the benchmark's own table, reasoning effort low, up to 6 tool rounds and the
-memory budget (both set from the small run). Each case gets a fresh store: the 15 cases of a history differ only by the
-rule. Added in this order as time allows: WildChat, and 2, 4 and 8 rounds.
+Reader gpt-oss-120b on vLLM 0.32.0, as in the benchmark's own table, reasoning effort low, up to 6 tool rounds. Each case
+gets a fresh store: the 15 cases of a history differ only by the rule. Added in this order as time allows: WildChat, and 2,
+4 and 8 rounds.
+
+Frozen from the small runs on the first 50 cases, before the first full cell. The memory budget is 4,096 tokens, with
+1,200 and 8,000 reported on one cell as a sweep. The multiple-choice cases run under condition i with the harness searching,
+for "finds" and "uses": the turns with headers off and on, each notes file under both note-taker wordings, and the delivered
+rules alone, in the headers, and with search. The header list runs under condition i, the flat file keeps the newest text, and
+the plain requests run under conditions vi, vii and viii with the turns searched by the agent, for "looks". The retention judge
+reads what each harness-searched arm delivers. Every case keeps its record, and the first full cell is read before any other
+starts. Cued, moved, revised and withdrawn cases follow, once each has been read on the first 50.
 
 ## The long run
 
