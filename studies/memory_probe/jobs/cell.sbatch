@@ -82,7 +82,7 @@ one() {  # label arm condition extra...
   for I in $(seq 0 $((PROCS-1))); do
     $PY -m studies.memory_probe.run --inputs $IN --prompt $PR --k $K --arm $arm --condition $condition --budget $BUDGET --shard $I/$PROCS --workers 1 \
         --url $URL --model $MODEL --tokenizer $D/models/gpt-oss-120b/tokenizer.json \
-        --workdir /tmp/aos-probe-$SLURM_JOB_ID-$label-$name --out $row/shard$I.jsonl "$@" > $row/shard$I.log 2>&1 &
+        --workdir /tmp/aos-probe-$SLURM_JOB_ID-$$-$label-$name --out $row/shard$I.jsonl "$@" > $row/shard$I.log 2>&1 &
     PIDS+=($!)
   done
   : > $row/run.log
@@ -97,7 +97,7 @@ one() {  # label arm condition extra...
   fi
   [ "$code" = 0 ] || FAILED=$((FAILED + 1))
   echo "$label $name exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $row/run.log | cut -c1-300)"
-  rm -rf /tmp/aos-probe-$SLURM_JOB_ID-$label-$name
+  rm -rf /tmp/aos-probe-$SLURM_JOB_ID-$$-$label-$name
 }
 judge() {  # label arm
   wanted $1 || return 0

@@ -156,7 +156,7 @@ every stage, then 3 to 5 sessions, then more only after reading them.
 fresh machine built from the task's published image, leaving out tasks too big for a share of a shared node, needing a machine
 inside the machine, or with no Python on the machine. Machines run under Apptainer on a shared cluster, not Docker, as root inside
 a user namespace, with the package installer told not to drop to its own user; a package whose install changes file owners may
-only half install. Each machine is an instance with its own process list and its own /tmp, so that files and work left in the background last from one command to the next, and a
+only half install. Each machine is an instance with its own process list and its own /tmp, so that files and work left in the background last from one command to the next, a command past its time keeps running there until the machine closes, and a
 command can signal only that machine. Before anything the agent sends reaches it, a machine reads what it can see, and one that sees more than 30 processes, or this account's home or the
 study's code, is refused like a machine that will not build; what each saw is on the record. The network is the node's, so tasks that open a port are left out, which removes 4 of the 43 usable tasks. The task's own score plays no part. The model is gpt-oss-120b, served on the same cluster; Laguna S 2.1, a stronger open coding
 model, was added on 2026-11-06 after gpt-oss-120b's restated ceiling proved low, and is reported apart. mini-swe-agent's published prompts are used, including its

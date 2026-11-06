@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -103,7 +104,7 @@ def test_a_long_run_seed_says_when_an_arm_failed(tmp_path: Path) -> None:
     bin_dir, study = tmp_path / "bin", tmp_path / "study"
     _stub(bin_dir / "curl", "exit 0")
     _stub(bin_dir / "nvidia-smi", "exit 0")
-    _stub(bin_dir / "apptainer", "sleep 1000")
+    _stub(bin_dir / "apptainer", "exec sleep 1000")
     _stub(study / "long" / "venv" / "bin" / "python", f"""echo "$*" >> {log}
 case "$*" in *"--arm taste "*) exit 1;; esac
 exit 0""")
@@ -114,6 +115,34 @@ exit 0""")
            "ARMS": "compaction taste"}
     done = subprocess.run(["bash", str(ROOT / "studies/long_run/jobs/seed.sbatch")], env=env, capture_output=True, text=True, timeout=120)
     assert done.returncode == 1 and "arms failed 1" in done.stdout, done.stdout + done.stderr
+
+
+def test_seeds_sharing_a_server_keep_folders_of_their_own_and_leave_nothing_on_the_node(tmp_path: Path) -> None:
+    log = tmp_path / "calls.log"
+    bin_dir, study = tmp_path / "bin", tmp_path / "study"
+    _stub(bin_dir / "curl", "exit 0")
+    _stub(bin_dir / "nvidia-smi", "exec sleep 1000")
+    _stub(bin_dir / "apptainer", f'echo "$*" >> {log}; exit 0')
+    _stub(study / "long" / "venv" / "bin" / "python", f"""echo "TMPDIR=$TMPDIR $*" >> {log}
+exit 0""")
+    (study / "long" / "venv" / "lib" / "python3.12" / "site-packages" / "minisweagent" / "config").mkdir(parents=True)
+    (study / "long" / "venv" / "lib" / "python3.12" / "site-packages" / "minisweagent" / "config" / "mini.yaml").write_text("")
+    (study / "code-abcdefabcdef").mkdir()
+    job = f"stand-in-{os.getpid()}"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "SLURM_JOB_ID": job, "ARMS": "compaction", "SERVER_URL": "http://127.0.0.1:1/v1"}
+    for seed in ("2", "3"):
+        done = subprocess.run(["bash", str(ROOT / "studies/long_run/jobs/seed.sbatch")], env={**env, "SEED": seed}, capture_output=True, text=True, timeout=120)
+        assert done.returncode == 0 and "using the running server" in done.stdout, done.stdout + done.stderr
+        assert not Path(f"/tmp/aos-long-{job}-gpt-oss-anthropic-seed{seed}").exists(), "a seed's machines go with it"
+    said = log.read_text()
+    assert "vllm serve" not in said and said.count("--url http://127.0.0.1:1/v1") == 2
+    for seed in ("2", "3"):
+        assert f"TMPDIR=/tmp/aos-long-{job}-gpt-oss-anthropic-seed{seed}/machines" in said and f"--workdir /tmp/aos-long-{job}-gpt-oss-anthropic-seed{seed}/compaction" in said
+
+
+def test_two_cells_on_one_job_do_not_share_a_working_folder(world: dict) -> None:
+    assert _run(world, ROWS="summary").returncode == 0
+    assert re.search(r"--workdir /tmp/aos-probe-1-\d+-summary-", world["log"].read_text())
 
 
 def _bench_world(tmp_path: Path, view: bool = True) -> dict:
