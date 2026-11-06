@@ -133,10 +133,12 @@ published summary prompts; a user message at a chosen model call; and the memory
 nothing run in the task's container for them. The paper says the agent was changed. A rule stated once in the first
 message, a rule given at a later call, and a fact the agent finds out itself and needs later are planted, and the harness
 never sends them again; after each compaction the raw prompt is checked for that, and a run where the harness re-sent
-one is invalid. Arms: compaction only; a flat list searched by the same code; Taste's memory, with nothing said about it, with
-one sentence saying a searchable record exists, and with that sentence and one saying to check the record; with ceilings of no
-compaction and of the statement restated. Size: a free dry run through every stage, then 3 to 5 sessions, then more only after
-reading them.
+one is invalid. Arms: compaction only; Taste's memory, with nothing said about it, with one sentence saying a searchable record
+exists, and with that sentence and one saying to check the record (a flat list searched by the same code holds the same text and
+ranks alike, by the test above, so it is one row with these); with ceilings of no compaction and of the statement restated. Added
+after the first sessions were read, because those arms hardly searched: the rule list delivered at every call, read back from the
+commit headers and written by the study's reader, and the notes file under both note-taker wordings. Size: a free dry run through
+every stage, then 3 to 5 sessions, then more only after reading them.
 
 **Tasks and machines.** A session chains public Terminal-Bench 2.1 tasks in one conversation, in an order a seed fixes, each on a
 fresh machine built from the task's published image, leaving out tasks too big for a share of a shared node, needing a machine
