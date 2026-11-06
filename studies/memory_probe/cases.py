@@ -361,6 +361,7 @@ def _rules_in_headers(case: dict, summary: str, *, chat: Callable, condition: st
     return {**_common(case, run, arm="a6h", condition=condition, prompt=prompt, k=k, upper=upper, reached=[], calls=[],
                       commits=commits, seconds=(ingested - started, asked - ingested), ledger=ledger),
             "delivered_tokens": count(block), "delivered_text": block, "records_read_back": len(lines), "looked": False,
+            "extractor": "the study's reader, studies/context_rot/criteria.py",
             "found": holds(block, case["sc_text"]), "searches": 0, "fetches": 0, "tool_errors": 0}
 
 

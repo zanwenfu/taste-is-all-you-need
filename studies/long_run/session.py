@@ -198,6 +198,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     summary = {"arm": arm, "versions": versions or {}, "outcomes": agent.outcomes, "ended_by": ended_by, "calls": agent.n_calls,
                "compactions": len(agent.events), "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
                "reader_calls": reader_calls[0], "note_versions": note_versions,
+               "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None,
                "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary

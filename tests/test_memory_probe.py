@@ -1081,3 +1081,10 @@ def test_the_newest_notes_can_be_read_whole_with_or_without_the_older_versions_s
     assert sent.index(versions[1]) < sent.index(versions[0]), "the newest first, then what search finds in older versions"
     assert both["delivered_text"].count(versions[1]) == 1 and both["searches"] == 1
     assert both["ledger"]["search_calls"] == 1
+
+
+def test_a_row_of_rules_in_headers_names_who_wrote_the_rules(tmp_path: Path) -> None:
+    """The store is Taste's, the list is not: a reader in the study wrote it, so every record says so."""
+    row = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a6h", condition="i", workdir=tmp_path, max_rounds=1, budget=500,
+                   count=_count, prompt="anthropic", k=1, items=[{"message": 0, "text": "Keep the rule."}])
+    assert row["extractor"] == "the study's reader, studies/context_rot/criteria.py"
