@@ -42,6 +42,11 @@ def load_run(root: Path, prompt: str, k: int, budget: int = 4096) -> dict[str, l
     return found
 
 
+def floors_from(paths: list[Path]) -> dict[str, bool | None]:
+    """The no-rule answers from a baseline's own run. A cued case keeps the published case's summaries, but its question, and so its no-rule rate, is its own."""
+    return {row["id"]: row["full_without_sc_compliant"] for path in paths for row in _rows(Path(path))}
+
+
 def difference_interval(base: dict[str, dict], other: dict[str, dict], *, draws: int = 2000, seed: int = 0) -> tuple[float, float, float]:
     """(difference in points, and its 95% interval), drawing whole histories with replacement. Unreadable answers count as not obeyed."""
     histories: dict[str, list[tuple[bool, bool]]] = {}
@@ -158,11 +163,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--k", required=True, type=int)
     parser.add_argument("--budget", type=int, default=4096)
     parser.add_argument("--base-cases", help="the unchanged cases, to tell whether a reversed rule's old text came back")
+    parser.add_argument("--floors", nargs="+", help="a baseline's results, for cases whose no-rule rate is not in the inputs")
     parser.add_argument("--rounds-from", help="the compaction records of this prompt, to report how many rounds folded enough to be a round")
     arguments = parser.parse_args(argv)
     inputs = Path(arguments.inputs)
     floor = {row["id"]: row["floor_compliant"] for row in _rows(inputs / "summaries.jsonl")
              if row["prompt"] == arguments.prompt and row["k"] == arguments.k}
+    if arguments.floors:
+        floor = floors_from([Path(path) for path in arguments.floors])
     old_text = None
     if arguments.base_cases:
         old = {row["id"]: row["sc_text"] for row in _rows(Path(arguments.base_cases))}

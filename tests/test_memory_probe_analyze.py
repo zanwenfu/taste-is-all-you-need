@@ -10,6 +10,7 @@ import pytest
 from studies.long_run import analyze as long_analyze
 from studies.memory_probe.analyze import (
     effective_rounds,
+    floors_from,
     load_run,
     render,
     render_rules,
@@ -67,6 +68,12 @@ def test_only_this_prompt_and_depth_are_read(tmp_path: Path) -> None:
     _write(tmp_path, "turns", [_row(0, obeyed=True)])
     _write(tmp_path, "other", [_row(0, obeyed=False)], name="a5q-i-pi_mono-k16-b4096")
     assert set(load_run(tmp_path, "anthropic", 1)) == {"turns"}
+
+
+def test_a_cued_case_is_read_against_its_own_no_rule_rate(tmp_path: Path) -> None:
+    baseline = tmp_path / "results.jsonl"
+    baseline.write_text("".join(json.dumps({"id": f"h0:{n}:cued", "full_without_sc_compliant": n == 0}) + "\n" for n in range(2)))
+    assert floors_from([baseline]) == {"h0:0:cued": True, "h0:1:cued": False}
 
 
 def test_a_budget_sweep_beside_the_main_rows_does_not_replace_them(tmp_path: Path) -> None:
