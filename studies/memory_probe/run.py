@@ -11,6 +11,7 @@ summary counts the steps (looked, found, obeyed), the tool calls that could not 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import threading
@@ -19,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from studies.memory_ledger import check
+from studies.memory_ledger import check, code_digest, code_version
 from studies.memory_probe.cases import _NEEDS_ITEMS, _NEEDS_NOTES, _NEEDS_RECORDS, ARMS, run_case
 from studies.memory_probe.tool_loop import http_chat
 
@@ -63,11 +64,24 @@ def summarize(rows: list[dict]) -> dict[str, Any]:
     }
 
 
+def _same_settings(out: Path, identity: dict[str, Any]) -> None:
+    """A second run carries on only with what the first was told, or two budgets or two wordings would sit in one file."""
+    path = out.with_name(out.stem + ".settings.json")
+    if path.exists():
+        before = json.loads(path.read_text())
+        changed = sorted(key for key in identity if before.get(key) != identity[key])
+        if changed:
+            raise SystemExit(f"{out} was started with other settings: {changed}")
+    path.write_text(json.dumps(identity, indent=1))
+
+
 def run_all(cases: list[dict], summaries: dict[str, str], *, chat: Callable, out: Path, workers: int,
             delivered: dict[str, str] | None = None, notes: dict[str, list[str]] | None = None,
-            items: dict[str, list[dict]] | None = None, **settings: Any) -> dict[str, Any]:
+            items: dict[str, list[dict]] | None = None, identity: dict[str, Any] | None = None, **settings: Any) -> dict[str, Any]:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    if identity is not None:
+        _same_settings(out, identity)
     done = {json.loads(line)["id"] for line in out.read_text().splitlines()} if out.exists() else set()
     lock = threading.Lock()
 
@@ -135,8 +149,17 @@ def main(argv=None) -> int:
     if arguments.arm in _NEEDS_NOTES:
         versions = {row["id"]: row["versions"] for row in map(json.loads, Path(arguments.notes).read_text().splitlines())}
     items = delivered_items(inputs / "delivered.jsonl", arguments.prompt) if arguments.arm in _NEEDS_ITEMS else None
+
+    def digest(path: str | Path | None) -> str | None:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else None
+
+    identity = {"arm": arguments.arm, "condition": arguments.condition, "prompt": arguments.prompt, "k": arguments.k,
+                "upper": arguments.upper, "budget": arguments.budget, "keep": arguments.keep, "max_rounds": arguments.max_rounds,
+                "model": arguments.model, "limit": arguments.limit, "cases_sha256": digest(inputs / "cases.jsonl"),
+                "summaries_sha256": digest(inputs / "summaries.jsonl"), "notes_sha256": digest(arguments.notes),
+                "headers_sha256": digest(arguments.headers), "commit": code_version()[0], "code_digest": code_digest()}
     summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers, delivered=blocks,
-                      notes=versions, items=items,
+                      notes=versions, items=items, identity=identity,
                       keep=arguments.keep,
                       arm=arguments.arm, condition=arguments.condition, workdir=Path(arguments.workdir),
                       max_rounds=arguments.max_rounds, budget=arguments.budget, count=count,

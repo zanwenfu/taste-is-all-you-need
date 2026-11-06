@@ -14,7 +14,7 @@ score it from the command record.
                    what the user asked it to keep doing; every version in Taste's memory, the newest in the system prompt at every call
     notes_neutral  the same, not told that
     no_compaction  a ceiling: the whole conversation, as long as it fits
-    restated       a ceiling: compaction, with every rule told so far said again at each task
+    restated       a ceiling: compaction, with every rule told so far in the system prompt at every call
 
 Names, per the study's rule: "taste" is "Taste memory, study-driven"; the others have no Taste code in the measured path.
 """
@@ -111,12 +111,20 @@ def make_note_taker(chat: Callable, style: str, store: NotesStore) -> Callable[[
     def keep(older: list[dict]) -> None:
         part = "\n".join(f"[{turn['role']}]: {str(turn['content'])[:MAX_TURN_CHARS]}" for turn in older)
         wanted = _PROMPT.format(told=STYLES[style], notes=store.newest() or "(no notes yet)", part=part)
-        reply = chat([{"role": "user", "content": wanted}], None)
-        if reply.choices[0].finish_reason == "length":
-            raise RuntimeError("a notes version was cut off by the output cap")
-        store.add_version(reply.choices[0].message.content or "")
+        for _ in range(EMPTY_TRIES):
+            reply = chat([{"role": "user", "content": wanted}], None)
+            if reply.choices[0].finish_reason == "length":
+                raise RuntimeError("a notes version was cut off by the output cap")
+            text = reply.choices[0].message.content or ""
+            if text.strip():
+                store.add_version(text)
+                return
+        # An empty reply says nothing about the notes: the file stays as it was, rather than being wiped by the model's silence.
 
     return keep
+
+
+EMPTY_TRIES = 3
 
 
 def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[dict], Any], count: Callable[[str], int],
@@ -146,7 +154,20 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         def standing() -> str:
             newest = store.newest()
             return f"{FLAT_HEADER}\n{fill([newest], MEMORY_BUDGET, count)}" if newest else ""
+    elif arm == "restated":
+
+        def standing() -> str:
+            said = [rule.get("restate") or rule["text"] for rule in rules
+                    if rule["say"] == "first" or agent.n_calls + 1 >= rule["say"]]
+            return f"{DELIVERED_HEADER}\n" + "\n".join(f"- {text}" for text in said) if said else ""
     actions = out / "actions.jsonl"
+    if actions.exists():
+        raise FileExistsError(f"{actions} already holds a run: a session has no resume, so give it a folder of its own")
+    prompts = out / "prompts.jsonl"
+
+    def on_prompt(row: dict) -> None:
+        with prompts.open("a") as written:
+            written.write(json.dumps(row) + "\n")
 
     def on_action(row: dict) -> None:
         with actions.open("a") as written:
@@ -158,28 +179,34 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
                   format_error_template=session["format_error_template"]),
         MemoryEnvironment(None, store.answer if arm in TOOL_ARMS else None),
         count=count, summarize=summarize, record=store.add if isinstance(store, GitTurns) else None, on_action=on_action,
-        standing=standing, on_compact=on_compact,
+        standing=standing, on_compact=on_compact, on_prompt=on_prompt,
         system_template=session["system_template"] + _SAID_ABOUT_THE_RECORD.get(arm, ""),
         instance_template=session["instance_template"], step_limit=session["step_limit"], cost_limit=0,
         compact_at_tokens=0 if arm == "no_compaction" else session.get("compact_at_tokens", 0),
         keep_recent_tokens=session.get("keep_recent_tokens", 0), task_calls=session["task_calls"],
         stop_at_tokens=session["stop_at_tokens"],
         planted={rule["say"]: rule["text"] for rule in rules if isinstance(rule["say"], int)},
-        watch={rule["name"]: rule.get("watch") or rule["text"] for rule in rules})
+        watch={rule["name"]: rule.get("watch") or rule["text"] for rule in rules},
+        mentions={rule["name"]: rule["mentions"] for rule in rules if rule.get("mentions")})
     agent.extra_template_vars |= platform.uname()._asdict()  # mini-swe-agent's own templates ask for these
 
-    def worded(task: dict, number: int) -> str:
-        says = (lambda rule: rule.get("restate") or rule["text"]) if arm == "restated" else (lambda rule: rule["text"])
-        told = [says(rule) for rule in rules if rule["say"] == "first" and (number == 0 or arm == "restated")]
-        if arm == "restated":
-            told += [says(rule) for rule in rules if isinstance(rule["say"], int) and agent.n_calls >= rule["say"]]
+    def worded(task: dict, machines: int) -> str:
+        """The rules told with the first task to get a machine, and never again in a message."""
+        told = [rule["text"] for rule in rules if rule["say"] == "first" and machines == 0]
         return "\n\n".join([*told, task["instruction"]])
 
+    planted = [False]
+
     def prepared(task: dict) -> Any:
-        """A task's machine, with anything the session plants there first: the harness's own step, in no message and no log."""
+        """A task's machine, with anything the session plants there first: the harness's own step, in no message and no log. What is
+        planted once goes on the first machine that actually opens."""
         env = make_env(task)
         for command in task.get("prepare", ()):
             env.execute({"command": command})
+        if not planted[0]:
+            for command in session.get("first_prepare", ()):
+                env.execute({"command": command})
+            planted[0] = True
         return env
 
     ended_by = None
@@ -195,8 +222,13 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         if store:
             store.close()
     rows = [json.loads(line) for line in actions.read_text().splitlines()] if actions.exists() else []
+    silent = [row for row in rows if row["kind"] == "no_command"]
+    reasons: dict[str, int] = {}
+    for row in silent:
+        reasons[str(row.get("finish_reason"))] = reasons.get(str(row.get("finish_reason")), 0) + 1
     summary = {"arm": arm, "versions": versions or {}, "outcomes": agent.outcomes, "ended_by": ended_by, "calls": agent.n_calls,
                "compactions": len(agent.events), "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
+               "resent": agent.resent, "valid": not agent.resent, "no_command": len(silent), "no_command_finish_reasons": reasons,
                "reader_calls": reader_calls[0], "note_versions": note_versions,
                "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None,
                "scores": score_session(rows, rules)}

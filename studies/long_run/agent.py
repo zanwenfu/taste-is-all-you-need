@@ -19,10 +19,12 @@ arm is a baseline; an arm whose memory is ``taste.memstore`` is "Taste memory, s
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any
 
+from jinja2 import StrictUndefined, Template
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.exceptions import FormatError, InterruptAgentFlow
 from minisweagent.models.utils.actions_toolcall import (
@@ -52,16 +54,21 @@ class ToolModel:
     def __init__(self, chat: Callable[[list[dict], list | None], Any], *, memory_tools: bool,
                  observation_template: str = "{{output.output}}", format_error_template: str = "{{error}}") -> None:
         self.chat, self.memory_tools = chat, memory_tools
-        self.last_text = ""
+        self.last_text = self.last_finish = self.last_error = ""
         self.observation_template, self.format_error_template = observation_template, format_error_template
         self.tools = [BASH_TOOL, *(definitions("chat") if memory_tools else [])]
 
-    def _refuse(self, error: str) -> FormatError:
-        return FormatError({"role": "user", "content": error, "extra": {"interrupt_type": "FormatError"}})
+    def _refuse(self, error: str, *, has_tool_calls: bool = True) -> FormatError:
+        """As mini-swe-agent does: its published template tells the model how to call a tool and how to submit."""
+        self.last_error = error
+        content = Template(self.format_error_template, undefined=StrictUndefined).render(
+            error=error, actions=[], has_tool_calls=has_tool_calls, finish_reason=self.last_finish)
+        return FormatError({"role": "user", "content": content, "extra": {"interrupt_type": "FormatError"}})
 
     def _actions(self, calls: list) -> list[dict]:
         if not calls:
-            raise self._refuse("No tool calls found in the response. Every response MUST include at least one tool call.")
+            raise self._refuse("No tool calls found in the response. Every response MUST include at least one tool call.",
+                               has_tool_calls=False)
         allowed = {"bash", SEARCH, FETCH} if self.memory_tools else {"bash"}
         actions = []
         for call in calls:
@@ -87,7 +94,7 @@ class ToolModel:
         sent = [{key: message[key] for key in _SENT_KEYS if key in message} for message in messages]
         reply = self.chat(sent, self.tools)
         message = reply.choices[0].message
-        self.last_text = message.content or ""
+        self.last_text, self.last_finish = message.content or "", reply.choices[0].finish_reason or ""
         calls = message.tool_calls or []
         actions = self._actions(calls)
         return {"role": "assistant", "content": message.content or "",
@@ -139,6 +146,7 @@ class LongRunConfig(AgentConfig):
     keep_recent_tokens: int = 0
     planted: dict[int, str] = Field(default_factory=dict)  # model call -> one user message added just before it
     watch: dict[str, str] = Field(default_factory=dict)  # texts whose survival each compaction reports
+    mentions: dict[str, str] = Field(default_factory=dict)  # patterns for the same, since a summary puts a rule in its own words
     task_calls: int = 0  # 0: a task may take any number of model calls; past it the next task follows
     stop_at_tokens: int = 0  # 0: never; the conversation ends here rather than overflow the model's window
 
@@ -149,10 +157,13 @@ class LongRunAgent(DefaultAgent):
                  record: Callable[[dict], None] | None = None,
                  on_action: Callable[[dict], None] | None = None,
                  standing: Callable[[], str] | None = None,
-                 on_compact: Callable[[list[dict]], None] | None = None, **kwargs: Any) -> None:
+                 on_compact: Callable[[list[dict]], None] | None = None,
+                 on_prompt: Callable[[dict], None] | None = None, **kwargs: Any) -> None:
         super().__init__(model, env, config_class=LongRunConfig, **kwargs)
         self.count, self.summarize, self.record, self.on_action = count, summarize, record, on_action
-        self.standing, self.on_compact = standing, on_compact
+        self.standing, self.on_compact, self.on_prompt = standing, on_compact, on_prompt
+        self.resent: dict[str, int] = {}
+        self._told: set[int] = set()
         self._system_base: str | None = None
         self.task_name = ""
         self.events: list[dict] = []
@@ -166,27 +177,49 @@ class LongRunAgent(DefaultAgent):
         added = super().add_messages(*messages)
         if self.record is not None:
             for message in messages:
-                if message.get("role") != "exit":
+                # The system prompt is in front of the model at every call, so a store has no need of it.
+                if message.get("role") not in ("exit", "system"):
                     self.record({"role": message["role"], "content": render(message),
                                  "from_harness": "interrupt_type" in message.get("extra", {})})
                     self.recorded += 1
         return added
 
-    def tokens(self) -> int:
-        return sum(self.count(render(message)) for message in self.messages)
+    def tokens(self, *, delivered: bool = True) -> int:
+        """What the conversation holds. ``delivered=False`` leaves out a memory's block in the system prompt, so that every arm
+        compacts at the same point of the same talk: a block is put back whole at every call, and folding turns cannot shrink it."""
+        total = sum(self.count(render(message)) for message in self.messages)
+        if not delivered and self._system_base is not None:
+            total += self.count(self._system_base) - self.count(render(self.messages[0]))
+        return total
+
+    def _check_resent(self) -> None:
+        """What the protocol promises: past the messages that first tell a rule, the harness never sends it. A model's own summary and
+        command output are not the harness's. Counted per model call, read from what is about to be sent."""
+        for message in self.messages[1:]:
+            if message.get("role") != "user" or message is self._summary_message or id(message) in self._told:
+                continue
+            text = str(message.get("content") or "")
+            for name, watched in self.config.watch.items():
+                if watched in text:
+                    self.resent[name] = self.resent.get(name, 0) + 1
 
     def query(self) -> dict:
         call = self.n_calls + 1
         if call in self.config.planted and call not in self._planted_sent:
             self._planted_sent.add(call)
             self.add_messages({"role": "user", "content": self.config.planted[call]})
-        if self.summarize is not None and 0 < self.config.compact_at_tokens < self.tokens():
+            self._told.add(id(self.messages[-1]))
+        folded = len(self.events)
+        if self.summarize is not None and 0 < self.config.compact_at_tokens < self.tokens(delivered=False):
             self._compact(call)
         if self.standing is not None:
             if self._system_base is None:
                 self._system_base = self.messages[0]["content"]
             block = self.standing()
             self.messages[0] = {**self.messages[0], "content": f"{self._system_base}\n\n{block}" if block else self._system_base}
+        self._check_resent()
+        if self.on_prompt is not None and len(self.events) > folded:
+            self.on_prompt({"call": call, "messages": [{"role": m["role"], "content": render(m)} for m in self.messages]})
         return super().query()
 
     def _compact(self, call: int) -> None:
@@ -218,6 +251,9 @@ class LongRunAgent(DefaultAgent):
             "watched_in_summary": {name: text in summary for name, text in self.config.watch.items()},
             "watched_in_kept_turns": {name: any(text in render(m) for m in recent)
                                       for name, text in self.config.watch.items()},
+            "mentioned_in_summary": {name: bool(re.search(pattern, summary)) for name, pattern in self.config.mentions.items()},
+            "mentioned_in_kept_turns": {name: any(re.search(pattern, render(m)) for m in recent)
+                                        for name, pattern in self.config.mentions.items()},
         })
 
     def execute_actions(self, message: dict) -> list[dict]:
@@ -226,7 +262,7 @@ class LongRunAgent(DefaultAgent):
         for action in message.get("extra", {}).get("actions", []):
             kind = action.get("memory_tool", "bash")
             row = {"kind": kind, "call": self.n_calls, "task": self.task_name, "compactions": len(self.events),
-                   "command": action["command"]}
+                   "command": action["command"], "said": str(message.get("content") or "")[:OUTPUT_KEPT]}
             try:
                 output = self.env.execute(action)
             except Exception as error:
@@ -255,7 +291,9 @@ class LongRunAgent(DefaultAgent):
             except FormatError as error:
                 if self.on_action:
                     self.on_action({"kind": "no_command", "call": self.n_calls, "task": self.task_name, "compactions": len(self.events),
-                                    "command": "", "output": getattr(self.model, "last_text", "")[:OUTPUT_KEPT]})
+                                    "command": "", "output": getattr(self.model, "last_text", "")[:OUTPUT_KEPT],
+                                    "finish_reason": getattr(self.model, "last_finish", ""),
+                                    "error": getattr(self.model, "last_error", "")})
                 self.cost += error.messages[0].get("extra", {}).get("cost", 0.0)
                 self.n_consecutive_format_errors += 1
                 limit = self.config.max_consecutive_format_errors
@@ -280,7 +318,8 @@ class LongRunAgent(DefaultAgent):
         one where the model stops issuing commands, is left the same way. Anything else ends the session."""
         self.outcomes = []
         opened = False
-        for number, task in enumerate(tasks):
+        machines = 0  # the tasks that got a machine so far: the first of them is where a session's rules are told
+        for task in tasks:
             self.task_name = task["name"]
             try:
                 self.env.inner = make_env(task)
@@ -288,7 +327,8 @@ class LongRunAgent(DefaultAgent):
                 self.outcomes.append({"task": task["name"], "exit_status": "MachineFailed", "reason": f"{type(error).__name__}: {error}"[:500],
                                       "calls": self.n_calls, "compactions": len(self.events)})
                 continue
-            text = worded(task, number) if worded else task["instruction"]
+            text = worded(task, machines) if worded else task["instruction"]
+            machines += 1
             if not opened:
                 opened = True
                 self.extra_template_vars |= {"task": text}
@@ -296,6 +336,7 @@ class LongRunAgent(DefaultAgent):
                 self.add_messages(
                     self.model.format_message(role="system", content=self._render_template(self.config.system_template)),
                     self.model.format_message(role="user", content=self._render_template(self.config.instance_template)))
+                self._told.add(id(self.messages[1]))
             else:
                 if self.messages[-1].get("role") == "exit":
                     self.messages.pop()

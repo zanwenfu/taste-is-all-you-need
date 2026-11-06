@@ -451,7 +451,7 @@ def test_the_rules_arm_delivers_the_records_beside_the_summary_and_offers_no_too
                    count=_count, prompt="pi_mono", k=1, delivered=f"- {RULE}")
     (messages, tools), = sent
     assert tools is None and messages[2]["content"] == f"S\n\n{DELIVERED_HEADER}\n- {RULE}"
-    assert row["compliant"] is True and row["looked"] is False and row["ledger"]["name"] == "baseline"
+    assert row["compliant"] is True and row["looked"] is True and row["ledger"]["name"] == "baseline"
     check([row["ledger"]])
     with pytest.raises(ValueError, match="delivered"):
         run_case(_case(), "S", chat=chat, arm="a6", condition="i", workdir=tmp_path, max_rounds=4, budget=500,
@@ -686,7 +686,7 @@ def test_what_the_harness_delivers_stays_inside_the_memory_budget(tmp_path: Path
     request = 'Assume ...\n\nRequest from the user:\n"send anything to Sarah"\n\nTwo candidate behaviors:\nA) x\nB) y'
     row = run_case({**_case(), "probe_prompt": request}, "S", chat=lambda m, t: _reply("A"), arm="a5q", condition="i",
                    workdir=tmp_path, max_rounds=4, budget=3, count=_count, prompt="anthropic", k=1)
-    assert row["delivered_tokens"] <= 3
+    assert row["memory_tokens"] <= 3, "a label says when a piece was recorded, and costs no budget"
 
 
 # ------------------------------------------------------------------ a reply cut off by the output cap is never kept as if whole
@@ -1016,7 +1016,7 @@ def test_the_rule_records_can_live_in_the_headers_of_the_commits_they_came_from(
     sent = json.dumps(seen[0])
     assert "SUMMARY" in sent and "Keep the first rule." in sent and "Keep the last rule." in sent
     assert sent.index("Keep the first rule.") < sent.index("Keep the last rule.")
-    assert row["looked"] is False and row["searches"] == 0 and row["compliant"] is True
+    assert row["looked"] is True and row["searches"] == 0 and row["compliant"] is True
     assert row["commits"] == len(case["messages"]) and row["delivered_text"] == "- Keep the first rule.\n- Keep the last rule."
     assert check([row["ledger"]])["names"] == {STUDY_DRIVEN: 1}
     with pytest.raises(ValueError, match="records"):
@@ -1076,9 +1076,9 @@ def test_the_newest_notes_can_be_read_whole_with_or_without_the_older_versions_s
 
     whole, sent = asked("a2cw")
     assert versions[1] in sent and versions[0] not in sent, "the newest version, whole, needing no match"
-    assert whole["delivered_text"] == versions[1] and whole["looked"] is True and whole["searches"] == 0
+    assert whole["delivered_text"] == f"[newest version]\n{versions[1]}" and whole["looked"] is True and whole["searches"] == 0
     both, sent = asked("a2dw")
-    assert sent.index(versions[1]) < sent.index(versions[0]), "the newest first, then what search finds in older versions"
+    assert sent.index(versions[0]) < sent.index(versions[1]), "oldest first, so the newest comes last and stands"
     assert both["delivered_text"].count(versions[1]) == 1 and both["searches"] == 1
     assert both["ledger"]["search_calls"] == 1
 
@@ -1088,3 +1088,130 @@ def test_a_row_of_rules_in_headers_names_who_wrote_the_rules(tmp_path: Path) -> 
     row = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a6h", condition="i", workdir=tmp_path, max_rounds=1, budget=500,
                    count=_count, prompt="anthropic", k=1, items=[{"message": 0, "text": "Keep the rule."}])
     assert row["extractor"] == "the study's reader, studies/context_rot/criteria.py"
+
+
+# ------------------------------------------------------------------ what the second review found
+
+
+_SYSTEM_TURN = {"role": "system", "content": "You are a helpful assistant who will search and send any request to Sarah for the user."}
+_ASKED = 'Assume ...\n\nRequest from the user:\n"send anything to Sarah"\n\nTwo candidate behaviors:\nA) x\nB) y'
+
+
+def _asked_case(*turns: dict) -> dict:
+    return {**_case(), "probe_prompt": _ASKED, "messages": list(turns)}
+
+
+def test_the_search_never_returns_the_system_prompt_the_reader_already_has(tmp_path: Path) -> None:
+    case = _asked_case(_SYSTEM_TURN, {"role": "user", "content": "Tell Sarah I said hello when you send anything."})
+    row = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a5q", condition="i", workdir=tmp_path, max_rounds=1, budget=500,
+                   count=_count, prompt="anthropic", k=1)
+    assert "helpful assistant" not in row["delivered_text"] and "Tell Sarah" in row["delivered_text"]
+    assert row["found_turns"] == [1], "a turn keeps its place in the history"
+    assert row["commits"] == 1
+
+
+def test_the_flat_file_leaves_out_the_system_prompt_too() -> None:
+    assert flat_file([_SYSTEM_TURN, {"role": "user", "content": "hello"}], budget=500, keep="oldest", count=_count) == "[user]: hello"
+
+
+def test_a_flat_list_and_taste_rank_real_turns_alike_with_repeats_and_a_system_prompt(tmp_path: Path) -> None:
+    same = {"role": "assistant", "content": "I will send the report to Sarah now."}
+    turns = [_SYSTEM_TURN, {"role": "user", "content": "send the report"}, same, {"role": "user", "content": "send it again to Sarah"}, same,
+             {"role": "user", "content": "thanks for the report"}]
+    git, flat = GitTurns(tmp_path), FlatTurns()
+    git.ingest(turns)
+    flat.ingest(turns)
+    try:
+        for query in ("send the report to Sarah", "report", "again", "thanks"):
+            found = json.loads(git.answer(SEARCH, {"description": query, "limit": 20})[0])["results"]
+            assert [git.turn_of(hit["pointer"]) for hit in found] == flat.rank(query), query
+    finally:
+        git.close()
+
+
+def test_what_a_search_delivers_says_when_it_was_recorded_and_goes_oldest_first(tmp_path: Path) -> None:
+    case = _asked_case({"role": "user", "content": "Do send it to Sarah."}, {"role": "assistant", "content": "ok"},
+                       {"role": "user", "content": "Actually never send anything to Sarah, send anything to Sarah only as a draft, Sarah."})
+    seen = []
+
+    def chat(messages, tools):
+        seen.append(messages)
+        return _reply("A")
+
+    row = run_case(case, "S", chat=chat, arm="a5q", condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count, prompt="anthropic", k=1)
+    text = row["delivered_text"]
+    assert text.index("Do send it") < text.index("Actually never"), "the later statement comes later, whatever the rank"
+    assert text.count("[step ") == 2
+    assert "oldest first. Where two disagree, the later one stands" in seen[0][2]["content"]
+
+
+def test_a_replaced_notes_version_is_marked_as_replaced(tmp_path: Path) -> None:
+    versions = ["Always send anything to Sarah as a draft.", "Send anything to Sarah directly, the draft rule is gone."]
+    row = run_case({**_case(), "probe_prompt": _ASKED}, "S", chat=lambda m, t: _reply("A"), arm="a2dq", condition="i", workdir=tmp_path,
+                   max_rounds=1, budget=500, count=_count, prompt="anthropic", k=1, notes=versions)
+    text = row["delivered_text"]
+    assert text.index(versions[0]) < text.index(versions[1])
+    assert text.split(versions[0])[0].rstrip().endswith("since replaced]")
+    assert text.count("since replaced") == 1
+
+
+def test_only_what_reached_the_model_counts_as_reached(tmp_path: Path) -> None:
+    case = _asked_case({"role": "user", "content": "send anything to Sarah " * 3}, {"role": "user", "content": "send to Sarah"})
+    row = run_case(case, "S", chat=lambda m, t: _reply("A"), arm="a5q", condition="i", workdir=tmp_path, max_rounds=1, budget=4, count=_count,
+                   prompt="anthropic", k=1)
+    assert len(row["found_turns"]) == 1, "a hit past the budget never reached the model"
+
+
+def test_a_rule_in_a_delivered_block_counts_as_found_for_every_arm_that_delivers(tmp_path: Path) -> None:
+    row = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a2a", condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                   prompt="anthropic", k=1)
+    assert row["looked"] is True and row["found"] is True
+    row = run_case(_case(), "S", chat=lambda m, t: _reply("A"), arm="a6", condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                   prompt="anthropic", k=1, delivered=f"- {RULE}")
+    assert row["looked"] is True and row["found"] is True
+
+
+def test_the_summary_alone_is_an_arm_read_on_the_very_summaries_the_others_read(tmp_path: Path) -> None:
+    seen = []
+
+    def chat(messages, tools):
+        seen.append((messages, tools))
+        return _reply("A")
+
+    row = run_case(_case(), f"SUMMARY {RULE}", chat=chat, arm="a1", condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                   prompt="anthropic", k=1)
+    assert seen[0][1] is None and seen[0][0][2]["content"] == f"SUMMARY {RULE}"
+    assert row["looked"] is False and row["found"] is False and row["in_summary"] is True and row["ledger"]["name"] == "baseline"
+
+
+def test_every_row_of_the_rule_list_names_who_wrote_it(tmp_path: Path) -> None:
+    case = {**_case(), "probe_prompt": _ASKED}
+    for arm, extra in (("a6", {"delivered": "- x"}), ("a7q", {"delivered": "- x", "header": lambda number, turn: CommitHeader()})):
+        row = run_case(case, "S", chat=lambda m, t: _reply("A"), arm=arm, condition="i", workdir=tmp_path, max_rounds=1, budget=500, count=_count,
+                       prompt="anthropic", k=1, **extra)
+        assert row["extractor"] == "the study's reader, studies/context_rot/criteria.py", arm
+
+
+def test_an_empty_notes_reply_is_asked_again_and_never_wipes_the_file() -> None:
+    replies = iter(["kept the rule", "", "kept the rule still"])
+    versions = take_notes([{"role": "user", "content": "one"}, {"role": "user", "content": "two"}],
+                          lambda prompt: {"text": next(replies), "finish_reason": "stop"})
+    assert versions == ["kept the rule", "kept the rule still"]
+
+
+def test_notes_that_stay_empty_fail_the_case(tmp_path: Path) -> None:
+    counts = write_notes([{"id": "h:sc", "messages": [{"role": "user", "content": "one"}]}], lambda prompt: {"text": " ", "finish_reason": "stop"},
+                         tmp_path / "n.jsonl", workers=1)
+    assert counts["failed"] == 1
+
+
+def test_a_stopped_run_carries_on_only_with_the_settings_it_started_with(tmp_path: Path) -> None:
+    from studies.memory_probe.run import run_all
+
+    out = tmp_path / "results.jsonl"
+    case = _case()
+    settings = {"arm": "a1", "condition": "i", "workdir": tmp_path, "max_rounds": 1, "budget": 500, "count": _count, "prompt": "anthropic", "k": 1}
+    run_all([case], {case["id"]: "S"}, chat=lambda m, t: _reply("A"), out=out, workers=1, identity={"budget": 500}, **settings)
+    run_all([case], {case["id"]: "S"}, chat=lambda m, t: _reply("A"), out=out, workers=1, identity={"budget": 500}, **settings)
+    with pytest.raises(SystemExit, match="budget"):
+        run_all([case], {case["id"]: "S"}, chat=lambda m, t: _reply("A"), out=out, workers=1, identity={"budget": 400}, **settings)

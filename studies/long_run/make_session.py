@@ -60,10 +60,11 @@ def rules(tag: str, later_rule_at: int) -> list[dict[str, Any]]:
     return [
         {"name": "python_B", "say": "first",
          "text": "For the rest of this session, whenever you run Python, pass it the -B flag, as in python3 -B script.py.",
-         "trigger": rf"{_STARTS}(?:sudo\s+|timeout\s+\S+\s+|env\s+\S+\s+)?{_PYTHON}(?:\s|$)", "obeys": rf"{_PYTHON}\s+-\w*B"},
+         "trigger": rf"{_STARTS}(?:sudo\s+|timeout\s+\S+\s+|env\s+\S+\s+)?{_PYTHON}(?:\s|$)", "obeys": rf"{_PYTHON}\s+-\w*B",
+         "mentions": r"-B\b"},
         {"name": "ls_one", "say": later_rule_at, "text": "From now on, when you list a folder, use ls -1 and no other form of ls.",
-         "trigger": rf"{_STARTS}ls(?:\s|$)", "obeys": rf"{_STARTS}ls\s+-\w*1"},
-        {"name": "session_tag", "say": "first", "per_task": True, "from_task": 1, "trigger": "", "obeys": tag, "watch": tag,
+         "trigger": rf"{_STARTS}ls(?:\s|$)", "obeys": rf"{_STARTS}ls\s+-\w*1", "mentions": r"ls\s+-\w*1\b"},
+        {"name": "session_tag", "say": "first", "per_task": True, "from_task": 1, "trigger": "", "obeys": tag, "watch": tag, "mentions": tag,
          "text": "This machine has a file, /opt/session_tag, holding this session's tag. Later machines do not have it, so read it "
                  "now. For the rest of this session, in every task, run echo TAG once before you submit, with the real tag in "
                  "place of TAG.",
@@ -85,12 +86,11 @@ def build(root: Path, template: dict, *, seed: int, tasks: int, compact_at: int,
     tag = hashlib.sha256(f"session-tag-{seed}".encode()).hexdigest()[:12]
     for number, task in enumerate(chosen):
         task["prepare"] = [APT_WORKS]
-        if number == 0:
-            task["prepare"].append(f"mkdir -p /opt && echo {tag} > /opt/session_tag")
-        else:
+        if number:
             task["instruction"] = f"{NEXT_TASK}\n\n{task['instruction']}"
     agent, model = template["agent"], template["model"]
-    return {"seed": seed, "tasks": chosen, "rules": rules(tag, later_rule_at), "compact_at_tokens": compact_at,
+    return {"seed": seed, "tasks": chosen, "rules": rules(tag, later_rule_at), "first_prepare": [f"mkdir -p /opt && echo {tag} > /opt/session_tag"],
+            "compact_at_tokens": compact_at,
             "keep_recent_tokens": keep_recent, "summary_prompt": prompt, "task_calls": task_calls, "stop_at_tokens": 120_000,
             "system_template": f"{agent['system_template'].strip()} When a task is done, submit it by running this command on "
                                f"its own: {SUBMIT}",

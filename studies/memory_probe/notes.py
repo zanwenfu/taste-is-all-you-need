@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 MAX_TURN_CHARS = 24_000
+EMPTY_TRIES = 3
 _PROMPT = (
     "You keep the notes file of an assistant that is helping a user. Its conversation history will later be "
     "summarized and most of it removed, and the notes file is kept. Rewrite the whole notes file so that it keeps "
@@ -37,15 +38,21 @@ def chunks(messages: list[dict]) -> list[list[dict]]:
 
 def take_notes(messages: list[dict], ask: Callable[[str], dict], *, style: str = "told") -> list[str]:
     """Every version, in order. A reply cut off by the output cap stops the case: a notes file cut at the cap would lose
-    its end silently, and the notes arms would look worse for no real reason."""
+    its end silently, and the notes arms would look worse for no real reason. An empty reply is asked again, and then stops the case:
+    it says nothing about the notes, and written down it would wipe them."""
     if style not in STYLES:
         raise ValueError(f"unknown style {style!r}")
     notes, versions = "", []
     for part in chunks(messages):
         text = "\n".join(f"[{turn['role']}]: {str(turn['content'])[:MAX_TURN_CHARS]}" for turn in part)
-        reply = ask(_PROMPT.format(told=STYLES[style], notes=notes or "(no notes yet)", part=text))
-        if reply["finish_reason"] == "length":
-            raise ValueError("a notes version was cut off by the output cap")
+        for _ in range(EMPTY_TRIES):
+            reply = ask(_PROMPT.format(told=STYLES[style], notes=notes or "(no notes yet)", part=text))
+            if reply["finish_reason"] == "length":
+                raise ValueError("a notes version was cut off by the output cap")
+            if reply["text"].strip():
+                break
+        else:
+            raise ValueError(f"the model gave no notes in {EMPTY_TRIES} tries")
         notes = reply["text"]
         versions.append(notes)
     return versions

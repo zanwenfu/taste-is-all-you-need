@@ -3,7 +3,8 @@
 ``GitTurns`` is "Taste memory, study-driven": one fresh store per case, each turn appended to the transcript and
 checkpointed on its own, so a hit is one turn. With a header writer, search also reads each commit's header, and a
 header that matches stands for the turn its commit added. Without one, it reads the turns alone, and ``FlatTurns``,
-the same turns under the same keyword code, must rank them identically: a difference is a bug, never a finding.
+the same turns under the same keyword code, must rank them identically: a difference is a bug, never a finding. The system
+prompt goes in neither: the reader has it already, and it would take most of a memory's budget.
 """
 
 from __future__ import annotations
@@ -37,12 +38,13 @@ class GitTurns:
         self._instructed: list[str] = []
 
     def ingest(self, messages: list[dict]) -> None:
-        for turn in messages:
-            self.add(turn)
+        for number, turn in enumerate(messages):
+            if turn["role"] != "system":
+                self.add(turn, number)
 
-    def add(self, turn: dict) -> None:
-        """One turn, committed on its own, as it happens."""
-        number = self.commits
+    def add(self, turn: dict, number: int | None = None) -> None:
+        """One turn, committed on its own, as it happens. ``number`` is its place in the history, if not simply the next."""
+        number = self.commits if number is None else number
         self.branch.turn(role=turn["role"], content=turn["content"])
         header = self.header(number, turn) if self.header else None
         state = self.branch.checkpoint(SUBJECT, header=header)
@@ -131,12 +133,20 @@ class NotesStore:
 
 
 class FlatTurns:
-    """The same turns in a plain list: the words search reads of a turn are its content and its role."""
+    """The same turns in a plain list: the words search reads of a turn are its content and its role. Taste's search holds a turn it has
+    met once, so this does too, and it ranks each by its place in the history."""
 
     def ingest(self, messages: list[dict]) -> None:
         self.index = Bm25()
-        for turn in messages:
+        self.numbers: list[int] = []
+        seen: set[tuple[str, str]] = set()
+        for number, turn in enumerate(messages):
+            key = (turn["role"], str(turn["content"]))
+            if turn["role"] == "system" or key in seen:
+                continue
+            seen.add(key)
+            self.numbers.append(number)
             self.index.add(tokens(f"{turn['content']}\n{turn['role']}"))
 
     def rank(self, query: str) -> list[int]:
-        return [doc for doc, _ in self.index.rank(tokens(query))]
+        return [self.numbers[doc] for doc, _ in self.index.rank(tokens(query))]

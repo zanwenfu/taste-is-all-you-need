@@ -385,13 +385,16 @@ def test_a_ceiling_with_no_compaction_never_asks_for_a_summary(tmp_path: Path) -
     assert summary["compactions"] == 0
 
 
-def test_a_ceiling_with_each_rule_told_again_at_every_task_says_so(tmp_path: Path) -> None:
-    script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2")])
-    run_session(load_session({**SESSION, "rules": SESSION["rules"][:1]}), arm="restated", chat=_routed(script),
-                make_env=lambda task: _Shell(), count=_count, out=tmp_path / "run", workdir=tmp_path / "w",
-                package_prompt=_prompt)
-    users = [m["content"] for m in script.sent[-1]["messages"] if m["role"] == "user"]
-    assert users[-1] == f"{SESSION['rules'][0]['text']}\n\nDo two."
+def test_the_restated_ceiling_has_every_rule_told_so_far_in_front_of_the_model_at_every_call(tmp_path: Path) -> None:
+    script = _Script([_bash("echo a", "c1"), _bash("echo b", "c2"), _bash(DONE, "c3"), _bash(DONE, "c4")])
+    summary = run_session(load_session(SESSION), arm="restated", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    first, later = SESSION["rules"][0]["text"], SESSION["rules"][1]["text"]
+    systems = [call["messages"][0]["content"] for call in script.sent]
+    assert all(first in system for system in systems)
+    assert later not in systems[1] and later in systems[2], "the later rule from the call it is told at"
+    assert [m["content"] for m in script.sent[-1]["messages"] if m["role"] == "user"][-1] == "Do two."
+    assert summary["valid"] is True, "this arm delivers its rules on purpose, in the system prompt"
 
 
 def test_a_session_with_a_rule_it_cannot_score_is_refused() -> None:
@@ -621,8 +624,8 @@ def test_the_session_file_is_built_the_same_way_from_the_public_tasks(tmp_path: 
     assert "epsilon" not in names, "a machine with no Python never meets the rule about Python"
     assert one["tasks"][0]["image"].startswith("docker://owner/") and one["tasks"][0]["cwd"] == "/app"
     tag = next(rule for rule in one["rules"] if rule["name"] == "session_tag")
-    assert tag["obeys"] in one["tasks"][0]["prepare"][-1]
-    assert tag["obeys"] not in json.dumps(one["tasks"]).replace(one["tasks"][0]["prepare"][-1], "")
+    assert tag["obeys"] in one["first_prepare"][0]
+    assert tag["obeys"] not in json.dumps(one["tasks"]), "the tag is in no message, and on the first machine that opens only"
     assert all("APT::Sandbox::User" in task["prepare"][0] for task in one["tasks"]), "the package installer works on every machine"
     assert tag["obeys"] not in tag["text"] and tag["obeys"] in tag["restate"]
     assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in one["system_template"], "a summary may lose the first message"
@@ -767,3 +770,142 @@ def test_the_session_file_can_point_at_images_fetched_once(tmp_path: Path) -> No
     session = build(root, template, seed=1, tasks=1, compact_at=8000, keep_recent=2000, prompt="anthropic", later_rule_at=20, task_calls=40,
                     images=tmp_path / "images")
     assert session["tasks"][0]["image"] == str(tmp_path / "images" / "alpha.sif")
+
+
+# ------------------------------------------------------------------ what the second review found
+
+
+_TEMPLATE = ("{% if finish_reason is defined and finish_reason == 'length' %}Cut off.{% else %}Tool call error: {{error}} "
+             "Every response needs to use the bash tool. To end the task run the submit command.{% endif %}")
+
+
+def test_a_reply_with_no_command_gets_the_agents_published_guidance_and_the_record_says_why(tmp_path: Path) -> None:
+    script = _Script([_reply([], "All done, I think."), _bash(DONE, "c1")])
+    rows = []
+    shell = _Shell()
+    model = ToolModel(script, memory_tools=False, format_error_template=_TEMPLATE)
+    agent = LongRunAgent(model, MemoryEnvironment(shell, None), count=_count, on_action=rows.append, system_template="s",
+                         instance_template="{{task}}", step_limit=10, cost_limit=0)
+    agent.run_tasks([{"name": "one", "instruction": "Do it."}], lambda task: shell)
+    said = [m["content"] for m in script.sent[1]["messages"] if m["role"] == "user"][-1]
+    assert "Every response needs to use the bash tool" in said and "No tool calls found" in said
+    silent = next(row for row in rows if row["kind"] == "no_command")
+    assert silent["finish_reason"] == "tool_calls" and "No tool calls found" in silent["error"] and silent["output"] == "All done, I think."
+
+
+def test_a_reply_cut_off_by_the_output_cap_is_told_so() -> None:
+    model = ToolModel(lambda messages, tools: None, memory_tools=False, format_error_template=_TEMPLATE)
+    model.last_finish = "length"
+    assert model._refuse("x", has_tool_calls=False).messages[0]["content"] == "Cut off."
+
+
+def test_a_delivered_block_does_not_bring_compaction_forward() -> None:
+    def run(standing):
+        script = _Script([_bash("word " * 8 + str(n), f"c{n}") for n in range(6)] + [_bash(DONE, "z")])
+        agent, _ = _agent(script, summarize=lambda older, previous: "short", compact_at_tokens=60, keep_recent_tokens=10)
+        agent.standing = standing
+        agent.run(task="Do it.")
+        return len(agent.events)
+
+    assert run(lambda: "block " * 200) == run(None) > 0
+
+
+def test_the_system_prompt_is_not_recorded_since_it_is_in_front_of_the_model_anyway(tmp_path: Path) -> None:
+    store = GitTurns(tmp_path)
+    agent, _ = _agent(_Script([_bash(DONE, "c1")]), store=store)
+    try:
+        agent.run(task="Fix it.")
+        assert agent.recorded == 2  # the task and the reply with its command
+    finally:
+        store.close()
+
+
+def test_when_the_first_machine_fails_the_rules_and_the_tag_go_to_the_first_one_that_opens(tmp_path: Path) -> None:
+    session = load_session({**SESSION, "rules": SESSION["rules"][:1], "first_prepare": ["plant the tag"],
+                            "tasks": [{"name": "broken", "instruction": "Do broken."}, {"name": "one", "instruction": "Do one."},
+                                      {"name": "two", "instruction": "Do two."}]})
+    script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2")])
+    shells = []
+
+    def make_env(task):
+        if task["name"] == "broken":
+            raise RuntimeError("no machine")
+        shells.append(_Shell())
+        return shells[-1]
+
+    summary = run_session(session, arm="compaction", chat=_routed(script), make_env=make_env, count=_count, out=tmp_path / "run",
+                          workdir=tmp_path / "w", package_prompt=_prompt)
+    first_user = next(m["content"] for m in script.sent[0]["messages"] if m["role"] == "user")
+    assert SESSION["rules"][0]["text"] in first_user and "Do one." in first_user
+    assert shells[0].ran[0] == "plant the tag" and "plant the tag" not in shells[1].ran
+    assert summary["outcomes"][0]["exit_status"] == "MachineFailed"
+
+
+def test_a_rule_the_harness_sends_twice_makes_the_run_invalid(tmp_path: Path) -> None:
+    rule = SESSION["rules"][0]
+    session = load_session({**SESSION, "rules": [rule], "tasks": [{"name": "one", "instruction": "Do one."},
+                                                                  {"name": "two", "instruction": f"Do two. {rule['text']}"}]})
+    script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2")])
+    summary = run_session(session, arm="compaction", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["valid"] is False and summary["resent"] == {"bytes": 1}
+
+
+def test_a_rule_told_once_is_a_valid_run_and_the_prompt_after_each_compaction_is_kept(tmp_path: Path) -> None:
+    summary = run_session(load_session(SESSION), arm="compaction", chat=_routed(_session_chat()), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["valid"] is True and summary["compactions"] > 0
+    kept = [json.loads(line) for line in (tmp_path / "run" / "prompts.jsonl").read_text().splitlines()]
+    assert len(kept) == summary["compactions"] and kept[0]["messages"][0]["role"] == "system"
+
+
+def test_a_summary_that_puts_a_rule_in_its_own_words_still_counts_as_holding_it() -> None:
+    script = _Script([_bash("word " * 30, "c1"), _bash(DONE, "c2")])
+    agent, _ = _agent(script, summarize=lambda older, previous: "Use `ls -1` as the user asked.", compact_at_tokens=20, keep_recent_tokens=2,
+                      watch={"ls": "From now on, when you list a folder, use ls -1 and no other form of ls."}, mentions={"ls": r"ls\s+-\w*1\b"})
+    agent.run(task="Do it.")
+    assert agent.events[0]["watched_in_summary"]["ls"] is False and agent.events[0]["mentioned_in_summary"]["ls"] is True
+
+
+def test_a_task_where_the_agent_says_the_tag_but_never_runs_it_counts_as_known_not_ran() -> None:
+    rules = [{"name": "tag", "say": "first", "per_task": True, "from_task": 1, "trigger": "", "obeys": "tag-7f3a"}]
+    actions = [{"kind": "bash", "call": 1, "task": "one", "compactions": 0, "command": "cat /opt/tag", "output": "tag-7f3a"},
+               {"kind": "bash", "call": 2, "task": "two", "compactions": 0, "command": "echo x", "said": ""},
+               {"kind": "no_command", "call": 3, "task": "two", "compactions": 0, "command": "", "output": "The tag is tag-7f3a."},
+               {"kind": "bash", "call": 4, "task": "three", "compactions": 1, "command": "echo tag-7f3a"}]
+    scored = score_session(actions, rules)["tag"]
+    assert (scored["obeyed"], scored["applies"]) == (1, 2)
+    assert (scored["knows"], scored["knows_of"]) == (2, 2)
+    assert scored["by_task"] == {"two": {"obeyed": 0, "applies": 1}, "three": {"obeyed": 1, "applies": 1}}
+
+
+def test_every_rule_is_also_scored_task_by_task_so_arms_that_end_early_can_be_paired() -> None:
+    rules = [{"name": "bytes", "say": "first", "trigger": r"\bpython3?\s", "obeys": r"\bpython3?\s+-B\b"}]
+    actions = [{"kind": "bash", "call": 1, "task": "one", "compactions": 0, "command": "python3 a.py"},
+               {"kind": "bash", "call": 2, "task": "one", "compactions": 0, "command": "python3 -B a.py"},
+               {"kind": "bash", "call": 3, "task": "two", "compactions": 1, "command": "python3 -B b.py"}]
+    assert score_session(actions, rules)["bytes"]["by_task"] == {"one": {"obeyed": 1, "applies": 2}, "two": {"obeyed": 1, "applies": 1}}
+
+
+def test_a_folder_that_already_holds_a_run_is_refused_rather_than_appended_to(tmp_path: Path) -> None:
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "actions.jsonl").write_text("{}\n")
+    with pytest.raises(FileExistsError, match="no resume"):
+        run_session(load_session(SESSION), arm="compaction", chat=_routed(_session_chat()), make_env=lambda task: _Shell(), count=_count,
+                    out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+
+
+def test_an_empty_reply_from_the_note_taker_leaves_the_notes_as_they_were(tmp_path: Path) -> None:
+    from studies.long_run.session import make_note_taker
+    from studies.memory_probe.stores import NotesStore
+
+    store = NotesStore(tmp_path, ["the rule is -B"], history=True)
+    try:
+        replies = iter(["", "", ""])
+        make_note_taker(lambda messages, tools: _text(next(replies)), "told", store)([{"role": "user", "content": "x"}])
+        assert store.newest() == "the rule is -B" and store.commits == 1
+        replies = iter(["", "kept and more"])
+        make_note_taker(lambda messages, tools: _text(next(replies)), "told", store)([{"role": "user", "content": "x"}])
+        assert store.newest() == "kept and more" and store.commits == 2
+    finally:
+        store.close()
