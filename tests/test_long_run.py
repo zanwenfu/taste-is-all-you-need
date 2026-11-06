@@ -665,3 +665,57 @@ def test_a_fact_is_scored_from_the_task_after_it_was_read_in_commands_or_their_o
     scored = score_session(actions, [rule])["tag"]
     assert scored["applies"] == 3 and scored["obeyed"] == 2
     assert scored["by_compactions"] == {"0": [1, 1], "1": [1, 1], "2": [0, 1]}
+
+
+# ------------------------------------------------------------------ memory that delivers, since the agent does not look
+
+from studies.context_rot.criteria import READER_SYSTEM  # noqa: E402
+
+
+def _reader_route(script, quotes):
+    """The served model: the reader's call, the summaries and notes with no tools, the agent with them."""
+    asked = {"reader": 0, "notes": []}
+
+    def chat(messages, tools):
+        if tools:
+            return script(messages, tools)
+        if messages[0]["content"] == READER_SYSTEM:
+            asked["reader"] += 1
+            found = [quote for quote in quotes if quote in messages[1]["content"]]
+            return _text(json.dumps({"standing": found}))
+        if "notes file" in messages[0]["content"]:
+            asked["notes"].append(messages[0]["content"])
+            return _text("Notes: pass -B to Python.")
+        return _text("a summary")
+
+    return chat, asked
+
+
+def test_rules_read_as_each_message_arrives_live_in_commit_headers_and_reach_every_call(tmp_path: Path) -> None:
+    rule = SESSION["rules"][0]["text"]
+    script = _Script([_bash("python3 a.py " + "word " * 30, "c1"), _bash("ls " + "word " * 30, "c2"), _bash(DONE, "c3"), _bash(DONE, "c4")])
+    chat, asked = _reader_route(script, [rule])
+    session = load_session({**SESSION, "rules": SESSION["rules"][:1]})
+    summary = run_session(session, arm="taste_rules", chat=chat, make_env=lambda task: _Shell(), count=_count, out=tmp_path / "run",
+                          workdir=tmp_path / "w", package_prompt=_prompt)
+    assert [t["function"]["name"] for t in script.sent[0]["tools"]] == ["bash"], "delivered, so no search is offered"
+    assert all(rule in sent["messages"][0]["content"] for sent in script.sent), "in the system prompt at every call"
+    assert summary["compactions"] > 0 and rule in script.sent[-1]["messages"][0]["content"], "a summary cannot lose it"
+    assert asked["reader"] >= 1 and summary["reader_calls"] == asked["reader"]
+    assert summary["ledger"]["name"] == "Taste memory, study-driven" and summary["ledger"]["search_calls"] == 0
+    assert summary["events"][0]["delivered"].count(rule) == 1
+
+
+def test_a_notes_file_is_rewritten_at_each_compaction_kept_in_git_and_reaches_every_later_call(tmp_path: Path) -> None:
+    for arm, clause in (("notes_told", True), ("notes_neutral", False)):
+        script = _Script([_bash("python3 a.py " + "word " * 30, "c1"), _bash("ls " + "word " * 30, "c2"), _bash(DONE, "c3"), _bash(DONE, "c4")])
+        chat, asked = _reader_route(script, [])
+        summary = run_session(load_session({**SESSION, "rules": SESSION["rules"][:1]}), arm=arm, chat=chat, make_env=lambda task: _Shell(),
+                              count=_count, out=tmp_path / arm, workdir=tmp_path / "w", package_prompt=_prompt)
+        assert len(asked["notes"]) == summary["compactions"] > 0
+        assert ("anything the user asked it to keep doing" in asked["notes"][0]) is clause
+        assert "python3 a.py" in asked["notes"][0], "the note-taker sees what the compaction is about to fold away"
+        assert "Notes: pass -B to Python." in script.sent[-1]["messages"][0]["content"]
+        assert "Notes: pass -B to Python." not in script.sent[0]["messages"][0]["content"]
+        assert summary["ledger"]["name"] == "Taste memory, study-driven" and summary["note_versions"] == summary["compactions"]
+        assert [t["function"]["name"] for t in script.sent[0]["tools"]] == ["bash"]

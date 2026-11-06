@@ -8,6 +8,11 @@ score it from the command record.
     taste          the same, and every message committed to Taste's memory, with search and fetch offered beside bash
     taste_exists   the same, and the system prompt says a searchable record exists
     taste_check    the same, and it also says to check that record before answering a request
+    taste_rules    compaction, each user message read once as it arrives, what it asks to keep doing written in that commit's
+                   header, and all of that read back from the store and put in the system prompt at every call; no tools
+    notes_told     compaction, and a notes file a model rewrites at each compaction from what is about to be folded away, told to keep
+                   what the user asked it to keep doing; every version in Taste's memory, the newest in the system prompt at every call
+    notes_neutral  the same, not told that
     no_compaction  a ceiling: the whole conversation, as long as it fits
     restated       a ceiling: compaction, with every rule told so far said again at each task
 
@@ -28,11 +33,16 @@ from typing import Any
 from studies.context_rot.repeated import round_prompt
 from studies.long_run.agent import LongRunAgent, MemoryEnvironment, ToolModel
 from studies.long_run.score import score_session
+from studies.memory_bench.core import fill
 from studies.memory_ledger import BASELINE, stand_in_record
-from studies.memory_probe.cases import LOOK, SENTENCE
-from studies.memory_probe.stores import GitTurns
+from studies.memory_probe.cases import DELIVERED_HEADER, FLAT_HEADER, LOOK, SENTENCE
+from studies.memory_probe.stores import GitTurns, NotesStore
+from taste.memstore import CommitHeader
 
-ARMS = ("compaction", "taste", "taste_exists", "taste_check", "no_compaction", "restated")
+TOOL_ARMS = ("taste", "taste_exists", "taste_check")
+NOTE_ARMS = {"notes_told": "told", "notes_neutral": "neutral"}
+ARMS = ("compaction", *TOOL_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated")
+MEMORY_BUDGET = 4096
 _SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
 # Duke's Apptainer has no user-id map, and its fakeroot helper needs a newer C library than the task images have. Without the
 # helper the agent is still root inside and its writes stay; a package whose install changes file owners may only half install.
@@ -75,6 +85,40 @@ def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tr
     return summarize
 
 
+def make_reader(chat: Callable) -> tuple[Callable[[str], list[str]], list[int]]:
+    """The study's reader, asked once per distinct user message, as it arrives."""
+    from studies.context_rot.criteria import parse_reply, reader_prompt
+
+    known: dict[str, list[str]] = {}
+    calls = [0]
+
+    def read(text: str) -> list[str]:
+        if text not in known:
+            reply = chat(reader_prompt(text), None)
+            calls[0] += 1
+            if reply.choices[0].finish_reason == "length":
+                raise RuntimeError("a rule reading was cut off by the output cap")
+            known[text] = parse_reply(reply.choices[0].message.content or "", text)[0]
+        return known[text]
+
+    return read, calls
+
+
+def make_note_taker(chat: Callable, style: str, store: NotesStore) -> Callable[[list[dict]], None]:
+    """The study's note-taker: the whole file rewritten from what a compaction is about to fold away."""
+    from studies.memory_probe.notes import _PROMPT, MAX_TURN_CHARS, STYLES
+
+    def keep(older: list[dict]) -> None:
+        part = "\n".join(f"[{turn['role']}]: {str(turn['content'])[:MAX_TURN_CHARS]}" for turn in older)
+        wanted = _PROMPT.format(told=STYLES[style], notes=store.newest() or "(no notes yet)", part=part)
+        reply = chat([{"role": "user", "content": wanted}], None)
+        if reply.choices[0].finish_reason == "length":
+            raise RuntimeError("a notes version was cut off by the output cap")
+        store.add_version(reply.choices[0].message.content or "")
+
+    return keep
+
+
 def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[dict], Any], count: Callable[[str], int],
                 out: Path, workdir: Path, package_prompt: Callable, versions: dict | None = None) -> dict[str, Any]:
     if arm not in ARMS:
@@ -83,7 +127,25 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     out.mkdir(parents=True, exist_ok=True)
     workdir.mkdir(parents=True, exist_ok=True)
     rules = session["rules"]
-    store = GitTurns(workdir) if arm.startswith("taste") else None
+    store: Any = None
+    standing, on_compact, reader_calls = None, None, [0]
+    if arm in TOOL_ARMS:
+        store = GitTurns(workdir)
+    elif arm == "taste_rules":
+        read, reader_calls = make_reader(chat)
+        store = GitTurns(workdir, header=lambda number, turn: CommitHeader(instructions=tuple(read(turn["content"])))
+                         if turn["role"] == "user" else CommitHeader())
+
+        def standing() -> str:
+            found = store.instructions()
+            return f"{DELIVERED_HEADER}\n" + fill([f"- {text}\n" for text in found], MEMORY_BUDGET, count) if found else ""
+    elif arm in NOTE_ARMS:
+        store = NotesStore(workdir, [], history=True)
+        on_compact = make_note_taker(chat, NOTE_ARMS[arm], store)
+
+        def standing() -> str:
+            newest = store.newest()
+            return f"{FLAT_HEADER}\n{fill([newest], MEMORY_BUDGET, count)}" if newest else ""
     actions = out / "actions.jsonl"
 
     def on_action(row: dict) -> None:
@@ -92,10 +154,11 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
 
     summarize = None if arm == "no_compaction" else make_summarizer(chat, session.get("summary_prompt", "anthropic"), package_prompt)
     agent = LongRunAgent(
-        ToolModel(chat, memory_tools=store is not None, observation_template=session["observation_template"],
+        ToolModel(chat, memory_tools=arm in TOOL_ARMS, observation_template=session["observation_template"],
                   format_error_template=session["format_error_template"]),
-        MemoryEnvironment(None, store.answer if store else None),
-        count=count, summarize=summarize, record=store.add if store else None, on_action=on_action,
+        MemoryEnvironment(None, store.answer if arm in TOOL_ARMS else None),
+        count=count, summarize=summarize, record=store.add if isinstance(store, GitTurns) else None, on_action=on_action,
+        standing=standing, on_compact=on_compact,
         system_template=session["system_template"] + _SAID_ABOUT_THE_RECORD.get(arm, ""),
         instance_template=session["instance_template"], step_limit=session["step_limit"], cost_limit=0,
         compact_at_tokens=0 if arm == "no_compaction" else session.get("compact_at_tokens", 0),
@@ -125,13 +188,16 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
             agent.run_tasks(session["tasks"], prepared, worded=worded)
         except Exception as error:  # a failed model call or machine ends the session, not its record
             ended_by = f"{type(error).__name__}: {error}"[:1000]
-        ledger = store.ledger() if store else stand_in_record(BASELINE, code=f"studies/long_run/session.py:{arm}")
+        ledger = (store.ledger("agent_tools" if arm in TOOL_ARMS else "delivered") if store
+                  else stand_in_record(BASELINE, code=f"studies/long_run/session.py:{arm}"))
+        note_versions = store.commits if arm in NOTE_ARMS else 0
     finally:
         if store:
             store.close()
     rows = [json.loads(line) for line in actions.read_text().splitlines()] if actions.exists() else []
     summary = {"arm": arm, "versions": versions or {}, "outcomes": agent.outcomes, "ended_by": ended_by, "calls": agent.n_calls,
                "compactions": len(agent.events), "events": agent.events, "memory_turns": agent.recorded, "ledger": ledger,
+               "reader_calls": reader_calls[0], "note_versions": note_versions,
                "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary

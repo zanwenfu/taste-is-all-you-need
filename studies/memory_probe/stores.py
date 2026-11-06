@@ -34,6 +34,7 @@ class GitTurns:
         self.kinds = ("transcript", "message") if header else ("transcript",)
         self.turn_at: dict[str, int] = {}
         self.commits = 0
+        self._instructed: list[str] = []
 
     def ingest(self, messages: list[dict]) -> None:
         for turn in messages:
@@ -43,9 +44,16 @@ class GitTurns:
         """One turn, committed on its own, as it happens."""
         number = self.commits
         self.branch.turn(role=turn["role"], content=turn["content"])
-        state = self.branch.checkpoint(SUBJECT, header=self.header(number, turn) if self.header else None)
+        header = self.header(number, turn) if self.header else None
+        state = self.branch.checkpoint(SUBJECT, header=header)
         self.turn_at[state.id] = number
         self.commits += 1
+        if header is not None and header.instructions:
+            self._instructed.append(state.id)
+
+    def instructions(self) -> list[str]:
+        """What the commits' headers say the user asked to keep doing, oldest first, read back from the store."""
+        return [text for state in self._instructed for text in header_fields(self.store.state(state).header).get("instructions", [])]
 
     def _turn(self, hit: ContentHit) -> ContentHit:
         """A header's commit stands for the one turn it added: the last line of its transcript note."""
@@ -95,10 +103,18 @@ class NotesStore:
         self.store = Store.open(self.folder / "repo", "memory-probe")
         self.branch = self.store.branch("notes", producer="memory-probe")
         self.commits = 0
+        self.head: Any = None
         for text in versions if history else versions[-1:]:
-            self.branch.write(self.PATH, text)
-            self.branch.checkpoint("notes updated")
-            self.commits += 1
+            self.add_version(text)
+
+    def add_version(self, text: str) -> None:
+        self.branch.write(self.PATH, text)
+        self.head = self.branch.checkpoint("notes updated")
+        self.commits += 1
+
+    def newest(self) -> str:
+        """The newest version, read back from the store."""
+        return (self.store.state(self.head.id).read(self.PATH) or "") if self.head else ""
 
     def answer(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
         return memory_tools.answer(self.store, name, arguments, kinds=("file",))

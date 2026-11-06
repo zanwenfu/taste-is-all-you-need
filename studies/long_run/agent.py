@@ -147,9 +147,13 @@ class LongRunAgent(DefaultAgent):
     def __init__(self, model: Any, env: Any, *, count: Callable[[str], int],
                  summarize: Callable[[list[dict], str | None], str] | None = None,
                  record: Callable[[dict], None] | None = None,
-                 on_action: Callable[[dict], None] | None = None, **kwargs: Any) -> None:
+                 on_action: Callable[[dict], None] | None = None,
+                 standing: Callable[[], str] | None = None,
+                 on_compact: Callable[[list[dict]], None] | None = None, **kwargs: Any) -> None:
         super().__init__(model, env, config_class=LongRunConfig, **kwargs)
         self.count, self.summarize, self.record, self.on_action = count, summarize, record, on_action
+        self.standing, self.on_compact = standing, on_compact
+        self._system_base: str | None = None
         self.task_name = ""
         self.events: list[dict] = []
         self.recorded = 0
@@ -177,6 +181,11 @@ class LongRunAgent(DefaultAgent):
             self.add_messages({"role": "user", "content": self.config.planted[call]})
         if self.summarize is not None and 0 < self.config.compact_at_tokens < self.tokens():
             self._compact(call)
+        if self.standing is not None:
+            if self._system_base is None:
+                self._system_base = self.messages[0]["content"]
+            block = self.standing()
+            self.messages[0] = {**self.messages[0], "content": f"{self._system_base}\n\n{block}" if block else self._system_base}
         return super().query()
 
     def _compact(self, call: int) -> None:
@@ -197,12 +206,14 @@ class LongRunAgent(DefaultAgent):
         plain = [{"role": m["role"] if m["role"] in ("system", "user", "assistant") else "user", "content": render(m)}
                  for m in older]
         summary = self.summarize(plain, self.previous_summary)
+        if self.on_compact is not None:
+            self.on_compact(plain)
         self.previous_summary = summary
         self._summary_message = {"role": "user", "content": SUMMARY_LEAD + summary}
         self.messages[:] = [system, self._summary_message, *recent]
         self.events.append({
             "call": call, "tokens_before": before, "tokens_after": self.tokens(), "summarized": len(older),
-            "kept": len(recent), "summary": summary,
+            "kept": len(recent), "summary": summary, "delivered": self.standing() if self.standing else None,
             "watched_in_summary": {name: text in summary for name, text in self.config.watch.items()},
             "watched_in_kept_turns": {name: any(text in render(m) for m in recent)
                                       for name, text in self.config.watch.items()},
