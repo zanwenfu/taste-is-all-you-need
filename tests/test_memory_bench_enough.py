@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from studies.memory_bench.core import Item, reader_prompt
 from studies.memory_bench.enough import delivered_text, judge_all, load_prompts, parse_judgment
@@ -30,9 +33,17 @@ os.system("this file is only ever read, never run")
 def test_the_prompts_are_read_from_the_file_without_running_it(tmp_path: Path) -> None:
     path = tmp_path / "run.py"
     path.write_text(_FILE)
-    system, template = load_prompts(path)
+    system, template = load_prompts(path, sha256=None)
     assert system == "You are strict. Return JSON only."
     assert template.startswith("Is it enough?") and "{memories_text}" in template
+
+
+def test_only_the_file_at_the_commit_named_is_read(tmp_path: Path) -> None:
+    path = tmp_path / "run.py"
+    path.write_text(_FILE)
+    with pytest.raises(SystemExit, match="is not the file at commit"):
+        load_prompts(path)
+    assert load_prompts(path, sha256=hashlib.sha256(_FILE.encode()).hexdigest())[0] == "You are strict. Return JSON only."
 
 
 def test_what_was_delivered_is_cut_from_the_readers_prompt() -> None:

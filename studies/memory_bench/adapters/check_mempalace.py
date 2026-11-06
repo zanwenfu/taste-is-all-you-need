@@ -54,7 +54,8 @@ def compare(data: list[dict], published: list[dict], rankings: list[dict]) -> di
 
 def compare_locomo(published: list[dict], rankings: list[dict]) -> dict:
     """Its LoCoMo runner's committed lists, in the dataset's own question order, against a session-level arm's. The
-    runner gives it the words of each turn; the study's ingest adds an image's caption, so a few near-ties may flip."""
+    runner gives it the words of each turn. The study's ingest adds an image's caption, which changes nearly every top ten (0 of 435 alike at raw), so this
+    check is run with captions left out, on all ten conversations."""
     ours = {row["qid"]: list(dict.fromkeys(item["session"] for item in row["items"])) for row in rankings}
     position: Counter = Counter()
     compared = same = 0
@@ -82,14 +83,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--data", help="LongMemEval's file; not needed with --locomo")
     parser.add_argument("--locomo", action="store_true", help="compare with its committed LoCoMo lists")
+    parser.add_argument("--least-same", type=float, help="exit 1 if a smaller share of the top tens than this are alike")
     arguments = parser.parse_args(argv)
     rankings = [json.loads(line) for line in Path(arguments.rankings).read_text().splitlines() if line.strip()]
     if arguments.locomo:
-        print(json.dumps(compare_locomo(json.loads(Path(arguments.published).read_text()), rankings), indent=1))
-        return 0
-    data = json.loads(Path(arguments.data).read_text())
-    published = [json.loads(line) for line in Path(arguments.published).read_text().splitlines() if line.strip()]
-    print(json.dumps(compare(data, published, rankings), indent=1))
+        found = json.loads(Path(arguments.published).read_text())
+        result = compare_locomo(found.get("per_question") or found.get("results") or found if isinstance(found, dict) else found, rankings)
+    else:
+        data = json.loads(Path(arguments.data).read_text())
+        published = [json.loads(line) for line in Path(arguments.published).read_text().splitlines() if line.strip()]
+        result = compare(data, published, rankings)
+    print(json.dumps(result, indent=1))
+    if arguments.least_same is not None and (not result["compared"] or result["same_top10"] / result["compared"] < arguments.least_same):
+        return 1
     return 0
 
 

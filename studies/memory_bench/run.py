@@ -7,7 +7,8 @@
     python -m studies.memory_bench.run judge --answers runs/x/answers.jsonl --reference ORACLE.json \\
         --url http://127.0.0.1:8000/v1 --model NAME
 
-The held-out part runs once, on settings committed beforehand: ``--frozen-config`` must name the commit in use.
+The held-out part runs once, on settings committed beforehand: ``--frozen-config`` must name the commit in use and ``--frozen-digest`` the
+hash of its code, worked out from git where the repository is, and it does not open before its date.
 """
 
 from __future__ import annotations
@@ -19,12 +20,15 @@ import multiprocessing
 import sys
 from collections.abc import Callable
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from statistics import fmean
 from typing import Any
 
 from studies.memory_bench import lme, locomo
+from studies.memory_bench.core import DATA_SHA256
+from studies.memory_bench.headers import PROMPT as HEADER_PROMPT
 from studies.memory_bench.headers import served_ask, stored_writer, write_all
 from studies.memory_bench.reader import ServedJudge, read_all
 from studies.memory_bench.runner import retrieve_conversation, retrieve_one, validate
@@ -39,9 +43,11 @@ from studies.memory_bench.systems import (
 )
 from studies.memory_ledger import code_digest, code_version
 
-# The files every number stands on. The held-out part refuses any other.
-DATA_SHA256 = {"lme": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
-               "locomo": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"}
+OPENS_AT = datetime(2026, 11, 10, 17, 0, tzinfo=UTC)  # noon Eastern, in the protocol
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 def make_system(name: str, gold: lme.Gold | None, workdir: Path, *, unit: str = "round", commit_per: str = "session",
@@ -109,6 +115,9 @@ def _summary(rows: list[dict[str, Any]], settings: dict[str, Any], ledger: dict[
         "questions": len(rows),
         "ledger": ledger,
         "means": {key: fmean(row["scores"][key] for row in rows if key in row["scores"]) for key in keys},
+        "counts": {key: sum(key in row["scores"] for row in rows) for key in keys},
+        "tokens_under_90_percent": sum(row["tokens_delivered"] < 0.9 * settings["budget"] for row in rows),
+        "delivered_nothing": sum(not row["tokens_delivered"] and not row.get("no_retrieval") for row in rows),
         "scored_questions": sum(bool(row["scores"]) for row in rows),
         "tokens_delivered_mean": fmean(row["tokens_delivered"] for row in rows),
         "items_cut": sum(row["cut"] for row in rows),
@@ -123,12 +132,17 @@ def _sha256(path: str | None) -> str | None:
 
 
 def _guard(arguments: argparse.Namespace) -> None:
-    """The held-out part runs on committed code and on the benchmark's own file, whichever stage opens it."""
+    """The held-out part runs on committed code and on the benchmark's own file, whichever stage opens it, and not before its date. A commit's name is
+    only what a job was told, so the code on disk is held to that commit's digest, worked out from git where the repository is."""
     if arguments.part != "held_out":
         return
+    if _now() < OPENS_AT:
+        raise SystemExit(f"the held-out part opens at {OPENS_AT.isoformat()}: nothing reads its gold before then")
     commit, dirty = code_version()
     if arguments.frozen_config != commit or dirty:
         raise SystemExit("held-out runs once, on committed settings: --frozen-config must name the clean commit in use")
+    if arguments.frozen_digest != code_digest():
+        raise SystemExit("held-out runs once, on committed settings: the code on disk is not that commit's (--frozen-digest)")
     if _sha256(arguments.data) != DATA_SHA256[arguments.benchmark]:
         raise SystemExit(f"{arguments.data} is not the benchmark's own file")
 
@@ -206,7 +220,7 @@ def views(arguments: argparse.Namespace) -> int:
     summary = {"benchmark": arguments.benchmark, "part": arguments.part, "units": len(units),
                "queries": sum(len(u["queries"]) for u in units),
                "data_sha256": hashlib.sha256(Path(arguments.data).read_bytes()).hexdigest(),
-               "sha256": hashlib.sha256(out.read_bytes()).hexdigest()}
+               "sha256": hashlib.sha256(out.read_bytes()).hexdigest(), "commit": code_version()[0], "code_digest": code_digest()}
     out.with_name(out.stem + ".summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary))
     return 0
@@ -217,7 +231,9 @@ def headers(arguments: argparse.Namespace) -> int:
     field, loader = ("question_id", lme.load) if arguments.benchmark == "lme" else ("sample_id", locomo.load)
     views, _ = loader([item for item in json.loads(Path(arguments.data).read_text()) if item[field] in wanted])
     ask = served_ask(_client(arguments.url), arguments.model, max_tokens=arguments.max_tokens, effort=arguments.effort)
-    counts = write_all(views, ask, Path(arguments.out), workers=arguments.workers)
+    settings = {"model": arguments.model, "max_tokens": arguments.max_tokens, "effort": arguments.effort, "temperature": 0,
+                "prompt_sha256": hashlib.sha256(HEADER_PROMPT.encode()).hexdigest(), "study_commit": code_version()[0], "code_digest": code_digest()}
+    counts = write_all(views, ask, Path(arguments.out), workers=arguments.workers, settings=settings)
     print(json.dumps(counts))
     return 1 if counts["errors"] else 0  # a call that failed left no row; the next run asks it again
 
@@ -234,9 +250,16 @@ def read(arguments: argparse.Namespace) -> int:
 def judge(arguments: argparse.Namespace) -> int:
     from studies.context_rot.lme_judge import judge_file
 
-    served = ServedJudge(_client(arguments.url), arguments.model)
-    print(judge_file(arguments.answers, arguments.reference, served, short_name="served", workers=arguments.workers))
+    served = ServedJudge(_client(arguments.url), arguments.model, max_tokens=arguments.max_tokens)
+    out = judge_file(arguments.answers, arguments.reference, served, short_name="served", workers=arguments.workers)
+    Path(f"{out}.settings.json").write_text(json.dumps(_judge_settings(arguments, served, answers_sha256=_sha256(arguments.answers)), indent=1))
+    print(out)
     return 0
+
+
+def _judge_settings(arguments: argparse.Namespace, served: ServedJudge, **more: Any) -> dict[str, Any]:
+    return {"model": served.model, "max_tokens": served.max_tokens, "effort": served.effort, "temperature": 0, "reference_sha256": _sha256(arguments.reference),
+            "commit": code_version()[0], "code_digest": code_digest(), **more}
 
 
 def enough(arguments: argparse.Namespace) -> int:
@@ -248,6 +271,7 @@ def enough(arguments: argparse.Namespace) -> int:
     served = ServedJudge(_client(arguments.url), arguments.model, max_tokens=arguments.max_tokens)
     summary = enough_module.judge_all(records, references, enough_module.load_prompts(Path(arguments.prompts)), served.ask, Path(arguments.out),
                                       workers=arguments.workers)
+    Path(arguments.out).with_suffix(".settings.json").write_text(json.dumps(_judge_settings(arguments, served, prompts_sha256=_sha256(arguments.prompts)), indent=1))
     print(json.dumps(summary))
     return 1 if summary["errors"] else 0
 
@@ -265,6 +289,7 @@ def score(arguments: argparse.Namespace) -> int:
     rows, summary = locomo.score_answers(answers, golds, locomo.official_stem(), flagged=flagged)
     summary["stemmer"] = f"nltk {nltk.__version__}, PorterStemmer() in its default mode, as evaluation.py"
     summary["audit_sha256"] = hashlib.sha256(audit).hexdigest() if audit else None
+    summary |= {"answers_sha256": _sha256(arguments.answers), "commit": code_version()[0], "code_digest": code_digest()}
     out = Path(arguments.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -290,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     stage.add_argument("--headers")
     stage.add_argument("--rankings", help="a precomputed system's rankings file, made in its own environment")
     stage.add_argument("--frozen-config")
+    stage.add_argument("--frozen-digest")
     stage.add_argument("--workers", type=int, default=8)
     stage.set_defaults(run=retrieve)
 

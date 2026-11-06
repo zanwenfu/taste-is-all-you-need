@@ -8,6 +8,7 @@ repository's file at a pinned commit (``COMMIT``), never copied here, and never 
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import threading
@@ -17,11 +18,14 @@ from pathlib import Path
 from typing import Any
 
 COMMIT = "4b61c5d31b9c668a12b4f5e78064248a02c82d2b"  # mem0ai/memory-benchmarks, benchmarks/longmemeval/run.py
+PROMPTS_SHA256 = "99bd3d6d9a69072f9125550a0409f0de0aeaec66309416060db3daf12e137861"  # that file at that commit
 _NAMES = ("RETRIEVAL_JUDGE_SYSTEM", "RETRIEVAL_JUDGE_PROMPT")
 
 
-def load_prompts(path: Path) -> tuple[str, str]:
-    """(system prompt, template), read as constants from the file's syntax tree."""
+def load_prompts(path: Path, sha256: str | None = PROMPTS_SHA256) -> tuple[str, str]:
+    """(system prompt, template), read as constants from the file's syntax tree. Any other file than the one named is refused."""
+    if sha256 and hashlib.sha256(Path(path).read_bytes()).hexdigest() != sha256:
+        raise SystemExit(f"{path} is not the file at commit {COMMIT}")
     found: dict[str, str] = {}
     for node in ast.parse(Path(path).read_text()).body:
         if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id in _NAMES:

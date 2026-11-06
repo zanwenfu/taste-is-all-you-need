@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -215,6 +218,7 @@ def test_the_served_judge_fills_the_benchmarks_own_judge_interface(tmp_path: Pat
     assert row["autoeval_label"]["label"] is True and row["autoeval_label"]["model"] == "gpt-oss-120b"
     assert "correct answer" in client.calls[0]["messages"][0]["content"].lower()
     assert "level 3" in client.calls[0]["messages"][0]["content"]
+    assert client.calls[0]["temperature"] == 0, "the official judge's setting: the model's default would put sampling noise in every verdict"
 
 
 # ------------------------------------------------------------------ the command line
@@ -266,15 +270,75 @@ def test_the_held_out_part_refuses_to_run_without_saying_so(tmp_path: Path, monk
     monkeypatch.setitem(run_module.DATA_SHA256, "lme", hashlib.sha256(data.read_bytes()).hexdigest())
     split = tmp_path / "split.json"
     split.write_text(json.dumps({"dev": [], "held_out": ["c"]}))
+    monkeypatch.setattr(run_module, "_now", lambda: run_module.OPENS_AT)
     arguments = ["retrieve", "--data", str(data), "--split", str(split), "--part", "held_out", "--system", "flat_bm25",
                  "--budget", "500", "--tokenizer", "words", "--workdir", str(tmp_path / "w"),
                  "--out", str(tmp_path / "o.jsonl"), "--workers", "1"]
     with pytest.raises(SystemExit, match="held-out"):
         run_main(arguments)
-    assert run_main([*arguments, "--frozen-config", "abc123"]) == 0
+    with pytest.raises(SystemExit, match="held-out"):
+        run_main([*arguments, "--frozen-config", "another"])
+    with pytest.raises(SystemExit, match="not that commit's"):
+        run_main([*arguments, "--frozen-config", "abc123"])
+    with pytest.raises(SystemExit, match="not that commit's"):
+        run_main([*arguments, "--frozen-config", "abc123", "--frozen-digest", "another"])
+    assert run_main([*arguments, "--frozen-config", "abc123", "--frozen-digest", run_module.code_digest()]) == 0
 
 
-def test_the_held_out_part_refuses_any_file_but_the_benchmarks_own(tmp_path: Path) -> None:
+def test_the_held_out_part_does_not_open_before_its_date_however_right_the_rest_is(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TASTE_COMMIT", "abc123")
+    data = tmp_path / "data.json"
+    data.write_text(json.dumps([_instance("c")]))
+    monkeypatch.setitem(run_module.DATA_SHA256, "lme", hashlib.sha256(data.read_bytes()).hexdigest())
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"dev": [], "held_out": ["c"]}))
+    arguments = ["retrieve", "--data", str(data), "--split", str(split), "--part", "held_out", "--system", "flat_bm25", "--budget", "500", "--tokenizer", "words",
+                 "--workdir", str(tmp_path / "w"), "--out", str(tmp_path / "o.jsonl"), "--workers", "1", "--frozen-config", "abc123", "--frozen-digest", run_module.code_digest()]
+    monkeypatch.setattr(run_module, "_now", lambda: run_module.OPENS_AT - timedelta(seconds=1))
+    with pytest.raises(SystemExit, match="opens at"):
+        run_main(arguments)
+    assert not (tmp_path / "o.jsonl").exists()
+    monkeypatch.setattr(run_module, "_now", lambda: run_module.OPENS_AT)
+    assert run_main(arguments) == 0
+    assert run_module.OPENS_AT.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M") == "2026-11-10 12:00"
+
+
+def test_a_copy_of_the_code_is_held_to_its_commit_by_what_git_holds(tmp_path: Path) -> None:
+    from studies.memory_ledger import code_digest, digest_of_commit, ingest_digest
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    files = {"taste/a.py": "a", "studies/x/b.py": "b", "studies/x/jobs/run.sbatch": "job", "studies/memory_bench/adapters/m.py": "m", "studies/memory_bench/core.py": "c",
+             "data/splits/s.json": "{}", "docs/note.md": "not code"}
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    git("init", "-q")
+    git("add", "-A")
+    git("commit", "-qm", "x")
+    commit = git("rev-parse", "HEAD")
+    assert code_digest(tmp_path) == digest_of_commit(commit, tmp_path)
+    (tmp_path / "docs" / "note.md").write_text("changed")
+    (tmp_path / "taste" / "__pycache__").mkdir()
+    (tmp_path / "taste" / "__pycache__" / "a.pyc").write_text("compiled")
+    assert code_digest(tmp_path) == digest_of_commit(commit, tmp_path), "words and compiled files are not code"
+    before = ingest_digest(tmp_path)
+    for name in ("studies/x/jobs/run.sbatch", "data/splits/s.json", "taste/a.py"):
+        original = (tmp_path / name).read_text()
+        (tmp_path / name).write_text(original + "!")
+        assert code_digest(tmp_path) != digest_of_commit(commit, tmp_path), name
+        assert ingest_digest(tmp_path) == before, name
+        (tmp_path / name).write_text(original)
+    (tmp_path / "studies/memory_bench/core.py").write_text("c!")
+    assert ingest_digest(tmp_path) == before, "the budget's code is not the ingest's"
+    (tmp_path / "studies/memory_bench/adapters/m.py").write_text("m!")
+    assert ingest_digest(tmp_path) != before
+
+
+def test_the_held_out_part_refuses_any_file_but_the_benchmarks_own(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TASTE_COMMIT", "abc123")
+    monkeypatch.setattr(run_module, "_now", lambda: run_module.OPENS_AT)
     data = tmp_path / "data.json"
     data.write_text(json.dumps([_instance("c")]))
     split = tmp_path / "split.json"
@@ -282,7 +346,7 @@ def test_the_held_out_part_refuses_any_file_but_the_benchmarks_own(tmp_path: Pat
     with pytest.raises(SystemExit, match="not the benchmark's own file"):
         run_main(["retrieve", "--data", str(data), "--split", str(split), "--part", "held_out", "--system", "flat_bm25",
                   "--budget", "500", "--tokenizer", "words", "--workdir", str(tmp_path / "w"), "--out", str(tmp_path / "o.jsonl"),
-                  "--workers", "1", "--frozen-config", "abc123"])
+                  "--workers", "1", "--frozen-config", "abc123", "--frozen-digest", run_module.code_digest()])
 
 
 def test_a_run_carries_on_only_with_the_settings_it_started_with(tmp_path: Path) -> None:

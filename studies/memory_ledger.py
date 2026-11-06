@@ -53,18 +53,62 @@ def code_version() -> tuple[str, bool]:
     return git("rev-parse", "HEAD"), bool(git("status", "--porcelain", "--", "taste", "studies"))
 
 
-def code_digest(root: Path | None = None) -> str:
-    """A hash of the code actually on disk: every Python file under taste/ and studies/. ``TASTE_COMMIT`` only says what a job
-    was told, so this is what shows that all of a run's stages ran one copy of the code, and that it is the commit's."""
-    base = Path(root) if root else Path(__file__).resolve().parent.parent
+def _in_code_digest(name: str) -> bool:
+    """Every Python file under taste/ and studies/, the job scripts, and the split files: what a run stands on."""
+    parts = name.split("/")
+    return ((parts[0] in ("taste", "studies") and name.endswith(".py"))
+            or (parts[0] == "studies" and "jobs" in parts[1:-1])
+            or name.startswith("data/splits/"))
+
+
+def _in_ingest_digest(name: str) -> bool:
+    """What decides what the long ingest stages write: the adapters, the header writer and their job scripts. A later fix to reading or judging leaves this alone."""
+    return (name.startswith("studies/memory_bench/adapters/") and name.endswith(".py")) or name in (
+        "studies/memory_bench/headers.py", "studies/memory_bench/jobs/mem0.sbatch", "studies/memory_bench/jobs/rank.sbatch",
+        "studies/memory_bench/jobs/headers.sbatch")
+
+
+def _digest_of(names: list[str], read: Any) -> str:
     digest = hashlib.sha256()
-    for folder in ("taste", "studies"):
-        for path in sorted((base / folder).rglob("*.py")):
-            digest.update(str(path.relative_to(base)).encode())
-            digest.update(b"\0")
-            digest.update(path.read_bytes())
-            digest.update(b"\0")
+    for name in sorted(names):
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(read(name))
+        digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _files_on_disk(base: Path) -> list[str]:
+    found = []
+    for folder in ("taste", "studies", "data/splits"):
+        for path in (base / folder).rglob("*"):
+            name = path.relative_to(base).as_posix()
+            if path.is_file() and "__pycache__" not in name and not name.endswith(".pyc"):
+                found.append(name)
+    return found
+
+
+def code_digest(root: Path | None = None, *, wanted: Any = _in_code_digest) -> str:
+    """A hash of the code actually on disk. ``TASTE_COMMIT`` only says what a job was told, so this is what shows that all of a run's stages ran one copy of the code,
+    and, against ``digest_of_commit`` worked out where the repository is, that the copy is the commit's."""
+    base = Path(root) if root else Path(__file__).resolve().parent.parent
+    return _digest_of([name for name in _files_on_disk(base) if wanted(name)], lambda name: (base / name).read_bytes())
+
+
+def ingest_digest(root: Path | None = None) -> str:
+    """The same over what the long ingest stages depend on, so that a run's later stages may be on a later commit that left it alone."""
+    return code_digest(root, wanted=_in_ingest_digest)
+
+
+def digest_of_commit(commit: str, root: Path | None = None, *, wanted: Any = _in_code_digest) -> str:
+    """``code_digest`` of a commit, from its git objects, with nothing unpacked."""
+    base = Path(root) if root else Path(__file__).resolve().parent.parent
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", "-C", str(base), *args], capture_output=True, check=True).stdout
+
+    names = git("ls-tree", "-r", "--name-only", commit, "taste", "studies", "data/splits").decode().splitlines()
+    return _digest_of([name for name in names if wanted(name)], lambda name: git("cat-file", "blob", f"{commit}:{name}"))
 
 
 def process_facts() -> dict[str, Any]:

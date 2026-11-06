@@ -83,15 +83,15 @@ class _Reply:
 
 
 class ServedJudge:
-    """The served model behind the interface ``lme_judge.judge_file`` expects, for dev runs. Held-out verdicts
-    come from the Bedrock judges, each paid step with the user's yes."""
+    """The served model behind the interface ``lme_judge.judge_file`` expects, at temperature 0 as the official judge is. It judges every
+    part; the paid judge reads the same answers beside it, on the user's yes."""
 
     def __init__(self, client: Any, model: str, *, effort: str = "low", max_tokens: int = 512) -> None:
         self.client, self.model, self.effort, self.max_tokens = client, model, effort, max_tokens
 
     def ask(self, user: str, system: str | None = None) -> _Reply:
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
-        reply = self.client.chat.completions.create(model=self.model, messages=messages, max_tokens=self.max_tokens,
+        reply = self.client.chat.completions.create(model=self.model, messages=messages, max_tokens=self.max_tokens, temperature=0,
                                                     reasoning_effort=self.effort)
         choice = reply.choices[0]
         return _Reply(choice.message.content or "", reply.usage.prompt_tokens, reply.usage.completion_tokens,

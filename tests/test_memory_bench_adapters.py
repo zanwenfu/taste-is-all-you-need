@@ -441,6 +441,17 @@ def test_the_session_date_goes_through_adds_prompt_only_when_asked_for() -> None
     assert [{k: v for k, v in add.items() if k != "prompt"} for add in dated.adds] == plain.adds
 
 
+def test_the_dense_list_holds_a_repeated_round_once_as_the_keyword_list_does() -> None:
+    from studies.memory_bench.adapters.flat_dense import FlatDenseArm
+
+    same = [{"role": "user", "content": "garden tips"}, {"role": "assistant", "content": "water it"}]
+    other = [{"role": "user", "content": "car repairs"}, {"role": "assistant", "content": "oil it"}]
+    arm = FlatDenseArm(lambda texts: [[float(len(text)), 1.0] for text in texts])
+    arm.ingest([{"sid": "s", "date": "d", "turns": [*same, *other, *same]}])
+    assert [unit.text for unit in arm.units] == list(dict.fromkeys(unit.text for unit in arm.units)) and len(arm.units) == 2
+    assert sorted(item.rounds for item in arm.retrieve("q")) == [(0,), (1,)], "each keeps its first place"
+
+
 def test_mem0_asks_for_more_memories_than_any_budget_here_can_hold() -> None:
     memory = _Memory()
     arm = Mem0Arm(memory)

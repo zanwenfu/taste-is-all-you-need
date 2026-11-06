@@ -266,7 +266,7 @@ def locomo_scores(ranked: Sequence[Item], delivered: Sequence[Item], gold: Gold)
     sessions = list(dict.fromkeys(item.session for item in ranked))
     scores = {f"session_recall@{cut}": _share(set(sessions[:cut]), gold.evidence_sessions) for cut in CUTS}
     scores["session_recall@budget"] = _share({item.session for item in delivered}, gold.evidence_sessions)
-    if any(item.rounds for item in delivered):
+    if any(item.rounds for item in ranked):
         scores["turn_recall@budget"] = _share(
             {(item.session, number) for item in delivered for number in item.rounds}, gold.evidence_rounds
         )

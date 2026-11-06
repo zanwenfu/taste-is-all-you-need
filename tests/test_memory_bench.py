@@ -195,12 +195,39 @@ def test_a_row_that_must_fit_the_readers_window_can_charge_the_whole_prompt() ->
     assert deliver([item], cost - 1, _count, chunk_text).items == ()
 
 
-def test_an_item_that_does_not_fit_is_cut_between_turns_and_filling_stops() -> None:
+def test_an_item_that_does_not_fit_is_cut_between_turns_and_filling_goes_on() -> None:
     first = _item("a", "alpha", "beta beta beta beta beta beta beta beta")
     later = _item("b", "x")
     delivered = deliver([first, later], 3, _count)
-    assert [i.turns for i in delivered.items] == [({"role": "user", "content": "alpha"},)]
-    assert delivered.cut == 1
+    assert [i.turns for i in delivered.items] == [({"role": "user", "content": "alpha"},), later.turns]
+    assert delivered.cut == 1 and delivered.dropped == 0 and delivered.tokens == 2
+
+
+def test_a_long_turn_high_in_a_ranking_does_not_end_the_row() -> None:
+    """Held-out holds 145 questions with a turn over 2,000 tokens where dev holds 6: a row that stopped there could deliver nothing."""
+    giant = _item("a", "word " * 50)
+    rest = [_item("b", "one two"), _item("c", "three four")]
+    delivered = deliver([giant, *rest], 4, _count)
+    assert [i.session for i in delivered.items] == ["b", "c"]
+    assert delivered.tokens == 4 and delivered.cut == 0 and delivered.dropped == 1
+
+
+def test_only_one_item_is_delivered_in_part_and_later_ones_must_fit_whole() -> None:
+    first = _item("a", "one", "two two two two two two")
+    second = _item("b", "three", "four four four four four four")
+    third = _item("c", "five")
+    delivered = deliver([first, second, third], 3, _count)
+    assert [i.session for i in delivered.items] == ["a", "c"]
+    assert delivered.cut == 1 and delivered.dropped == 1
+
+
+def test_a_budget_is_never_passed_whatever_is_skipped() -> None:
+    items = [_item(f"s{number}", "word " * size) for number, size in enumerate((9, 2, 7, 1, 5, 1, 1, 3))]
+    for budget in range(0, 15):
+        delivered = deliver(items, budget, _count)
+        assert delivered.tokens <= budget and delivered.tokens == sum(_count(item_text(item)) for item in delivered.items)
+        assert delivered.offered == len(items) and len(delivered.items) + delivered.dropped == len(items)
+        assert [i.session for i in delivered.items] == [i.session for i in items if i.session in {d.session for d in delivered.items}], "rank order is kept"
 
 
 def test_nothing_fits_means_nothing_delivered() -> None:
@@ -254,6 +281,22 @@ def test_identical_rounds_are_held_once_by_both_so_they_still_rank_alike(tmp_pat
             flat_items, taste_items = flat.retrieve(query), taste.retrieve(query)
             assert flat_items and [(i.session, i.rounds) for i in flat_items] == [(i.session, i.rounds) for i in taste_items], query
         assert len([i for i in flat.retrieve("pasta") if i.rounds in ((0,), (1,))]) == 1
+    finally:
+        taste.close()
+
+
+def test_a_copy_of_a_round_keeps_the_place_of_the_first_so_a_tie_breaks_as_in_the_store(tmp_path: Path) -> None:
+    """Copies not next to each other, and a third round tying with them: keeping the last copy's place would flip the tie."""
+    same = [{"role": "user", "content": "garden tips please"}, {"role": "assistant", "content": "water it often"}]
+    other = [{"role": "user", "content": "garden plans please"}, {"role": "assistant", "content": "water it often"}]
+    filler = [{"role": "user", "content": "something else entirely here"}, {"role": "assistant", "content": "another reply with more words in it"}]
+    session = {"sid": "s", "date": "2023/05/02 (Tue) 09:00", "turns": [*same, *filler, *other, *filler, *same]}
+    flat, taste = FlatBm25(), TasteGit(tmp_path)
+    flat.ingest([session])
+    taste.ingest([session])
+    try:
+        assert [i.rounds for i in flat.retrieve("garden")] == [i.rounds for i in taste.retrieve("garden")]
+        assert [unit.text for unit in flat.units] == list(dict.fromkeys(unit.text for unit in flat.every))
     finally:
         taste.close()
 
@@ -412,6 +455,17 @@ def test_a_system_that_cannot_say_which_round_gets_no_round_score_rather_than_a_
     scores = retrieval_scores([drawer], [drawer], gold)
     assert scores["session_recall_any@budget"] == 1.0
     assert "round_recall_any@budget" not in scores
+
+
+def test_a_system_that_can_name_its_rounds_reads_zero_when_only_a_cut_piece_arrived(question) -> None:
+    """Asking what was delivered, not what was ranked, left such a question out: 8 of 45 scored on one real row, and a recall of .625 where .111 was right."""
+    view, gold = question
+    parked = view["sessions"][1]["sid"]
+    whole = Item(parked, "d", ({"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}), (0,))
+    cut = Item(parked, "d", whole.turns[:1], ())
+    scores = retrieval_scores([whole], [cut], gold)
+    assert scores["round_recall_any@budget"] == 0.0 and scores["round_recall_all@budget"] == 0.0
+    assert retrieval_scores([whole], [], gold)["round_recall_any@budget"] == 0.0
 
 
 def test_abstention_questions_have_no_retrieval_score() -> None:

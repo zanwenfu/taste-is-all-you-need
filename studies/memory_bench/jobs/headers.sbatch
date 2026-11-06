@@ -11,13 +11,16 @@ echo "start $(date -u +%FT%TZ) on $(hostname) code $TASTE_COMMIT part $PART"
 gpu_log $JOB
 serve_oss $JOB 65536 0.92
 cd $CODE
+FAILED=0
 for row in "lme $LME_SPLIT $LME_DATA" "locomo $LOC_SPLIT $LOC_DATA"; do
   set -- $row
   T1=$(date +%s)
   $PY -m studies.memory_bench.run headers --benchmark $1 --data $3 --split $2 --part $PART --url http://127.0.0.1:$PORT/v1 --model $OSS_NAME \
     --max-tokens 800 --effort low --workers 48 --out $R/headers/$1.jsonl 2>&1 | tail -1 | cut -c1-240
-  echo "$1 headers exit ${PIPESTATUS[0]} seconds $(( $(date +%s) - T1 ))"
+  code=${PIPESTATUS[0]}; [ $code = 0 ] || FAILED=$((FAILED + 1))
+  echo "$1 headers exit $code seconds $(( $(date +%s) - T1 ))"
 done
 metrics $JOB
 kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null
-echo "end $(date -u +%FT%TZ)"
+echo "end $(date -u +%FT%TZ) failed $FAILED"
+[ $FAILED = 0 ]

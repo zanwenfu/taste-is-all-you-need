@@ -1,5 +1,6 @@
 """The shared meaning-based baseline: the same units as the keyword list, ranked by cosine similarity under one
-local embedder. It runs on the shared ingest file in the environment that holds the embedder.
+local embedder, and like the keyword list it holds the first copy of identical text only. It runs on the shared ingest file in the
+environment that holds the embedder.
 
     python -m studies.memory_bench.adapters.flat_dense --views views.jsonl \\
         --embedder sentence-transformers/all-MiniLM-L6-v2 --out rankings.jsonl
@@ -12,6 +13,7 @@ import math
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from studies.memory_bench.adapters.common import run_adapter
 from studies.memory_bench.core import Item
@@ -28,7 +30,11 @@ class FlatDenseArm:
         self.embed, self.unit = embed, unit
 
     def ingest(self, sessions: list[dict]) -> None:
-        self.units = [unit for session in sessions for unit in units_of(session, self.unit)]
+        first: dict[str, Any] = {}
+        for session in sessions:
+            for unit in units_of(session, self.unit):
+                first.setdefault(unit.text, unit)
+        self.units = list(first.values())
         self.vectors = self.embed([unit.text for unit in self.units])
 
     def retrieve(self, query: str, *, date: str | None = None) -> list[Item]:

@@ -45,8 +45,8 @@ def _parsed(text: str) -> tuple[str, list[str]] | None:
     return value["what"], [word for word in words if isinstance(word, str)] if isinstance(words, list) else []
 
 
-def write_all(views: list[dict], ask: Callable[[str], dict], path: Path, *, workers: int) -> dict[str, int]:
-    """Ask for a header for every distinct session not yet stored, and count the calls."""
+def write_all(views: list[dict], ask: Callable[[str], dict], path: Path, *, workers: int, settings: dict[str, Any] | None = None) -> dict[str, int]:
+    """Ask for a header for every distinct session not yet stored, and count the calls. ``settings`` (model, cap, the prompt's hash) goes on every row."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     stored = {json.loads(line)["key"] for line in path.read_text().splitlines()} if path.exists() else set()
@@ -69,7 +69,7 @@ def write_all(views: list[dict], ask: Callable[[str], dict], path: Path, *, work
         parsed = None if reply.get("finish_reason") == "length" else _parsed(reply["text"])
         row = {"key": key, "what": parsed[0] if parsed else "", "keywords": parsed[1] if parsed else [],
                "ok": parsed is not None, "finish_reason": reply.get("finish_reason"), "prompt_tokens": reply["prompt_tokens"],
-               "completion_tokens": reply["completion_tokens"], "raw": reply["text"]}
+               "completion_tokens": reply["completion_tokens"], "raw": reply["text"], **(settings or {})}
         with lock, path.open("a") as written:
             written.write(json.dumps(row) + "\n")
             failed[0] += parsed is None

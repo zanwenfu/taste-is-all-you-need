@@ -75,7 +75,10 @@ class FlatBm25(System):
 
     def ingest(self, sessions: list[dict], unit: str | None = None) -> None:
         self.every = [unit for session in sessions for unit in units_of(session, self.unit)]
-        self.units = list({unit.text: unit for unit in reversed(self.every)}.values())[::-1]
+        first: dict[str, Any] = {}
+        for unit in self.every:
+            first.setdefault(unit.text, unit)
+        self.units = list(first.values())
         self.index = Bm25()
         for unit in self.units:
             self.index.add(tokens(unit.text))

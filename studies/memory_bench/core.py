@@ -17,6 +17,10 @@ _READER = (
 )
 _CHUNK = "\n### Session {}:\nSession Date: {}\nSession Content:\n{}\n"
 
+# The files every number stands on. The held-out part refuses any other.
+DATA_SHA256 = {"lme": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+               "locomo": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"}
+
 
 @dataclass(frozen=True)
 class Item:
@@ -50,29 +54,31 @@ def item_text(item: Item) -> str:
 
 def deliver(items: Iterable[Item], budget: int, count: Callable[[str], int],
             render: Callable[[Item], str] = item_text) -> Delivered:
-    """Fill the budget in the system's own rank order, in tokens, and stop at the first item that does
-    not fit whole. That item is cut between turns, never inside one, and the cut part cannot claim its
-    rounds: what arrived is no longer known round by round. A row that must fit the reader's window charges what
-    the prompt will hold instead, through ``render``."""
+    """Fill the budget in the system's own rank order, in tokens. An item that does not fit whole is left out and filling goes on, so that one
+    long turn high in a ranking does not end a row. The first of them that has a part that fits is cut between turns, never inside one, and
+    the cut part cannot claim its rounds: what arrived is no longer known round by round. Only one item is delivered in part, so that the end of a
+    budget is not spent on the opening lines of many sessions. A row that must fit the reader's window charges what the prompt will hold
+    instead, through ``render``."""
     offered = list(items)
     taken: list[Item] = []
     used = cut = 0
-    for position, item in enumerate(offered):
+    for item in offered:
+        if used >= budget:
+            break
         cost = count(render(item))
         if used + cost <= budget:
             taken.append(item)
             used += cost
-            continue
-        for keep in range(len(item.turns) - 1, 0, -1):
-            part = Item(item.session, item.date, item.turns[:keep], (), item.source)
-            cost = count(render(part))
-            if used + cost <= budget:
-                taken.append(part)
-                used += cost
-                cut = 1
-                break
-        return Delivered(tuple(taken), used, len(offered), cut, len(offered) - position - cut)
-    return Delivered(tuple(taken), used, len(offered), 0, 0)
+        elif not cut:
+            for keep in range(len(item.turns) - 1, 0, -1):
+                part = Item(item.session, item.date, item.turns[:keep], (), item.source)
+                cost = count(render(part))
+                if used + cost <= budget:
+                    taken.append(part)
+                    used += cost
+                    cut = 1
+                    break
+    return Delivered(tuple(taken), used, len(offered), cut, len(offered) - len(taken))
 
 
 def reader_prompt(items: Iterable[Item], question_date: str, question: str) -> str:

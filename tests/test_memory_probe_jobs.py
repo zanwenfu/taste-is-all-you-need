@@ -235,12 +235,13 @@ def _bench_world(tmp_path: Path, view: bool = True) -> dict:
   *"vllm serve"*) exec sleep 60;;
   *) echo '{"ran": 1}';;
 esac""")
-    _stub(study / "venv-probe" / "bin" / "python", "exit 0")
+    _stub(study / "venv-probe" / "bin" / "python", '''case "$*" in *code_digest*) echo "the code's digest";; esac
+exit 0''')
     views = study / "bench" / "runs" / "dev-abcdefabcdef" / "views"
     views.mkdir(parents=True)
     if view:
         (views / "lme.jsonl").write_text("{}\n")
-    return {"PATH": f"{bin_dir}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "SLURM_JOB_ID": "stand-in-job", "PART": "dev", "VIEW": "lme", "TOTAL": "2"}
+    return {"PATH": f"{bin_dir}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "DIGEST": "the code's digest", "SLURM_JOB_ID": "stand-in-job", "PART": "dev", "VIEW": "lme", "TOTAL": "2"}
 
 
 def _job(script: str, env: dict) -> subprocess.CompletedProcess:
@@ -252,6 +253,84 @@ def test_a_mem0_job_with_no_embedder_reaches_its_end_rather_than_stopping_itself
     done = _job("studies/memory_bench/jobs/mem0.sbatch", _bench_world(tmp_path))
     assert done.returncode == 0, done.stdout + done.stderr
     assert "shards ended" in done.stdout and "\nend " in done.stdout
+
+
+def test_a_bench_job_on_a_copy_of_the_code_that_is_not_the_commit_stops_before_anything(tmp_path: Path) -> None:
+    done = _job("studies/memory_bench/jobs/mem0.sbatch", {**_bench_world(tmp_path), "DIGEST": "another"})
+    assert done.returncode == 1 and "is not commit" in done.stdout, done.stdout + done.stderr
+    assert "start " not in done.stdout
+
+
+def test_a_shard_that_did_not_finish_fails_the_mem0_job(tmp_path: Path) -> None:
+    world = _bench_world(tmp_path)
+    _stub(Path(world["PATH"].split(":")[0]) / "apptainer", """case "$*" in
+  *"vllm serve"*) exec sleep 60;;
+  *) echo 'it broke';;
+esac""")
+    done = _job("studies/memory_bench/jobs/mem0.sbatch", world)
+    assert done.returncode == 1 and "DID NOT FINISH" in done.stdout and "shards failed 2" in done.stdout, done.stdout + done.stderr
+
+
+def test_a_later_commit_carries_on_the_run_it_is_told_to(tmp_path: Path) -> None:
+    world = _bench_world(tmp_path)
+    study = Path(world["STUDY_ROOT"])
+    views = study / "bench" / "runs" / "dev-first" / "views"
+    views.mkdir(parents=True)
+    (views / "lme.jsonl").write_text("{}\n")
+    (study / "bench" / "runs" / "dev-abcdefabcdef" / "views" / "lme.jsonl").unlink()
+    done = _job("studies/memory_bench/jobs/mem0.sbatch", {**world, "RUN": "first"})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (study / "bench" / "runs" / "dev-first" / "rankings" / "lme" / "mem0").is_dir()
+
+
+def _records_world(tmp_path: Path, fail_when: str = "", part: str = "dev") -> dict:
+    world = _bench_world(tmp_path)
+    study = Path(world["STUDY_ROOT"])
+    run = study / "bench" / "runs" / f"{part}-abcdefabcdef"
+    (run / "views").mkdir(parents=True, exist_ok=True)
+    for view in ("lme", "locomo"):
+        (run / "views" / f"{view}.jsonl").write_text("{}\n")
+        (run / "rankings" / view / "mem0").mkdir(parents=True)
+        (run / "rankings" / view / "mem0" / "shard0.jsonl").write_text("{}\n")
+    log = tmp_path / "calls.log"
+    _stub(study / "venv-probe" / "bin" / "python", f'''echo "$*" >> {log}
+case "$*" in *code_digest*) echo "the code's digest"; exit 0;; esac
+case "$*" in *"{fail_when or 'never'}"*) echo broke; exit 3;; esac
+case "$*" in *" views "*) shift; while [ "$1" != "--out" ]; do shift; done; echo "{{}}" > "$2"; exit 0;; esac
+exit 0''')
+    _stub(Path(world["PATH"].split(":")[0]) / "cmp", '''exec /usr/bin/cmp "$@"''')
+    return {**world, "PART": part, "SWEEP": "0", "SLURM_CPUS_PER_TASK": "4"}
+
+
+def test_a_row_that_fails_fails_the_records_job_so_nothing_reads_on(tmp_path: Path) -> None:
+    done = _job("studies/memory_bench/jobs/records.sbatch", _records_world(tmp_path, fail_when="--system flat_bm25 --budget 8000"))
+    assert done.returncode == 1 and "FAILED lme flat_bm25 8000" in done.stdout, done.stdout + done.stderr
+
+
+def test_a_clean_records_job_passes_and_asks_for_the_whole_row_list(tmp_path: Path) -> None:
+    done = _job("studies/memory_bench/jobs/records.sbatch", _records_world(tmp_path))
+    assert done.returncode == 0 and "rows failed 0" in done.stdout, done.stdout + done.stderr
+    calls = (tmp_path / "calls.log").read_text()
+    assert "--system full" in calls and "--budget 118000" in calls and "--budget 126000" not in calls and "--workers 4" in calls
+
+
+def test_views_that_differ_from_those_the_rankings_came_from_stop_the_records_job(tmp_path: Path) -> None:
+    world = _records_world(tmp_path)
+    (Path(world["STUDY_ROOT"]) / "bench" / "runs" / "dev-abcdefabcdef" / "views" / "lme.jsonl").write_text("another\n")
+    done = _job("studies/memory_bench/jobs/records.sbatch", world)
+    assert done.returncode == 1 and "not the ones the rankings came from" in done.stdout, done.stdout + done.stderr
+
+
+def test_on_the_held_out_part_the_records_job_names_the_commit_and_its_digest(tmp_path: Path) -> None:
+    done = _job("studies/memory_bench/jobs/records.sbatch", _records_world(tmp_path, part="held_out"))
+    assert done.returncode == 0, done.stdout + done.stderr
+    calls = (tmp_path / "calls.log").read_text()
+    assert "--frozen-config abcdefabcdef0000 --frozen-digest the code's digest" in calls or "--frozen-digest the" in calls
+
+
+def test_the_judges_read_the_file_the_prompts_came_from() -> None:
+    env = (ROOT / "studies/memory_bench/jobs/env.sh").read_text()
+    assert "LME_REF=$LME_DATA" in env and "oracle" not in env.split("LME_REF=")[1].splitlines()[0]
 
 
 def test_a_bench_job_that_fails_says_so_and_exits_one_rather_than_stopping_itself(tmp_path: Path) -> None:

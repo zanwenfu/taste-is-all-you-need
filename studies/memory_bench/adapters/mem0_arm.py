@@ -4,8 +4,8 @@ One ``Memory`` per process, reset for every unit. Each round (a user turn and it
 whose speaker_a becomes the user and speaker_b the assistant, with their names in the text, as Mem0's own harness does) is one
 ``add`` with ``infer=True``: exactly one call to the served model, which writes the memories. A system line gives
 the session's date, and the session's id, round and date go in the metadata, which every hit carries back. Search
-asks for the whole ranked list (``threshold`` 0) of this unit's memories, and each memory reaches the reader as
-written, tagged with its session and round.
+asks for 1,000 memories at ``threshold`` 0, the lowest it allows, so memories it scores below zero do not come back, and each memory reaches
+the reader as written, tagged with its session and round.
 
 The served model is asked for JSON; how often its reply parses is counted on every call, because a reply that
 does not parse leaves nothing stored and the brief stops an arm whose parse rate is under 95%.

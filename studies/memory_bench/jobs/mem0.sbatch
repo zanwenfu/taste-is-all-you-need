@@ -30,14 +30,15 @@ serve_oss $JOB 65536 $SHARE
 cd $CODE
 t0=$(date +%s); SHARDS=()
 for I in $(seq $FIRST $((FIRST+COUNT-1))); do
-  $RUN $B/venv-mem0/bin/python -m studies.memory_bench.adapters.mem0_arm --views $V/$VIEW.jsonl --url http://127.0.0.1:$PORT/v1 --model $OSS_NAME \
+  $INSIDE $B/venv-mem0/bin/python -m studies.memory_bench.adapters.mem0_arm --views $V/$VIEW.jsonl --url http://127.0.0.1:$PORT/v1 --model $OSS_NAME \
     --max-tokens 4096 --effort low --date-prompt "${EMBED[@]}" --dims $DIMS --shard $I/$TOTAL --workdir /tmp/aos-mem0-$SLURM_JOB_ID-$I \
     --out $OUT/shard$I.jsonl $EXTRA > $OUT/shard$I.log 2>&1 &
   SHARDS+=($!)
 done
 wait "${SHARDS[@]}"
 echo "shards ended after $(( $(date +%s) - t0 )) s"
-for I in $(seq $FIRST $((FIRST+COUNT-1))); do grep -q '"ran"' $OUT/shard$I.log || { echo "  SHARD $I DID NOT FINISH"; grep -v pthread $OUT/shard$I.log | tail -2 | cut -c1-200; }; done
+FAILED=0
+for I in $(seq $FIRST $((FIRST+COUNT-1))); do grep -q '"ran"' $OUT/shard$I.log || { FAILED=$((FAILED + 1)); echo "  SHARD $I DID NOT FINISH"; grep -v pthread $OUT/shard$I.log | tail -2 | cut -c1-200; }; done
 metrics $JOB
 if [ "$(ls $OUT/shard*[0-9].jsonl | wc -l)" = "$TOTAL" ]; then cat $OUT/shard*[0-9].jsonl > $OUT/rankings.jsonl; echo "$VIEW $ARM: $(wc -l < $OUT/rankings.jsonl) questions so far"; fi
 $PY - $OUT $(( $(date +%s) - t0 )) <<'PY'
@@ -50,4 +51,5 @@ print("  replies", len(rows), dict(kinds), "rate", kinds["parsed"] / max(1, len(
 PY
 kill $PID ${EMB:-} $SMI 2>/dev/null; wait $PID 2>/dev/null
 rm -rf /tmp/aos-mem0-$SLURM_JOB_ID-*
-echo "end $(date -u +%FT%TZ)"
+echo "end $(date -u +%FT%TZ) shards failed $FAILED"
+[ $FAILED = 0 ]
