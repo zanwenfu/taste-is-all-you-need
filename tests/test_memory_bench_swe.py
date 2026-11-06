@@ -379,3 +379,21 @@ def test_mem0s_adapter_differs_from_the_commit_of_its_one_ingest_only_in_its_doc
     if then.returncode:
         pytest.skip("that commit is not in this clone")
     assert code(then.stdout) == code((root / path).read_text())
+
+
+def test_every_stage_runs_from_the_command_line_rather_than_only_its_functions(tmp_path: Path) -> None:
+    from studies.memory_bench import swe
+
+    cases = [_case(n) for n in range(2)]
+    _whole_run(tmp_path, cases)
+    out = tmp_path / "report.md"
+    assert swe.main(["report", "--root", str(tmp_path), "--commit", "c1", "--digest", "d1", "--out", str(out)]) == 0
+    assert "flat_free-1000" in out.read_text() and json.loads(out.with_suffix(".json").read_text())
+    assert swe.main(["report", "--root", str(tmp_path), "--commit", "other", "--digest", "d1", "--out", str(tmp_path / "no.md")]) == 1
+    assert not (tmp_path / "no.md").exists()
+    (tmp_path / "rank").mkdir()
+    assert swe.main(["none", "--cases", str(tmp_path / "cases" / "cases.jsonl"), "--out", str(tmp_path / "rank" / "none.jsonl")]) == 0
+    blocks = tmp_path / "blocks" / "none-1000.jsonl"
+    old = tmp_path / "answers" / "none-1000.jsonl"
+    assert swe.main(["carry", "--blocks", str(blocks), "--answers", str(old), "--out", str(tmp_path / "rank" / "answers.jsonl")]) == 0
+    assert len((tmp_path / "rank" / "answers.jsonl").read_text().splitlines()) == 2

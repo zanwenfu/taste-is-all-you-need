@@ -11,7 +11,7 @@ blocks as a stage of its own; it reports no effective retention.
     python -m studies.memory_bench.swe rank --views cases/views.jsonl --system taste --query-free --workdir /tmp/x --out r.jsonl
     python -m studies.memory_bench.swe blocks --rankings r.jsonl --cases cases/cases.jsonl --tokenizer <folder> --out b.jsonl
     python -m studies.memory_bench.swe answer --blocks b.jsonl --cases cases/cases.jsonl --url URL --model NAME --out a.jsonl
-    python -m studies.memory_bench.swe report --run runs/swe-X --commit X --digest D --out report.md
+    python -m studies.memory_bench.swe report --root runs/swe-X --commit X --digest D --out report.md
 
 The stages run as ``jobs/swe.sbatch`` and ``jobs/swe_read.sbatch``. An answer on record stands only if this code makes its block again byte for byte, so that a later commit
 reads nothing twice, and ``report`` writes no table from a run that is not whole.
@@ -398,7 +398,7 @@ def carry_stage(arguments: argparse.Namespace) -> int:
 
 
 def report_stage(arguments: argparse.Namespace) -> int:
-    root = Path(arguments.run)
+    root = Path(arguments.root)
     problems = check_coding(root, commit=arguments.commit, digest=arguments.digest)
     if problems:
         print(f"{len(problems)} problems, and no table:", *problems[:40], sep="\n  ")
@@ -428,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
     stage.add_argument("--judged-out")
     stage.set_defaults(run=carry_stage)
     stage = stages.add_parser("report")
-    for name in ("run", "commit", "digest", "out"):
+    for name in ("root", "commit", "digest", "out"):
         stage.add_argument(f"--{name}", required=True)
     stage.set_defaults(run=report_stage)
     stage = stages.add_parser("rank")

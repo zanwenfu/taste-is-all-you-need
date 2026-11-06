@@ -26,6 +26,6 @@ for BLOCKS in $R/blocks/*.jsonl; do
 done
 metrics $JOB
 kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null
-$PY -m studies.memory_bench.swe report --run $R --commit $SHA --digest $DIGEST --out $R/report.md || FAILED=$((FAILED + 1))
+$PY -m studies.memory_bench.swe report --root $R --commit $SHA --digest $DIGEST --out $R/report.md || FAILED=$((FAILED + 1))
 echo "end $(date -u +%FT%TZ) failed $FAILED"
 [ $FAILED = 0 ]
