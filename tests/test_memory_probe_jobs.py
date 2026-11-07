@@ -493,6 +493,31 @@ def test_a_stop_file_stops_that_task_and_all_it_started_and_no_other(tmp_path: P
         _end_keep(job, tasks)
 
 
+def test_a_task_killed_outright_is_over_and_does_not_hold_the_job(tmp_path: Path) -> None:
+    env, tasks, ended = _keep(tmp_path, HUNG_SECONDS="600")
+    (tasks / "a.sh").write_text("exec sleep 30\n")
+    job = _start_keep(env)
+    try:
+        assert _until((tasks / "a.pid").exists)
+        time.sleep(0.5)
+        os.killpg(int((tasks / "a.pid").read_text()), signal.SIGKILL)
+        assert _until((tasks / "a.exit").exists) and (tasks / "a.exit").read_text().strip() == "gone"
+        assert job.wait(timeout=15) == 0 and ended.read_text().split() == ["77"], "with nothing left the idle limit applies"
+    finally:
+        _end_keep(job, tasks)
+
+
+def test_a_task_stopped_as_it_starts_is_over_even_if_it_never_ran(tmp_path: Path) -> None:
+    env, tasks, _ = _keep(tmp_path, util="50")
+    (tasks / "a.sh").write_text("exec sleep 30\n")
+    (tasks / "a.stop").touch()
+    job = _start_keep(env)
+    try:
+        assert _until((tasks / "a.exit").exists), "stopped before or after its wrapper was ready"
+    finally:
+        _end_keep(job, tasks)
+
+
 def test_a_task_is_handed_over_whole_and_never_over_another(tmp_path: Path) -> None:
     study = tmp_path / "study"
     give = ["bash", str(ROOT / "studies/long_run/jobs/give_task.sh"), "77", "one"]
@@ -590,7 +615,7 @@ def _steps(tmp_path: Path, **more: str) -> tuple[subprocess.CompletedProcess, Pa
     code.mkdir(parents=True, exist_ok=True)
     (code / "give_task.sh").write_text((ROOT / "studies/long_run/jobs/give_task.sh").read_text())
     done = subprocess.run(["bash", str(ROOT / "studies/memory_bench/submit_part.sh"), "steps"], capture_output=True, text=True, timeout=60, start_new_session=True,
-                          env={**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "DIGEST": "d", "PART": "dev", "RUN": "r", "OSS_JOBS": "101 102", "LLAMA_JOB": "103", **more})
+                          env={**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "DIGEST": "d", "PART": "dev", "RUN": "r", "OSS_JOBS": "101 102", "LLAMA_JOBS": "103 104", **more})
     return done, study
 
 
@@ -607,11 +632,30 @@ def test_the_stages_as_tasks_keep_opens_order_on_the_jobs_they_are_given(tmp_pat
     for (name, job), only in wanted.items():
         text = task(job, name)
         assert f"ONLY='{only}'" in text and "READER=oss" in text and f"stage.sh {name} gpt-oss read.sbatch records" in text
-    assert "READER=llama" in task(103, "read-llama") and "ONLY" not in task(103, "read-llama") and "stage.sh read-llama llama read.sbatch records" in task(103, "read-llama")
+    first = "/(taste_git|taste_git_headers|flat_bm25|mem0|mempalace_product)-"
+    assert f"ONLY='lme{first}'" in task(103, "read-llama-lme-first") and "READER=llama" in task(103, "read-llama-lme-first")
+    assert "ONLY='lme/'" in task(103, "read-llama-lme") and "records\\ read-llama-lme-first\\?" in task(103, "read-llama-lme")
+    assert f"ONLY='locomo{first}'" in task(104, "read-llama-locomo-first")
+    assert "ONLY='locomo/'" in task(104, "read-llama-locomo") and "records\\ read-llama-locomo-first\\?" in task(104, "read-llama-locomo")
     assert "read-oss-lme\\ read-oss-locomo\\ read-oss-lme-sweep\\ read-oss-locomo-sweep" in task(101, "judge")
-    assert "read-llama\\ judge\\?" in task(101, "judge-llama")
-    for job, tasks in ((101, 5), (102, 2), (103, 1)):
+    assert "read-llama-lme\\ read-llama-locomo\\ judge\\?" in task(101, "judge-llama")
+    for job, tasks in ((101, 5), (102, 2), (103, 2), (104, 2)):
         assert len(list((study / "logs" / f"gpus-{job}" / "tasks").glob("*.sh"))) == tasks
+
+
+def test_one_llama_server_takes_both_benchmarks_in_turn(tmp_path: Path) -> None:
+    done, study = _steps(tmp_path, LLAMA_JOBS="103")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(list((study / "logs" / "gpus-103" / "tasks").glob("*.sh"))) == 4
+
+
+def test_the_patterns_for_llamas_first_rows_pick_those_rows_and_no_others() -> None:
+    text = (ROOT / "studies/memory_bench/submit_part.sh").read_text()
+    first = re.search(r"FIRST='([^']+)'", text).group(1)
+    rows = ["flat_bm25-8000", "taste_git-8000", "taste_git_headers-8000", "mem0-8000", "mempalace_product-8000", "flat_dense-8000", "full_llama-31000", "newest-8000", "none-8000",
+            "oracle_llama-31000", "mempalace_bench_raw-8000", "mempalace_bench_v4-8000"]
+    picked = [row for row in rows if re.search("lme" + first, f"lme/{row} 512 ")]
+    assert picked == rows[:5]
 
 
 def test_settings_in_a_task_reach_the_shell_as_one_word_each(tmp_path: Path) -> None:

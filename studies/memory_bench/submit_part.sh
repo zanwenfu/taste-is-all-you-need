@@ -8,7 +8,7 @@
 # ingest reads no gold: the shared files, MemPalace, the dense list, Mem0 across GPUs, the headers. open reads it, and on the held-out part the first stage waits for the part's
 # date, which its own guard also checks. The reader's rows are split so that no job meets its time limit, the main rows first.
 #
-#   STUDY_ROOT=... SHA=<commit> DIGEST=<its digest> PART=held_out RUN=<...> OSS_JOBS="<job> <job>" LLAMA_JOB=<job> bash submit_part.sh steps
+#   STUDY_ROOT=... SHA=<commit> DIGEST=<its digest> PART=held_out RUN=<...> OSS_JOBS="<job> <job>" LLAMA_JOBS="<job> <job>" bash submit_part.sh steps
 #
 # steps does what open does on GPUs the study already has, for when the queue would keep the stages from their day: the same job scripts and the same rows, each a task on a job running
 # long_run/jobs/keep.sbatch with a server task, read with SERVER_URL. It hands over the tasks and exits, and the tasks keep the order themselves (jobs/stage.sh), so that nothing rests on a login
@@ -42,14 +42,14 @@ case "${1:?ingest, open or steps}" in
     R2=$(sbatch --parsable $GPU $ONE $EXP,READER=oss,ONLY="locomo/.*($MAIN)" $AFTER --output=$L/$PART-read-oss-locomo-%j.out $J/read.sbatch)
     R3=$(sbatch --parsable $GPU $ONE $EXP,READER=oss,ONLY='lme/.*-(2000|4000|16000) ' $AFTER --output=$L/$PART-read-oss-lme-sweep-%j.out $J/read.sbatch)
     R4=$(sbatch --parsable $GPU $ONE $EXP,READER=oss,ONLY='locomo/.*-(2000|4000|16000) ' $AFTER --output=$L/$PART-read-oss-locomo-sweep-%j.out $J/read.sbatch)
-    R5=$(sbatch --parsable $GPU --gres=gpu:rtx_pro_6000:2 --exclude=compsci-cluster-fitz-47,compsci-cluster-fitz-48 $EXP,READER=llama --time=12:00:00 $AFTER --output=$L/$PART-read-llama-%j.out $J/read.sbatch)
+    R5=$(sbatch --parsable $GPU --gres=gpu:rtx_pro_6000:2 --exclude=compsci-cluster-fitz-47,compsci-cluster-fitz-48 $EXP,READER=llama --time=30:00:00 $AFTER --output=$L/$PART-read-llama-%j.out $J/read.sbatch)
     # The first judge does not wait on Llama, whose two GPUs may come late; the second follows it, since two judges must not write one verdict file at once, and asks only what has no verdict.
     JU=$(sbatch --parsable $GPU $ONE $EXP --dependency=afterok:$R1:$R2:$R3:$R4 --output=$L/$PART-judge-%j.out $J/judge.sbatch)
     JL=$(sbatch --parsable $GPU $ONE $EXP --dependency=afterok:$R5,afterany:$JU --output=$L/$PART-judge-llama-%j.out $J/judge.sbatch)
     echo "records $REC read $R1 $R2 $R3 $R4 $R5 judge $JU $JL"
     ;;
   steps)
-    read -r -a OSS <<< "${OSS_JOBS:?the kept jobs that run gpt-oss}"; LLAMA=${LLAMA_JOB:?the kept job that runs Llama}; AGAIN=${AGAIN:-}; LAST=$(( ${#OSS[@]} - 1 ))
+    read -r -a OSS <<< "${OSS_JOBS:?the kept jobs that run gpt-oss}"; read -r -a LLAMA <<< "${LLAMA_JOBS:?the kept jobs that run Llama}"; AGAIN=${AGAIN:-}; LAST=$(( ${#OSS[@]} - 1 )); LAST_LLAMA=$(( ${#LLAMA[@]} - 1 ))
     KEEP=$D/code-${SHA:0:12}/studies/long_run/jobs; MARKS=$D/bench/runs/$PART-$RUN/stages; mkdir -p "$MARKS"
     for FAILED in "$MARKS"/*.failed; do [ -e "$FAILED" ] && mv "$FAILED" "$FAILED.before$AGAIN"; done
     GATE=; [ "$PART" = held_out ] && GATE=$(date -d $OPENS +%s)
@@ -64,9 +64,14 @@ case "${1:?ingest, open or steps}" in
     stage read-oss-locomo "${OSS[0]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*($MAIN)'"
     stage read-oss-lme-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='lme/.*-(2000|4000|16000) '"
     stage read-oss-locomo-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*-(2000|4000|16000) '"
-    stage read-llama "$LLAMA" llama read.sbatch records "READER=llama"
+    # Llama is the slow reader, about 21 hours on one server by the practice run, so a second server takes LoCoMo, and on each server the rows the comparison turns on go first.
+    FIRST='/(taste_git|taste_git_headers|flat_bm25|mem0|mempalace_product)-'
+    stage read-llama-lme-first "${LLAMA[0]}" llama read.sbatch records "READER=llama ONLY='lme$FIRST'"
+    stage read-llama-lme "${LLAMA[0]}" llama read.sbatch "records read-llama-lme-first?" "READER=llama ONLY='lme/'"
+    stage read-llama-locomo-first "${LLAMA[$LAST_LLAMA]}" llama read.sbatch records "READER=llama ONLY='locomo$FIRST'"
+    stage read-llama-locomo "${LLAMA[$LAST_LLAMA]}" llama read.sbatch "records read-llama-locomo-first?" "READER=llama ONLY='locomo/'"
     # The first judge does not wait on Llama, and two judges must not write one verdict file at once: the second follows it, however it ended.
     stage judge "${OSS[0]}" gpt-oss judge.sbatch "read-oss-lme read-oss-locomo read-oss-lme-sweep read-oss-locomo-sweep"
-    stage judge-llama "${OSS[0]}" gpt-oss judge.sbatch "read-llama judge?"
+    stage judge-llama "${OSS[0]}" gpt-oss judge.sbatch "read-llama-lme read-llama-locomo judge?"
     ;;
 esac

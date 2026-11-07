@@ -167,6 +167,10 @@ refuses to write any table unless every row named here is there and no other, fr
 question answered and judged, each answer to the prompt on record, each verdict to the answer on record, and Mem0 and the headers on the settings named here. A row that fails stops the job, so
 nothing reads on from it. The dev part rehearses every stage on the commit about to be frozen.
 
+## Running on a full cluster
+
+The stages may run as tasks on GPU jobs the study already holds, for when the queue would keep them from their day: the same job scripts and rows, in the same order, kept by marks on the shared disk, so that nothing rests on a login node. A held job ends itself when its GPUs have rested with no work for an hour, or for 8 hours whatever says it is running. Llama reads about 3,000 prompt tokens a second on two GPUs, about 21 hours for this part on one server by the practice run, so a second server takes LoCoMo if one can be had, and on each the rows the comparison turns on go first: Taste with and without headers, the keyword list, Mem0 and MemPalace's product path.
+
 ## Stopping and record
 
 A run stops at the first surprise in any batch. A model whose tool calls or JSON replies parse less than 95%

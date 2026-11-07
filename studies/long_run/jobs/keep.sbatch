@@ -41,6 +41,19 @@ stop_tasks() {
   done
 }
 
+reap_tasks() {  # a task with no process left that never said how it ended, as when the wrapper itself was killed: it is over, and must not hold the job
+  local pid name
+  for pid in "$TASKS"/*.pid; do
+    [ -e "$pid" ] || continue
+    name=${pid%.pid}
+    [ -e "$name.exit" ] && continue
+    kill -0 "$(cat "$pid")" 2>/dev/null || kill -0 -- "-$(cat "$pid")" 2>/dev/null && continue
+    [ -e "$name.exit" ] && continue  # it wrote this as it left, between the two looks
+    echo gone > "$name.exit"
+    echo "task $(basename "$name") is gone $(date -u +%FT%TZ)"
+  done
+}
+
 working() {  # a task still running that is not a server
   local pid name
   for pid in "$TASKS"/*.pid; do
@@ -70,6 +83,7 @@ GPU_AT=$(date +%s); WORK_AT=$GPU_AT
 while true; do
   start_tasks
   stop_tasks
+  reap_tasks
   NOW=$(date +%s)
   gpu_busy && GPU_AT=$NOW
   working && WORK_AT=$NOW
