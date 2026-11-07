@@ -8,10 +8,11 @@
 # ingest reads no gold: the shared files, MemPalace, the dense list, Mem0 across GPUs, the headers. open reads it, and on the held-out part the first stage waits for the part's
 # date, which its own guard also checks. The reader's rows are split so that no job meets its time limit, the main rows first.
 #
-#   STUDY_ROOT=... SHA=<commit> DIGEST=<its digest> PART=held_out RUN=<...> OSS_JOBS="<job> <job>" LLAMA_JOB=<job> nohup bash submit_part.sh steps > log 2>&1 &
+#   STUDY_ROOT=... SHA=<commit> DIGEST=<its digest> PART=held_out RUN=<...> OSS_JOBS="<job> <job>" LLAMA_JOB=<job> bash submit_part.sh steps
 #
-# steps does what open does on GPUs the study already has, for when the queue would keep the stages from their day: the same job scripts and the same rows, as steps on jobs that each run a
-# server (long_run/jobs/serve.sbatch), read with SERVER_URL. It stays on the login node until every stage ends, each stage waiting for what open makes it wait for, and stops at the first that fails.
+# steps does what open does on GPUs the study already has, for when the queue would keep the stages from their day: the same job scripts and the same rows, each a task on a job running
+# long_run/jobs/keep.sbatch with a server task, read with SERVER_URL. It hands over the tasks and exits, and the tasks keep the order themselves (jobs/stage.sh), so that nothing rests on a login
+# node. Run again, with AGAIN set to name the new tasks, it asks again only for stages with no mark of having ended well, and every row asks only what has no answer.
 set -u
 D=${STUDY_ROOT:?}; SHA=${SHA:?}; DIGEST=${DIGEST:?}; PART=${PART:?}; RUN=${RUN:-${SHA:0:12}}
 J=$D/code-${SHA:0:12}/studies/memory_bench/jobs
@@ -48,27 +49,24 @@ case "${1:?ingest, open or steps}" in
     echo "records $REC read $R1 $R2 $R3 $R4 $R5 judge $JU $JL"
     ;;
   steps)
-    read -r -a OSS <<< "${OSS_JOBS:?the jobs running gpt-oss}"; LLAMA=${LLAMA_JOB:?the job running Llama}
-    url() { cat $L/long-serve-$1-$2/url; }
-    # step log job reader-of-its-server cpus script [more of the export]
-    step() {
-      local log=$1 job=$2 server=$3 cpus=$4 script=$5 more=${6:-}
-      srun --jobid=$job --overlap --ntasks=1 --cpus-per-task=$cpus "--export=ALL,STUDY_ROOT=$D,SHA=$SHA,DIGEST=$DIGEST,PART=$PART,RUN=$RUN,SERVER_URL=$(url $job $server)$more" bash $J/$script > $L/$PART-$log.out 2>&1
+    read -r -a OSS <<< "${OSS_JOBS:?the kept jobs that run gpt-oss}"; LLAMA=${LLAMA_JOB:?the kept job that runs Llama}; AGAIN=${AGAIN:-}; LAST=$(( ${#OSS[@]} - 1 ))
+    KEEP=$D/code-${SHA:0:12}/studies/long_run/jobs; MARKS=$D/bench/runs/$PART-$RUN/stages; mkdir -p "$MARKS"
+    for FAILED in "$MARKS"/*.failed; do [ -e "$FAILED" ] && mv "$FAILED" "$FAILED.before$AGAIN"; done
+    GATE=; [ "$PART" = held_out ] && GATE=$(date -d $OPENS +%s)
+    stage() {  # name job server script after [more of the task's settings]
+      [ -e "$MARKS/$1.ok" ] && { echo "$1 has ended well"; return 0; }
+      printf 'export STUDY_ROOT=%q SHA=%q DIGEST=%q PART=%q RUN=%q OPENS_EPOCH=%q %s\nexec bash %q %q %q %q %q\n' "$D" "$SHA" "$DIGEST" "$PART" "$RUN" "$GATE" "${6:-}" "$J/stage.sh" "$1" "$3" "$4" "$5" |
+        STUDY_ROOT=$D bash "$KEEP/give_task.sh" "$2" "$PART-$1$AGAIN"
     }
-    [ "$PART" = held_out ] && until [ $(date +%s) -ge $(date -d $OPENS +%s) ]; do sleep 20; done
-    step records-steps ${OSS[0]} gpt-oss 32 records.sbatch || { echo "FAILED: records"; exit 1; }
-    MAIN='-8000 |-118000 '; LAST=$(( ${#OSS[@]} - 1 ))
-    step read-oss-lme-steps ${OSS[0]} gpt-oss 48 read.sbatch ",READER=oss,ONLY=lme/.*($MAIN)" & A=$!
-    step read-oss-locomo-steps ${OSS[0]} gpt-oss 48 read.sbatch ",READER=oss,ONLY=locomo/.*($MAIN)" & B=$!
-    step read-oss-lme-sweep-steps ${OSS[$LAST]} gpt-oss 48 read.sbatch ",READER=oss,ONLY=lme/.*-(2000|4000|16000) " & C=$!
-    step read-oss-locomo-sweep-steps ${OSS[$LAST]} gpt-oss 48 read.sbatch ",READER=oss,ONLY=locomo/.*-(2000|4000|16000) " & E=$!
-    step read-llama-steps $LLAMA llama 48 read.sbatch ",READER=llama" & F=$!
-    FAILED=0
-    for READ in $A $B $C $E; do wait $READ || FAILED=$((FAILED + 1)); done
-    [ $FAILED = 0 ] || { echo "FAILED: $FAILED of gpt-oss's reading steps"; wait $F; exit 1; }
-    step judge-steps ${OSS[0]} gpt-oss 48 judge.sbatch || { echo "FAILED: the first judge"; wait $F; exit 1; }
-    wait $F || { echo "FAILED: Llama's reading"; exit 1; }
-    step judge-llama-steps ${OSS[0]} gpt-oss 48 judge.sbatch || { echo "FAILED: the judge after Llama"; exit 1; }
-    echo "end $(date -u +%FT%TZ) every stage ended"
+    MAIN='-8000 |-118000 '
+    stage records "${OSS[0]}" none records.sbatch ""
+    stage read-oss-lme "${OSS[0]}" gpt-oss read.sbatch records "READER=oss ONLY='lme/.*($MAIN)'"
+    stage read-oss-locomo "${OSS[0]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*($MAIN)'"
+    stage read-oss-lme-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='lme/.*-(2000|4000|16000) '"
+    stage read-oss-locomo-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*-(2000|4000|16000) '"
+    stage read-llama "$LLAMA" llama read.sbatch records "READER=llama"
+    # The first judge does not wait on Llama, and two judges must not write one verdict file at once: the second follows it, however it ended.
+    stage judge "${OSS[0]}" gpt-oss judge.sbatch "read-oss-lme read-oss-locomo read-oss-lme-sweep read-oss-locomo-sweep"
+    stage judge-llama "${OSS[0]}" gpt-oss judge.sbatch "read-llama judge?"
     ;;
 esac

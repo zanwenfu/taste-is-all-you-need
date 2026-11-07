@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import signal
@@ -371,48 +372,262 @@ def test_a_llama_reader_uses_a_running_server_when_it_is_told_to(tmp_path: Path)
     assert "load_seconds" not in done.stdout
 
 
-def _steps(tmp_path: Path, fail_when: str = "no such words") -> tuple[subprocess.CompletedProcess, list[str]]:
-    bin_dir, study, log = tmp_path / "bin", tmp_path / "study", tmp_path / "calls.log"
-    _stub(bin_dir / "srun", f'''echo "$*" >> {log}
-case "$*" in *"{fail_when}"*) exit 1;; esac
-exit 0''')
-    for job, reader in ((101, "gpt-oss"), (102, "gpt-oss"), (103, "llama")):
-        folder = study / "logs" / f"long-serve-{job}-{reader}"
-        folder.mkdir(parents=True)
-        (folder / "url").write_text(f"http://127.0.0.1:{job}/v1\n")
+# ------------------------------------------------------------------ GPUs kept for the study: never idle, and work that needs no login node
+
+
+def _keep(tmp_path: Path, *, util: str = "0", **more: str) -> tuple[dict, Path, Path]:
+    bin_dir, study, ended = tmp_path / "bin", tmp_path / "study", tmp_path / "scancel.log"
+    (tmp_path / "util").write_text(util + "\n")
+    _stub(bin_dir / "nvidia-smi", f'''case "$*" in *" -l "*) exec sleep 30;; esac
+cat {tmp_path / "util"}''')
+    _stub(bin_dir / "scancel", f'echo "$*" >> {ended}')
+    _stub(bin_dir / "setsid", 'exec python3 -c "import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])" "$@"')
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SLURM_JOB_ID": "77", "TICK": "0.1", "IDLE_SECONDS": "2", "HUNG_SECONDS": "5", **more}
+    tasks = study / "logs" / "gpus-77" / "tasks"
+    tasks.mkdir(parents=True)
+    return env, tasks, ended
+
+
+def _start_keep(env: dict) -> subprocess.Popen:
+    return subprocess.Popen(["bash", str(ROOT / "studies/long_run/jobs/keep.sbatch")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+
+
+def _until(test, seconds: float = 12.0) -> bool:
+    end = time.time() + seconds
+    while time.time() < end:
+        if test():
+            return True
+        time.sleep(0.05)
+    return test()
+
+
+def _end_keep(job: subprocess.Popen, tasks: Path) -> str:
+    """Stop what this test started, by exact ids: the job, then any task it left."""
+    for pid in tasks.glob("*.pid"):
+        if not pid.with_suffix(".exit").exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(int(pid.read_text()), signal.SIGTERM)
+    if job.poll() is None:
+        job.terminate()
+    return job.communicate(timeout=20)[0]
+
+
+def test_kept_gpus_with_nothing_to_do_end_the_job_by_its_own_id(tmp_path: Path) -> None:
+    env, tasks, ended = _keep(tmp_path)
+    job = _start_keep(env)
+    assert job.wait(timeout=15) == 0
+    out = _end_keep(job, tasks)
+    assert ended.read_text().split() == ["77"] and "ending: its GPUs at rest and no work" in out
+
+
+def test_a_working_gpu_keeps_the_job_and_the_clock_starts_again_when_it_rests(tmp_path: Path) -> None:
+    env, tasks, ended = _keep(tmp_path, util="0\n80")
+    job = _start_keep(env)
+    time.sleep(3.5)
+    assert job.poll() is None and not ended.exists(), "one GPU at work of two is work"
+    (tmp_path / "util").write_text("0\n1\n")
+    assert job.wait(timeout=15) == 0 and ended.read_text().split() == ["77"]
+    _end_keep(job, tasks)
+
+
+def test_a_loaded_server_with_no_one_asking_is_idle(tmp_path: Path) -> None:
+    env, tasks, ended = _keep(tmp_path)
+    (tasks / "server-laguna.sh").write_text("exec sleep 30\n")
+    job = _start_keep(env)
+    try:
+        assert job.wait(timeout=15) == 0 and ended.read_text().split() == ["77"]
+    finally:
+        _end_keep(job, tasks)
+
+
+def test_work_on_the_cpu_keeps_the_job_until_the_longer_limit(tmp_path: Path) -> None:
+    env, tasks, ended = _keep(tmp_path)
+    (tasks / "records.sh").write_text("exec sleep 30\n")
+    job = _start_keep(env)
+    try:
+        time.sleep(3.5)
+        assert job.poll() is None and not ended.exists(), "past the idle limit, with a task at work"
+        assert job.wait(timeout=15) == 0 and ended.read_text().split() == ["77"], "and a task that does nothing for the longer limit does not hold the GPUs"
+    finally:
+        out = _end_keep(job, tasks)
+    assert "whatever says it is running" in out
+
+
+def test_when_nvidia_smi_cannot_say_the_job_is_not_ended(tmp_path: Path) -> None:
+    env, tasks, ended = _keep(tmp_path, util="not a number")
+    job = _start_keep(env)
+    time.sleep(3.5)
+    assert job.poll() is None and not ended.exists()
+    out = _end_keep(job, tasks)
+    assert out.count("nvidia-smi cannot say") == 1
+
+
+def test_a_task_handed_over_before_the_job_starts_runs_once_and_says_how_it_ended(tmp_path: Path) -> None:
+    env, tasks, _ = _keep(tmp_path, util="50")
+    (tmp_path / "ran").write_text("")
+    (tasks / "first.sh").write_text(f"echo ran >> {tmp_path / 'ran'}\necho its words\nexit 3\n")
+    job = _start_keep(env)
+    try:
+        assert _until((tasks / "first.exit").exists)
+        time.sleep(0.5)
+        assert (tasks / "first.exit").read_text().strip() == "3" and (tasks / "first.out").read_text() == "its words\n"
+        assert (tmp_path / "ran").read_text() == "ran\n", "a task runs once"
+    finally:
+        _end_keep(job, tasks)
+
+
+def test_a_stop_file_stops_that_task_and_all_it_started_and_no_other(tmp_path: Path) -> None:
+    env, tasks, _ = _keep(tmp_path, util="50")
+    child = tmp_path / "child-done"
+    (tasks / "a.sh").write_text(f"(sleep 3; touch {child}) &\nwait\n")
+    (tasks / "b.sh").write_text("exec sleep 30\n")
+    job = _start_keep(env)
+    try:
+        assert _until(lambda: (tasks / "a.pid").exists() and (tasks / "b.pid").exists())
+        (tasks / "a.stop").touch()
+        assert _until((tasks / "a.exit").exists)
+        assert not (tasks / "b.exit").exists() and job.poll() is None
+        time.sleep(3.5)
+        assert not child.exists(), "what the task started goes with it"
+    finally:
+        _end_keep(job, tasks)
+
+
+def test_a_task_is_handed_over_whole_and_never_over_another(tmp_path: Path) -> None:
+    study = tmp_path / "study"
+    give = ["bash", str(ROOT / "studies/long_run/jobs/give_task.sh"), "77", "one"]
+    env = {**os.environ, "STUDY_ROOT": str(study)}
+    assert subprocess.run(give, input="echo first\n", env=env, capture_output=True, text=True).returncode == 0
+    again = subprocess.run(give, input="echo second\n", env=env, capture_output=True, text=True)
+    assert again.returncode == 1 and "already has a task" in again.stderr
+    tasks = study / "logs" / "gpus-77" / "tasks"
+    assert (tasks / "one.sh").read_text() == "echo first\n" and not list(tasks.glob("*.writing"))
+    empty = subprocess.run([*give[:-1], "two"], input="", env=env, capture_output=True, text=True)
+    assert empty.returncode == 1 and not (tasks / "two.sh").exists()
+
+
+def _url_world(tmp_path: Path) -> tuple[dict, Path, Path]:
+    study = tmp_path / "study"
+    tasks, url = study / "logs" / "gpus-77" / "tasks", study / "logs" / "long-serve-77-laguna" / "url"
+    tasks.mkdir(parents=True)
+    url.parent.mkdir(parents=True)
+    return {**os.environ, "STUDY_ROOT": str(study), "SERVER_POLL": "0.05", "SERVER_WAIT": "1"}, tasks, url
+
+
+def test_a_servers_address_comes_when_it_has_loaded_and_a_dead_server_says_so(tmp_path: Path) -> None:
+    env, tasks, url = _url_world(tmp_path)
+    run = ["bash", str(ROOT / "studies/long_run/jobs/server_url.sh"), "77", "laguna"]
+    late = subprocess.run(run, env=env, capture_output=True, text=True, timeout=20)
+    assert late.returncode == 1 and "after 1 seconds" in late.stderr
+    (tasks / "server-laguna.pid").write_text("1")
+    (tasks / "server-laguna.exit").write_text("1")
+    dead = subprocess.run(run, env={**env, "SERVER_WAIT": "60"}, capture_output=True, text=True, timeout=20)
+    assert dead.returncode == 1 and "task has ended" in dead.stderr
+    url.write_text("http://127.0.0.1:9/v1\n")
+    assert subprocess.run(run, env=env, capture_output=True, text=True, timeout=20).stdout.strip() == "http://127.0.0.1:9/v1"
+
+
+def _stage(tmp_path: Path, name: str, script: str, after: str = "", *, body: str = "exit 0", server: str = "none", **more: str) -> subprocess.CompletedProcess:
+    study = tmp_path / "study"
+    code = study / "code-abcdefabcdef" / "studies"
+    (code / "memory_bench" / "jobs").mkdir(parents=True, exist_ok=True)
+    (code / "long_run" / "jobs").mkdir(parents=True, exist_ok=True)
+    (code / "long_run" / "jobs" / "server_url.sh").write_text((ROOT / "studies/long_run/jobs/server_url.sh").read_text())
+    (code / "memory_bench" / "jobs" / script).write_text(f"echo ran >> {tmp_path / 'ran'}\necho url ${{SERVER_URL:-none}} >> {tmp_path / 'ran'}\n{body}\n")
+    env = {**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "PART": "dev", "RUN": "r", "SLURM_JOB_ID": "77", "STAGE_POLL": "0.05", "SERVER_POLL": "0.05", **more}
+    return subprocess.run(["bash", str(ROOT / "studies/memory_bench/jobs/stage.sh"), name, server, script, after], env=env, capture_output=True, text=True, timeout=20)
+
+
+def _marks(tmp_path: Path) -> Path:
+    marks = tmp_path / "study" / "bench" / "runs" / "dev-r" / "stages"
+    marks.mkdir(parents=True, exist_ok=True)
+    return marks
+
+
+def test_a_stage_runs_its_job_script_and_leaves_a_mark(tmp_path: Path) -> None:
+    done = _stage(tmp_path, "records", "records.sbatch")
+    assert done.returncode == 0 and (_marks(tmp_path) / "records.ok").exists()
+    failed = _stage(tmp_path, "read", "read.sbatch", body="exit 4")
+    assert failed.returncode == 4 and (_marks(tmp_path) / "read.failed").exists() and not (_marks(tmp_path) / "read.ok").exists()
+
+
+def test_a_stage_after_a_failed_one_fails_without_running(tmp_path: Path) -> None:
+    (_marks(tmp_path) / "records.failed").touch()
+    done = _stage(tmp_path, "read", "read.sbatch", "records")
+    assert done.returncode == 1 and "since records failed" in done.stdout and not (tmp_path / "ran").exists()
+
+
+def test_a_stage_that_only_needs_another_to_have_ended_runs_after_a_failure(tmp_path: Path) -> None:
+    (_marks(tmp_path) / "read-llama.ok").touch()
+    (_marks(tmp_path) / "judge.failed").touch()
+    assert _stage(tmp_path, "judge-llama", "judge.sbatch", "read-llama judge?").returncode == 0 and (tmp_path / "ran").exists()
+
+
+def test_a_stage_does_not_start_before_the_parts_hour(tmp_path: Path) -> None:
+    study = tmp_path / "study"
+    code = study / "code-abcdefabcdef" / "studies" / "memory_bench" / "jobs"
+    code.mkdir(parents=True)
+    (code / "records.sbatch").write_text(f"touch {tmp_path / 'ran'}\n")
+    env = {**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "PART": "held_out", "RUN": "r", "SLURM_JOB_ID": "77", "STAGE_POLL": "0.05", "OPENS_EPOCH": str(int(time.time()) + 3600)}
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run(["bash", str(ROOT / "studies/memory_bench/jobs/stage.sh"), "records", "none", "records.sbatch", ""], env=env, capture_output=True, text=True, timeout=1.5, start_new_session=True)
+    assert not (tmp_path / "ran").exists()
+
+
+def test_a_stage_with_no_server_fails_and_says_so_and_one_with_a_server_is_given_it(tmp_path: Path) -> None:
+    (tmp_path / "study" / "logs" / "gpus-77" / "tasks").mkdir(parents=True)
+    done = _stage(tmp_path, "read", "read.sbatch", server="laguna", SERVER_WAIT="1")
+    assert done.returncode == 1 and "no laguna server" in done.stdout and (_marks(tmp_path) / "read.failed").exists()
+    url = tmp_path / "study" / "logs" / "long-serve-77-laguna" / "url"
+    url.parent.mkdir(parents=True)
+    url.write_text("http://127.0.0.1:9/v1\n")
+    assert _stage(tmp_path, "read2", "read.sbatch", server="laguna").returncode == 0
+    assert "url http://127.0.0.1:9/v1" in (tmp_path / "ran").read_text()
+
+
+def _steps(tmp_path: Path, **more: str) -> tuple[subprocess.CompletedProcess, Path]:
+    study, code = tmp_path / "study", tmp_path / "study" / "code-abcdefabcdef" / "studies" / "long_run" / "jobs"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "give_task.sh").write_text((ROOT / "studies/long_run/jobs/give_task.sh").read_text())
     done = subprocess.run(["bash", str(ROOT / "studies/memory_bench/submit_part.sh"), "steps"], capture_output=True, text=True, timeout=60, start_new_session=True,
-                          env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "DIGEST": "d", "PART": "dev", "RUN": "r",
-                               "OSS_JOBS": "101 102", "LLAMA_JOB": "103"})
-    return done, log.read_text().splitlines() if log.exists() else []
+                          env={**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "DIGEST": "d", "PART": "dev", "RUN": "r", "OSS_JOBS": "101 102", "LLAMA_JOB": "103", **more})
+    return done, study
 
 
-def test_the_stages_as_steps_run_as_open_runs_them_on_the_servers_they_are_given(tmp_path: Path) -> None:
-    done, calls = _steps(tmp_path)
-    assert done.returncode == 0 and "every stage ended" in done.stdout, done.stdout + done.stderr
-    assert "records.sbatch" in calls[0] and "--jobid=101" in calls[0] and "--cpus-per-task=32" in calls[0]
-    assert "judge.sbatch" in calls[-1] and "judge.sbatch" in calls[-2] and len(calls) == 8
-    reads = [line for line in calls if "read.sbatch" in line]
-    wanted = {"ONLY=lme/.*(-8000 |-118000 )": 101, "ONLY=locomo/.*(-8000 |-118000 )": 101, "ONLY=lme/.*-(2000|4000|16000) ": 102, "ONLY=locomo/.*-(2000|4000|16000) ": 102}
-    for only, job in wanted.items():
-        line = next(line for line in reads if only in line)
-        assert f"--jobid={job}" in line and f"SERVER_URL=http://127.0.0.1:{job}/v1" in line and "READER=oss" in line
-    llama = next(line for line in reads if "READER=llama" in line)
-    assert "--jobid=103" in llama and "SERVER_URL=http://127.0.0.1:103/v1" in llama and "ONLY" not in llama
-    assert all("PART=dev" in line and "RUN=r" in line and "SHA=abcdefabcdef0000" in line for line in calls)
+def test_the_stages_as_tasks_keep_opens_order_on_the_jobs_they_are_given(tmp_path: Path) -> None:
+    done, study = _steps(tmp_path)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+    def task(job: int, name: str) -> str:
+        return (study / "logs" / f"gpus-{job}" / "tasks" / f"dev-{name}.sh").read_text()
+
+    assert "stage.sh records none records.sbatch \'\'" in task(101, "records")
+    wanted = {("read-oss-lme", 101): "lme/.*(-8000 |-118000 )", ("read-oss-locomo", 101): "locomo/.*(-8000 |-118000 )",
+              ("read-oss-lme-sweep", 102): "lme/.*-(2000|4000|16000) ", ("read-oss-locomo-sweep", 102): "locomo/.*-(2000|4000|16000) "}
+    for (name, job), only in wanted.items():
+        text = task(job, name)
+        assert f"ONLY='{only}'" in text and "READER=oss" in text and f"stage.sh {name} gpt-oss read.sbatch records" in text
+    assert "READER=llama" in task(103, "read-llama") and "ONLY" not in task(103, "read-llama") and "stage.sh read-llama llama read.sbatch records" in task(103, "read-llama")
+    assert "read-oss-lme\\ read-oss-locomo\\ read-oss-lme-sweep\\ read-oss-locomo-sweep" in task(101, "judge")
+    assert "read-llama\\ judge\\?" in task(101, "judge-llama")
+    for job, tasks in ((101, 5), (102, 2), (103, 1)):
+        assert len(list((study / "logs" / f"gpus-{job}" / "tasks").glob("*.sh"))) == tasks
 
 
-def test_stages_as_steps_stop_at_the_first_that_fails(tmp_path: Path) -> None:
-    done, calls = _steps(tmp_path, "records.sbatch")
-    assert done.returncode == 1 and "FAILED: records" in done.stdout and len(calls) == 1
+def test_settings_in_a_task_reach_the_shell_as_one_word_each(tmp_path: Path) -> None:
+    done, study = _steps(tmp_path)
+    assert done.returncode == 0
+    text = (study / "logs" / "gpus-101" / "tasks" / "dev-read-oss-lme.sh").read_text().replace("exec bash", "echo")
+    shown = subprocess.run(["bash", "-c", text + '\necho "[$ONLY][$READER][$PART][$RUN][$SHA]"'], capture_output=True, text=True)
+    assert "[lme/.*(-8000 |-118000 )][oss][dev][r][abcdefabcdef0000]" in shown.stdout, shown.stdout + shown.stderr
 
 
-def test_no_judge_reads_after_a_reader_fails_as_steps(tmp_path: Path) -> None:
-    done, calls = _steps(tmp_path, "ONLY=lme/.*-(2000")
-    assert done.returncode == 1 and "FAILED: 1 of gpt-oss" in done.stdout
-    assert not any("judge.sbatch" in line for line in calls)
-
-
-def test_the_judge_after_llama_waits_for_llama_as_steps(tmp_path: Path) -> None:
-    done, calls = _steps(tmp_path, "READER=llama")
-    assert done.returncode == 1 and "FAILED: Llama" in done.stdout
-    assert sum("judge.sbatch" in line for line in calls) == 1, "the first judge has read gpt-oss's answers, and the second has nothing new"
+def test_run_again_the_stages_ask_only_for_what_did_not_end_well(tmp_path: Path) -> None:
+    _, study = _steps(tmp_path)
+    marks = study / "bench" / "runs" / "dev-r" / "stages"
+    (marks / "records.ok").touch()
+    (marks / "read-oss-lme.failed").touch()
+    again, _ = _steps(tmp_path, AGAIN="-2")
+    assert again.returncode == 0 and "records has ended well" in again.stdout and not (marks / "read-oss-lme.failed").exists()
+    tasks = study / "logs" / "gpus-101" / "tasks"
+    assert (tasks / "dev-read-oss-lme-2.sh").exists() and not (tasks / "dev-records-2.sh").exists()

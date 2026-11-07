@@ -4,8 +4,8 @@
 #SBATCH --mem=200G
 #SBATCH --time=4-00:00:00
 # One reader's server, the same settings as the job that reads with it, for several steps to share with SERVER_URL, so that none waits in the queue or loads the model again. READER is
-# gpt-oss, llama or laguna, the last two on two GPUs and not on a node where a two-GPU server stalls. Run as a job, or as a step of keep.sbatch so that a model can change on the same GPUs.
-# Free, no key. Ended by hand, by its job or step id, when its work is read. Writes its address to OUT/url.
+# gpt-oss, llama or laguna, the last two on two GPUs and not on a node where a two-GPU server stalls. Run as a task of keep.sbatch, named server-READER, so that a model can change on the same GPUs.
+# Free, no key. Stopped by its task's stop file, or with its job. Writes its address to OUT/url, and empties it when told to stop.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
 D=${STUDY_ROOT:?}; READER=${READER:-laguna}; IMG=$D/images/vllm-v0.32.0.sif; OUT=$D/logs/long-serve-$SLURM_JOB_ID-$READER; mkdir -p $OUT
@@ -21,6 +21,8 @@ else
   SERVE=(--max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice --tool-call-parser openai)
 fi
 echo "start $(date -u +%FT%TZ) on $(hostname) reader $READER"
+: > $OUT/url  # an earlier server's on these GPUs is gone
+trap 'kill ${PID:-} ${SMI:-} 2>/dev/null; : > $OUT/url; exit 143' TERM
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 60 > $OUT/gpu.csv &
 SMI=$!
 PORT=$((20000 + RANDOM % 20000)); T0=$(date +%s)
