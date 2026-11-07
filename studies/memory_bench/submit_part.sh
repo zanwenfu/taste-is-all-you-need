@@ -50,6 +50,17 @@ case "${1:?ingest, open or steps}" in
     ;;
   steps)
     read -r -a OSS <<< "${OSS_JOBS:?the kept jobs that run gpt-oss}"; read -r -a LLAMA <<< "${LLAMA_JOBS:?the kept jobs that run Llama}"; AGAIN=${AGAIN:-}; LAST=$(( ${#OSS[@]} - 1 )); LAST_LLAMA=$(( ${#LLAMA[@]} - 1 ))
+    # Llama's rows the comparison turns on, which go first on each server; and with two servers, the share of LoCoMo the first takes once LongMemEval is read, so that neither waits
+    # long on the other, named at hand-over by system (LLAMA_SHARE). The share leaves the comparison's rows alone, as the other server reads them first: two stages on one row would
+    # write one answers file at once.
+    FIRST='/(taste_git|taste_git_headers|flat_bm25|mem0|mempalace_product)-'
+    SHARE=${LLAMA_SHARE:-/(full_llama|mempalace_bench_raw|mempalace_bench_v4)-}
+    if [ $LAST_LLAMA -gt 0 ]; then
+      NAMES=${FIRST#/(}; NAMES=${NAMES%)-}
+      for NAME in ${NAMES//|/ }; do
+        if echo "locomo/$NAME-8000 " | grep -qE "locomo$SHARE"; then echo "the first server's share would take $NAME, which the comparison turns on: name another share"; exit 1; fi
+      done
+    fi
     KEEP=$D/code-${SHA:0:12}/studies/long_run/jobs; MARKS=$D/bench/runs/$PART-$RUN/stages; mkdir -p "$MARKS"
     if compgen -G "$MARKS/*.failed" > /dev/null; then
       [ -n "$AGAIN" ] || { echo "stages have failed: AGAIN must name the new tasks"; exit 1; }
@@ -84,14 +95,18 @@ case "${1:?ingest, open or steps}" in
     stage read-oss-locomo "${OSS[0]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*($MAIN)'"
     stage read-oss-lme-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='lme/.*-(2000|4000|16000) '"
     stage read-oss-locomo-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*-(2000|4000|16000) '"
-    # Llama is the slow reader, about 21 hours on one server by the practice run. A second server takes LoCoMo. On one server LongMemEval goes first, as the second judge waits only for that. On
-    # each, the rows the comparison turns on go first.
-    FIRST='/(taste_git|taste_git_headers|flat_bm25|mem0|mempalace_product)-'
+    # Llama is the slow reader: on the rehearsal LongMemEval took 54 minutes and LoCoMo about seven times as much reading, so the held-out part is about 26 hours on one server. A second
+    # server takes LoCoMo but for the first server's share. On one server LongMemEval goes first, as the second judge waits only for that. On each, the comparison's rows go first.
     THEN=; [ $LAST_LLAMA = 0 ] && THEN=" read-llama-lme?"
     stage read-llama-lme-first "${LLAMA[0]}" llama read.sbatch records "READER=llama ONLY='lme$FIRST'"
     stage read-llama-lme "${LLAMA[0]}" llama read.sbatch "records read-llama-lme-first?" "READER=llama ONLY='lme/'"
     stage read-llama-locomo-first "${LLAMA[$LAST_LLAMA]}" llama read.sbatch "records$THEN" "READER=llama ONLY='locomo$FIRST'"
-    stage read-llama-locomo "${LLAMA[$LAST_LLAMA]}" llama read.sbatch "records read-llama-locomo-first?" "READER=llama ONLY='locomo/'"
+    if [ $LAST_LLAMA = 0 ]; then
+      stage read-llama-locomo "${LLAMA[0]}" llama read.sbatch "records read-llama-locomo-first?" "READER=llama ONLY='locomo/'"
+    else
+      stage read-llama-locomo "${LLAMA[$LAST_LLAMA]}" llama read.sbatch "records read-llama-locomo-first?" "READER=llama ONLY='locomo/' NOT='locomo$SHARE'"
+      stage read-llama-locomo-share "${LLAMA[0]}" llama read.sbatch "records read-llama-lme?" "READER=llama ONLY='locomo$SHARE'"
+    fi
     # The first judge does not wait on Llama, and two judges must not write one verdict file at once: the second follows it, however it ended. Only LongMemEval's answers are judged.
     stage judge "${OSS[0]}" gpt-oss judge.sbatch "read-oss-lme read-oss-locomo read-oss-lme-sweep read-oss-locomo-sweep"
     stage judge-llama "${OSS[0]}" gpt-oss judge.sbatch "read-llama-lme judge?"
