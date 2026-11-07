@@ -556,7 +556,7 @@ def test_a_servers_address_comes_when_it_has_loaded_and_a_dead_server_says_so(tm
     assert subprocess.run(run, env=env, capture_output=True, text=True, timeout=20).returncode == 0, "and a later server on the same GPUs will do"
 
 
-def _stage(tmp_path: Path, name: str, script: str, after: str = "", *, body: str = "exit 0", server: str = "none", **more: str) -> subprocess.CompletedProcess:
+def _stage_env(tmp_path: Path, script: str, body: str = "exit 0", **more: str) -> dict:
     study = tmp_path / "study"
     code = study / "code-abcdefabcdef" / "studies"
     (code / "memory_bench" / "jobs").mkdir(parents=True, exist_ok=True)
@@ -564,7 +564,12 @@ def _stage(tmp_path: Path, name: str, script: str, after: str = "", *, body: str
     for helper in ("server_url.sh", "job_gone.sh"):
         (code / "long_run" / "jobs" / helper).write_text((ROOT / "studies/long_run/jobs" / helper).read_text())
     (code / "memory_bench" / "jobs" / script).write_text(f"echo ran >> {tmp_path / 'ran'}\necho url ${{SERVER_URL:-none}} >> {tmp_path / 'ran'}\n{body}\n")
-    env = {**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "PART": "dev", "RUN": "r", "SLURM_JOB_ID": "77", "STAGE_POLL": "0.05", "SERVER_POLL": "0.05", **more}
+    return {**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "PART": "dev", "RUN": "r", "SLURM_JOB_ID": "77", "STAGE_POLL": "0.05", "SERVER_POLL": "0.05",
+            "STAGE_BEAT": "0.2", "STAGE_CONFIRM_SECONDS": "0", **more}
+
+
+def _stage(tmp_path: Path, name: str, script: str, after: str = "", *, body: str = "exit 0", server: str = "none", **more: str) -> subprocess.CompletedProcess:
+    env = _stage_env(tmp_path, script, body, **more)
     return subprocess.run(["bash", str(ROOT / "studies/memory_bench/jobs/stage.sh"), name, server, script, after], env=env, capture_output=True, text=True, timeout=20)
 
 
@@ -605,6 +610,83 @@ def test_a_stage_stops_waiting_when_the_job_of_the_stage_it_follows_has_gone_wit
 def test_a_stage_that_only_needs_another_to_have_ended_goes_on_when_its_job_has_gone(tmp_path: Path) -> None:
     (_marks(tmp_path) / "judge.running").write_text("55\n")
     assert _stage(tmp_path, "judge-llama", "judge.sbatch", "judge?", **_no_such_job(tmp_path)).returncode == 0
+
+
+def _job_still_there(tmp_path: Path) -> dict:
+    _stub(tmp_path / "bin" / "squeue", "echo RUNNING")
+    return {"PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"}
+
+
+def test_a_stage_stops_waiting_for_one_that_fell_silent_on_a_job_still_running(tmp_path: Path) -> None:
+    # A stage killed outright leaves its job up and its mark unwritten, as when the job's own loop, not the stage, said how it went.
+    marks = _marks(tmp_path)
+    (marks / "records.running").write_text("55\n")
+    (marks / "records.beat").write_text(f"{int(time.time()) - 3600}\n")
+    done = _stage(tmp_path, "read", "read.sbatch", "records", **_job_still_there(tmp_path))
+    assert done.returncode == 1 and "records has said nothing for" in done.stdout and not (tmp_path / "ran").exists()
+    assert (marks / "read.failed").exists()
+    (marks / "judge.running").write_text("55\n")
+    (marks / "judge.beat").write_text(f"{int(time.time()) - 3600}\n")
+    assert _stage(tmp_path, "judge-llama", "judge.sbatch", "judge?", **_job_still_there(tmp_path)).returncode == 0, "one that needs it only to have ended goes on"
+
+
+def test_a_stage_that_ended_well_between_the_looks_is_not_taken_for_lost(tmp_path: Path) -> None:
+    marks = _marks(tmp_path)
+    (marks / "records.running").write_text("55\n")
+    # The stage marks itself and its job leaves the queue after the follower looked for a mark and before it asked after the job.
+    _stub(tmp_path / "bin" / "squeue", f'touch {marks / "records.ok"}; echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1')
+    done = _stage(tmp_path, "read", "read.sbatch", "records", PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+    assert done.returncode == 0 and (tmp_path / "ran").exists(), done.stdout
+
+
+def test_a_stage_heard_from_lately_or_on_code_from_before_the_beat_is_waited_for(tmp_path: Path) -> None:
+    marks = _marks(tmp_path)
+    (marks / "records.running").write_text("55\n")
+    (marks / "records.beat").write_text(f"{int(time.time())}\n")
+    fresh = _stage(tmp_path, "read", "read.sbatch", "records", STAGE_WAIT_SECONDS="1", **_job_still_there(tmp_path))
+    assert fresh.returncode == 1 and "seconds waiting for records" in fresh.stdout
+    (marks / "records.beat").unlink()
+    older = _stage(tmp_path, "read2", "read.sbatch", "records", STAGE_WAIT_SECONDS="1", **_job_still_there(tmp_path))
+    assert older.returncode == 1 and "seconds waiting for records" in older.stdout, "no beat at all is not silence"
+
+
+def test_a_silence_is_taken_for_an_end_only_when_it_lasts(tmp_path: Path) -> None:
+    # A file system that stalls every node a while must not end what follows: the silence has to outlast a second look.
+    marks = _marks(tmp_path)
+    (marks / "records.running").write_text("55\n")
+    (marks / "records.beat").write_text(f"{int(time.time()) - 3600}\n")
+    done = _stage(tmp_path, "read", "read.sbatch", "records", STAGE_CONFIRM_SECONDS="30", STAGE_WAIT_SECONDS="1", **_job_still_there(tmp_path))
+    assert done.returncode == 1 and "seconds waiting for records" in done.stdout
+
+
+def test_a_stage_says_it_is_alive_while_it_runs_and_clears_up_when_it_ends(tmp_path: Path) -> None:
+    marks = tmp_path / "study" / "bench" / "runs" / "dev-r" / "stages"
+    seen = tmp_path / "seen"
+    done = _stage(tmp_path, "read", "read.sbatch", body=f"echo 0 > {marks / 'read.beat'}; sleep 1; cat {marks / 'read.beat'} > {seen}")
+    assert done.returncode == 0 and int(seen.read_text()) > time.time() - 60
+    assert not (marks / "read.beat").exists() and not (marks / "read.running").exists()
+
+
+def test_a_stage_killed_outright_falls_silent(tmp_path: Path) -> None:
+    env = _stage_env(tmp_path, "read.sbatch", "sleep 30")
+    marks = tmp_path / "study" / "bench" / "runs" / "dev-r" / "stages"
+    proc = subprocess.Popen(["bash", str(ROOT / "studies/memory_bench/jobs/stage.sh"), "read", "none", "read.sbatch", ""], env=env, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            if (marks / "read.running").exists():
+                break
+            time.sleep(0.05)
+        proc.kill()  # the stage's own shell only, as the kernel ends one process
+        proc.wait(timeout=10)
+        time.sleep(0.5)
+        (marks / "read.beat").write_text("0\n")
+        time.sleep(1)
+        assert (marks / "read.beat").read_text().strip() == "0", "nothing it left behind speaks for it"
+        assert (marks / "read.running").exists() and not (marks / "read.failed").exists()
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)  # the group this test made: the job script's sleep
 
 
 def test_a_stage_stops_waiting_at_its_limit(tmp_path: Path) -> None:
@@ -649,7 +731,8 @@ def test_a_stage_does_not_start_before_the_parts_hour(tmp_path: Path) -> None:
     code = study / "code-abcdefabcdef" / "studies" / "memory_bench" / "jobs"
     code.mkdir(parents=True)
     (code / "records.sbatch").write_text(f"touch {tmp_path / 'ran'}\n")
-    env = {**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "PART": "held_out", "RUN": "r", "SLURM_JOB_ID": "77", "STAGE_POLL": "0.05", "OPENS_EPOCH": str(int(time.time()) + 3600)}
+    env = {**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "PART": "held_out", "RUN": "r", "SLURM_JOB_ID": "77", "STAGE_POLL": "0.05", "STAGE_BEAT": "0.2",
+           "OPENS_EPOCH": str(int(time.time()) + 3600)}
     with pytest.raises(subprocess.TimeoutExpired):
         subprocess.run(["bash", str(ROOT / "studies/memory_bench/jobs/stage.sh"), "records", "none", "records.sbatch", ""], env=env, capture_output=True, text=True, timeout=1.5, start_new_session=True)
     assert not (tmp_path / "ran").exists()
@@ -726,10 +809,31 @@ def test_a_stage_still_running_is_not_asked_again(tmp_path: Path) -> None:
     marks = study / "bench" / "runs" / "dev-r" / "stages"
     (marks / "read-oss-lme.failed").touch()
     (marks / "read-llama-lme.running").write_text("103\n")
+    (marks / "read-llama-locomo.running").write_text("104\n")
+    (marks / "read-llama-locomo.beat").write_text(f"{int(time.time())}\n")
+    # Silent on a job still up: its shell may yet be alive behind a stalled file system, and a second copy would write the same rows, so it is left for a person to stop.
+    (marks / "judge.running").write_text("101\n")
+    (marks / "judge.beat").write_text(f"{int(time.time()) - 3600}\n")
     again, _ = _steps(tmp_path, AGAIN="-2")
     assert again.returncode == 0 and "read-llama-lme is still running on job 103" in again.stdout
-    assert not (study / "logs" / "gpus-103" / "tasks" / "dev-read-llama-lme-2.sh").exists()
+    assert "read-llama-locomo is still running on job 104" in again.stdout
+    assert "judge has said nothing for" in again.stdout and "not asked again" in again.stdout.split("judge has said nothing for")[1].splitlines()[0]
+    for job, name in ((103, "read-llama-lme"), (104, "read-llama-locomo"), (101, "judge")):
+        assert not (study / "logs" / f"gpus-{job}" / "tasks" / f"dev-{name}-2.sh").exists()
     assert (study / "logs" / "gpus-101" / "tasks" / "dev-read-oss-lme-2.sh").exists()
+
+
+def test_a_stage_asked_again_after_its_job_left_sets_aside_what_that_job_left(tmp_path: Path) -> None:
+    # Else a stage handed over again but not yet started looks, to what follows it, like the one whose job has gone.
+    _, study = _steps(tmp_path)
+    marks = study / "bench" / "runs" / "dev-r" / "stages"
+    (marks / "records.running").write_text("55\n")
+    (marks / "records.beat").write_text("1\n")
+    _stub(tmp_path / "bin2" / "squeue", 'case "$*" in *55*) echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1;; *) echo RUNNING;; esac')
+    again, _ = _steps(tmp_path, AGAIN="-2", PATH=f"{tmp_path / 'bin2'}:{tmp_path / 'bin'}:{os.environ['PATH']}")
+    assert again.returncode == 0 and (study / "logs" / "gpus-101" / "tasks" / "dev-records-2.sh").exists()
+    assert not (marks / "records.running").exists() and not (marks / "records.beat").exists()
+    assert (marks / "records.running.before-2").read_text() == "55\n"
 
 
 def test_failed_stages_are_not_moved_aside_unless_new_tasks_are_named(tmp_path: Path) -> None:

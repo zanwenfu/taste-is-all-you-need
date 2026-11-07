@@ -58,9 +58,23 @@ case "${1:?ingest, open or steps}" in
     GATE=; [ "$PART" = held_out ] && GATE=$(date -d $OPENS +%s)
     # A kept job with its GPUs at rest ends itself after 8 hours, whatever is waiting on it.
     if [ -n "$GATE" ] && [ $(( GATE - $(date +%s) )) -gt 21600 ]; then echo "more than 6 hours before the hour: hand these over nearer it"; exit 1; fi
+    quiet() {  # name: seconds since its stage last said it was alive, or nothing from a stage on code from before the beat
+      local at; at=$(cat "$MARKS/$1.beat" 2>/dev/null)
+      case "$at" in ''|*[!0-9]*) return 0;; esac
+      echo $(( $(date +%s) - at ))
+    }
     stage() {  # name job server script after [more of the task's settings]
       if [ "$(cat "$MARKS/$1.ok" 2>/dev/null)" = "$SHA" ]; then echo "$1 has ended well"; return 0; fi
-      if [ -e "$MARKS/$1.running" ] && ! bash "$KEEP/job_gone.sh" "$(cat "$MARKS/$1.running")"; then echo "$1 is still running on job $(cat "$MARKS/$1.running"): not asked again"; return 0; fi
+      if [ -e "$MARKS/$1.running" ] && ! bash "$KEEP/job_gone.sh" "$(cat "$MARKS/$1.running")"; then
+        QUIET=$(quiet "$1")
+        # Silent on a job still up, its shell may yet be alive behind a stalled file system, and a second copy would write the same rows: a person looks first.
+        if [ -n "$QUIET" ] && [ "$QUIET" -ge "${STAGE_SILENT_SECONDS:-1800}" ]; then
+          echo "$1 has said nothing for $QUIET seconds on job $(cat "$MARKS/$1.running"): not asked again, as it may still be alive; look at its task"; return 0
+        fi
+        echo "$1 is still running on job $(cat "$MARKS/$1.running"): not asked again"; return 0
+      fi
+      # What a job that has gone left behind is set aside, so that what follows does not take the new task, not yet started, for the one that was lost.
+      for LEFT in running beat; do [ -e "$MARKS/$1.$LEFT" ] && mv "$MARKS/$1.$LEFT" "$MARKS/$1.$LEFT.before$AGAIN"; done
       printf 'export STUDY_ROOT=%q SHA=%q DIGEST=%q PART=%q RUN=%q OPENS_EPOCH=%q SERVER_WAIT=%q %s\nexec bash %q %q %q %q %q\n' "$D" "$SHA" "$DIGEST" "$PART" "$RUN" "$GATE" "${SERVER_WAIT:-2400}" "${6:-}" "$J/stage.sh" "$1" "$3" "$4" "$5" |
         STUDY_ROOT=$D bash "$KEEP/give_task.sh" "$2" "$PART-$1$AGAIN"
     }
