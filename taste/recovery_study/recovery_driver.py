@@ -258,6 +258,9 @@ DEFAULTS = {
     # The base runs taken, by what the hidden tests said of them: "failed" (the study), "passed" (what the reviewer
     # and the recoveries do to work that was already right: its net effect), or "any".
     "base_outcome": "failed",
+    # The base runs taken, by name, of those the outcome allows; empty: all. The others are still read, so a task's
+    # budget does not change with the list.
+    "only_runs": [],
 }
 BASE_OUTCOMES = ("failed", "passed", "any")
 
@@ -336,6 +339,9 @@ class RecoveryDriver(Driver):
         unknown = (set(settings["recoveries"]) - set(RECOVERIES)) | (set(settings["rewind_sources"]) - set(SOURCES))
         if unknown:
             raise ValueError("unknown recoveries or rewind sources: " + ", ".join(sorted(unknown)))
+        only = settings["only_runs"]
+        if not isinstance(only, list) or not all(isinstance(name, str) for name in only):
+            raise ValueError("only_runs must be a list of base runs' names")
         # These arms tell the agent what the hidden tests failed in the run it goes on from: nothing, for a passed one.
         told_tests = sorted(name for name in settings["recoveries"] if MESSAGE[name] in ("tests", "both"))
         if settings["base_outcome"] != "failed" and told_tests:
@@ -382,7 +388,9 @@ class RecoveryDriver(Driver):
 
     def takes(self, summary):
         wanted = self.settings["base_outcome"]
-        return wanted == "any" or (summary["solved"] if wanted == "passed" else not summary["solved"])
+        only = self.settings["only_runs"]
+        return (wanted == "any" or (summary["solved"] if wanted == "passed" else not summary["solved"])) \
+            and (not only or summary["trial"] in only)
 
     def _add_run(self, summary, job_dir):
         before = set(self.runs)

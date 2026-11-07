@@ -75,11 +75,29 @@ def test_the_checks_alone_first_then_a_second_state_recovers_from_their_verdicts
     assert not made & checks and all(name.startswith("ne2") for name in made)
 
 
+def test_only_runs_takes_the_named_base_runs_though_the_budget_still_reads_them_all(tmp_path):
+    jobs_dir, _, given, failed, passed = both(tmp_path, base_outcome="any")
+    open_all, _ = step(tmp_path / "all.json", given, jobs_dir)
+    driver, _ = step(tmp_path / "rec.json", {**given, "only_runs": [passed]}, jobs_dir)
+    assert set(driver.runs) == {passed}
+    # The run left out is still read, so the task's budget does not change with the list.
+    assert len(driver.data["fresh"]) == len(open_all.data["fresh"])
+    assert driver.runs[passed]["budget"] == open_all.runs[passed]["budget"]
+
+
+def test_only_runs_still_holds_to_the_outcome_asked_for(tmp_path):
+    jobs_dir, _, given, failed, passed = both(tmp_path, base_outcome="passed")
+    driver, _ = step(tmp_path / "rec.json", {**given, "only_runs": [failed, passed]}, jobs_dir)
+    assert set(driver.runs) == {passed}
+
+
 @pytest.mark.parametrize("given, message", [
     ({"base_outcome": "sometimes"}, "base_outcome"),
     # The tests arms tell the agent what the hidden tests failed: nothing, for a run that passed them.
     ({"base_outcome": "passed", "recoveries": ["continue_tests"]}, "hidden tests"),
     ({"base_outcome": "any", "recoveries": ["continue_both"]}, "hidden tests"),
+    ({"only_runs": "a-run"}, "only_runs"),
+    ({"only_runs": [1]}, "only_runs"),
 ])
 def test_settings_that_cannot_hold_for_passed_runs_are_refused(tmp_path, given, message):
     _, _, settings, _, _ = both(tmp_path)
