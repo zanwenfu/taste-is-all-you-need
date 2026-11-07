@@ -763,6 +763,7 @@ def test_settings_in_a_task_reach_the_shell_as_one_word_each(tmp_path: Path) -> 
     text = (study / "logs" / "gpus-101" / "tasks" / "dev-read-oss-lme.sh").read_text().replace("exec bash", "echo")
     shown = subprocess.run(["bash", "-c", text + '\necho "[$ONLY][$READER][$PART][$RUN][$SHA]"'], capture_output=True, text=True)
     assert "[lme/.*(-8000 |-118000 )][oss][dev][r][abcdefabcdef0000]" in shown.stdout, shown.stdout + shown.stderr
+    assert "SERVER_WAIT=2400" in text
 
 
 def test_run_again_the_stages_ask_only_for_what_did_not_end_well(tmp_path: Path) -> None:

@@ -61,7 +61,7 @@ case "${1:?ingest, open or steps}" in
     stage() {  # name job server script after [more of the task's settings]
       if [ "$(cat "$MARKS/$1.ok" 2>/dev/null)" = "$SHA" ]; then echo "$1 has ended well"; return 0; fi
       if [ -e "$MARKS/$1.running" ] && ! bash "$KEEP/job_gone.sh" "$(cat "$MARKS/$1.running")"; then echo "$1 is still running on job $(cat "$MARKS/$1.running"): not asked again"; return 0; fi
-      printf 'export STUDY_ROOT=%q SHA=%q DIGEST=%q PART=%q RUN=%q OPENS_EPOCH=%q %s\nexec bash %q %q %q %q %q\n' "$D" "$SHA" "$DIGEST" "$PART" "$RUN" "$GATE" "${6:-}" "$J/stage.sh" "$1" "$3" "$4" "$5" |
+      printf 'export STUDY_ROOT=%q SHA=%q DIGEST=%q PART=%q RUN=%q OPENS_EPOCH=%q SERVER_WAIT=%q %s\nexec bash %q %q %q %q %q\n' "$D" "$SHA" "$DIGEST" "$PART" "$RUN" "$GATE" "${SERVER_WAIT:-2400}" "${6:-}" "$J/stage.sh" "$1" "$3" "$4" "$5" |
         STUDY_ROOT=$D bash "$KEEP/give_task.sh" "$2" "$PART-$1$AGAIN"
     }
     MAIN='-8000 |-118000 '
