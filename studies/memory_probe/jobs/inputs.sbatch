@@ -8,7 +8,8 @@
 # (its inputs are built apart), and needs from here only its own no-rule rate, which the analysis reads with --floors. Free. Needs STUDY_ROOT, SHA, VARIANT and OUT.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
-D=${STUDY_ROOT:?}; S=${SHA:?}; V=${VARIANT:?}; OUT=${OUT:?}; PR=${PR:-anthropic}; HISTORIES=${HISTORIES:-0:10}
+# WORKERS: a shared server holds about six of these long requests at once, and one waiting past the client's time limit fails the run: three case sets at 16 each timed out on one GPU.
+D=${STUDY_ROOT:?}; S=${SHA:?}; V=${VARIANT:?}; OUT=${OUT:?}; PR=${PR:-anthropic}; HISTORIES=${HISTORIES:-0:10}; WORKERS=${WORKERS:-16}
 IMG=$D/images/vllm-v0.32.0.sif
 CODE=$D/code-${S:0:12}
 JOB=$OUT/job-$SLURM_JOB_ID; mkdir -p $JOB
@@ -42,7 +43,7 @@ printf -v NAME 'h%02d-%02d' ${HISTORIES%%:*} ${HISTORIES##*:}  # the name the ex
 mkdir -p $OUT/full/hermes-$PR $OUT/repeated/$PR
 T1=$(date +%s)
 $RUN $D/venv/bin/python -m studies.context_rot.conpact_bridge --source hermes --histories $HISTORIES --variant $V --prompt $PR \
-  --judge defer --probe-url $URL --workers 16 --out $OUT/full/hermes-$PR/$NAME > $OUT/full-$PR.report.json 2> $OUT/full-$PR.stderr.log || fail "baseline"
+  --judge defer --probe-url $URL --workers $WORKERS --out $OUT/full/hermes-$PR/$NAME > $OUT/full-$PR.report.json 2> $OUT/full-$PR.stderr.log || fail "baseline"
 echo "baseline seconds $(( $(date +%s) - T1 ))"
 if [ "$V" = cued ]; then
   kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null
@@ -51,7 +52,7 @@ if [ "$V" = cued ]; then
 fi
 T1=$(date +%s)
 $RUN $D/venv/bin/python -m studies.context_rot.repeated --prompt $PR --records-only --histories $HISTORIES --variant $V --probe-url $URL \
-  --tokenizer $D/models/gpt-oss-120b --workers 15 --out $OUT/repeated/$PR/$NAME > $OUT/repeated-$PR.stdout 2> $OUT/repeated-$PR.stderr.log || fail "records"
+  --tokenizer $D/models/gpt-oss-120b --workers $WORKERS --out $OUT/repeated/$PR/$NAME > $OUT/repeated-$PR.stdout 2> $OUT/repeated-$PR.stderr.log || fail "records"
 echo "records seconds $(( $(date +%s) - T1 )) $(tail -1 $OUT/repeated-$PR.stdout | cut -c1-200)"
 # The inputs are one prompt's, so a second prompt's have a folder of their own.
 INPUTS=$OUT/inputs; [ "$PR" = anthropic ] || INPUTS=$OUT/inputs-$PR
