@@ -158,6 +158,17 @@ def _same_settings(out: Path, settings: dict[str, Any]) -> None:
     path.write_text(json.dumps(settings, indent=1))
 
 
+def _whole_lines_done(out: Path) -> set[str]:
+    """The questions a records file already holds. A job stopped in mid-write leaves half a last line, which goes, so that a run again carries on rather than failing on it."""
+    if not out.exists():
+        return set()
+    data = out.read_bytes()
+    if data and not data.endswith(b"\n"):
+        data = data[:data.rfind(b"\n") + 1]
+        out.write_bytes(data)
+    return {json.loads(line)["qid"] for line in data.decode().splitlines()}
+
+
 def retrieve(arguments: argparse.Namespace) -> int:
     _guard(arguments)
     wanted = set(json.loads(Path(arguments.split).read_text())[arguments.part])
@@ -166,7 +177,7 @@ def retrieve(arguments: argparse.Namespace) -> int:
     out = Path(arguments.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
-    done = {json.loads(line)["qid"] for line in out.read_text().splitlines()} if out.exists() else set()
+    done = _whole_lines_done(out)
     settings = {key: getattr(arguments, key) for key in
                 ("benchmark", "system", "part", "budget", "charge", "tokenizer", "unit", "commit_per", "workdir", "headers",
                  "rankings")}

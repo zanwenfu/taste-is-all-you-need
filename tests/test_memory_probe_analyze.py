@@ -323,9 +323,11 @@ def test_commands_that_go_back_to_an_earlier_tasks_files_are_counted_arm_by_arm(
     seed.mkdir()
     (seed / "session.json").write_text(json.dumps({"tasks": tasks}))
 
-    def arm(name: str, rows: list[tuple[str, str, str]]) -> None:
+    def arm(name: str, rows: list[tuple[str, str, str]], valid: bool | None = True) -> None:
         (seed / name).mkdir()
         (seed / name / "actions.jsonl").write_text("\n".join(json.dumps({"kind": kind, "task": task, "command": command}) for task, kind, command in rows))
+        if valid is not None:
+            (seed / name / "summary.json").write_text(json.dumps({"valid": valid}))
 
     arm("compaction", [("circuit", "bash", "cat /app/sim.c"), ("count", "bash", "python3 count.py"), ("fix", "bash", "sed -n 1,9p bottle.py")])
     arm("taste_search", [("circuit", "bash", "cat /app/gates.txt"),
@@ -335,12 +337,25 @@ def test_commands_that_go_back_to_an_earlier_tasks_files_are_counted_arm_by_arm(
                          ("count", "no_command", ""),
                          ("fix", "bash", "cd /app && cat gates.txt && cat count.py")])  # back at both
 
+    arm("taste", [("count", "bash", "cat /app/sim.c")], valid=False)
+    arm("notes_told", [("count", "bash", "cat /app/sim.c")], valid=None)  # died before it could write a summary
+
     table = long_analyze.went_back([seed])
+    assert set(table) == {"compaction", "taste_search"}, "an invalid session is in no total"
     assert table["compaction"]["commands"] == 3 and table["compaction"]["back"] == 0
     assert table["taste_search"]["commands"] == 5 and table["taste_search"]["back"] == 2
     assert table["taste_search"]["by_task"] == {"count": 1, "fix": 1}
     text = long_analyze.render_went_back(table)
     assert "taste_search" in text and "2/5" in text
+
+
+def test_a_name_any_agent_might_give_its_own_file_says_nothing_of_going_back(tmp_path: Path) -> None:
+    seed = tmp_path / "s1"
+    (seed / "taste").mkdir(parents=True)
+    (seed / "session.json").write_text(json.dumps({"tasks": [{"name": "one", "instruction": "Write tests in test.py and /app/sim.c."}, {"name": "two", "instruction": "Fix bottle.py."}]}))
+    (seed / "taste" / "summary.json").write_text(json.dumps({"valid": True}))
+    (seed / "taste" / "actions.jsonl").write_text("\n".join(json.dumps({"kind": "bash", "task": "two", "command": command}) for command in ("python3 test.py", "cat sim.c")))
+    assert long_analyze.went_back([seed])["taste"]["back"] == 1
 
 
 def test_a_folder_with_no_task_list_has_nothing_to_count_for_going_back(tmp_path: Path) -> None:

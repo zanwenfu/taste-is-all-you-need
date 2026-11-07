@@ -316,27 +316,27 @@ def test_the_summary_is_the_published_prompt_asked_of_the_served_model_with_no_t
 
     def chat(messages, tools):
         sent.append((messages, tools))
-        return _text("<summary>the summary</summary>")
+        return _text("<summary>the summary of the work so far</summary>")
 
     summarize = make_summarizer(chat, "anthropic", _prompt)
     older = [{"role": "user", "content": "the task"}]
-    assert summarize(older, None) == "the summary" and sent[0][1] is None
+    assert summarize(older, None) == "the summary of the work so far" and sent[0][1] is None
     assert sent[0][0][0]["content"] == "summarize with anthropic"
     summarize(older, "the summary")
     assert {"role": "assistant", "content": "the summary"} in sent[1][0], "the previous summary goes in with the new part"
 
 
 def test_an_empty_summary_is_asked_again_and_none_is_given_if_it_stays_empty() -> None:
-    replies = iter(["", "<summary>fine</summary>"])
-    assert make_summarizer(lambda m, t: _text(next(replies)), "anthropic", _prompt)([], None) == "fine"
+    replies = iter(["", "<summary>the state of the work so far</summary>"])
+    assert make_summarizer(lambda m, t: _text(next(replies)), "anthropic", _prompt)([], None) == "the state of the work so far"
     assert make_summarizer(lambda m, t: _text(""), "anthropic", _prompt)([], None) is None
 
 
 def test_a_summary_cut_off_once_is_asked_again() -> None:
     cut = _text("<summary>half a summ")
     cut.choices[0].finish_reason = "length"
-    replies = iter([cut, _text("<summary>a whole summary</summary>")])
-    assert make_summarizer(lambda m, t: next(replies), "anthropic", _prompt)([], None) == "a whole summary"
+    replies = iter([cut, _text("<summary>a whole summary of the work</summary>")])
+    assert make_summarizer(lambda m, t: next(replies), "anthropic", _prompt)([], None) == "a whole summary of the work"
 
 
 def test_a_summary_cut_off_every_time_gives_none() -> None:
@@ -347,11 +347,13 @@ def test_a_summary_cut_off_every_time_gives_none() -> None:
 
 # Replies of the first Laguna session, shortened: of 161 summaries, 39 had other text around the block and 7 were no summary at all, which left the agent without its task.
 @pytest.mark.parametrize(("reply", "read"), [
-    ("Hmm, the user is asking me to summarize a transcript.</think><summary>\nthe state\n</summary>", "the state"),
-    ("<summary>the state</summary><tool_call>bash ${\"command\": \"echo 2f6c\"}", "the state"),
-    ("I've made progress.\n\n[summary]\nthe state\n[/summary]<tool_call>bash ${\"command\": \"echo 2f6c\"}", "the state"),
-    ("I must wrap it in a <summary></summary> block.</think><summary>the state</summary>", "the state"),
-    ("<summary>\nthe state, with no closing tag", "the state, with no closing tag"),
+    ("Hmm, the user is asking me to summarize a transcript.</think><summary>\nthe state of the work so far\n</summary>", "the state of the work so far"),
+    ("<summary>the state of the work so far</summary><tool_call>bash ${\"command\": \"echo 2f6c\"}", "the state of the work so far"),
+    ("I've made progress.\n\n[summary]\nthe state of the work so far\n[/summary]<tool_call>bash ${\"command\": \"echo 2f6c\"}", "the state of the work so far"),
+    ("I must wrap it in a <summary></summary> block.</think><summary>the state of the work so far</summary>", "the state of the work so far"),
+    ("I need to write a <summary> block.</think><summary>the state of the work so far</summary>", "the state of the work so far"),
+    ("<summary>\nthe state of the work, with no closing tag", "the state of the work, with no closing tag"),
+    ("<summary>The agent ran [bash] {\"command\": \"ls\"} and saw the list</summary>", "The agent ran [bash] {\"command\": \"ls\"} and saw the list"),
 ])
 def test_a_summary_is_what_the_published_prompt_asked_for_and_nothing_around_it(reply: str, read: str) -> None:
     assert read_summary("anthropic", reply) == read
@@ -361,8 +363,12 @@ def test_a_summary_is_what_the_published_prompt_asked_for_and_nothing_around_it(
     "<tool_call>bash{\"command\": \"cat > /app/out.txt << 'EOF'\\nEmbossed text\\nEOF\\n\"}",
     "<bash] {\"command\": \"echo done\"}</arg_value></tool_call>",
     "[bash] {\"command\": \"grep -c M486 /app/text.gcode\"}\n\nLet me analyze the M486 commands:</think>[bash] {\"command\": \"grep -n M486 /app/text.gcode\"}",
-    "<summary>\nthe state\n</arg_value></tool_call>",
-    "<summary>the state</arg_value>\n\n```summary\nagain\n</summary>",
+    "<summary>\nthe state of the work so far\n</arg_value></tool_call>",
+    "<summary>the state of the work so far</arg_value>\n\n```summary\nagain\n</summary>",
+    "The format is <summary>...</summary>. First let me look.</think>[bash] {\"command\": \"ls\"}",
+    "The format is <summary>...</summary>. First let me look.",
+    "<summary>\n[bash] {\"command\": \"ls -la and then a good deal more\"}\n</summary>",
+    "<summary>the state of the work so far</think>and on it goes</summary>",
     "Looking at this transcript, I need to understand what's happening.",
     "<summary></summary>",
     "",
@@ -377,15 +383,25 @@ def test_a_reply_that_carries_on_the_work_is_not_a_summary(reply: str) -> None:
     ("## Goal\nfix it\n\n## Next Steps\n1. run it\n[bash] {\"command\": \"ls\"}", "## Goal\nfix it\n\n## Next Steps\n1. run it"),
     ("<tool_call>bash{\"command\": \"ls\"}", None),
     ("## Goal\nfix it, cut before the rest", None),
+    ("I must use ## Goal and ## Next Steps as headings. Let me first run ls.", None),
+    ("I must use ## Goal and ## Next Steps.</think>## Goal\nfix it\n\n## Next Steps\n1. run it", "## Goal\nfix it\n\n## Next Steps\n1. run it"),
 ])
 def test_the_second_published_prompt_is_read_by_its_own_headings(reply: str, read: str | None) -> None:
     assert read_summary("pi_mono", reply) == read
 
 
+def test_a_note_taker_that_carries_on_the_work_in_any_form_is_not_taken_for_notes(tmp_path: Path) -> None:
+    from studies.long_run.session import _carries_on_the_work
+
+    for reply in ("<bash] {\"command\": \"echo done\"}</arg_value></tool_call>", "<tool_call>bash{}", "notes</think>more", "[bash] {\"command\": \"ls\"}\nand so on"):
+        assert _carries_on_the_work(reply), reply
+    assert not _carries_on_the_work("- Always pass -B to Python.\n- The agent had run [bash] {\"command\": \"ls\"} and it failed.")
+
+
 def test_each_reply_is_on_the_record_and_a_summary_that_was_never_given_says_so(tmp_path: Path) -> None:
     rows = []
-    replies = iter(["<tool_call>bash{}", "<summary>fine</summary>"])
-    assert make_summarizer(lambda m, t: _text(next(replies)), "anthropic", _prompt, on_reply=rows.append)([], None) == "fine"
+    replies = iter(["<tool_call>bash{}", "<summary>the state of the work so far</summary>"])
+    assert make_summarizer(lambda m, t: _text(next(replies)), "anthropic", _prompt, on_reply=rows.append)([], None) == "the state of the work so far"
     assert [(row["try"], row["summary"]) for row in rows] == [(1, False), (2, True)] and rows[0]["reply"] == "<tool_call>bash{}"
 
 
@@ -409,7 +425,7 @@ def _session_chat() -> _Script:
 
 
 def _summaries(messages, tools):
-    return _text("<summary>a summary</summary>")
+    return _text("<summary>a summary of the work so far</summary>")
 
 
 def _routed(script):
@@ -658,7 +674,7 @@ def test_a_session_says_how_many_summaries_it_asked_again_and_how_many_folds_wai
         if tools:
             return script(messages, tools)
         calls["summary"] += 1
-        return _text("<tool_call>bash{}" if calls["summary"] <= 4 else "<summary>a summary</summary>")
+        return _text("<tool_call>bash{}" if calls["summary"] <= 4 else "<summary>a summary of the work so far</summary>")
 
     summary = run_session(session, arm="compaction", chat=chat, make_env=lambda task: _Shell(), count=_count,
                           out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
@@ -1206,7 +1222,7 @@ def _reader_route(script, quotes):
         if "notes file" in messages[0]["content"]:
             asked["notes"].append(messages[0]["content"])
             return _text("Notes: pass -B to Python.")
-        return _text("<summary>a summary</summary>")
+        return _text("<summary>a summary of the work so far</summary>")
 
     return chat, asked
 

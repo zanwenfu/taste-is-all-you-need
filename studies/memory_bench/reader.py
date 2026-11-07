@@ -31,7 +31,14 @@ def served_ask(client: Any, model: str, *, max_tokens: int, effort: str | None =
 
 
 def _rows(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    """The answers so far. A job stopped in mid-write leaves half a last line, which goes, so that a run again carries on rather than failing on it."""
+    if not path.exists():
+        return []
+    data = path.read_bytes()
+    if data and not data.endswith(b"\n"):
+        data = data[:data.rfind(b"\n") + 1]
+        path.write_bytes(data)
+    return [json.loads(line) for line in data.decode().splitlines()]
 
 
 # A model that reasons first can use up its whole cap and show nothing. On full context gpt-oss-120b did so on 2 of 50 dev questions at 12,288 tokens, and asked three more times each, the two

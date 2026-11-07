@@ -51,10 +51,16 @@ case "${1:?ingest, open or steps}" in
   steps)
     read -r -a OSS <<< "${OSS_JOBS:?the kept jobs that run gpt-oss}"; read -r -a LLAMA <<< "${LLAMA_JOBS:?the kept jobs that run Llama}"; AGAIN=${AGAIN:-}; LAST=$(( ${#OSS[@]} - 1 )); LAST_LLAMA=$(( ${#LLAMA[@]} - 1 ))
     KEEP=$D/code-${SHA:0:12}/studies/long_run/jobs; MARKS=$D/bench/runs/$PART-$RUN/stages; mkdir -p "$MARKS"
-    for FAILED in "$MARKS"/*.failed; do [ -e "$FAILED" ] && mv "$FAILED" "$FAILED.before$AGAIN"; done
+    if compgen -G "$MARKS/*.failed" > /dev/null; then
+      [ -n "$AGAIN" ] || { echo "stages have failed: AGAIN must name the new tasks"; exit 1; }
+      for FAILED in "$MARKS"/*.failed; do mv "$FAILED" "$FAILED.before$AGAIN"; done
+    fi
     GATE=; [ "$PART" = held_out ] && GATE=$(date -d $OPENS +%s)
+    # A kept job with its GPUs at rest ends itself after 8 hours, whatever is waiting on it.
+    if [ -n "$GATE" ] && [ $(( GATE - $(date +%s) )) -gt 21600 ]; then echo "more than 6 hours before the hour: hand these over nearer it"; exit 1; fi
     stage() {  # name job server script after [more of the task's settings]
-      [ -e "$MARKS/$1.ok" ] && { echo "$1 has ended well"; return 0; }
+      if [ "$(cat "$MARKS/$1.ok" 2>/dev/null)" = "$SHA" ]; then echo "$1 has ended well"; return 0; fi
+      if [ -e "$MARKS/$1.running" ] && ! bash "$KEEP/job_gone.sh" "$(cat "$MARKS/$1.running")"; then echo "$1 is still running on job $(cat "$MARKS/$1.running"): not asked again"; return 0; fi
       printf 'export STUDY_ROOT=%q SHA=%q DIGEST=%q PART=%q RUN=%q OPENS_EPOCH=%q %s\nexec bash %q %q %q %q %q\n' "$D" "$SHA" "$DIGEST" "$PART" "$RUN" "$GATE" "${6:-}" "$J/stage.sh" "$1" "$3" "$4" "$5" |
         STUDY_ROOT=$D bash "$KEEP/give_task.sh" "$2" "$PART-$1$AGAIN"
     }
@@ -64,14 +70,16 @@ case "${1:?ingest, open or steps}" in
     stage read-oss-locomo "${OSS[0]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*($MAIN)'"
     stage read-oss-lme-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='lme/.*-(2000|4000|16000) '"
     stage read-oss-locomo-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*-(2000|4000|16000) '"
-    # Llama is the slow reader, about 21 hours on one server by the practice run, so a second server takes LoCoMo, and on each server the rows the comparison turns on go first.
+    # Llama is the slow reader, about 21 hours on one server by the practice run. A second server takes LoCoMo. On one server LongMemEval goes first, as the second judge waits only for that. On
+    # each, the rows the comparison turns on go first.
     FIRST='/(taste_git|taste_git_headers|flat_bm25|mem0|mempalace_product)-'
+    THEN=; [ $LAST_LLAMA = 0 ] && THEN=" read-llama-lme?"
     stage read-llama-lme-first "${LLAMA[0]}" llama read.sbatch records "READER=llama ONLY='lme$FIRST'"
     stage read-llama-lme "${LLAMA[0]}" llama read.sbatch "records read-llama-lme-first?" "READER=llama ONLY='lme/'"
-    stage read-llama-locomo-first "${LLAMA[$LAST_LLAMA]}" llama read.sbatch records "READER=llama ONLY='locomo$FIRST'"
+    stage read-llama-locomo-first "${LLAMA[$LAST_LLAMA]}" llama read.sbatch "records$THEN" "READER=llama ONLY='locomo$FIRST'"
     stage read-llama-locomo "${LLAMA[$LAST_LLAMA]}" llama read.sbatch "records read-llama-locomo-first?" "READER=llama ONLY='locomo/'"
-    # The first judge does not wait on Llama, and two judges must not write one verdict file at once: the second follows it, however it ended.
+    # The first judge does not wait on Llama, and two judges must not write one verdict file at once: the second follows it, however it ended. Only LongMemEval's answers are judged.
     stage judge "${OSS[0]}" gpt-oss judge.sbatch "read-oss-lme read-oss-locomo read-oss-lme-sweep read-oss-locomo-sweep"
-    stage judge-llama "${OSS[0]}" gpt-oss judge.sbatch "read-llama-lme read-llama-locomo judge?"
+    stage judge-llama "${OSS[0]}" gpt-oss judge.sbatch "read-llama-lme judge?"
     ;;
 esac

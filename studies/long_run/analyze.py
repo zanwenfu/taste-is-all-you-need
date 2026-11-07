@@ -160,12 +160,15 @@ def compaction_table(runs: dict[str, dict[str, dict]]) -> dict[str, dict[str, di
     return table
 
 
+_COMMON_FILES = {"test.py", "tests.py", "main.py", "app.py", "script.py", "solution.py", "solve.py", "run.py", "utils.py", "setup.py", "output.txt", "input.txt", "result.txt", "results.txt",
+                 "answer.txt", "data.csv", "data.json", "config.json", "requirements.txt", "README.md"}  # names an agent also gives its own files, so they say nothing of which task it is on
 _FILE_NAME = re.compile(r"[\w-]+\.(?:c|cc|cpp|h|py|txt|json|jsonl|gcode|csv|sh|md|yaml|yml|toml|scm|rs|go|js|ts|java|sql|log|dat|html|R|tex|xml|parquet)\b")
 
 
 def went_back(folders: list[Path]) -> dict[str, dict[str, Any]]:
     """Commands at work on an earlier task, arm by arm: those naming a file only one earlier task's words name, and no file of this task's. An agent can lose its task as it loses a rule, to a
-    bad summary or to what a memory brought back. A file two tasks name is nobody's own, so it says nothing. {arm: {commands, back, by_task}}"""
+    bad summary or to what a memory brought back. A file two tasks name is nobody's own, and nor is a name any agent might give its own file. An invalid session is left out, as in every total.
+    {arm: {commands, back, by_task}}"""
     table: dict[str, dict[str, Any]] = {}
     for folder in folders:
         path = folder / "session.json"
@@ -175,10 +178,13 @@ def went_back(folders: list[Path]) -> dict[str, dict[str, Any]]:
         named = {task["name"]: set(_FILE_NAME.findall(task["instruction"])) for task in tasks}
         order = [task["name"] for task in tasks]
         counts = {name: sum(name in files for files in named.values()) for name in set().union(*named.values())}
-        own = {task: {name for name in files if counts[name] == 1} for task, files in named.items()}
+        own = {task: {name for name in files if counts[name] == 1 and name not in _COMMON_FILES} for task, files in named.items()}
         for actions in sorted(folder.glob("*/actions.jsonl")):
+            ended = actions.with_name("summary.json")
+            if not ended.exists() or not json.loads(ended.read_text()).get("valid", True):
+                continue
             entry = table.setdefault(actions.parent.name, {"commands": 0, "back": 0, "by_task": {}})
-            for row in (json.loads(line) for line in actions.read_text().splitlines()):
+            for row in map(json.loads, actions.read_text().splitlines()):
                 if row["kind"] != "bash" or row["task"] not in own:
                     continue
                 entry["commands"] += 1

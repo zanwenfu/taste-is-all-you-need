@@ -367,6 +367,16 @@ def test_the_ledger_counts_tokens_and_gpu_hours_stage_by_stage(run: Path) -> Non
     assert data["ledger"]["answers-oss"] == {"prompt_tokens": 100.0, "generated_tokens": 20.0, "cached_tokens": 60.0, "calls": 3.0, "gpu_hours": 2.0}
 
 
+def test_a_reader_on_a_shared_server_is_counted_from_its_answers(run: Path) -> None:
+    from studies.memory_bench.analyze import cost_ledger
+
+    row = run / "answers-llama" / "lme" / "some-8000"
+    row.mkdir(parents=True, exist_ok=True)
+    (row / "answers.jsonl").write_text(json.dumps({"prompt_tokens": 10, "completion_tokens": 2, "tries": 3}) + "\n" + json.dumps({"prompt_tokens": 5, "completion_tokens": 1}) + "\n")
+    entry = cost_ledger(run)["answers-llama"]
+    assert entry["prompt_tokens"] >= 15 and entry["generated_tokens"] >= 3 and entry["calls"] >= 4 and entry["gpu_hours"] is None and "shared server" in entry["by"]
+
+
 def test_a_later_commit_may_carry_on_a_run_only_if_the_ingest_it_stands_on_is_unchanged(run: Path, tmp_path: Path, monkeypatch) -> None:
     from studies.memory_ledger import code_digest, ingest_digest
 

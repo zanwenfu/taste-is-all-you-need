@@ -5,7 +5,8 @@
 #SBATCH --time=4-00:00:00
 # One reader's server, the same settings as the job that reads with it, for several steps to share with SERVER_URL, so that none waits in the queue or loads the model again. READER is
 # gpt-oss, llama or laguna, the last two on two GPUs and not on a node where a two-GPU server stalls. Run as a task of keep.sbatch, named server-READER, so that a model can change on the same GPUs.
-# Free, no key. Stopped by its task's stop file, or with its job. Writes its address to OUT/url, and empties it when told to stop.
+# Free, no key. Stopped by its task's stop file, or with its job. Writes its address to OUT/url, and empties it when it stops. The gpt-oss server carries the tool-call flags the long run needs,
+# which a request with no tools does not use, so a part's rehearsal and real test on these servers read alike, on a window wide enough for every stage.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
 D=${STUDY_ROOT:?}; READER=${READER:-laguna}; IMG=$D/images/vllm-v0.32.0.sif; OUT=$D/logs/long-serve-$SLURM_JOB_ID-$READER; mkdir -p $OUT
@@ -36,5 +37,6 @@ done
 echo "load_seconds $(( $(date +%s) - T0 )) port $PORT"
 echo "http://127.0.0.1:$PORT/v1" > $OUT/url
 wait $PID
+: > $OUT/url
 kill ${SMI:-} 2>/dev/null
 echo "end $(date -u +%FT%TZ)"

@@ -410,10 +410,23 @@ def judges_agree(root: Path, reader: str, other: str) -> dict[str, Any] | None:
     return {"judge": other, "answers": len(first), "agree": sum(x == y for x, y in zip(first, second, strict=True)), "kappa": kappa(first, second), "unread": unread}
 
 
+def _answered(root: Path) -> dict[str, dict[str, Any]]:
+    """What each reader's answers say they cost, for stages on a shared server, whose counters hold all its work at once and whose GPUs are on the record of the job that keeps them."""
+    readers: dict[str, dict[str, Any]] = {}
+    for path in sorted(root.glob("answers-*/*/*/answers.jsonl")):
+        entry = readers.setdefault(path.relative_to(root).parts[0], {"prompt_tokens": 0, "generated_tokens": 0, "cached_tokens": None, "calls": 0, "gpu_hours": None, "by": "the answers, on a shared server"})
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            entry["prompt_tokens"] += row.get("prompt_tokens") or 0
+            entry["generated_tokens"] += row.get("completion_tokens") or 0
+            entry["calls"] += row.get("tries") or 1
+    return readers
+
+
 def cost_ledger(root: Path) -> dict[str, Any]:
-    """Every stage's model tokens by the server's own counters, ingest and reading apart, and GPU-hours from the minute-by-minute record each job keeps. A stage that shared a
-    server with other work counts that work too, so a rehearsal's figures are upper bounds."""
-    stages: dict[str, dict[str, float]] = {}
+    """Every stage's model tokens by the server's own counters, ingest and reading apart, and GPU-hours from the minute-by-minute record each job keeps. A stage on a shared server writes no
+    counters, and a reader's cost then comes from its answers."""
+    stages: dict[str, dict[str, Any]] = {}
     for path in sorted(root.rglob("vllm-metrics.txt")):
         top = path.relative_to(root).parts[0]
         stage = stages.setdefault(top, {"prompt_tokens": 0, "generated_tokens": 0, "cached_tokens": 0, "calls": 0, "gpu_hours": 0.0})
@@ -431,6 +444,8 @@ def cost_ledger(root: Path) -> dict[str, Any]:
         if gpu.exists():
             samples = gpu.read_text().splitlines()[1:]
             stage["gpu_hours"] += len(samples) / 60
+    for reader, entry in _answered(root).items():
+        stages.setdefault(reader, entry)
     return stages
 
 

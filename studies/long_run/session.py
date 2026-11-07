@@ -84,26 +84,39 @@ def load_session(raw: dict) -> dict:
 # other text around the block, and 7 were no summary at all, and the next call had no task in front of it. So a summary is what the published prompt asked for, and nothing around it.
 _SUMMARY_BLOCK = re.compile(r"(?:<summary>|\[summary\])(.*?)(?:</summary>|\[/summary\])", re.S)
 _SUMMARY_OPEN = re.compile(r"^\s*(?:<summary>|\[summary\])(.*)$", re.S)
-_WORK_TEXT = re.compile(r"</?tool_call>|</?arg_key>|</?arg_value>|</think>|<bash\b|\[bash\]\s*\{")
-_PI_FIRST, _PI_LAST = "## Goal", "## Next Steps"
+_WORK_MARK = re.compile(r"</?tool_call>|</?arg_key>|</?arg_value>|</think>")
+_WORK_LINE = re.compile(r"^\s*(?:\[bash\]\s*\{|<bash\b)", re.M)  # a line that is a call, in the transcript's own form; a summary may name one mid-sentence
+_PI_FIRST, _PI_LAST = re.compile(r"^## Goal\b", re.M), re.compile(r"^## Next Steps\b", re.M)
+_FEWEST_WORDS = 5  # a mention of the form, such as <summary>...</summary>, is not a summary
+
+
+def _carries_on_the_work(text: str) -> re.Match | None:
+    """Where a reply turns from writing into working, if it does."""
+    found = [match for match in (_WORK_MARK.search(text), _WORK_LINE.search(text)) if match]
+    return min(found, key=lambda match: match.start()) if found else None
+
+
+def _a_summary(text: str) -> bool:
+    return len(re.findall(r"\w+", text)) >= _FEWEST_WORDS
 
 
 def read_summary(option: str, reply: str) -> str | None:
-    """The summary in a reply, by what its prompt asked for, or None if there is none: Anthropic's asks for a block, whose closing tag some models leave out, and Pi's for its headings."""
+    """The summary in a reply, by what its prompt asked for, or None if there is none: Anthropic's asks for a block, whose closing tag some models leave out, and Pi's for its headings, each on a
+    line of its own. What comes before the end of the model's thinking is thinking, whatever it mentions."""
+    text = reply.rsplit("</think>", 1)[-1]
     if option == "pi_mono":
-        text = reply.rsplit("</think>", 1)[-1]
-        start = text.find(_PI_FIRST)
-        if start < 0:
+        first = _PI_FIRST.search(text)
+        if not first:
             return None
-        text = text[start:]
-        work = _WORK_TEXT.search(text)
+        text = text[first.start():]
+        work = _carries_on_the_work(text)
         text = (text[:work.start()] if work else text).strip()
-        return text if _PI_LAST in text else None
-    blocks = [block.strip() for block in _SUMMARY_BLOCK.findall(reply)]
-    opened = _SUMMARY_OPEN.match(reply)
+        return text if _PI_LAST.search(text) and _a_summary(text) else None
+    blocks = [block.strip() for block in _SUMMARY_BLOCK.findall(text)]
+    opened = _SUMMARY_OPEN.match(text)
     if not blocks and opened:
         blocks = [opened.group(1).strip()]
-    whole = [block for block in blocks if block and not _WORK_TEXT.search(block)]
+    whole = [block for block in blocks if _a_summary(block) and not _carries_on_the_work(block)]
     return max(whole, key=len) if whole else None
 
 
@@ -146,7 +159,6 @@ def make_reader(chat: Callable) -> tuple[Callable[[str], list[str]], list[int]]:
 # A long conversation pasted in makes a model that thinks first carry on the work: on the first real sessions of Laguna S 2.1, 6 of 12 versions held tool calls. So the instruction comes
 # again last, as a summary prompt's does, and a reply that is still not notes is not taken for them. Read on real parts of a session before any main run: 0 of 12 with tool text, against 1 of 12.
 _NOTES_LAST = "\n\nThat was the newest part of the conversation. Do not continue it, run nothing and call no tool. Reply now with the new notes file only."
-_NOT_NOTES = re.compile(r"<tool_call>|<arg_key>|</think>")
 _NO_NOTES = "(no notes yet)"
 
 
@@ -160,7 +172,7 @@ def make_note_taker(chat: Callable, style: str, store: NotesStore, skipped: list
         for _ in range(EMPTY_TRIES):
             reply = chat([{"role": "user", "content": wanted}], None)
             text = reply.choices[0].message.content or ""
-            if text.strip() and text.strip() != _NO_NOTES and not _NOT_NOTES.search(text) and reply.choices[0].finish_reason != "length":
+            if text.strip() and text.strip() != _NO_NOTES and not _carries_on_the_work(text) and reply.choices[0].finish_reason != "length":
                 store.add_version(text)
                 return
         # An empty reply, a cut-off one or one that is not notes says nothing whole about them: the file stays as it was, rather than being wiped or halved, and the count is on the record.

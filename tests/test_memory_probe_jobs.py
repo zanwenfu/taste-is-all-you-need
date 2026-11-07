@@ -353,8 +353,10 @@ def test_no_job_script_can_aim_a_signal_at_its_own_process_group_or_everything(s
 def test_the_long_runs_shared_server_has_the_same_settings_as_a_seeds_own() -> None:
     seed = (ROOT / "studies/long_run/jobs/seed.sbatch").read_text()
     serve = (ROOT / "studies/long_run/jobs/serve.sbatch").read_text()
-    for line in ("--tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs", "--tool-call-parser openai", "--max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice"):
-        assert line in seed and line in serve
+    common = "--max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice"
+    laguna, oss = "--tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs", "--tool-call-parser openai"
+    assert common in seed and laguna in seed and f"SERVE=({oss})" in seed
+    assert f"SERVE=({common} {laguna}" in serve and f"SERVE=({common} {oss})" in serve
 
 
 def test_the_shared_llama_server_has_the_same_settings_as_the_readers_own() -> None:
@@ -545,11 +547,13 @@ def test_a_servers_address_comes_when_it_has_loaded_and_a_dead_server_says_so(tm
     late = subprocess.run(run, env=env, capture_output=True, text=True, timeout=20)
     assert late.returncode == 1 and "after 1 seconds" in late.stderr
     (tasks / "server-laguna.pid").write_text("1")
-    (tasks / "server-laguna.exit").write_text("1")
-    dead = subprocess.run(run, env={**env, "SERVER_WAIT": "60"}, capture_output=True, text=True, timeout=20)
-    assert dead.returncode == 1 and "task has ended" in dead.stderr
     url.write_text("http://127.0.0.1:9/v1\n")
     assert subprocess.run(run, env=env, capture_output=True, text=True, timeout=20).stdout.strip() == "http://127.0.0.1:9/v1"
+    (tasks / "server-laguna.exit").write_text("1")
+    dead = subprocess.run(run, env={**env, "SERVER_WAIT": "60"}, capture_output=True, text=True, timeout=20)
+    assert dead.returncode == 1 and "task has ended" in dead.stderr, "whatever address it left behind"
+    (tasks / "server-laguna-2.pid").write_text("2")
+    assert subprocess.run(run, env=env, capture_output=True, text=True, timeout=20).returncode == 0, "and a later server on the same GPUs will do"
 
 
 def _stage(tmp_path: Path, name: str, script: str, after: str = "", *, body: str = "exit 0", server: str = "none", **more: str) -> subprocess.CompletedProcess:
@@ -557,7 +561,8 @@ def _stage(tmp_path: Path, name: str, script: str, after: str = "", *, body: str
     code = study / "code-abcdefabcdef" / "studies"
     (code / "memory_bench" / "jobs").mkdir(parents=True, exist_ok=True)
     (code / "long_run" / "jobs").mkdir(parents=True, exist_ok=True)
-    (code / "long_run" / "jobs" / "server_url.sh").write_text((ROOT / "studies/long_run/jobs/server_url.sh").read_text())
+    for helper in ("server_url.sh", "job_gone.sh"):
+        (code / "long_run" / "jobs" / helper).write_text((ROOT / "studies/long_run/jobs" / helper).read_text())
     (code / "memory_bench" / "jobs" / script).write_text(f"echo ran >> {tmp_path / 'ran'}\necho url ${{SERVER_URL:-none}} >> {tmp_path / 'ran'}\n{body}\n")
     env = {**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "PART": "dev", "RUN": "r", "SLURM_JOB_ID": "77", "STAGE_POLL": "0.05", "SERVER_POLL": "0.05", **more}
     return subprocess.run(["bash", str(ROOT / "studies/memory_bench/jobs/stage.sh"), name, server, script, after], env=env, capture_output=True, text=True, timeout=20)
@@ -574,6 +579,57 @@ def test_a_stage_runs_its_job_script_and_leaves_a_mark(tmp_path: Path) -> None:
     assert done.returncode == 0 and (_marks(tmp_path) / "records.ok").exists()
     failed = _stage(tmp_path, "read", "read.sbatch", body="exit 4")
     assert failed.returncode == 4 and (_marks(tmp_path) / "read.failed").exists() and not (_marks(tmp_path) / "read.ok").exists()
+
+
+def test_a_stage_says_while_it_runs_which_job_it_is_on(tmp_path: Path) -> None:
+    seen = tmp_path / "seen"
+    done = _stage(tmp_path, "read", "read.sbatch", body=f"cat {tmp_path / 'study' / 'bench' / 'runs' / 'dev-r' / 'stages' / 'read.running'} > {seen}")
+    assert done.returncode == 0 and seen.read_text().strip() == "77"
+    assert not (_marks(tmp_path) / "read.running").exists() and (_marks(tmp_path) / "read.ok").read_text().strip() == "abcdefabcdef0000"
+
+
+def _no_such_job(tmp_path: Path) -> dict:
+    _stub(tmp_path / "bin" / "squeue", 'echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1')
+    code = tmp_path / "study" / "code-abcdefabcdef" / "studies" / "long_run" / "jobs"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "job_gone.sh").write_text((ROOT / "studies/long_run/jobs/job_gone.sh").read_text())
+    return {"PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"}
+
+
+def test_a_stage_stops_waiting_when_the_job_of_the_stage_it_follows_has_gone_with_no_mark(tmp_path: Path) -> None:
+    (_marks(tmp_path) / "records.running").write_text("55\n")
+    done = _stage(tmp_path, "read", "read.sbatch", "records", **_no_such_job(tmp_path))
+    assert done.returncode == 1 and "job left the queue with no mark" in done.stdout and not (tmp_path / "ran").exists()
+
+
+def test_a_stage_that_only_needs_another_to_have_ended_goes_on_when_its_job_has_gone(tmp_path: Path) -> None:
+    (_marks(tmp_path) / "judge.running").write_text("55\n")
+    assert _stage(tmp_path, "judge-llama", "judge.sbatch", "judge?", **_no_such_job(tmp_path)).returncode == 0
+
+
+def test_a_stage_stops_waiting_at_its_limit(tmp_path: Path) -> None:
+    done = _stage(tmp_path, "read", "read.sbatch", "records", STAGE_WAIT_SECONDS="1")
+    assert done.returncode == 1 and "seconds waiting for records" in done.stdout and (_marks(tmp_path) / "read.failed").exists()
+
+
+def test_a_controller_that_cannot_answer_is_not_a_job_gone(tmp_path: Path) -> None:
+    gone = ["bash", str(ROOT / "studies/long_run/jobs/job_gone.sh"), "55"]
+
+    def asked(body: str) -> int:
+        _stub(tmp_path / "bin" / "squeue", body)
+        return subprocess.run(gone, env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"}, capture_output=True, timeout=20).returncode
+
+    assert asked("exit 0") == 0, "no line for it: gone"
+    assert asked('echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1') == 0
+    assert asked("echo RUNNING") == 1
+    assert asked('echo "slurm_load_jobs error: Unable to contact slurm controller" >&2; exit 1') == 1
+
+
+def test_a_task_for_a_job_that_has_left_the_queue_is_refused(tmp_path: Path) -> None:
+    _stub(tmp_path / "bin" / "squeue", 'echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1')
+    env = {**os.environ, "STUDY_ROOT": str(tmp_path / "study"), "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"}
+    done = subprocess.run(["bash", str(ROOT / "studies/long_run/jobs/give_task.sh"), "55", "one"], input="echo first\n", env=env, capture_output=True, text=True, timeout=20)
+    assert done.returncode == 1 and "left the queue" in done.stderr
 
 
 def test_a_stage_after_a_failed_one_fails_without_running(tmp_path: Path) -> None:
@@ -613,9 +669,14 @@ def test_a_stage_with_no_server_fails_and_says_so_and_one_with_a_server_is_given
 def _steps(tmp_path: Path, **more: str) -> tuple[subprocess.CompletedProcess, Path]:
     study, code = tmp_path / "study", tmp_path / "study" / "code-abcdefabcdef" / "studies" / "long_run" / "jobs"
     code.mkdir(parents=True, exist_ok=True)
-    (code / "give_task.sh").write_text((ROOT / "studies/long_run/jobs/give_task.sh").read_text())
+    for name in ("give_task.sh", "job_gone.sh"):
+        (code / name).write_text((ROOT / "studies/long_run/jobs" / name).read_text())
+    _stub(tmp_path / "bin" / "squeue", "echo RUNNING")
+    # GNU's date, for a laptop's.
+    _stub(tmp_path / "bin" / "date", 'case "$1" in -d) echo $(( $(/bin/date +%s) + ${HOUR_IN:-3600} ));; *) exec /bin/date "$@";; esac')
     done = subprocess.run(["bash", str(ROOT / "studies/memory_bench/submit_part.sh"), "steps"], capture_output=True, text=True, timeout=60, start_new_session=True,
-                          env={**os.environ, "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "DIGEST": "d", "PART": "dev", "RUN": "r", "OSS_JOBS": "101 102", "LLAMA_JOBS": "103 104", **more})
+                          env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "DIGEST": "d", "PART": "dev", "RUN": "r",
+                               "OSS_JOBS": "101 102", "LLAMA_JOBS": "103 104", **more})
     return done, study
 
 
@@ -635,10 +696,10 @@ def test_the_stages_as_tasks_keep_opens_order_on_the_jobs_they_are_given(tmp_pat
     first = "/(taste_git|taste_git_headers|flat_bm25|mem0|mempalace_product)-"
     assert f"ONLY='lme{first}'" in task(103, "read-llama-lme-first") and "READER=llama" in task(103, "read-llama-lme-first")
     assert "ONLY='lme/'" in task(103, "read-llama-lme") and "records\\ read-llama-lme-first\\?" in task(103, "read-llama-lme")
-    assert f"ONLY='locomo{first}'" in task(104, "read-llama-locomo-first")
+    assert f"ONLY='locomo{first}'" in task(104, "read-llama-locomo-first") and "read.sbatch records\n" in task(104, "read-llama-locomo-first"), "a second server does not wait for the first"
     assert "ONLY='locomo/'" in task(104, "read-llama-locomo") and "records\\ read-llama-locomo-first\\?" in task(104, "read-llama-locomo")
     assert "read-oss-lme\\ read-oss-locomo\\ read-oss-lme-sweep\\ read-oss-locomo-sweep" in task(101, "judge")
-    assert "read-llama-lme\\ read-llama-locomo\\ judge\\?" in task(101, "judge-llama")
+    assert "read-llama-lme\\ judge\\?" in task(101, "judge-llama"), "only LongMemEval's answers are judged"
     for job, tasks in ((101, 5), (102, 2), (103, 2), (104, 2)):
         assert len(list((study / "logs" / f"gpus-{job}" / "tasks").glob("*.sh"))) == tasks
 
@@ -646,7 +707,45 @@ def test_the_stages_as_tasks_keep_opens_order_on_the_jobs_they_are_given(tmp_pat
 def test_one_llama_server_takes_both_benchmarks_in_turn(tmp_path: Path) -> None:
     done, study = _steps(tmp_path, LLAMA_JOBS="103")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert len(list((study / "logs" / "gpus-103" / "tasks").glob("*.sh"))) == 4
+    tasks = study / "logs" / "gpus-103" / "tasks"
+    assert len(list(tasks.glob("*.sh"))) == 4
+    assert "records\\ read-llama-lme\\?" in (tasks / "dev-read-llama-locomo-first.sh").read_text(), "LoCoMo follows LongMemEval"
+
+
+def test_the_stages_on_the_held_out_part_carry_its_hour_and_are_not_handed_over_too_early(tmp_path: Path) -> None:
+    done, study = _steps(tmp_path, PART="held_out")
+    assert done.returncode == 0, done.stdout + done.stderr
+    task = (study / "logs" / "gpus-101" / "tasks" / "held_out-records.sh").read_text()
+    assert re.search(r"OPENS_EPOCH=\d{10}", task)
+    early, study2 = _steps(tmp_path / "early", PART="held_out", HOUR_IN="30000")
+    assert early.returncode == 1 and "more than 6 hours before" in early.stdout and not (study2 / "logs").exists()
+
+
+def test_a_stage_still_running_is_not_asked_again(tmp_path: Path) -> None:
+    _, study = _steps(tmp_path)
+    marks = study / "bench" / "runs" / "dev-r" / "stages"
+    (marks / "read-oss-lme.failed").touch()
+    (marks / "read-llama-lme.running").write_text("103\n")
+    again, _ = _steps(tmp_path, AGAIN="-2")
+    assert again.returncode == 0 and "read-llama-lme is still running on job 103" in again.stdout
+    assert not (study / "logs" / "gpus-103" / "tasks" / "dev-read-llama-lme-2.sh").exists()
+    assert (study / "logs" / "gpus-101" / "tasks" / "dev-read-oss-lme-2.sh").exists()
+
+
+def test_failed_stages_are_not_moved_aside_unless_new_tasks_are_named(tmp_path: Path) -> None:
+    _, study = _steps(tmp_path)
+    marks = study / "bench" / "runs" / "dev-r" / "stages"
+    (marks / "records.failed").touch()
+    again, _ = _steps(tmp_path)
+    assert again.returncode == 1 and "AGAIN must name" in again.stdout and (marks / "records.failed").exists()
+
+
+def test_a_mark_from_another_commit_does_not_count_as_ended_well(tmp_path: Path) -> None:
+    _, study = _steps(tmp_path)
+    marks = study / "bench" / "runs" / "dev-r" / "stages"
+    (marks / "records.ok").write_text("another commit\n")
+    again, _ = _steps(tmp_path, AGAIN="-2")
+    assert again.returncode == 0 and (study / "logs" / "gpus-101" / "tasks" / "dev-records-2.sh").exists()
 
 
 def test_the_patterns_for_llamas_first_rows_pick_those_rows_and_no_others() -> None:
@@ -669,7 +768,7 @@ def test_settings_in_a_task_reach_the_shell_as_one_word_each(tmp_path: Path) -> 
 def test_run_again_the_stages_ask_only_for_what_did_not_end_well(tmp_path: Path) -> None:
     _, study = _steps(tmp_path)
     marks = study / "bench" / "runs" / "dev-r" / "stages"
-    (marks / "records.ok").touch()
+    (marks / "records.ok").write_text("abcdefabcdef0000\n")
     (marks / "read-oss-lme.failed").touch()
     again, _ = _steps(tmp_path, AGAIN="-2")
     assert again.returncode == 0 and "records has ended well" in again.stdout and not (marks / "read-oss-lme.failed").exists()

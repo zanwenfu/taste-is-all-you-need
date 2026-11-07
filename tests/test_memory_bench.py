@@ -583,3 +583,24 @@ def test_a_split_is_repeatable_and_covers_every_type() -> None:
     dev, _ = grouped_split(_questions(), 20, 7)
     kinds = {next(q["question_type"] for q in _questions() if q["question_id"] == d) for d in dev}
     assert kinds == {"multi-session", "temporal-reasoning", "single-session-user"}
+
+
+def test_half_a_line_left_by_a_stopped_job_goes_and_the_run_carries_on(tmp_path: Path) -> None:
+    from studies.memory_bench.run import _whole_lines_done
+
+    out = tmp_path / "records.jsonl"
+    assert _whole_lines_done(out) == set()
+    out.write_text('{"qid": "a"}\n{"qid": "b"}\n{"qid": "c", "half')
+    assert _whole_lines_done(out) == {"a", "b"}
+    assert out.read_text() == '{"qid": "a"}\n{"qid": "b"}\n'
+
+
+def test_half_an_answer_left_by_a_stopped_job_goes_and_the_row_carries_on(tmp_path: Path) -> None:
+    from studies.memory_bench.reader import _rows
+
+    out = tmp_path / "answers.jsonl"
+    assert _rows(out) == []
+    out.write_text('{"qid": "a"}\n{"qid": "b", "half')
+    assert _rows(out) == [{"qid": "a"}]
+    assert out.read_text() == '{"qid": "a"}\n'
+

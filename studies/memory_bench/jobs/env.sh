@@ -32,7 +32,8 @@ OSS_NAME=openai/gpt-oss-120b
 LLAMA_NAME=meta-llama/Meta-Llama-3.1-70B-Instruct
 FROZEN=(); [ "$PART" = held_out ] && FROZEN=(--frozen-config $SHA --frozen-digest $DIGEST)
 fail() { echo "FAILED: $*"; kill ${PID:-} ${EMB:-} ${SMI:-} 2>/dev/null; exit 1; }
-gpu_log() { nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 60 > $1/gpu.csv & SMI=$!; }
+# On a shared server the job that keeps the GPUs has the record of them, and the counters hold every stage's work at once, so a stage writes neither: the ledger counts its answers.
+gpu_log() { SMI=; [ -z "${SERVER_URL:-}" ] || return 0; nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 60 > $1/gpu.csv & SMI=$!; }
 on_running_server() {  # SERVER_URL: a server of this study already running this model. Sets PORT and PID, and says whether there is one.
   [ -n "${SERVER_URL:-}" ] || return 1
   PID=; PORT=${SERVER_URL##*:}; PORT=${PORT%%/*}
@@ -61,4 +62,4 @@ wait_for() {  # job folder, port, start time
   echo "load_seconds $(( $(date +%s) - $3 ))"
 }
 RUN_GPU="apptainer exec --nv --home $D/cache/home --bind $D $IMG"
-metrics() { curl -s http://127.0.0.1:$PORT/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $1/vllm-metrics.txt; }
+metrics() { [ -z "${SERVER_URL:-}" ] || return 0; curl -s http://127.0.0.1:$PORT/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $1/vllm-metrics.txt; }
