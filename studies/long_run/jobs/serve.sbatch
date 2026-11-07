@@ -5,7 +5,7 @@
 #SBATCH --time=4-00:00:00
 # One reader's server, the same settings as the job that reads with it, for several steps to share with SERVER_URL, so that none waits in the queue or loads the model again. READER is
 # gpt-oss, llama or laguna, the last two on two GPUs and not on a node where a two-GPU server stalls. Run as a task of keep.sbatch, named server-READER, so that a model can change on the same GPUs.
-# Free, no key. Stopped by its task's stop file, or with its job. Writes its address to OUT/url, and empties it when it stops. The gpt-oss server carries the tool-call flags the long run needs,
+# SERVE_MORE adds to the flags, for GPUs of another kind that need the model across more of them; the study's rows on those say so. Free, no key. Stopped by its task's stop file, or with its job. Writes its address to OUT/url, and empties it when it stops. The gpt-oss server carries the tool-call flags the long run needs,
 # which a request with no tools does not use, so a part's rehearsal and real test on these servers read alike, on a window wide enough for every stage.
 set -uo pipefail
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
@@ -28,7 +28,7 @@ nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv 
 SMI=$!
 PORT=$((20000 + RANDOM % 20000)); T0=$(date +%s)
 apptainer exec --nv --home $D/cache/home --bind $D $IMG vllm serve $FOLDER --served-model-name $MODEL --host 127.0.0.1 --port $PORT \
-  "${SERVE[@]}" > $OUT/vllm.log 2>&1 &
+  "${SERVE[@]}" ${SERVE_MORE:-} > $OUT/vllm.log 2>&1 &
 PID=$!
 until curl -sf http://127.0.0.1:$PORT/health >/dev/null; do
   sleep 5; kill -0 $PID 2>/dev/null || { tail -40 $OUT/vllm.log; kill ${SMI:-} 2>/dev/null; echo "FAILED: server died"; exit 1; }
