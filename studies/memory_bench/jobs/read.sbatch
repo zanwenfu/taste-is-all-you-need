@@ -13,10 +13,8 @@ OUT=$R/answers-$READER; JOB=$OUT/job-$SLURM_JOB_ID; mkdir -p $JOB
 echo "start $(date -u +%FT%TZ) on $(hostname) code $TASTE_COMMIT part $PART reader $READER rows '$ONLY' not '$NOT'"
 gpu_log $JOB
 if [ $READER = llama ]; then
-  MODEL=$LLAMA_NAME; PORT=$((20000 + RANDOM % 20000)); t0=$(date +%s)
-  $RUN_GPU vllm serve $LLAMA --served-model-name $MODEL --tensor-parallel-size 2 --max-model-len 32768 --gpu-memory-utilization 0.92 --host 127.0.0.1 --port $PORT > $JOB/vllm.log 2>&1 &
-  PID=$!
-  wait_for $JOB $PORT $t0
+  MODEL=$LLAMA_NAME
+  serve_llama $JOB
 else
   MODEL=$OSS_NAME
   serve_oss $JOB 131072 0.92

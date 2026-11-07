@@ -33,15 +33,23 @@ LLAMA_NAME=meta-llama/Meta-Llama-3.1-70B-Instruct
 FROZEN=(); [ "$PART" = held_out ] && FROZEN=(--frozen-config $SHA --frozen-digest $DIGEST)
 fail() { echo "FAILED: $*"; kill ${PID:-} ${EMB:-} ${SMI:-} 2>/dev/null; exit 1; }
 gpu_log() { nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 60 > $1/gpu.csv & SMI=$!; }
-serve_oss() {  # job folder, window, share of the GPU's memory; sets PORT and PID. SERVER_URL: a server of this study already running this model, for a rehearsal.
-  if [ -n "${SERVER_URL:-}" ]; then
-    PID=; PORT=${SERVER_URL##*:}; PORT=${PORT%%/*}
-    curl -sf http://127.0.0.1:$PORT/health > /dev/null || fail "no server at $SERVER_URL"
-    echo "using the running server at $SERVER_URL"
-    return
-  fi
+on_running_server() {  # SERVER_URL: a server of this study already running this model. Sets PORT and PID, and says whether there is one.
+  [ -n "${SERVER_URL:-}" ] || return 1
+  PID=; PORT=${SERVER_URL##*:}; PORT=${PORT%%/*}
+  curl -sf http://127.0.0.1:$PORT/health > /dev/null || fail "no server at $SERVER_URL"
+  echo "using the running server at $SERVER_URL"
+}
+serve_oss() {  # job folder, window, share of the GPU's memory; sets PORT and PID.
+  on_running_server && return
   PORT=$((20000 + RANDOM % 20000)); local t0=$(date +%s)
   $RUN_GPU vllm serve $OSS --served-model-name $OSS_NAME --host 127.0.0.1 --port $PORT --max-model-len $2 --gpu-memory-utilization $3 > $1/vllm.log 2>&1 &
+  PID=$!
+  wait_for $1 $PORT $t0
+}
+serve_llama() {  # job folder; sets PORT and PID. On two GPUs.
+  on_running_server && return
+  PORT=$((20000 + RANDOM % 20000)); local t0=$(date +%s)
+  $RUN_GPU vllm serve $LLAMA --served-model-name $LLAMA_NAME --tensor-parallel-size 2 --max-model-len 32768 --gpu-memory-utilization 0.92 --host 127.0.0.1 --port $PORT > $1/vllm.log 2>&1 &
   PID=$!
   wait_for $1 $PORT $t0
 }

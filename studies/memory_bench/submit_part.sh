@@ -7,6 +7,11 @@
 # DIGEST is worked out from git where the repository is: python -c "from studies.memory_ledger import digest_of_commit; print(digest_of_commit('<commit>'))".
 # ingest reads no gold: the shared files, MemPalace, the dense list, Mem0 across GPUs, the headers. open reads it, and on the held-out part the first stage waits for the part's
 # date, which its own guard also checks. The reader's rows are split so that no job meets its time limit, the main rows first.
+#
+#   STUDY_ROOT=... SHA=<commit> DIGEST=<its digest> PART=held_out RUN=<...> OSS_JOBS="<job> <job>" LLAMA_JOB=<job> nohup bash submit_part.sh steps > log 2>&1 &
+#
+# steps does what open does on GPUs the study already has, for when the queue would keep the stages from their day: the same job scripts and the same rows, as steps on jobs that each run a
+# server (long_run/jobs/serve.sbatch), read with SERVER_URL. It stays on the login node until every stage ends, each stage waiting for what open makes it wait for, and stops at the first that fails.
 set -u
 D=${STUDY_ROOT:?}; SHA=${SHA:?}; DIGEST=${DIGEST:?}; PART=${PART:?}; RUN=${RUN:-${SHA:0:12}}
 J=$D/code-${SHA:0:12}/studies/memory_bench/jobs
@@ -16,7 +21,7 @@ GPU="--partition=compsci-gpu --exclude=compsci-cluster-fitz-48"
 CPU="--partition=compsci --exclude=compsci-cluster-fitz-48"
 EXP="--export=ALL,STUDY_ROOT=$D,SHA=$SHA,DIGEST=$DIGEST,PART=$PART,RUN=$RUN"
 ONE="--gres=gpu:rtx_pro_6000:1"
-case "${1:?ingest or open}" in
+case "${1:?ingest, open or steps}" in
   ingest)
     RANK=$(sbatch --parsable $CPU $EXP --output=$L/$PART-rank-%j.out $J/rank.sbatch)
     echo "rank $RANK"
@@ -41,5 +46,29 @@ case "${1:?ingest or open}" in
     JU=$(sbatch --parsable $GPU $ONE $EXP --dependency=afterok:$R1:$R2:$R3:$R4 --output=$L/$PART-judge-%j.out $J/judge.sbatch)
     JL=$(sbatch --parsable $GPU $ONE $EXP --dependency=afterok:$R5,afterany:$JU --output=$L/$PART-judge-llama-%j.out $J/judge.sbatch)
     echo "records $REC read $R1 $R2 $R3 $R4 $R5 judge $JU $JL"
+    ;;
+  steps)
+    read -r -a OSS <<< "${OSS_JOBS:?the jobs running gpt-oss}"; LLAMA=${LLAMA_JOB:?the job running Llama}
+    url() { cat $L/long-serve-$1-$2/url; }
+    # step log job reader-of-its-server cpus script [more of the export]
+    step() {
+      local log=$1 job=$2 server=$3 cpus=$4 script=$5 more=${6:-}
+      srun --jobid=$job --overlap --ntasks=1 --cpus-per-task=$cpus "--export=ALL,STUDY_ROOT=$D,SHA=$SHA,DIGEST=$DIGEST,PART=$PART,RUN=$RUN,SERVER_URL=$(url $job $server)$more" bash $J/$script > $L/$PART-$log.out 2>&1
+    }
+    [ "$PART" = held_out ] && until [ $(date +%s) -ge $(date -d $OPENS +%s) ]; do sleep 20; done
+    step records-steps ${OSS[0]} gpt-oss 32 records.sbatch || { echo "FAILED: records"; exit 1; }
+    MAIN='-8000 |-118000 '; LAST=$(( ${#OSS[@]} - 1 ))
+    step read-oss-lme-steps ${OSS[0]} gpt-oss 48 read.sbatch ",READER=oss,ONLY=lme/.*($MAIN)" & A=$!
+    step read-oss-locomo-steps ${OSS[0]} gpt-oss 48 read.sbatch ",READER=oss,ONLY=locomo/.*($MAIN)" & B=$!
+    step read-oss-lme-sweep-steps ${OSS[$LAST]} gpt-oss 48 read.sbatch ",READER=oss,ONLY=lme/.*-(2000|4000|16000) " & C=$!
+    step read-oss-locomo-sweep-steps ${OSS[$LAST]} gpt-oss 48 read.sbatch ",READER=oss,ONLY=locomo/.*-(2000|4000|16000) " & E=$!
+    step read-llama-steps $LLAMA llama 48 read.sbatch ",READER=llama" & F=$!
+    FAILED=0
+    for READ in $A $B $C $E; do wait $READ || FAILED=$((FAILED + 1)); done
+    [ $FAILED = 0 ] || { echo "FAILED: $FAILED of gpt-oss's reading steps"; wait $F; exit 1; }
+    step judge-steps ${OSS[0]} gpt-oss 48 judge.sbatch || { echo "FAILED: the first judge"; wait $F; exit 1; }
+    wait $F || { echo "FAILED: Llama's reading"; exit 1; }
+    step judge-llama-steps ${OSS[0]} gpt-oss 48 judge.sbatch || { echo "FAILED: the judge after Llama"; exit 1; }
+    echo "end $(date -u +%FT%TZ) every stage ended"
     ;;
 esac

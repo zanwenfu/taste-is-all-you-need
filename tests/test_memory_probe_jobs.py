@@ -354,3 +354,65 @@ def test_the_long_runs_shared_server_has_the_same_settings_as_a_seeds_own() -> N
     serve = (ROOT / "studies/long_run/jobs/serve.sbatch").read_text()
     for line in ("--tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs", "--tool-call-parser openai", "--max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice"):
         assert line in seed and line in serve
+
+
+def test_the_shared_llama_server_has_the_same_settings_as_the_readers_own() -> None:
+    env = (ROOT / "studies/memory_bench/jobs/env.sh").read_text()
+    serve = (ROOT / "studies/long_run/jobs/serve.sbatch").read_text()
+    line = "--tensor-parallel-size 2 --max-model-len 32768 --gpu-memory-utilization 0.92"
+    assert line in env and line in serve
+
+
+def test_a_llama_reader_uses_a_running_server_when_it_is_told_to(tmp_path: Path) -> None:
+    world = _bench_world(tmp_path)
+    (Path(world["STUDY_ROOT"]) / "code-abcdefabcdef" / "studies" / "memory_bench" / "jobs" / "read.sbatch").write_text((ROOT / "studies/memory_bench/jobs/read.sbatch").read_text())
+    done = _job("studies/memory_bench/jobs/read.sbatch", {**world, "READER": "llama", "SERVER_URL": "http://127.0.0.1:4242/v1", "SLURM_JOB_ID": "7"})
+    assert "using the running server at http://127.0.0.1:4242/v1" in done.stdout, done.stdout + done.stderr
+    assert "load_seconds" not in done.stdout
+
+
+def _steps(tmp_path: Path, fail_when: str = "no such words") -> tuple[subprocess.CompletedProcess, list[str]]:
+    bin_dir, study, log = tmp_path / "bin", tmp_path / "study", tmp_path / "calls.log"
+    _stub(bin_dir / "srun", f'''echo "$*" >> {log}
+case "$*" in *"{fail_when}"*) exit 1;; esac
+exit 0''')
+    for job, reader in ((101, "gpt-oss"), (102, "gpt-oss"), (103, "llama")):
+        folder = study / "logs" / f"long-serve-{job}-{reader}"
+        folder.mkdir(parents=True)
+        (folder / "url").write_text(f"http://127.0.0.1:{job}/v1\n")
+    done = subprocess.run(["bash", str(ROOT / "studies/memory_bench/submit_part.sh"), "steps"], capture_output=True, text=True, timeout=60, start_new_session=True,
+                          env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "DIGEST": "d", "PART": "dev", "RUN": "r",
+                               "OSS_JOBS": "101 102", "LLAMA_JOB": "103"})
+    return done, log.read_text().splitlines() if log.exists() else []
+
+
+def test_the_stages_as_steps_run_as_open_runs_them_on_the_servers_they_are_given(tmp_path: Path) -> None:
+    done, calls = _steps(tmp_path)
+    assert done.returncode == 0 and "every stage ended" in done.stdout, done.stdout + done.stderr
+    assert "records.sbatch" in calls[0] and "--jobid=101" in calls[0] and "--cpus-per-task=32" in calls[0]
+    assert "judge.sbatch" in calls[-1] and "judge.sbatch" in calls[-2] and len(calls) == 8
+    reads = [line for line in calls if "read.sbatch" in line]
+    wanted = {"ONLY=lme/.*(-8000 |-118000 )": 101, "ONLY=locomo/.*(-8000 |-118000 )": 101, "ONLY=lme/.*-(2000|4000|16000) ": 102, "ONLY=locomo/.*-(2000|4000|16000) ": 102}
+    for only, job in wanted.items():
+        line = next(line for line in reads if only in line)
+        assert f"--jobid={job}" in line and f"SERVER_URL=http://127.0.0.1:{job}/v1" in line and "READER=oss" in line
+    llama = next(line for line in reads if "READER=llama" in line)
+    assert "--jobid=103" in llama and "SERVER_URL=http://127.0.0.1:103/v1" in llama and "ONLY" not in llama
+    assert all("PART=dev" in line and "RUN=r" in line and "SHA=abcdefabcdef0000" in line for line in calls)
+
+
+def test_stages_as_steps_stop_at_the_first_that_fails(tmp_path: Path) -> None:
+    done, calls = _steps(tmp_path, "records.sbatch")
+    assert done.returncode == 1 and "FAILED: records" in done.stdout and len(calls) == 1
+
+
+def test_no_judge_reads_after_a_reader_fails_as_steps(tmp_path: Path) -> None:
+    done, calls = _steps(tmp_path, "ONLY=lme/.*-(2000")
+    assert done.returncode == 1 and "FAILED: 1 of gpt-oss" in done.stdout
+    assert not any("judge.sbatch" in line for line in calls)
+
+
+def test_the_judge_after_llama_waits_for_llama_as_steps(tmp_path: Path) -> None:
+    done, calls = _steps(tmp_path, "READER=llama")
+    assert done.returncode == 1 and "FAILED: Llama" in done.stdout
+    assert sum("judge.sbatch" in line for line in calls) == 1, "the first judge has read gpt-oss's answers, and the second has nothing new"
