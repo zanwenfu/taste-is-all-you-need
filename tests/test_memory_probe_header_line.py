@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -124,6 +126,16 @@ def test_a_cases_or_headers_file_other_than_the_rows_own_is_refused_before_any_c
     with pytest.raises(ValueError, match="headers"):
         check_header_lines(results, cases, heads, _verdicts(said), workers=1)
     assert said == [] and not results.with_name("header-line.served.jsonl").exists()
+
+
+def test_the_reader_names_a_turn_as_the_header_writer_does_and_loads_no_git_library() -> None:
+    # The judge's environment on the cluster has the benchmark package but no git library; Taste's store needs one.
+    from studies.memory_probe import header_line, headers
+    for turn in ({"role": "user", "content": "plain"}, {"role": "assistant", "content": "naïve 日本語 \udcff"}, {"role": "tool", "content": ""}):
+        assert header_line.turn_key(turn) == headers.turn_key(turn)
+    loaded = subprocess.run([sys.executable, "-c", "import sys, studies.memory_probe.header_line; print([m for m in sys.modules if m.split('.')[0] in ('git', 'taste')])"],
+                            capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1], check=True).stdout.strip()
+    assert loaded == "[]"
 
 
 def test_a_run_again_asks_only_what_has_no_verdict(tmp_path: Path) -> None:

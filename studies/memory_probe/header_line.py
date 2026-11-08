@@ -26,9 +26,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from studies.memory_probe.headers import turn_key
-
 OUT_NAME = "header-line.served.jsonl"
+
+
+def turn_key(turn: dict) -> str:
+    """headers.turn_key, written out here: that module needs the git library through Taste's store, which the judge's own environment does not hold. A test holds the two equal."""
+    text = json.dumps({"role": turn["role"], "content": turn["content"]}, sort_keys=True)
+    return hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()
 
 
 def _sha256(path: Path) -> str:
