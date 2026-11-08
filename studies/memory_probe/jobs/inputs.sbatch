@@ -23,6 +23,8 @@ fail() { echo "FAILED: $*"; kill ${PID:-} ${SMI:-} 2>/dev/null; exit 1; }
 # with its own effort and cap (PROBE_EFFORT, "none" sends none; PROBE_CAP), and keeps the rule records the study's reader wrote for these cases
 # (REPEATED_FROM, a folder holding repeated/<prompt>/<histories>), since the reader is part of the memory under test, not of the agent.
 PROBE_MODEL=${PROBE_MODEL:-$MODEL}; PROBE_EFFORT=${PROBE_EFFORT:-low}; PROBE_CAP=${PROBE_CAP:-4096}; REPEATED_FROM=${REPEATED_FROM:-}
+# VARIANT=published: the benchmark's own cases, unchanged, for another agent on the matrix's main cell.
+VARG=(--variant "$V"); [ "$V" = published ] && VARG=()
 if [ "$PROBE_MODEL" != "$MODEL" ]; then
   [ -n "${SERVER_URL:-}" ] || fail "another agent needs SERVER_URL"
   [ -n "$REPEATED_FROM" ] || fail "another agent keeps the study reader's rule records: REPEATED_FROM"
@@ -50,7 +52,7 @@ cd $CODE
 printf -v NAME 'h%02d-%02d' ${HISTORIES%%:*} ${HISTORIES##*:}  # the name the export looks for
 mkdir -p $OUT/full/hermes-$PR $OUT/repeated/$PR
 T1=$(date +%s)
-$RUN $D/venv/bin/python -m studies.context_rot.conpact_bridge --source hermes --histories $HISTORIES --variant $V --prompt $PR \
+$RUN $D/venv/bin/python -m studies.context_rot.conpact_bridge --source hermes --histories $HISTORIES ${VARG[@]+"${VARG[@]}"} --prompt $PR \
   --judge defer --probe-url $URL --probe-model $PROBE_MODEL --effort $PROBE_EFFORT --output-cap $PROBE_CAP --workers $WORKERS --out $OUT/full/hermes-$PR/$NAME > $OUT/full-$PR.report.json 2> $OUT/full-$PR.stderr.log || fail "baseline"
 echo "baseline seconds $(( $(date +%s) - T1 ))"
 if [ "$V" = cued ]; then
@@ -60,17 +62,17 @@ if [ "$V" = cued ]; then
 fi
 T1=$(date +%s)
 if [ -n "$REPEATED_FROM" ]; then
-  [ -d "$REPEATED_FROM/repeated/$PR/$NAME" ] || fail "no rule records at $REPEATED_FROM/repeated/$PR/$NAME"
-  cp -r "$REPEATED_FROM/repeated/$PR/$NAME" $OUT/repeated/$PR/ || fail "records"
+  compgen -G "$REPEATED_FROM/repeated/$PR/h??-??/records.json" > /dev/null || fail "no rule records at $REPEATED_FROM/repeated/$PR"
+  for SLICE in "$REPEATED_FROM"/repeated/$PR/h??-??; do cp -r "$SLICE" $OUT/repeated/$PR/ || fail "records"; done
   echo "records kept from $REPEATED_FROM"
 else
-$RUN $D/venv/bin/python -m studies.context_rot.repeated --prompt $PR --records-only --histories $HISTORIES --variant $V --probe-url $URL \
+$RUN $D/venv/bin/python -m studies.context_rot.repeated --prompt $PR --records-only --histories $HISTORIES ${VARG[@]+"${VARG[@]}"} --probe-url $URL \
   --tokenizer $D/models/gpt-oss-120b --workers $WORKERS --out $OUT/repeated/$PR/$NAME > $OUT/repeated-$PR.stdout 2> $OUT/repeated-$PR.stderr.log || fail "records"
 echo "records seconds $(( $(date +%s) - T1 )) $(tail -1 $OUT/repeated-$PR.stdout | cut -c1-200)"
 fi
 # The inputs are one prompt's, so a second prompt's have a folder of their own.
 INPUTS=$OUT/inputs; [ "$PR" = anthropic ] || INPUTS=$OUT/inputs-$PR
-$RUN $D/venv/bin/python -m studies.memory_probe.export --full $OUT/full --repeated $OUT/repeated --histories $HISTORIES --variant $V --deep 0 --prompts $PR --out $INPUTS 2>&1 | tail -1 | cut -c1-200
+$RUN $D/venv/bin/python -m studies.memory_probe.export --full $OUT/full --repeated $OUT/repeated --histories $HISTORIES ${VARG[@]+"${VARG[@]}"} --deep 0 --prompts $PR --out $INPUTS 2>&1 | tail -1 | cut -c1-200
 [ -s $INPUTS/delivered.jsonl ] || fail "export"
 curl -s ${URL%/v1}/metrics | grep -E "^vllm:(prompt_tokens_total|generation_tokens_total|prefix_cache_(hits|queries)_total|request_success_total)" > $JOB/vllm-metrics.txt
 kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null

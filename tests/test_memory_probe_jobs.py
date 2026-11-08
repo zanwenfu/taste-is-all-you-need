@@ -171,18 +171,21 @@ def test_the_baselines_by_default_ask_the_study_model_with_the_package_settings(
     bridge = [line for line in calls.splitlines() if "conpact_bridge" in line]
     assert bridge and "--probe-model openai/gpt-oss-120b --effort low --output-cap 4096 " in bridge[0]
     assert "studies.context_rot.repeated" in calls
+    assert all("--variant revised " in line for line in calls.splitlines()), "a variant reaches every step"
 
 
 def test_another_agents_baselines_keep_the_study_readers_records(tmp_path: Path) -> None:
     kept = tmp_path / "kept"
-    (kept / "repeated" / "anthropic" / "h00-10").mkdir(parents=True)
-    (kept / "repeated" / "anthropic" / "h00-10" / "records.json").write_text("{}")
-    done, calls, out = _inputs(tmp_path, PROBE_MODEL="poolside/laguna-s-2.1", PROBE_EFFORT="none", PROBE_CAP="16384", REPEATED_FROM=str(kept))
+    for part in ("h00-05", "h05-10"):  # the published cases' records were read in two slices
+        (kept / "repeated" / "anthropic" / part).mkdir(parents=True)
+        (kept / "repeated" / "anthropic" / part / "records.json").write_text(part)
+    done, calls, out = _inputs(tmp_path, PROBE_MODEL="poolside/laguna-s-2.1", PROBE_EFFORT="none", PROBE_CAP="16384", REPEATED_FROM=str(kept), VARIANT="published")
     assert done.returncode == 0, done.stdout + done.stderr
     bridge = [line for line in calls.splitlines() if "conpact_bridge" in line]
     assert bridge and "--probe-model poolside/laguna-s-2.1 --effort none --output-cap 16384 " in bridge[0]
     assert "studies.context_rot.repeated" not in calls
-    assert (out / "repeated" / "anthropic" / "h00-10" / "records.json").read_text() == "{}"
+    assert all((out / "repeated" / "anthropic" / part / "records.json").read_text() == part for part in ("h00-05", "h05-10"))
+    assert "--variant" not in calls, "the published cases, unchanged"
     for missing, said in (("REPEATED_FROM", "rule records"), ("SERVER_URL", "SERVER_URL")):
         settings = {"PROBE_MODEL": "poolside/laguna-s-2.1", "REPEATED_FROM": str(kept)} | {missing: ""}
         refused, refused_calls, _ = _inputs(tmp_path / missing, **settings)
