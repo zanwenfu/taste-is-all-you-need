@@ -37,7 +37,7 @@ from pathlib import Path
 
 from studies.context_rot.bedrock import Converse
 
-CONDITIONS = ("full_with_sc", "full_without_sc", "compaction", "upper_bound")
+CONDITIONS =("full_with_sc", "full_without_sc", "compaction", "upper_bound")
 NOT_SERVED = "[not served: the prompt is longer than the model's window]"
 
 
@@ -378,6 +378,17 @@ DATA_REVISION = "9381c98d6fe131a7e622986389800502a9ad055b"  # the Hugging Face r
 OUTPUT_CAP = 4096  # the package's probe and summary setting
 
 
+def effort_arg(value: str) -> str | None:
+    """A command line's reasoning effort: \"none\" sends none. Its own copy, as this runs where the memory code's git library is not."""
+    return None if value == "none" else value
+
+
+def probe_params(effort: str | None = "low", cap: int = OUTPUT_CAP) -> dict:
+    """The served model's request settings: the package's own for gpt-oss-120b (effort low, cap 4,096). A model that takes no
+    effort is sent none, and one that thinks at length may have a larger cap; a run on other settings records them."""
+    return ({"reasoning_effort": effort} if effort is not None else {}) | {"max_tokens": cap}
+
+
 def window_counters(tokenizer, compaction_messages) -> dict:
     """Prompt-token counters per call kind, from the chat template's rendered text.
 
@@ -458,10 +469,10 @@ def run(arguments) -> dict:
             raise SystemExit("prompt token count is implausibly small; the window check is not working")
         counts = {row.id: {kind: count(row) for kind, count in counters.items()} for row in instances}
         over = over_window(instances, {kind: (lambda row, kind=kind: counts[row.id][kind]) for kind in counters},
-                           arguments.window, OUTPUT_CAP)
+                           arguments.window, arguments.output_cap)
         largest = {kind: max(each[kind] for each in counts.values()) for kind in counters}
-        short = short_room(counts, arguments.window, OUTPUT_CAP)
-        (out / "window.json").write_text(json.dumps({"window": arguments.window, "output_cap": OUTPUT_CAP,
+        short = short_room(counts, arguments.window, arguments.output_cap)
+        (out / "window.json").write_text(json.dumps({"window": arguments.window, "output_cap": arguments.output_cap,
                                                      "largest_prompt_tokens": largest, "over": over,
                                                      "short_room": short, "prompt_tokens": counts}, indent=1))
         if over:
@@ -472,8 +483,10 @@ def run(arguments) -> dict:
                     "short_room_calls": len(short), "smallest_room": min((r for *_, r in short), default=None)}
     (out / "judge_inputs.jsonl").write_text(
         "".join(json.dumps({"id": row.id, "sc_text": row.sc_text}) + "\n" for row in instances))
-    oss = guarded_endpoint(arguments.probe_model, arguments.probe_url,
-                           {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP}, out / "not_served.jsonl")
+    params = probe_params(effort_arg(arguments.effort), arguments.output_cap)
+    if params != probe_params():
+        (out / "probe.json").write_text(json.dumps({"model": arguments.probe_model, "params": params}, indent=1))
+    oss = guarded_endpoint(arguments.probe_model, arguments.probe_url, params, out / "not_served.jsonl")
     summarizer = LLMSummarize(oss, prompt=arguments.prompt)
     unused = Endpoint("bedrock-judge", api_key="unused")
     reuse = contextlib.nullcontext()
@@ -517,6 +530,8 @@ def main(argv=None) -> int:
     parser.add_argument("--prompt", default="pi_mono", choices=("pi_mono", "anthropic"))
     parser.add_argument("--probe-url", help="the served summarizer and probe model; not needed with --judge-later")
     parser.add_argument("--probe-model", default="openai/gpt-oss-120b")
+    parser.add_argument("--effort", default="low", help='the probe model\'s reasoning effort; "none" sends none')
+    parser.add_argument("--output-cap", type=int, default=OUTPUT_CAP, help="the probe model's output cap, summaries included")
     parser.add_argument("--revision", default=DATA_REVISION, help="Hugging Face revision of the instances")
     parser.add_argument("--judge", default="bedrock", choices=("bedrock", "defer"),
                         help="defer: leave verdicts empty, for --judge-later where the judge key is")

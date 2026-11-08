@@ -92,13 +92,19 @@ def ask_with_tools(chat: Callable[[list[dict], list | None], Any], messages: lis
     raise AssertionError("unreachable: the last round offers no tools")
 
 
-def served_chat(client: Any, model: str, *, max_tokens: int, effort: str = "low") -> Callable[[list[dict], list | None], Any]:
+def effort_arg(value: str) -> str | None:
+    """A command line's reasoning effort: "none" sends none, for a model that takes no such setting."""
+    return None if value == "none" else value
+
+
+def served_chat(client: Any, model: str, *, max_tokens: int, effort: str | None = "low") -> Callable[[list[dict], list | None], Any]:
     """The served model through its OpenAI-compatible endpoint, as the rule-loss package asks it."""
 
     def chat(messages: list[dict], tools: list | None) -> Any:
         extra = {"tools": tools, "tool_choice": "auto"} if tools else {}
-        return client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens,
-                                              reasoning_effort=effort, **extra)
+        if effort is not None:
+            extra["reasoning_effort"] = effort
+        return client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens, **extra)
 
     return chat
 
@@ -118,14 +124,17 @@ def _reply(raw: dict) -> SimpleNamespace:
                               completion_tokens=usage.get("completion_tokens", 0)))
 
 
-def http_chat(url: str, model: str, *, max_tokens: int, effort: str = "low", timeout: float = 1800,
+def http_chat(url: str, model: str, *, max_tokens: int, effort: str | None = "low", timeout: float = 1800,
               tries: int = 3) -> Callable[[list[dict], list | None], Any]:
     """The same call as ``served_chat`` over plain HTTP, for an environment with no OpenAI package. A refusal
-    by the server (4xx) is raised at once; a dropped connection or a server error is tried again."""
+    by the server (4xx) is raised at once; a dropped connection or a server error is tried again. An effort of
+    None sends none."""
     endpoint = url.rstrip("/") + "/chat/completions"
 
     def chat(messages: list[dict], tools: list | None) -> Any:
-        body = {"model": model, "messages": messages, "max_tokens": max_tokens, "reasoning_effort": effort}
+        body = {"model": model, "messages": messages, "max_tokens": max_tokens}
+        if effort is not None:
+            body["reasoning_effort"] = effort
         if tools:
             body |= {"tools": tools, "tool_choice": "auto"}
         request = urllib.request.Request(endpoint, data=json.dumps(body).encode(),

@@ -59,14 +59,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", required=True, choices=("pi_mono", "anthropic"))
     parser.add_argument("--limit", type=int)
     parser.add_argument("--workers", type=int, default=16)
+    parser.add_argument("--effort", default="low", help='the model\'s reasoning effort; "none" sends none')
+    parser.add_argument("--output-cap", type=int, help="the summary's output cap; the package's 4,096 when not given")
     arguments = parser.parse_args(argv)
 
     from conpact import Endpoint
     from conpact.prompts import summarization_prompt
 
-    from studies.context_rot.conpact_bridge import OUTPUT_CAP
+    from studies.context_rot.conpact_bridge import OUTPUT_CAP, effort_arg, probe_params
 
-    endpoint = Endpoint(arguments.model, arguments.url, "EMPTY", {"reasoning_effort": "low", "max_tokens": OUTPUT_CAP})
+    endpoint = Endpoint(arguments.model, arguments.url, "EMPTY", probe_params(effort_arg(arguments.effort), arguments.output_cap or OUTPUT_CAP))
     client = endpoint.client()
 
     def ask(messages: list[dict]) -> tuple[str, str]:

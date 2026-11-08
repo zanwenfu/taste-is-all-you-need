@@ -441,6 +441,21 @@ def test_the_http_client_sends_the_tools_and_reads_tool_calls_back() -> None:
     assert answer.usage.prompt_tokens == 12 and answer.choices[0].finish_reason == "tool_calls"
 
 
+def test_a_model_that_takes_no_reasoning_effort_is_sent_none() -> None:
+    from studies.memory_probe.tool_loop import effort_arg
+
+    plain = {"choices": [{"finish_reason": "stop", "message": {"content": "A"}}], "usage": {}}
+    server, received = _serve([(200, plain), (200, plain)])
+    try:
+        http_chat(f"http://127.0.0.1:{server.server_port}/v1", "m", max_tokens=9, effort=None)([{"role": "user", "content": "hi"}], None)
+        http_chat(f"http://127.0.0.1:{server.server_port}/v1", "m", max_tokens=9)([{"role": "user", "content": "hi"}], None)
+    finally:
+        server.shutdown()
+    assert "reasoning_effort" not in received[0]["body"] and received[0]["body"]["max_tokens"] == 9
+    assert received[1]["body"]["reasoning_effort"] == "low"
+    assert effort_arg("none") is None and effort_arg("low") == "low" and effort_arg("high") == "high"
+
+
 def test_the_http_client_tries_again_after_a_server_error_and_not_after_a_refusal() -> None:
     plain = {"choices": [{"finish_reason": "stop", "message": {"content": "A"}}], "usage": {}}
     server, received = _serve([(503, {"error": "busy"}), (200, plain), (400, {"error": "too long"})])

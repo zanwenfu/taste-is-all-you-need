@@ -118,6 +118,89 @@ def test_a_cued_set_keeps_the_published_notes_and_headers(world: dict) -> None:
     assert "--notes" not in [word for line in calls.splitlines() if "studies.memory_probe.judge" in line for word in line.split()]
 
 
+def _agent_calls(calls: str) -> list[str]:
+    return [line for line in calls.splitlines() if any(step in line for step in ("studies.memory_probe.run ", "studies.memory_probe.notes ", "studies.memory_probe.told_summary "))]
+
+
+def test_by_default_the_study_model_answers_with_the_package_settings(world: dict) -> None:
+    assert _run(world).returncode == 0
+    calls = world["log"].read_text()
+    agent = _agent_calls(calls)
+    assert agent and all("--model openai/gpt-oss-120b --effort low " in line for line in agent), agent[:3]
+    assert not any("--max-tokens" in line or "--output-cap" in line for line in agent)
+    assert "studies.memory_probe.headers" in calls and "studies.memory_probe.judge" in calls
+
+
+def test_another_agent_answers_writes_its_own_notes_and_summaries_and_is_judged_apart(world: dict, tmp_path: Path) -> None:
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    (kept / "turn-headers.jsonl").write_text("{}\n")
+    done = _run(world, AGENT_MODEL="poolside/laguna-s-2.1", AGENT_EFFORT="none", AGENT_CAP="16384", JUDGE="later", HEADERS_FROM=str(kept), SMALL="0")
+    assert done.returncode == 0, done.stdout + done.stderr
+    calls = world["log"].read_text()
+    agent = _agent_calls(calls)
+    rows = [line for line in agent if "studies.memory_probe.run " in line]
+    assert rows and all("--model poolside/laguna-s-2.1 --effort none --max-tokens 16384 " in line for line in rows)
+    assert all("--model poolside/laguna-s-2.1 --effort none --max-tokens 16384 " in line for line in agent if "studies.memory_probe.notes " in line)
+    assert any("studies.memory_probe.told_summary " in line and "--model poolside/laguna-s-2.1 --effort none --output-cap 16384 " in line for line in agent)
+    assert "studies.memory_probe.judge" not in calls, "judged apart, on gpt-oss-120b"
+    assert "studies.memory_probe.headers" not in calls, "the memory's own headers, as written for the study's model"
+    assert (Path(world["env"]["OUT"]) / "turn-headers.jsonl").read_text() == "{}\n"
+
+
+def _inputs(tmp_path: Path, **extra: str) -> tuple[subprocess.CompletedProcess, str, Path]:
+    """inputs.sbatch with stand-ins: its Python logs each call and, as the export, writes the file the job checks for."""
+    log, bin_dir, study = tmp_path / "inputs-calls.log", tmp_path / "ibin", tmp_path / "istudy"
+    for name in ("curl", "nvidia-smi"):
+        _stub(bin_dir / name, "exit 0")
+    _stub(bin_dir / "apptainer", 'while [[ "$1" != */python ]]; do shift; done; exec "$@"')
+    _stub(study / "venv" / "bin" / "python", f"""echo "$*" >> {log}
+case "$*" in *studies.memory_probe.export*) out=${{@: -1}}; mkdir -p "$out"; echo x > "$out/delivered.jsonl";; esac
+exit 0""")
+    (study / "code-abcdefabcdef").mkdir(parents=True, exist_ok=True)
+    out = study / "out"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "STUDY_ROOT": str(study), "SHA": "abcdefabcdef0000", "SLURM_JOB_ID": "1",
+           "VARIANT": "revised", "OUT": str(out), "SERVER_URL": "http://127.0.0.1:1/v1", **extra}
+    done = subprocess.run(["bash", str(ROOT / "studies/memory_probe/jobs/inputs.sbatch")], env=env, capture_output=True, text=True, timeout=120)
+    return done, log.read_text() if log.exists() else "", out
+
+
+def test_the_baselines_by_default_ask_the_study_model_with_the_package_settings(tmp_path: Path) -> None:
+    done, calls, _ = _inputs(tmp_path)
+    assert done.returncode == 0, done.stdout + done.stderr
+    bridge = [line for line in calls.splitlines() if "conpact_bridge" in line]
+    assert bridge and "--probe-model openai/gpt-oss-120b --effort low --output-cap 4096 " in bridge[0]
+    assert "studies.context_rot.repeated" in calls
+
+
+def test_another_agents_baselines_keep_the_study_readers_records(tmp_path: Path) -> None:
+    kept = tmp_path / "kept"
+    (kept / "repeated" / "anthropic" / "h00-10").mkdir(parents=True)
+    (kept / "repeated" / "anthropic" / "h00-10" / "records.json").write_text("{}")
+    done, calls, out = _inputs(tmp_path, PROBE_MODEL="poolside/laguna-s-2.1", PROBE_EFFORT="none", PROBE_CAP="16384", REPEATED_FROM=str(kept))
+    assert done.returncode == 0, done.stdout + done.stderr
+    bridge = [line for line in calls.splitlines() if "conpact_bridge" in line]
+    assert bridge and "--probe-model poolside/laguna-s-2.1 --effort none --output-cap 16384 " in bridge[0]
+    assert "studies.context_rot.repeated" not in calls
+    assert (out / "repeated" / "anthropic" / "h00-10" / "records.json").read_text() == "{}"
+    for missing, said in (("REPEATED_FROM", "rule records"), ("SERVER_URL", "SERVER_URL")):
+        settings = {"PROBE_MODEL": "poolside/laguna-s-2.1", "REPEATED_FROM": str(kept)} | {missing: ""}
+        refused, refused_calls, _ = _inputs(tmp_path / missing, **settings)
+        assert refused.returncode == 1 and said in refused.stdout, (missing, refused.stdout)
+        assert "conpact_bridge" not in refused_calls
+
+
+def test_another_agent_refuses_without_the_memorys_headers_a_running_server_or_judging_apart(world: dict, tmp_path: Path) -> None:
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    (kept / "turn-headers.jsonl").write_text("{}\n")
+    other = {"AGENT_MODEL": "poolside/laguna-s-2.1", "JUDGE": "later", "HEADERS_FROM": str(kept)}
+    for missing, said in (("HEADERS_FROM", "headers"), ("JUDGE", "judged apart"), ("SERVER_URL", "SERVER_URL")):
+        done = _run(world, **{**other, missing: ""})
+        assert done.returncode == 1 and said in done.stdout, (missing, done.stdout)
+        assert "studies.memory_probe.run " not in world["log"].read_text() if world["log"].exists() else True
+
+
 def test_a_long_run_seed_says_when_an_arm_failed(tmp_path: Path) -> None:
     log = tmp_path / "calls.log"
     bin_dir, study = tmp_path / "bin", tmp_path / "study"

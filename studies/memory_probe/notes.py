@@ -85,18 +85,20 @@ def main(argv=None) -> int:
     import argparse
 
     from studies.memory_probe.headers import served_ask
+    from studies.memory_probe.tool_loop import effort_arg
 
     parser = argparse.ArgumentParser(description="Write each case's notes versions with the served model.")
     for name in ("inputs", "url", "model", "out"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--max-tokens", type=int, default=8192)
+    parser.add_argument("--effort", default="low", help='the reasoning effort sent with each call; "none" sends none')
     parser.add_argument("--style", default="told", choices=tuple(STYLES))
     parser.add_argument("--workers", type=int, default=16)
     arguments = parser.parse_args(argv)
     cases = [json.loads(line) for line in (Path(arguments.inputs) / "cases.jsonl").read_text().splitlines()]
     cases = cases[: arguments.limit] if arguments.limit else cases
-    ask = served_ask(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
+    ask = served_ask(arguments.url, arguments.model, max_tokens=arguments.max_tokens, effort=effort_arg(arguments.effort))
     counts = write_notes(cases, ask, Path(arguments.out), workers=arguments.workers, style=arguments.style)
     print(json.dumps(counts))
     return 0 if counts["failed"] == 0 else 1

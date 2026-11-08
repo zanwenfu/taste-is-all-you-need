@@ -61,11 +61,11 @@ def write_turn_headers(cases: list[dict], ask: Callable[[str], dict], path: Path
     return {"turns": len(turns), "calls": len(todo), "failed": failed[0]}
 
 
-def served_ask(url: str, model: str, *, max_tokens: int = 1024) -> Callable[[str], dict]:
+def served_ask(url: str, model: str, *, max_tokens: int = 1024, effort: str | None = "low") -> Callable[[str], dict]:
     """One user message to the served auxiliary model, over plain HTTP, no tools."""
     from studies.memory_probe.tool_loop import http_chat
 
-    chat = http_chat(url, model, max_tokens=max_tokens)
+    chat = http_chat(url, model, max_tokens=max_tokens, effort=effort)
 
     def ask(prompt: str) -> dict:
         reply = chat([{"role": "user", "content": prompt}], None)

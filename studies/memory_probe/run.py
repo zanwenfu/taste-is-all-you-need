@@ -24,7 +24,7 @@ from typing import Any
 
 from studies.memory_ledger import check, code_digest, code_version
 from studies.memory_probe.cases import _NEEDS_ITEMS, _NEEDS_NOTES, _NEEDS_RECORDS, ARMS, run_case
-from studies.memory_probe.tool_loop import http_chat
+from studies.memory_probe.tool_loop import effort_arg, http_chat
 
 
 def history_id(case_id: str) -> str:
@@ -135,6 +135,7 @@ def main(argv=None) -> int:
     parser.add_argument("--max-rounds", type=int, default=6)
     parser.add_argument("--budget", type=int, default=4096, help="memory tokens a probe may receive in all")
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--effort", default="low", help='the reasoning effort sent with each call; "none" sends none, for a model that takes no such setting')
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--upper", action="store_true", help="ask the restated probe instead (the ceiling)")
     parser.add_argument("--headers", help="the header arm's stored headers (studies.memory_probe.headers)")
@@ -157,7 +158,7 @@ def main(argv=None) -> int:
     def count(text: str) -> int:
         return len(tokenizer.encode(text, add_special_tokens=False).ids)
 
-    chat = http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
+    chat = http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens, effort=effort_arg(arguments.effort))
     Path(arguments.workdir).mkdir(parents=True, exist_ok=True)
     versions = None
     if arguments.arm in _NEEDS_NOTES:
@@ -173,6 +174,11 @@ def main(argv=None) -> int:
                 "summaries_sha256": digest(inputs / "summaries.jsonl"), "notes_sha256": digest(arguments.notes),
                 "headers_sha256": digest(arguments.headers), "delivered_sha256": digest(inputs / "delivered.jsonl"),
                 "tokenizer_sha256": digest(arguments.tokenizer), "commit": code_version()[0], "code_digest": code_digest()}
+    # A row's settings name its cap and effort only where they are not the ones every row before had, so that those rows carry on as they were.
+    if arguments.effort != "low":
+        identity["effort"] = arguments.effort
+    if arguments.max_tokens != 4096:
+        identity["max_tokens"] = arguments.max_tokens
     headers = StoredTurnHeaders(Path(arguments.headers)) if arguments.headers else None
     summary = run_all(cases, summaries, chat=chat, out=Path(arguments.out), workers=arguments.workers, delivered=blocks,
                       notes=versions, items=items, identity=identity,
