@@ -51,10 +51,11 @@ case "${1:?ingest, open or steps}" in
   steps)
     read -r -a OSS <<< "${OSS_JOBS:?the kept jobs that run gpt-oss}"; read -r -a LLAMA <<< "${LLAMA_JOBS:?the kept jobs that run Llama}"; AGAIN=${AGAIN:-}; LAST=$(( ${#OSS[@]} - 1 )); LAST_LLAMA=$(( ${#LLAMA[@]} - 1 ))
     # Llama's rows the comparison turns on, which go first on each server; and with two servers, the share of LoCoMo the first takes once LongMemEval is read, so that neither waits
-    # long on the other, named at hand-over by system (LLAMA_SHARE). The share leaves the comparison's rows alone, as the other server reads them first: two stages on one row would
-    # write one answers file at once.
+    # long on the other, by LoCoMo's own row names (LLAMA_SHARE at hand-over to name others). The share leaves the comparison's rows alone, as the other server reads them first: two
+    # stages on one row would write one answers file at once. By the rehearsal's times, scaled to the held-out part (LongMemEval 9 times dev, LoCoMo 1,551 of 435 questions): the
+    # first reads LongMemEval in about 7.7 hours and then dense and MemPalace raw session in 2.8; the second the comparison's five LoCoMo rows in 7.4 and the other five in 3.1.
     FIRST='/(taste_git|taste_git_headers|flat_bm25|mem0|mempalace_product)-'
-    SHARE=${LLAMA_SHARE:-/(full_llama|mempalace_bench_raw|mempalace_bench_v4)-}
+    SHARE=${LLAMA_SHARE:-/(flat_dense|mempalace_locomo_raw_session)-}
     if [ $LAST_LLAMA -gt 0 ]; then
       NAMES=${FIRST#/(}; NAMES=${NAMES%)-}
       for NAME in ${NAMES//|/ }; do
@@ -95,8 +96,8 @@ case "${1:?ingest, open or steps}" in
     stage read-oss-locomo "${OSS[0]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*($MAIN)'"
     stage read-oss-lme-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='lme/.*-(2000|4000|16000) '"
     stage read-oss-locomo-sweep "${OSS[$LAST]}" gpt-oss read.sbatch records "READER=oss ONLY='locomo/.*-(2000|4000|16000) '"
-    # Llama is the slow reader: on the rehearsal LongMemEval took 54 minutes and LoCoMo about seven times as much reading, so the held-out part is about 26 hours on one server. A second
-    # server takes LoCoMo but for the first server's share. On one server LongMemEval goes first, as the second judge waits only for that. On each, the comparison's rows go first.
+    # Llama is the slow reader: on the rehearsal LongMemEval took 51 minutes and LoCoMo 3.7 hours, so the held-out part is about 21 hours on one server. A second server takes LoCoMo
+    # but for the first server's share. On one server LongMemEval goes first, as the second judge waits only for that. On each, the comparison's rows go first.
     THEN=; [ $LAST_LLAMA = 0 ] && THEN=" read-llama-lme?"
     stage read-llama-lme-first "${LLAMA[0]}" llama read.sbatch records "READER=llama ONLY='lme$FIRST'"
     stage read-llama-lme "${LLAMA[0]}" llama read.sbatch "records read-llama-lme-first?" "READER=llama ONLY='lme/'"

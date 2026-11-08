@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from studies.memory_bench.analyze import readers_of, required_rows
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -781,7 +783,7 @@ def test_the_stages_as_tasks_keep_opens_order_on_the_jobs_they_are_given(tmp_pat
     assert "ONLY='lme/'" in task(103, "read-llama-lme") and "records\\ read-llama-lme-first\\?" in task(103, "read-llama-lme")
     assert f"ONLY='locomo{first}'" in task(104, "read-llama-locomo-first") and "read.sbatch records\n" in task(104, "read-llama-locomo-first"), "a second server does not wait for the first"
     assert "ONLY='locomo/'" in task(104, "read-llama-locomo") and "records\\ read-llama-locomo-first\\?" in task(104, "read-llama-locomo")
-    share = "/(full_llama|mempalace_bench_raw|mempalace_bench_v4)-"
+    share = "/(flat_dense|mempalace_locomo_raw_session)-"
     assert f"NOT='locomo{share}'" in task(104, "read-llama-locomo"), "the second server leaves the first server's share alone"
     assert f"ONLY='locomo{share}'" in task(103, "read-llama-locomo-share") and "records\\ read-llama-lme\\?" in task(103, "read-llama-locomo-share"), \
         "the first server takes a share of LoCoMo once LongMemEval is read"
@@ -791,15 +793,16 @@ def test_the_stages_as_tasks_keep_opens_order_on_the_jobs_they_are_given(tmp_pat
         assert len(list((study / "logs" / f"gpus-{job}" / "tasks").glob("*.sh"))) == tasks
 
 
-_LLAMA_ROWS = ["flat_bm25-8000", "flat_dense-8000", "full_llama-31000", "mem0-8000", "mempalace_bench_raw-8000", "mempalace_bench_v4-8000", "mempalace_product-8000",
-               "newest-8000", "none-8000", "oracle_llama-31000", "taste_git-8000", "taste_git_headers-8000"]
+def _llama_rows(view: str) -> set[str]:
+    """Llama's rows on a benchmark, from the protocol itself: LoCoMo's MemPalace rows are not LongMemEval's, and it has no oracle."""
+    return {row for row in required_rows(view) if "llama" in readers_of(row)}
 
 
 def _rows_of(task_text: str, view: str = "locomo") -> set[str]:
     """The rows a read stage asks, by its ONLY and NOT read the way read.sbatch reads them: grep -E, then grep -vE, over 'view/row cap effort' lines."""
     only = re.search(r"ONLY='([^']*)'", task_text).group(1)
     found = re.search(r"NOT='([^']*)'", task_text)
-    lines = "".join(f"{view}/{row} 512 \n" for row in _LLAMA_ROWS)
+    lines = "".join(f"{view}/{row} 512 \n" for row in sorted(_llama_rows(view)))
     picked = subprocess.run(["grep", "-E", only], input=lines, capture_output=True, text=True).stdout
     if found:
         picked = subprocess.run(["grep", "-vE", found.group(1)], input=picked, capture_output=True, text=True).stdout
@@ -814,16 +817,26 @@ def test_on_two_llama_servers_every_locomo_row_is_read_by_one_stage_alone(tmp_pa
     share = _rows_of((tasks / "gpus-103" / "tasks" / "dev-read-llama-locomo-share.sh").read_text())
     rest = _rows_of((tasks / "gpus-104" / "tasks" / "dev-read-llama-locomo.sh").read_text())
     first = _rows_of((tasks / "gpus-104" / "tasks" / "dev-read-llama-locomo-first.sh").read_text())
-    assert share and not share & rest and share | rest == set(_LLAMA_ROWS), (share, rest)
+    assert share and not share & rest and share | rest == _llama_rows("locomo"), (share, rest)
     assert first <= rest, "the comparison's rows go first on the server that reads the rest"
 
 
+def test_the_first_servers_share_by_default_is_locomo_rows_that_even_the_two_servers(tmp_path: Path) -> None:
+    # A share named by LongMemEval's rows takes next to nothing on LoCoMo (its full context row read in 137 seconds), and the second server reads about three hours longer.
+    done, study = _steps(tmp_path)
+    assert done.returncode == 0, done.stdout + done.stderr
+    task = (study / "logs" / "gpus-103" / "tasks" / "dev-read-llama-locomo-share.sh").read_text()
+    names = re.search(r"ONLY='locomo/\(([^)]*)\)-'", task).group(1).split("|")
+    assert all(any(row.startswith(f"{name}-") for row in _llama_rows("locomo")) for name in names), names
+    assert _rows_of(task) == {"flat_dense-8000", "mempalace_locomo_raw_session-8000"}
+
+
 def test_the_first_servers_share_can_be_named_at_hand_over(tmp_path: Path) -> None:
-    done, study = _steps(tmp_path, LLAMA_SHARE="/(full_llama|oracle_llama)-")
+    done, study = _steps(tmp_path, LLAMA_SHARE="/(full_llama|mempalace_locomo_raw_dialog)-")
     assert done.returncode == 0, done.stdout + done.stderr
     share = _rows_of((study / "logs" / "gpus-103" / "tasks" / "dev-read-llama-locomo-share.sh").read_text())
     rest = _rows_of((study / "logs" / "gpus-104" / "tasks" / "dev-read-llama-locomo.sh").read_text())
-    assert share == {"full_llama-31000", "oracle_llama-31000"} and not share & rest and share | rest == set(_LLAMA_ROWS)
+    assert share == {"full_llama-31000", "mempalace_locomo_raw_dialog-8000"} and not share & rest and share | rest == _llama_rows("locomo")
 
 
 def test_a_share_that_would_take_a_row_the_comparison_turns_on_is_refused(tmp_path: Path) -> None:
