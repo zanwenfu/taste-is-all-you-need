@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -330,7 +331,13 @@ def test_the_held_out_part_does_not_open_before_its_date_however_right_the_rest_
     assert not (tmp_path / "o.jsonl").exists()
     monkeypatch.setattr(run_module, "_now", lambda: run_module.OPENS_AT)
     assert run_main(arguments) == 0
-    assert run_module.OPENS_AT.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M") == "2026-11-10 12:00"
+    assert run_module.OPENS_AT.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M") == "2026-11-08 08:00"
+
+
+def test_the_job_scripts_open_the_part_at_the_same_hour_as_the_code(tmp_path: Path) -> None:
+    script = (Path(__file__).resolve().parent.parent / "studies" / "memory_bench" / "submit_part.sh").read_text()
+    opens = re.search(r"^OPENS=(\S+)", script, re.MULTILINE).group(1)
+    assert datetime.fromisoformat(opens).replace(tzinfo=ZoneInfo("America/New_York")) == run_module.OPENS_AT
 
 
 def test_a_copy_of_the_code_is_held_to_its_commit_by_what_git_holds(tmp_path: Path) -> None:

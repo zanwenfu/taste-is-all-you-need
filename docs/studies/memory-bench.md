@@ -157,8 +157,9 @@ maintainers replied before it ran is recorded.
 
 What needs no gold may be written earlier, since ingest takes a long time on shared GPUs: the shared ingest files, Mem0's ingest, the
 headers and each system's ranked lists, which take the question's words alone. Nothing reads those lists and no score is computed until
-the part opens on 2026-11-10 at noon Eastern; the first stage that reads the gold starts then. If a maintainer's reply changes a system's
-settings, that system is run again.
+the part opens on 2026-11-08 at 8 am Eastern; the first stage that reads the gold starts then. If a maintainer's reply changes a system's
+settings, that system is run again. The opening was first set for 2026-11-10 at noon, only to leave the maintainers time to answer the note;
+the note was never sent, and on 2026-11-08, before any held-out gold was read, the opening was moved to that morning.
 
 Every stage records its commit and a hash of the code on disk, job scripts and split files included. That hash is worked out from git where the repository is and every job holds its copy of the
 code to it before it starts, and the stage that first reads the gold refuses to run before the part's date. The long ingest may stand on an earlier commit than the stages after it, as long as what

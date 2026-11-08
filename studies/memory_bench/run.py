@@ -43,7 +43,9 @@ from studies.memory_bench.systems import (
 )
 from studies.memory_ledger import code_digest, code_version
 
-OPENS_AT = datetime(2026, 11, 10, 17, 0, tzinfo=UTC)  # noon Eastern, in the protocol
+# 8 am Eastern on Sun Nov 8, in the protocol. Moved on Nov 8, by the user, before any held-out gold was read, from noon on Tue Nov 10, a date that
+# existed only to leave the maintainers time to answer a note that was never sent.
+OPENS_AT = datetime(2026, 11, 8, 13, 0, tzinfo=UTC)
 
 
 def _now() -> datetime:

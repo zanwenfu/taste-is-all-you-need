@@ -17,7 +17,7 @@ set -u
 D=${STUDY_ROOT:?}; SHA=${SHA:?}; DIGEST=${DIGEST:?}; PART=${PART:?}; RUN=${RUN:-${SHA:0:12}}
 J=$D/code-${SHA:0:12}/studies/memory_bench/jobs
 L=$D/logs
-OPENS=2026-11-10T12:00:00  # noon Eastern, the cluster's own zone
+OPENS=2026-11-08T08:00:00  # 8 am Eastern, the cluster's own zone, as in run.py (moved from noon Tue Nov 10 on Nov 8, by the user)
 GPU="--partition=compsci-gpu --exclude=compsci-cluster-fitz-48"
 CPU="--partition=compsci --exclude=compsci-cluster-fitz-48"
 EXP="--export=ALL,STUDY_ROOT=$D,SHA=$SHA,DIGEST=$DIGEST,PART=$PART,RUN=$RUN"
