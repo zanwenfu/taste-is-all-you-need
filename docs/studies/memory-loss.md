@@ -187,6 +187,18 @@ Paired tests per case against the compaction arm, intervals by a bootstrap over 
 history share it (`studies/memory_probe/analyze.py`). In the long run the unit is the session, each compared on the tasks both arms reached, since the tasks of one conversation are not independent; counts over tasks are description only (`studies/long_run/analyze.py`). Sixteen rounds are not sixteen equal rounds: a history with one very long turn
 leaves rounds that fold almost nothing, so effective rounds are reported beside them. Every clean result is reported, whichever way it falls.
 
+**The long run's analysis, fixed on 2026-11-08 before any session on the final code had run.** The primary comparison is each arm
+against compaction alone, for each planted rule and each summary prompt apart, with the session as the unit: a session counts for
+the arm when the arm obeyed the rule at a higher rate than compaction alone over the tasks both reached after the rule was told,
+against it when lower, and the two-sided sign test is over those sessions (`studies/long_run/analyze.py`). Such a test cannot fall
+under .05 with fewer than six sessions, even if every one agrees (five of five gives .0625), so a summary prompt with fewer than six
+valid sessions is reported as description only, beside the rule-loss matrix, which carries the tests. Secondary, and description
+only: obedience by compactions so far (0, 1 to 2, 3 to 5, 6 to 10, 11 to 20, 21 to 50, 51 to 100, over 100), the commands at
+work on an earlier task, and looks, finds and uses for the memory arms. How many sessions run is set by GPU time and not by any
+result: the session filler sizes each session to end by a fixed time and starts the next only if the last ended cleanly and not far
+shorter than asked. The paper reports every valid session that ended by 6 am ET on Mon 2026-11-16, and no session is stopped,
+dropped or added because of what it showed.
+
 An independent review of this harness on 2026-11-06 found that the search also held the system prompt, that what the harness delivered had lost each hit's date and
 replacement mark, and that the long run's message for a reply with no command was not mini-swe-agent's. All were fixed, and the runs before that commit are not reported.
 
