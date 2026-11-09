@@ -514,6 +514,23 @@ def test_a_prompt_the_server_refuses_as_too_long_is_recorded_as_not_served(tmp_p
     assert json.loads(log.read_text())["input_tokens"] == 133595
 
 
+def test_a_prompt_too_long_in_the_servers_other_wording_is_recorded_as_not_served_too(tmp_path):
+    """Laguna S 2.1's server words the same refusal otherwise (Nov 9: the second agent's full cell stopped on it at its 48th case), and a tokenizer
+    that counts more tokens for the same history meets the window where gpt-oss-120b's did not."""
+    import openai
+
+    response = httpx.Response(400, request=httpx.Request("POST", "http://server/v1/chat/completions"))
+    error = openai.BadRequestError(
+        "Error code: 400 - {'error': {'message': \"This model's maximum context length is 131072 tokens. However, your prompt contains at least "
+        "131073 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt. "
+        "(parameter=input_tokens, value=131073)\", 'type': 'BadRequestError', 'param': 'input_tokens', 'code': 400}}", response=response, body=None)
+    inner, _completions = _fake_client(error)
+    log = tmp_path / "not_served.jsonl"
+    reply = conpact_bridge.WindowGuard(inner, log).chat.completions.create(model="m", messages=[{"role": "user", "content": "long"}])
+    assert reply.choices[0].message.content == conpact_bridge.NOT_SERVED
+    assert json.loads(log.read_text()) == {"input_tokens": 131073, "why": "input longer than the window"}
+
+
 def test_another_refusal_still_stops_the_run(tmp_path):
     import openai
 

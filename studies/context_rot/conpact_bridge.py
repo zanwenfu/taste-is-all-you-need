@@ -40,6 +40,10 @@ from studies.memory_probe.replies import carries_on_the_work
 
 CONDITIONS =("full_with_sc", "full_without_sc", "compaction", "upper_bound")
 NOT_SERVED = "[not served: the prompt is longer than the model's window]"
+# The server words the refusal in one of two ways (the second met on Laguna S 2.1's server, Nov 9, whose tokenizer counts more tokens for the
+# same history than gpt-oss-120b's): the number is the prompt's length, or the least it is known to be.
+_TOO_LONG = re.compile(r"Input length \((\d+)\) exceeds model's maximum context length"
+                       r"|maximum context length is \d+ tokens\. However, your (?:prompt|request) (?:contains|has) (?:at least )?(\d+) input tokens")
 
 
 class WindowGuard:
@@ -65,10 +69,10 @@ class WindowGuard:
         try:
             return self._inner.chat.completions.create(**kwargs)
         except openai.BadRequestError as error:
-            found = re.search(r"Input length \((\d+)\) exceeds model's maximum context length", str(error))
+            found = _TOO_LONG.search(str(error))
             if not found:
                 raise
-            return self._not_served(int(found.group(1)), "input longer than the window")
+            return self._not_served(int(found.group(1) or found.group(2)), "input longer than the window")
 
     def _not_served(self, tokens, why):
         if self._log is not None:
