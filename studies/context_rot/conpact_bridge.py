@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from studies.context_rot.bedrock import Converse
-from studies.memory_probe.replies import read_summary
+from studies.memory_probe.replies import carries_on_the_work
 
 CONDITIONS =("full_with_sc", "full_without_sc", "compaction", "upper_bound")
 NOT_SERVED = "[not served: the prompt is longer than the model's window]"
@@ -90,17 +90,19 @@ def guarded_endpoint(model: str, url: str, params: dict, log: Path | None):
     return Guarded(model, url, "EMPTY", params)
 
 
-class SummaryReader:
+class KeepToSummaries:
     """The package's summarizer client for a second model, which may carry on the work in place of summarizing (Laguna S 2.1,
-    Nov 6 and 9): each reply is read by the long run's rule (what the prompt asked for, nothing around it), and one with no
-    summary, or cut off by the output cap, is asked again, up to three tries. After the last the package's own reply goes
-    back, as the package would have kept it. Every call says on the record how many tries it took and whether a summary
-    was read. A call the server could not take (NOT_SERVED) goes back at once."""
+    Nov 6 and 9). The package keeps the whole reply, and so does this, word for word, unless the reply carries on the work
+    (a tool call, its markup or the end of the model's thinking), is empty or was cut off by the output cap: then it is asked
+    again, up to three tries, and after the last the package's own reply goes back, as the package would have kept it. A reply
+    in no particular form is kept as it is. Every call says on the record how many tries it took and whether the reply kept was
+    clean. A call the server could not take (NOT_SERVED) goes back at once. gpt-oss-120b's stored summaries pass this in 3,297 of
+    3,300 (the three quote the tool-call tag in prose), so its rows and a second model's are read alike."""
 
     _log_lock = threading.Lock()
 
-    def __init__(self, inner, option: str, log: Path | None = None, tries: int = 3) -> None:
-        self._inner, self._option, self._log, self._tries = inner, option, log, tries
+    def __init__(self, inner, log: Path | None = None, tries: int = 3) -> None:
+        self._inner, self._log, self._tries = inner, log, tries
         self.chat = self
         self.completions = self
 
@@ -109,15 +111,13 @@ class SummaryReader:
             reply = self._inner.chat.completions.create(**kwargs)
             choice = reply.choices[0]
             if choice.finish_reason == "not_served":
-                self._write({"tries": attempt, "read": False, "not_served": True})
+                self._write({"tries": attempt, "clean": False, "not_served": True})
                 return reply
-            summary = None if choice.finish_reason == "length" else read_summary(self._option, choice.message.content or "")
-            if summary:
-                self._write({"tries": attempt, "read": True})
-                message = types.SimpleNamespace(content=summary, role="assistant")
-                return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason=choice.finish_reason)],
-                                             usage=reply.usage)
-        self._write({"tries": self._tries, "read": False})
+            text = choice.message.content or ""
+            if choice.finish_reason != "length" and text.strip() and not carries_on_the_work(text):
+                self._write({"tries": attempt, "clean": True})
+                return reply
+        self._write({"tries": self._tries, "clean": False})
         return reply
 
     def _write(self, row: dict) -> None:
@@ -126,23 +126,23 @@ class SummaryReader:
                 written.write(json.dumps(row) + "\n")
 
 
-def reading_endpoint(model: str, url: str, params: dict, log: Path | None, option: str, reads: Path):
-    """conpact's Endpoint for the summarizer of a second model: WindowGuard, then SummaryReader."""
+def keeping_endpoint(model: str, url: str, params: dict, log: Path | None, keeps: Path):
+    """conpact's Endpoint for the summarizer of a second model: WindowGuard, then KeepToSummaries."""
     from conpact import Endpoint
 
-    class Reading(Endpoint):
+    class Keeping(Endpoint):
         def client(self):
-            return SummaryReader(WindowGuard(super().client(), log), option, reads)
+            return KeepToSummaries(WindowGuard(super().client(), log), keeps)
 
-    return Reading(model, url, "EMPTY", params)
+    return Keeping(model, url, "EMPTY", params)
 
 
-def summary_read_counts(path: Path) -> dict:
-    """What SummaryReader put on the record: summaries read at the first try, read after more, and none read."""
+def summary_keep_counts(path: Path) -> dict:
+    """What KeepToSummaries put on the record: replies kept clean at the first try, clean after more, and none clean."""
     rows = [json.loads(line) for line in Path(path).read_text().splitlines()] if Path(path).exists() else []
-    return {"calls": len(rows), "read_first_try": sum(1 for r in rows if r["read"] and r["tries"] == 1),
-            "read_after_more": sum(1 for r in rows if r["read"] and r["tries"] > 1),
-            "none_read": sum(1 for r in rows if not r["read"] and not r.get("not_served")),
+    return {"calls": len(rows), "clean_first_try": sum(1 for r in rows if r["clean"] and r["tries"] == 1),
+            "clean_after_more": sum(1 for r in rows if r["clean"] and r["tries"] > 1),
+            "none_clean": sum(1 for r in rows if not r["clean"] and not r.get("not_served")),
             "not_served": sum(1 for r in rows if r.get("not_served"))}
 
 
@@ -545,9 +545,8 @@ def run(arguments) -> dict:
         (out / "probe.json").write_text(json.dumps({"model": arguments.probe_model, "params": params}, indent=1))
     oss = guarded_endpoint(arguments.probe_model, arguments.probe_url, params, out / "not_served.jsonl")
     writer = oss
-    if arguments.read_summaries:
-        writer = reading_endpoint(arguments.probe_model, arguments.probe_url, params, out / "not_served.jsonl", arguments.prompt,
-                                  out / "summary_reads.jsonl")
+    if arguments.keep_to_summaries:
+        writer = keeping_endpoint(arguments.probe_model, arguments.probe_url, params, out / "not_served.jsonl", out / "summary_keeps.jsonl")
     summarizer = LLMSummarize(writer, prompt=arguments.prompt)
     unused = Endpoint("bedrock-judge", api_key="unused")
     reuse = contextlib.nullcontext()
@@ -571,8 +570,8 @@ def run(arguments) -> dict:
     ids = {row.id for row in instances}
     results = [r for r in map(json.loads, (out / "results.jsonl").read_text().splitlines()) if r["id"] in ids]
     report = _report(out, results, settings, "summary.csv")
-    if arguments.read_summaries:
-        report["summary_reads"] = summary_read_counts(out / "summary_reads.jsonl")
+    if arguments.keep_to_summaries:
+        report["summary_keeps"] = summary_keep_counts(out / "summary_keeps.jsonl")
         (out / "report.json").write_text(json.dumps(report, indent=1))
     return report
 
@@ -597,8 +596,8 @@ def main(argv=None) -> int:
     parser.add_argument("--probe-model", default="openai/gpt-oss-120b")
     parser.add_argument("--effort", default="low", help='the probe model\'s reasoning effort; "none" sends none')
     parser.add_argument("--output-cap", type=int, default=OUTPUT_CAP, help="the probe model's output cap, summaries included")
-    parser.add_argument("--read-summaries", action="store_true",
-                        help="read each summary by the long run's rule and ask again when a reply holds none (a second model's summaries)")
+    parser.add_argument("--keep-to-summaries", action="store_true",
+                        help="ask again a summary reply that carries on the work, is empty or was cut off, up to three tries (a second model's summaries)")
     parser.add_argument("--revision", default=DATA_REVISION, help="Hugging Face revision of the instances")
     parser.add_argument("--judge", default="bedrock", choices=("bedrock", "defer"),
                         help="defer: leave verdicts empty, for --judge-later where the judge key is")

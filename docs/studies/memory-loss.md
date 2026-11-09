@@ -140,14 +140,17 @@ reasoning effort sent and an output cap of 16,384. It writes its own summaries, 
 probe; the memory's own parts stay the study's (the headers its writer made and the rule records the study's reader wrote), and its rows
 are judged apart on gpt-oss-120b, so that only the agent changes. Set on Nov 9, after its small test on one history (15 cases) and
 before any full cell of it ran: that test found it carrying on the work in place of writing, with tool calls or the end of its thinking
-in 105 of its 360 notes versions (every case had some) and 3 of its 15 summaries holding no summary at all, as on its first long-run
-session. Its writers now follow the long run's rule. A notes reply that carries on the work, or only repeats that there are no notes,
-is asked again with the long run's sentence after the conversation, up to three tries, and after the last the notes stay as they were for
-that round, counted on the case's record; the first ask is word for word what gpt-oss-120b was asked. A summary, in the benchmark's own
-path and the told summary alike, is what its prompt asked for and nothing around it, and a reply with none is asked again, up to three
-tries; after the last the package's own reply is kept, counted. On the small test's stored replies this rule finds a summary in 12 of
-the 15 baselines and all 15 told summaries. gpt-oss-120b's rows are untouched: its writers run as they always did. Its multiple-choice
-answers are graded by the package's rule, the last line alone; 8 of its 270 on the small test were unreadable that way (an option
+in 105 of its 360 notes versions (every case had some) and in 6 of its 15 summaries, 3 of which held no summary at all, as on its first
+long-run session. So its writers are held to writing, and only where a reply carries on the work. A notes reply that does, or only
+repeats that there are no notes, is asked again with the long run's sentence after the conversation, up to three tries, and after the
+last the notes stay as they were for that round, counted on the case's record; the first ask is word for word what gpt-oss-120b was
+asked. A summary reply, in the benchmark's own path and the told summary alike, is kept word for word as the package keeps every reply,
+unless it carries on the work, is empty or was cut off by the output cap: then it is asked again, up to three tries, and after the last
+the package's own reply is kept, counted. A reply in no particular form is kept, as the package keeps it. The same rule read over
+gpt-oss-120b's stored writers in every reported cell (Nov 9) finds none of its 17,280 notes versions carrying on the work, and 3 of its
+3,300 summaries, all three told summaries of the published cell that name the tool-call tag in prose rather than call a tool; they stay
+as stored, so the two models' rows are read alike. gpt-oss-120b's writers run as they always did. Multiple-choice answers are graded by
+the package's rule, the last line alone; 8 of the second agent's 270 on its first small test were unreadable that way (an option
 written out after the letter, a stray closing tag, a tool call after the answer), and are reported as unreadable, as for every model.
 
 ## The long run

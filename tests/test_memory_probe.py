@@ -1464,21 +1464,27 @@ def test_notes_kept_to_writing_say_how_many_rounds_kept_the_notes_over(tmp_path:
     assert set(json.loads(plain.read_text())) == {"id", "versions"}, "off, the rows are as they were"
 
 
-def test_a_second_models_told_summary_is_read_by_the_long_runs_rule_and_asked_again_when_it_holds_none(tmp_path: Path) -> None:
-    replies = {"turn 0": iter(["<summary>The user wants drafts first, always.</summary>\n\nNow let me run it.<tool_call>bash</tool_call>"]),
-               "turn 1": iter(["<tool_call>write_file</tool_call>", "<summary>The second try holds the summary.</summary>"]),
-               "turn 2": iter(["<tool_call>a</tool_call>", "Let me keep going with it.", "<tool_call>b</tool_call>"])}
-    cases = [{"id": f"c{n}", "messages": [{"role": "user", "content": f"turn {n}"}]} for n in range(3)]
+def test_a_second_models_told_summary_is_kept_as_the_package_keeps_it_and_asked_again_only_when_it_works(tmp_path: Path) -> None:
+    """The package keeps the whole reply. A second model's reply is kept the same way, word for word, unless it carries on the work, is empty or is cut off:
+    then it is asked again, up to three tries. A reply in no particular form is kept, as the package keeps it. gpt-oss-120b's stored replies pass this
+    rule in 3,297 of 3,300 (Nov 9), so the two models are read alike."""
+    replies = {"turn 0": iter([("<summary>The user wants drafts first, always.</summary>\n\nNow let me run it.<tool_call>bash</tool_call>", "stop"),
+                               ("<summary>The user wants drafts first, always.</summary>", "stop")]),
+               "turn 1": iter([("A plain summary in prose with no tags at all, which the package keeps as it is.", "stop")]),
+               "turn 2": iter([("<tool_call>a</tool_call>", "stop"), ("Let me keep going.<tool_call>b</tool_call>", "stop"), ("</think>done with it all", "stop")]),
+               "turn 3": iter([("", "stop"), ("<summary>half of it", "length"), ("<summary>After an empty and a cut one, whole.</summary>", "stop")])}
+    cases = [{"id": f"c{n}", "messages": [{"role": "user", "content": f"turn {n}"}]} for n in range(4)]
 
     def package(option: str, messages: list[dict]) -> list[dict]:
         return [*messages, {"role": "user", "content": f"Summarize, {option}."}]
 
     out = tmp_path / "told"
-    counts = write_summaries(cases, "anthropic", lambda messages: (next(replies[messages[0]["content"]]), "stop"), out, workers=1,
-                             package_prompt=package, read_summaries=True)
-    assert counts == {"cases": 3, "written": 3}
+    counts = write_summaries(cases, "anthropic", lambda messages: next(replies[messages[0]["content"]]), out, workers=1,
+                             package_prompt=package, keep_to_summaries=True)
+    assert counts == {"cases": 4, "written": 4}
     rows = {row["id"]: row for row in map(json.loads, (out / "summaries.jsonl").read_text().splitlines())}
-    assert rows["c0"] == {"id": "c0", "prompt": "anthropic", "k": 1, "summary": "The user wants drafts first, always.", "read": True, "tries": 1}
-    assert rows["c1"]["summary"] == "The second try holds the summary." and rows["c1"]["tries"] == 2
-    assert rows["c2"] == {"id": "c2", "prompt": "anthropic", "k": 1, "summary": "<tool_call>b</tool_call>", "read": False, "tries": 3}, \
-        "none in three tries keeps the package's own reply, and says so"
+    assert rows["c0"] == {"id": "c0", "prompt": "anthropic", "k": 1, "summary": "<summary>The user wants drafts first, always.</summary>", "clean": True, "tries": 2}
+    assert rows["c1"]["summary"] == "A plain summary in prose with no tags at all, which the package keeps as it is." and rows["c1"]["tries"] == 1
+    assert rows["c2"] == {"id": "c2", "prompt": "anthropic", "k": 1, "summary": "</think>done with it all", "clean": False, "tries": 3}, \
+        "none clean in three tries keeps the package's own reply, and says so"
+    assert rows["c3"]["summary"] == "<summary>After an empty and a cut one, whole.</summary>" and rows["c3"]["tries"] == 3

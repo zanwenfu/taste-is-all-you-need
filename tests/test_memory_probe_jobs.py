@@ -1028,7 +1028,7 @@ def test_run_again_the_stages_ask_only_for_what_did_not_end_well(tmp_path: Path)
 def test_only_another_agents_writers_are_kept_to_writing(world: dict, tmp_path: Path) -> None:
     assert _run(world, SMALL="0").returncode == 0
     calls = world["log"].read_text()
-    assert "--keep-to-notes" not in calls and "--read-summaries" not in calls, "the study model's writers run as they did"
+    assert "--keep-to-notes" not in calls and "--keep-to-summaries" not in calls, "the study model's writers run as they did"
     world["log"].write_text("")
     kept = tmp_path / "kept"
     kept.mkdir()
@@ -1039,19 +1039,19 @@ def test_only_another_agents_writers_are_kept_to_writing(world: dict, tmp_path: 
     notes = [line for line in agent if "studies.memory_probe.notes " in line]
     told = [line for line in agent if "studies.memory_probe.told_summary " in line]
     assert notes and all("--keep-to-notes" in line for line in notes)
-    assert told and all("--read-summaries" in line for line in told)
+    assert told and all("--keep-to-summaries" in line for line in told)
 
 
-def test_only_another_agents_baselines_read_their_summaries(tmp_path: Path) -> None:
+def test_only_another_agents_baselines_keep_their_summaries_to_writing(tmp_path: Path) -> None:
     done, calls, _ = _inputs(tmp_path / "study-model")
-    assert done.returncode == 0 and "--read-summaries" not in calls
+    assert done.returncode == 0 and "--keep-to-summaries" not in calls
     kept = tmp_path / "kept"
     (kept / "repeated" / "anthropic" / "h00-10").mkdir(parents=True)
     (kept / "repeated" / "anthropic" / "h00-10" / "records.json").write_text("r")
     done, calls, _ = _inputs(tmp_path / "other", PROBE_MODEL="poolside/laguna-s-2.1", PROBE_EFFORT="none", PROBE_CAP="16384", REPEATED_FROM=str(kept), VARIANT="published")
     assert done.returncode == 0, done.stdout + done.stderr
     bridge = [line for line in calls.splitlines() if "conpact_bridge" in line]
-    assert bridge and all("--read-summaries" in line for line in bridge)
+    assert bridge and all("--keep-to-summaries" in line for line in bridge)
 
 
 def _judge_lines(calls: str) -> list[str]:

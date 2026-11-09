@@ -684,18 +684,21 @@ class _Inner:
                                      usage=types.SimpleNamespace(prompt_tokens=1, completion_tokens=1))
 
 
-def test_a_second_models_summary_in_the_package_path_is_read_by_the_long_runs_rule(tmp_path: Path) -> None:
-    log = tmp_path / "reads.jsonl"
-    inner = _Inner([("<tool_call>x</tool_call>", "stop"), ("<summary>Always draft first, then wait.</summary> then <tool_call>y</tool_call>", "stop")])
-    reply = conpact_bridge.SummaryReader(inner, "anthropic", log).chat.completions.create(model="m", messages=[])
-    assert reply.choices[0].message.content == "Always draft first, then wait." and inner.calls == 2
-    cut = _Inner([("<summary>half of a summary that was", "length"), ("<summary>The whole summary, at last.</summary>", "stop")])
-    assert conpact_bridge.SummaryReader(cut, "anthropic", log).chat.completions.create().choices[0].message.content == "The whole summary, at last."
-    none = _Inner([("<tool_call>a</tool_call>", "stop"), ("Let me go on.", "stop"), ("<tool_call>c</tool_call>", "stop")])
-    assert conpact_bridge.SummaryReader(none, "anthropic", log).chat.completions.create().choices[0].message.content == "<tool_call>c</tool_call>", \
-        "none in three tries leaves the package's own reply"
+def test_a_second_models_summary_in_the_package_path_is_kept_as_the_package_keeps_it_and_asked_again_only_when_it_works(tmp_path: Path) -> None:
+    log = tmp_path / "keeps.jsonl"
+    clean = "<summary>Always draft first, then wait.</summary>"
+    inner = _Inner([("<tool_call>x</tool_call>", "stop"), (clean + " then <tool_call>y</tool_call>", "stop"), (clean, "stop")])
+    reply = conpact_bridge.KeepToSummaries(inner, log).chat.completions.create(model="m", messages=[])
+    assert reply.choices[0].message.content == clean and inner.calls == 3, "the clean reply itself, word for word"
+    prose = "A summary in plain prose, in no form the prompt asked for, kept as the package keeps it."
+    cut = _Inner([("<summary>half of a summary that was", "length"), ("", "stop"), (prose, "stop")])
+    assert conpact_bridge.KeepToSummaries(cut, log).chat.completions.create().choices[0].message.content == prose
+    none = _Inner([("<tool_call>a</tool_call>", "stop"), ("Let me go on.<tool_call>b</tool_call>", "stop"), ("<tool_call>c</tool_call>", "stop")])
+    assert conpact_bridge.KeepToSummaries(none, log).chat.completions.create().choices[0].message.content == "<tool_call>c</tool_call>", \
+        "none clean in three tries leaves the package's own reply"
     refused = _Inner([(conpact_bridge.NOT_SERVED, "not_served")])
-    assert conpact_bridge.SummaryReader(refused, "anthropic", log).chat.completions.create().choices[0].message.content == conpact_bridge.NOT_SERVED
+    assert conpact_bridge.KeepToSummaries(refused, log).chat.completions.create().choices[0].message.content == conpact_bridge.NOT_SERVED
     assert refused.calls == 1, "a call the server could not take is not asked again"
     assert [json.loads(line) for line in log.read_text().splitlines()] == [
-        {"tries": 2, "read": True}, {"tries": 2, "read": True}, {"tries": 3, "read": False}, {"tries": 1, "read": False, "not_served": True}]
+        {"tries": 3, "clean": True}, {"tries": 3, "clean": True}, {"tries": 3, "clean": False}, {"tries": 1, "clean": False, "not_served": True}]
+    assert conpact_bridge.summary_keep_counts(log) == {"calls": 4, "clean_first_try": 0, "clean_after_more": 2, "none_clean": 1, "not_served": 1}
