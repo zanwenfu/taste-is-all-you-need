@@ -199,6 +199,12 @@ result: the session filler sizes each session to end by a fixed time and starts 
 shorter than asked. The paper reports every valid session that ended by 6 am ET on Mon 2026-11-16, and no session is stopped,
 dropped or added because of what it showed.
 
+**Session length, set on 2026-11-09 before any session on the final code had ended.** The first session, seed 102 on Pi's prompt,
+holds 39 tasks. Every later session holds at most 24. With eleven arms on two GPUs a task took about 25 minutes in that session, so
+39-task sessions would have given about six sessions per summary prompt by the jobs' ends, the least the sign test above can use,
+with none to spare for a failed one. 24 tasks still take each arm past 100 compactions at the four to six a task seen so far, so
+every bin above is reached. The choice rests on GPU time alone; no obedience had been read from any session when it was made.
+
 An independent review of this harness on 2026-11-06 found that the search also held the system prompt, that what the harness delivered had lost each hit's date and
 replacement mark, and that the long run's message for a reply with no command was not mini-swe-agent's. All were fixed, and the runs before that commit are not reported.
 
