@@ -33,6 +33,7 @@ from studies.memory_bench.headers import served_ask, stored_writer, write_all
 from studies.memory_bench.reader import ServedJudge, read_all
 from studies.memory_bench.runner import retrieve_conversation, retrieve_one, validate
 from studies.memory_bench.systems import (
+    DatedTasteGit,
     FlatBm25,
     FullContext,
     NoMemory,
@@ -74,6 +75,8 @@ def make_system(name: str, gold: lme.Gold | None, workdir: Path, *, unit: str = 
         if headers is None:
             raise ValueError("taste_git_headers needs stored headers")
         return TasteGit(workdir, unit=unit, commit_per=commit_per, header_writer=stored_writer(headers))
+    if name == "taste_git_dated":
+        return DatedTasteGit(workdir, unit=unit, commit_per=commit_per)
     raise ValueError(f"unknown system {name!r}")
 
 

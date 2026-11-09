@@ -167,6 +167,16 @@ class TasteGit(System):
         shutil.rmtree(self.folder, ignore_errors=True)
 
 
+class DatedTasteGit(TasteGit):
+    """Taste's store holding the raw history with each relative date followed by the date it names, worked out at write
+    time from the session's date with no model call (studies/memory_bench/dates.py). Everything else is plain Taste."""
+
+    def ingest(self, sessions: list[dict], unit: str | None = None) -> None:
+        from studies.memory_bench.dates import dated_session
+
+        super().ingest([dated_session(session) for session in sessions], unit)
+
+
 @lru_cache(maxsize=4)
 def _rankings(path: str, stamp: tuple[int, int]) -> dict[str, dict]:
     """Read once per process, and again if the file changes (``stamp`` is its time and size)."""
