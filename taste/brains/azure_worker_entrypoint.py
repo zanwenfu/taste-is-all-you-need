@@ -58,7 +58,8 @@ def _hosted_runtime(policy, branch, assignment, session, monitor, terminal, dire
 
     return HostedWorkerRuntime(branch, assignment, session, monitor, terminal_client=terminal,
                                agent=hosted_agent(policy.agent, effort=policy.effort, uname=policy.uname,
-                                                  rewind=None if policy.branch is None else policy.branch.agent_rewind()),
+                                                  rewind=None if policy.branch is None else policy.branch.agent_rewind(),
+                                                  command_seconds=policy.command_seconds),
                                model_name=assignment.model)
 
 

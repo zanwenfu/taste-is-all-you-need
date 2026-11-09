@@ -217,6 +217,8 @@ def trial(trial_dir, trials_root):
                        and not (taste.get("final_checkpoint") or {}).get("partial"),
         # What that save holds as changed (its manifest's paths), for a checker told what changed.
         "final_changed_paths": _paths((taste.get("final_checkpoint") or {}).get("changed_paths")),
+        # The trial's final change as git tells it (taste.benchmarks.final_change), only when the trial read it.
+        **({"final_change": taste["final_change"]} if isinstance(taste.get("final_change"), dict) else {}),
         "model": (config.get("agent") or {}).get("model_name"),
         "settings": dict((config.get("agent") or {}).get("kwargs") or {}),
         "cost_usd": cost, "prompt_tokens": prompt, "completion_tokens": completion,

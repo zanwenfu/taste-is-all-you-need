@@ -115,12 +115,13 @@ def canonical_uname(value) -> str:
     return json.dumps(found, sort_keys=True, separators=(",", ":")) if found else ""
 
 
-def hosted_agent(name: str, *, effort: str, uname: str = "", rewind=None):
+def hosted_agent(name: str, *, effort: str, uname: str = "", rewind=None, command_seconds: int = 0):
     """The named agent, configured as its own project configures it, at this effort.
 
     ``uname`` (``agent_uname``) is mini-swe-agent's alone: the other agents do not report their host, and are
     refused one rather than silently ignoring it. So is ``rewind``, the rewind arm's notes and the call they go
-    in at (``taste.agents.agentrewind``).
+    in at (``taste.agents.agentrewind``), and ``command_seconds`` (``agent_command_seconds``), the limit on each
+    of its commands (0: its configuration's own).
     """
     if name not in HOSTED_AGENTS:
         raise ValueError(f"no hosted agent named {name!r}")
@@ -129,7 +130,11 @@ def hosted_agent(name: str, *, effort: str, uname: str = "", rewind=None):
         raise ValueError(f"agent_uname is mini-swe-agent's; {name} does not report its host")
     if rewind is not None and name != "mini-swe-agent":
         raise ValueError(f"the rewind arm runs mini-swe-agent; {name} has no rewind tools")
+    if command_seconds and name != "mini-swe-agent":
+        raise ValueError(f"agent_command_seconds is mini-swe-agent's; {name} keeps its own limits")
     options = {"uname": canonical_uname(uname)} if uname else {}
     if rewind is not None:
         options["rewind"] = rewind
+    if command_seconds:
+        options["command_seconds"] = command_seconds
     return getattr(importlib.import_module(module), attribute)(effort=effort, **options)

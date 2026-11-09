@@ -31,7 +31,8 @@ _FIELDS = frozenset({
 
 _EFFORTS = ("medium", "high")  # "low" is the original choice and is not written.
 # Written only when chosen, so assignments made before them keep their form.
-_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent", "worker_uname", "services", "branch"})
+_OPTIONAL = frozenset({"worker_effort", "request_seconds", "worker_agent", "worker_uname", "worker_command_seconds",
+                       "services", "branch"})
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,8 @@ class AzureWorkerPolicy:
     branch: BranchPolicy | None = None
     # The machine mini-swe-agent is told it runs on (agent_uname); empty: the host's.
     uname: str = ""
+    # The longest one of mini-swe-agent's commands may run (agent_command_seconds); 0: its own limit.
+    command_seconds: int = 0
 
     @classmethod
     def from_assignment(cls, assignment: Assignment) -> AzureWorkerPolicy:
@@ -74,6 +77,11 @@ class AzureWorkerPolicy:
             # Written only when set, in its one form, and only for the agent that reports its host.
             if not raw["worker_uname"] or written != raw["worker_uname"] or raw.get("worker_agent") != "mini-swe-agent":
                 raise EntrypointInputError("the assignment's agent_uname is not admitted")
+        if "worker_command_seconds" in raw:
+            seconds = raw["worker_command_seconds"]
+            # Written only when set, and only for the agent whose commands it limits.
+            if type(seconds) is not int or seconds < 1 or raw.get("worker_agent") != "mini-swe-agent":
+                raise EntrypointInputError("the assignment's agent_command_seconds is not admitted")
         branch = None
         if "branch" in raw:
             if raw.get("services") != "none":
@@ -119,7 +127,8 @@ class AzureWorkerPolicy:
             # Do not echo arbitrary policy values into launch diagnostics.
             raise EntrypointInputError("Azure routing or spending limits are invalid") from exc
         return cls(worker, monitor, batch, raw.get("worker_effort", "low"), raw.get("worker_agent", ""),
-                   raw.get("services") != "none", branch, raw.get("worker_uname", ""))
+                   raw.get("services") != "none", branch, raw.get("worker_uname", ""),
+                   raw.get("worker_command_seconds", 0))
 
     def validate_launch(self, config: EntrypointConfig) -> None:
         if (config.expected_model != self.worker.model or config.monitor_model != self.monitor.model

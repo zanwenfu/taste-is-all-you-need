@@ -16,7 +16,8 @@ What Taste supplies, as two classes behind mini-swe-agent's own interfaces:
 - ``TasteEnvironment`` in place of its local environment, which under Harbor
   runs inside the task container. Commands go to the container through the
   host, with standard error folded into the output, upstream's 30-second
-  default limit, its timeout message and its submission protocol.
+  default limit (a trial may set another: ``agent_command_seconds``), its
+  timeout message and its submission protocol.
 
 Differences, disclosed with results: Taste caps each reply's output tokens
 (a budget needs a ceiling per call); the environment's template values leave
@@ -301,7 +302,7 @@ class MiniSweAgent:
 
     name = NAME
 
-    def __init__(self, *, effort, config="mini", uname="", rewind=None):
+    def __init__(self, *, effort, config="mini", uname="", rewind=None, command_seconds=0):
         path = Path(builtin_config_dir) / f"{config}.yaml"
         self._raw = path.read_bytes()
         loaded = yaml.safe_load(self._raw)
@@ -314,6 +315,11 @@ class MiniSweAgent:
         if rewind is not None and (not isinstance(rewind, dict) or set(rewind) != {"notes", "at_call"}):
             raise ValueError("the rewind arm's agent is given its notes and the call they go in at")
         self.rewind = rewind
+        # agent_command_seconds: the limit on each command over the configuration's (its environment's 30 s);
+        # disclosed with the trial's settings, not in the identity, so a branch replays a run made at another limit.
+        if type(command_seconds) is not int or command_seconds < 0:
+            raise ValueError("the command limit is a whole number of seconds, 0 for the configuration's own")
+        self.command_seconds = command_seconds
 
     def configs(self):
         return copy.deepcopy(self._configs)
@@ -327,7 +333,8 @@ class MiniSweAgent:
         model = (TasteResponsesModel if self.rewind is None else RewindResponsesModel)(
             host=host, effort=self.effort, model_name=model_name, **configs["model"],
             **({} if self.rewind is None else self.rewind))
-        return DefaultAgent(model, TasteEnvironment(host=host, cwd=cwd, uname=self.uname, **configs["environment"]),
+        environment = {**configs["environment"], **({"timeout": self.command_seconds} if self.command_seconds else {})}
+        return DefaultAgent(model, TasteEnvironment(host=host, cwd=cwd, uname=self.uname, **environment),
                             **configs["agent"])
 
     def run(self, task, host, *, cwd, model_name):

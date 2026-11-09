@@ -34,7 +34,9 @@ the files of step k are rebuilt by the worker or restored here before the goal
 starts, and a rebuild with live off can leave a checkpoint of them for later
 branches. With ``branch_replay=off`` only the files come back, and the trial's
 own agent starts fresh: a checker given a run's final files. Any trial can
-leave its final files (``final_checkpoint``) for such a checker to restore. A
+leave its final files (``final_checkpoint``) for such a checker to restore,
+and its final change as text (``final_change_chars``: git's diff of the
+task's files against the commit they started from, ``final_change``). A
 fresh trial can be given another task text, or more of it.
 
 This module is the only one that imports Harbor. Trial settings live in
@@ -59,7 +61,7 @@ from harbor.agents.base import BaseAgent
 from harbor.agents.capabilities import AgentCapabilities
 
 from taste import __version__
-from taste.benchmarks import branch_trial
+from taste.benchmarks import branch_trial, final_change
 from taste.benchmarks.azure_terminal_trial import AzureTerminalTrial
 from taste.benchmarks.flat_trajectory import encode, flat_trajectory, ledger_trajectory
 from taste.benchmarks.harbor_settings import (
@@ -198,6 +200,8 @@ class TasteAgent(BaseAgent):
         if settings.task_text or settings.task_suffix or branch is not None:
             # The task text this trial gave, when it is not the benchmark's own.
             summary["task_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
+        # The commit the task's files start from, read before a restore or the agent can change them.
+        self._change_base = await self._read_base(backend)
         self._restore_seconds = 0.0
         if branch is not None:
             summary["branch"] = branch_trial.disclosure(settings, branch)
@@ -287,6 +291,28 @@ class TasteAgent(BaseAgent):
             # The checkpoint this trial saved, as it was named, and what it holds as changed.
             summary["branch"].update(checkpoint=settings.branch_checkpoint, changed_paths=saved["changed_paths"],
                                      changed_paths_more=saved["changed_paths_more"])
+        if settings.final_change_chars:
+            # After the saves, so that they hold the files as the agent left them; git writes nothing here.
+            summary["final_change"] = await asyncio.to_thread(self._final_change, backend)
+
+    async def _read_base(self, backend):
+        """(the commit the task's files start from, "") or (None, why), when the trial reads its final change;
+        (None, "") when it does not, and nothing runs."""
+        if not self.settings.final_change_chars:
+            return None, ""
+        return await asyncio.to_thread(final_change.base_commit, backend, self._workdir)
+
+    def _final_change(self, backend):
+        """The trial's final change (``final_change.read_change``), or why there is none; it never raises."""
+        cap = self.settings.final_change_chars
+        commit, why = getattr(self, "_change_base", (None, "the base commit was not read"))
+        if commit is None:
+            return {"read": False, "reason": why, "cap_chars": cap}
+        try:
+            return final_change.final_change(backend, self._workdir, commit, cap)
+        except Exception as failure:
+            return {"read": False, "reason": f"the read failed: {type(failure).__name__}", "base": commit,
+                    "cap_chars": cap}
 
     def _checkpoint(self, value):
         return branch_trial.checkpoint_directory(value, self.checkpoints_root)

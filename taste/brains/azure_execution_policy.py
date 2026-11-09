@@ -32,7 +32,8 @@ POLICY_KEY = "azure_execution"
 _ORIGINAL_CHOICES = {"worker_model": AZURE_WORKER_MODEL, "worker_effort": "low",
                      "worker_grace_seconds": 2.0, "worker_wall_seconds": 900.0, "max_assignments": None,
                      "planner_effort": "", "request_seconds": None, "planner_model": AZURE_PLANNER_MODEL,
-                     "worker_agent": "", "worker_uname": "", "services": "all", "rollback": False, "branch": None}
+                     "worker_agent": "", "worker_uname": "", "worker_command_seconds": 0, "services": "all",
+                     "rollback": False, "branch": None}
 SERVICES = ("all", "none")
 
 
@@ -81,6 +82,9 @@ class AzureExecutionPolicy:
     # The machine that agent (mini-swe-agent only) is told it runs on, in its
     # one written JSON form (taste.agents.canonical_uname); empty: the host's.
     worker_uname: str = ""
+    # The longest one of that agent's (mini-swe-agent's) commands may run, in
+    # seconds (agent_command_seconds); 0: the agent's own limit.
+    worker_command_seconds: int = 0
     # "none" runs that agent alone through the same machinery: the fixed plan
     # as its planner (taste.brains.single_run), no monitor, no certification.
     services: str = "all"
@@ -126,6 +130,11 @@ class AzureExecutionPolicy:
         if self.worker_uname and (canonical_uname(self.worker_uname) != self.worker_uname
                                   or self.worker_agent != "mini-swe-agent"):
             raise ValueError("agent_uname is mini-swe-agent's, in its one written form")
+        seconds = self.worker_command_seconds
+        if type(seconds) is not int or seconds < 0 or (seconds and (
+                self.worker_agent != "mini-swe-agent" or self.terminal is None
+                or seconds > self.terminal.max_timeout_seconds)):
+            raise ValueError("agent_command_seconds is mini-swe-agent's, whole seconds within the terminal's limit")
         if self.planner_effort not in ("", *WORKER_EFFORTS):
             raise ValueError("planner reasoning effort must be low, medium or high, or empty for the default")
         for name, ceiling in (("worker_grace_seconds", 600), ("worker_wall_seconds", 604800)):
@@ -229,6 +238,7 @@ class AzureExecutionPolicy:
             **({} if self.request_seconds is None else {"request_seconds": self.request_seconds}),
             **({"worker_agent": self.worker_agent} if self.worker_agent else {}),
             **({"worker_uname": self.worker_uname} if self.worker_uname else {}),
+            **({"worker_command_seconds": self.worker_command_seconds} if self.worker_command_seconds else {}),
             **({"services": self.services} if self.services != "all" else {}),
             **({"branch": self.branch.to_dict()} if self.branch is not None else {}),
         }

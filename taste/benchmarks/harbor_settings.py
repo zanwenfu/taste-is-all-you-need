@@ -22,6 +22,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 
 from taste.agents import HOSTED_AGENTS, canonical_uname, uname_override
+from taste.benchmarks.final_change import LEAST_CHARS as LEAST_CHANGE_CHARS
+from taste.benchmarks.final_change import MOST_CHARS as MOST_CHANGE_CHARS
 from taste.brains import benchmark_reply
 from taste.brains.azure_execution_policy import WORKER_EFFORTS, AzureExecutionPolicy
 from taste.brains.branch_replay import MODES, OVERRIDES, BranchPolicy
@@ -75,6 +77,12 @@ class TrialSettings:
     # empty for the host's own. A study shows it the host its recorded runs
     # had, so that a branch's requests match the record's on another host.
     agent_uname: str = ""
+    # The longest one of a hosted mini-swe-agent's commands may run, in
+    # seconds; 0 for its own limit (30). A study gives a longer one to the
+    # tasks whose builds need it (Luna's Go builds and tests were ended at
+    # 30 s 52-60% of the time). At most command_seconds, the terminal's own
+    # limit on any command.
+    agent_command_seconds: int = 0
     # "none" runs that agent alone: the task as given, with no planner (a
     # fixed rule plans), no monitor and no certification.
     services: str = "all"
@@ -131,6 +139,12 @@ class TrialSettings:
     # A save's size cap in MiB (0: the 512 MiB default). Over it a save is partial and cannot be restored; a study
     # whose runs leave large build caches (Sonnet's Go runs: 0.6-1.4 GB) raises it. 64-8192.
     checkpoint_mib: int = 0
+    # The trial's final change (taste.benchmarks.final_change): git's diff of
+    # the task's files against the commit they started from, with the changed
+    # paths, read once the agent has ended, after its final files are saved
+    # and before its verifier runs, and kept in its record up to this many
+    # characters. 0: not read. 1,000-1,000,000.
+    final_change_chars: int = 0
     # The coordinator writes every contract and the final reply. Its effort is
     # named so that a run discloses it. Measured on gpt-6-astra the level moves
     # little: 47 to 70 reasoning tokens on one small puzzle from low to high,
@@ -199,6 +213,8 @@ class TrialSettings:
             raise ValueError("lost_workers and max_assignments must be nonnegative and positive")
         if self.checkpoint_mib and not 64 <= self.checkpoint_mib <= 8192:
             raise ValueError("checkpoint_mib must be 0 (the 512 MiB default) or 64-8192")
+        if self.final_change_chars and not LEAST_CHANGE_CHARS <= self.final_change_chars <= MOST_CHANGE_CHARS:
+            raise ValueError(f"final_change_chars must be 0 (not read) or {LEAST_CHANGE_CHARS:,}-{MOST_CHANGE_CHARS:,}")
         # Refused when the agent is built, not when the first plan is made.
         if self.worker_effort not in WORKER_EFFORTS:
             raise ValueError("worker reasoning effort must be low, medium or high")
@@ -207,6 +223,10 @@ class TrialSettings:
         object.__setattr__(self, "agent_uname", canonical_uname(self.agent_uname))
         if self.agent_uname and self.agent != "mini-swe-agent":
             raise ValueError("agent_uname is mini-swe-agent's: the other agents do not report their host")
+        if not 0 <= self.agent_command_seconds <= self.command_seconds:
+            raise ValueError("agent_command_seconds must be 0 (the agent's own limit) or at most command_seconds")
+        if self.agent_command_seconds and self.agent != "mini-swe-agent":
+            raise ValueError("agent_command_seconds is mini-swe-agent's: the other agents keep their own limits")
         if self.services not in ("all", "none"):
             raise ValueError("services must be all or none")
         if self.services == "none" and not self.agent:
@@ -336,7 +356,8 @@ class TrialSettings:
             pricing_sha=table_sha(),
             terminal=TerminalWorkerPolicy(binding, self.command_seconds, workdir),
             planner_model=planner, worker_model=worker, worker_effort=self.worker_effort,
-            worker_agent=self.agent, worker_uname=self.agent_uname, services=self.services,
+            worker_agent=self.agent, worker_uname=self.agent_uname,
+            worker_command_seconds=self.agent_command_seconds, services=self.services,
             rollback=self.rollback == "on",
             planner_effort=self.planner_effort, request_seconds=self.request_seconds,
             worker_grace_seconds=self.worker_grace_seconds,
@@ -360,6 +381,7 @@ class TrialSettings:
                 "monitor_model": worker_served, "worker_effort": self.worker_effort,
                 "worker_agent": self.agent or "taste", "services": self.services,
                 **({"agent_uname": uname_override(self.agent_uname)} if self.agent_uname else {}),
+                **({"agent_command_seconds": self.agent_command_seconds} if self.agent_command_seconds else {}),
                 **({"alone": self.alone} if self.services == "none" else {}),
                 **({"rollback": self.rollback} if self.rollback != "off" else {}),
                 **({"branch": {"script": self.branch, "step": self.branch_step, "mode": self.branch_mode,
@@ -372,6 +394,7 @@ class TrialSettings:
                 **({"task_text": self.task_text} if self.task_text else {}),
                 **({"task_suffix": self.task_suffix} if self.task_suffix else {}),
                 **({"final_checkpoint": self.final_checkpoint} if self.final_checkpoint else {}),
+                **({"final_change_chars": self.final_change_chars} if self.final_change_chars else {}),
                 "coordinator_effort": self.planner_effort or "provider default",
                 "monitor_effort": "low",
                 "spend_cap_usd": self.spend_cap_usd, "admission_budgets_usd": {
