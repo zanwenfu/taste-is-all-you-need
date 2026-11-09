@@ -1052,3 +1052,22 @@ def test_only_another_agents_baselines_read_their_summaries(tmp_path: Path) -> N
     assert done.returncode == 0, done.stdout + done.stderr
     bridge = [line for line in calls.splitlines() if "conpact_bridge" in line]
     assert bridge and all("--read-summaries" in line for line in bridge)
+
+
+def _judge_lines(calls: str) -> list[str]:
+    return sorted(line for line in calls.splitlines() if "studies.memory_probe.judge " in line)
+
+
+def test_rows_judged_later_get_the_very_judge_calls_they_would_have_got_and_nothing_else_runs(world: dict) -> None:
+    """Another agent's rows are judged apart (JUDGE=later); JUDGE_ONLY then asks, on gpt-oss-120b, every judge call a cell judged at once would make."""
+    assert _run(world, SMALL="0").returncode == 0
+    at_once = _judge_lines(world["log"].read_text())
+    world["log"].write_text("")
+    done = _run(world, SMALL="0", JUDGE_ONLY="1")
+    assert done.returncode == 0, done.stdout + done.stderr
+    calls = world["log"].read_text()
+    assert at_once and _judge_lines(calls) == at_once
+    assert not any(step in calls for step in ("studies.memory_probe.run ", "studies.memory_probe.notes ", "studies.memory_probe.headers ",
+                                              "studies.memory_probe.told_summary ", "studies.memory_probe.merge ")), "it writes and answers nothing"
+    refused = _run(world, JUDGE_ONLY="1", JUDGE="later")
+    assert refused.returncode == 1 and "judge" in refused.stdout

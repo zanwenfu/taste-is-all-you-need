@@ -28,6 +28,10 @@ fail() { echo "FAILED: $*"; kill ${PID:-} ${SMI:-} 2>/dev/null; exit 1; }
 # Another agent's writers are kept to writing (KEEP, READS): Laguna S 2.1 carried on the work in 105 of its 360 notes versions on the matrix's small test (Nov 9),
 # so a notes reply that works is asked again with the long run's sentence last, and a told summary is read by the long run's rule. The study model's run as they did.
 AGENT_MODEL=${AGENT_MODEL:-$MODEL}; AGENT_EFFORT=${AGENT_EFFORT:-low}; AGENT_CAP=${AGENT_CAP:-}; KEEP=(); READS=()
+# JUDGE_ONLY=1: the rows of a cell answered and judged apart (JUDGE=later) are judged now, on gpt-oss-120b, by every judge call this script makes when it
+# judges at once, on the same rows, files and settings. It writes no notes, headers or summaries and answers no row.
+JUDGE_ONLY=${JUDGE_ONLY:-0}
+[ "$JUDGE_ONLY" = 1 ] && [ "${JUDGE:-}" = later ] && fail "JUDGE_ONLY judges now: leave JUDGE unset"
 if [ "$AGENT_MODEL" != "$MODEL" ]; then
   [ -n "${SERVER_URL:-}" ] || fail "another agent needs SERVER_URL"
   { [ -n "$HEADERS_FROM" ] && [ -e "$HEADERS_FROM/turn-headers.jsonl" ]; } || fail "another agent keeps the memory's own headers: HEADERS_FROM"
@@ -72,7 +76,7 @@ fi
 # WRITERS=0: a cued case has the published case's history word for word, so it keeps that case's notes and headers, read by the history they came from.
 wanted() { [ -z "${ROWS:-}" ] || [[ " $ROWS " == *" $1 "* ]]; }
 needs() { [ -z "${ROWS:-}" ] || [[ "$ROWS" =~ $1 ]]; }  # a pattern over the rows asked for
-if [ "${WRITERS:-1}" = 1 ]; then
+if [ "${WRITERS:-1}" = 1 ] && [ "$JUDGE_ONLY" = 0 ]; then
   # A set's notes and headers are written once, by whichever of its cells gets here first: another waits here, and finds them written. Each writer asks only what it lacks, so
   # it is run again here, before any row has read its file: a row started on a file that later changes refuses to carry on.
   exec 9> $OUT/.writers.lock; flock 9
@@ -101,6 +105,7 @@ fi
 one() {  # label arm condition extra...
   local label=$1 arm=$2 condition=$3; shift 3
   wanted $label || return 0
+  [ "$JUDGE_ONLY" = 1 ] && return 0
   local name=$arm-$condition-$PR-k$K-b$BUDGET T1=$(date +%s) row=$OUT/$label/$arm-$condition-$PR-k$K-b$BUDGET PIDS=() I bad=0 code
   mkdir -p $row
   for I in $(seq 0 $((PROCS-1))); do
@@ -177,10 +182,12 @@ done
 # The summary told to keep what the user asked it to keep doing, on the same prompt, so that the store and the instruction can be read apart. A cued set has the published
 # case's history word for word, so its summaries are the published case's too, and this row belongs to that set.
 if [ "$K" = 1 ] && [ "$BUDGET" = 4096 ] && [ "${WRITERS:-1}" = 1 ] && wanted summary-told; then
-  T1=$(date +%s)
-  $RUN $D/venv/bin/python -m studies.memory_probe.told_summary --inputs $IN --prompt $PR --url $URL --model $AGENT_MODEL --effort $AGENT_EFFORT ${AGENT_CAP:+--output-cap $AGENT_CAP} ${READS[@]+"${READS[@]}"} --out $OUT/told-$PR > $JOB/told-$PR.log 2>&1
-  code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
-  echo "told summaries exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/told-$PR.log | cut -c1-200)"
+  if [ "$JUDGE_ONLY" = 0 ]; then
+    T1=$(date +%s)
+    $RUN $D/venv/bin/python -m studies.memory_probe.told_summary --inputs $IN --prompt $PR --url $URL --model $AGENT_MODEL --effort $AGENT_EFFORT ${AGENT_CAP:+--output-cap $AGENT_CAP} ${READS[@]+"${READS[@]}"} --out $OUT/told-$PR > $JOB/told-$PR.log 2>&1
+    code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
+    echo "told summaries exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/told-$PR.log | cut -c1-200)"
+  fi
   PUBLISHED=$IN; IN=$OUT/told-$PR
   one summary-told a1 i
   judge_summary summary-told $OUT/told-$PR/summaries.jsonl
