@@ -104,20 +104,31 @@ def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tr
     return summarize
 
 
-def make_reader(chat: Callable) -> tuple[Callable[[str], list[str]], list[int]]:
-    """The study's reader, asked once per distinct user message, as it arrives."""
+# A reading cut off by the output cap says nothing whole, and once ended its arm. Two of the first three main sessions lost the arm that way (Nov 9, seed 130
+# about task 4, seed 140 at task 27), so from Nov 9 a cut-off reading is asked again the same way, as a summary is, and every cut-off try is counted.
+# The reader's prompt is the instrument and stays as it was; a reading still cut off on the last try ends the arm as before.
+RULE_READING_TRIES = 3
+
+
+def make_reader(chat: Callable, *, tries: int = RULE_READING_TRIES, cut_off: list[int] | None = None) -> tuple[Callable[[str], list[str]], list[int]]:
+    """The study's reader, asked once per distinct user message, as it arrives, and again up to `tries` times in all when a reply is cut off."""
     from studies.context_rot.criteria import parse_reply, reader_prompt
 
     known: dict[str, list[str]] = {}
     calls = [0]
+    cut = cut_off if cut_off is not None else [0]
 
     def read(text: str) -> list[str]:
         if text not in known:
-            reply = chat(reader_prompt(text), None)
-            calls[0] += 1
-            if reply.choices[0].finish_reason == "length":
-                raise RuntimeError("a rule reading was cut off by the output cap")
-            known[text] = parse_reply(reply.choices[0].message.content or "", text)[0]
+            for _ in range(tries):
+                reply = chat(reader_prompt(text), None)
+                calls[0] += 1
+                if reply.choices[0].finish_reason != "length":
+                    known[text] = parse_reply(reply.choices[0].message.content or "", text)[0]
+                    break
+                cut[0] += 1
+            else:
+                raise RuntimeError(f"a rule reading was cut off by the output cap on all {tries} tries")
         return known[text]
 
     return read, calls
@@ -177,7 +188,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
     notes_skipped = [0]
     chat = _counted(chat, model_use)
     store: Any = None
-    standing, on_compact, reader_calls = None, None, [0]
+    standing, on_compact, reader_calls, reader_cut = None, None, [0], [0]
     searches: list[dict] = []
     found = [""]
     if arm in TOOL_ARMS:
@@ -188,7 +199,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         def standing() -> str:
             return f"{SEARCH_ARMS[arm]}\n{found[0]}" if found[0] else ""
     elif arm == "taste_rules":
-        read, reader_calls = make_reader(chat)
+        read, reader_calls = make_reader(chat, cut_off=reader_cut)
         store = GitTurns(workdir, header=lambda number, turn: CommitHeader(instructions=tuple(read(turn["content"])))
                          if turn["role"] == "user" and not turn.get("from_harness") else CommitHeader())
 
@@ -329,7 +340,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
                "machines_not_stopped": agent.not_stopped, "model_use": model_use, "notes_not_written": notes_skipped[0],
                "valid": not agent.resent and ledger_refused is None and (bool(planted_on) or not session.get("first_prepare")),
                "no_command": len(silent), "no_command_finish_reasons": reasons,
-               "reader_calls": reader_calls[0], "note_versions": note_versions, "searches": searches,
+               "reader_calls": reader_calls[0], "reader_cut_off": reader_cut[0], "note_versions": note_versions, "searches": searches,
                "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None,
                "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))

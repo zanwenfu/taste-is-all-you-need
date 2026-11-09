@@ -1257,6 +1257,63 @@ def test_a_notes_file_is_rewritten_at_each_compaction_kept_in_git_and_reaches_ev
         assert [t["function"]["name"] for t in script.sent[0]["tools"]] == ["bash"]
 
 
+def _cut(text: str = "") -> SimpleNamespace:
+    """A reply that ran to the output cap."""
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None), finish_reason="length")],
+                           usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2))
+
+
+def test_a_rule_reading_cut_off_by_the_output_cap_is_asked_again_the_same_way_and_counted() -> None:
+    from studies.long_run.session import make_reader
+    rule = SESSION["rules"][0]["text"]
+    replies, sent, cut = [_cut("Let me think about which of these"), _text(json.dumps({"standing": [rule]}))], [], [0]
+
+    def chat(messages, tools):
+        sent.append(messages)
+        return replies.pop(0)
+
+    read, calls = make_reader(chat, cut_off=cut)
+    assert read(f"Before you start: {rule}") == [rule]
+    assert calls[0] == 2 and cut[0] == 1
+    assert sent[0] == sent[1], "asked again the same way: the reader's prompt is the instrument and stays as it was"
+    assert read(f"Before you start: {rule}") == [rule] and calls[0] == 2, "still one reading per distinct message"
+
+
+def test_a_rule_reading_cut_off_on_every_try_still_ends_the_arm() -> None:
+    from studies.long_run.session import RULE_READING_TRIES, make_reader
+    cut = [0]
+    read, calls = make_reader(lambda messages, tools: _cut("Let me think"), cut_off=cut)
+    with pytest.raises(RuntimeError, match="a rule reading was cut off by the output cap"):
+        read("Always pass -B to Python.")
+    assert calls[0] == cut[0] == RULE_READING_TRIES == 3
+
+
+def test_a_session_records_each_cut_off_rule_reading_and_keeps_the_rule(tmp_path: Path) -> None:
+    rule = SESSION["rules"][0]["text"]
+    script = _Script([_bash("python3 a.py " + "word " * 30, "c1"), _bash("ls " + "word " * 30, "c2"), _bash(DONE, "c3"), _bash(DONE, "c4")])
+    inner, asked = _reader_route(script, [rule])
+    left = [1]
+
+    def chat(messages, tools):
+        if not tools and messages[0]["content"] == READER_SYSTEM and left[0]:
+            left[0] -= 1
+            return _cut("Let me think about which of these")
+        return inner(messages, tools)
+
+    summary = run_session(load_session({**SESSION, "rules": SESSION["rules"][:1]}), arm="taste_rules", chat=chat, make_env=lambda task: _Shell(),
+                          count=_count, out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["reader_cut_off"] == 1 and summary["reader_calls"] == asked["reader"] + 1
+    assert rule in script.sent[-1]["messages"][0]["content"], "the rule still reaches the agent"
+
+
+def test_sessions_of_other_arms_record_no_cut_off_rule_reading(tmp_path: Path) -> None:
+    script = _Script([_bash("python3 a.py " + "word " * 30, "c1"), _bash("ls " + "word " * 30, "c2"), _bash(DONE, "c3"), _bash(DONE, "c4")])
+    chat, asked = _reader_route(script, [])
+    summary = run_session(load_session({**SESSION, "rules": SESSION["rules"][:1]}), arm="compaction", chat=chat, make_env=lambda task: _Shell(),
+                          count=_count, out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["reader_cut_off"] == 0 and summary["reader_calls"] == 0
+
+
 def test_the_reader_does_not_read_the_harnesss_own_messages_as_the_users_rules(tmp_path: Path) -> None:
     rule = SESSION["rules"][0]["text"]
     silent = _reply([], content="done")
