@@ -36,6 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from studies.context_rot.bedrock import Converse
+from studies.memory_probe.replies import read_summary
 
 CONDITIONS =("full_with_sc", "full_without_sc", "compaction", "upper_bound")
 NOT_SERVED = "[not served: the prompt is longer than the model's window]"
@@ -87,6 +88,62 @@ def guarded_endpoint(model: str, url: str, params: dict, log: Path | None):
             return WindowGuard(super().client(), log)
 
     return Guarded(model, url, "EMPTY", params)
+
+
+class SummaryReader:
+    """The package's summarizer client for a second model, which may carry on the work in place of summarizing (Laguna S 2.1,
+    Nov 6 and 9): each reply is read by the long run's rule (what the prompt asked for, nothing around it), and one with no
+    summary, or cut off by the output cap, is asked again, up to three tries. After the last the package's own reply goes
+    back, as the package would have kept it. Every call says on the record how many tries it took and whether a summary
+    was read. A call the server could not take (NOT_SERVED) goes back at once."""
+
+    _log_lock = threading.Lock()
+
+    def __init__(self, inner, option: str, log: Path | None = None, tries: int = 3) -> None:
+        self._inner, self._option, self._log, self._tries = inner, option, log, tries
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kwargs):
+        for attempt in range(1, self._tries + 1):
+            reply = self._inner.chat.completions.create(**kwargs)
+            choice = reply.choices[0]
+            if choice.finish_reason == "not_served":
+                self._write({"tries": attempt, "read": False, "not_served": True})
+                return reply
+            summary = None if choice.finish_reason == "length" else read_summary(self._option, choice.message.content or "")
+            if summary:
+                self._write({"tries": attempt, "read": True})
+                message = types.SimpleNamespace(content=summary, role="assistant")
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason=choice.finish_reason)],
+                                             usage=reply.usage)
+        self._write({"tries": self._tries, "read": False})
+        return reply
+
+    def _write(self, row: dict) -> None:
+        if self._log is not None:
+            with self._log_lock, Path(self._log).open("a") as written:
+                written.write(json.dumps(row) + "\n")
+
+
+def reading_endpoint(model: str, url: str, params: dict, log: Path | None, option: str, reads: Path):
+    """conpact's Endpoint for the summarizer of a second model: WindowGuard, then SummaryReader."""
+    from conpact import Endpoint
+
+    class Reading(Endpoint):
+        def client(self):
+            return SummaryReader(WindowGuard(super().client(), log), option, reads)
+
+    return Reading(model, url, "EMPTY", params)
+
+
+def summary_read_counts(path: Path) -> dict:
+    """What SummaryReader put on the record: summaries read at the first try, read after more, and none read."""
+    rows = [json.loads(line) for line in Path(path).read_text().splitlines()] if Path(path).exists() else []
+    return {"calls": len(rows), "read_first_try": sum(1 for r in rows if r["read"] and r["tries"] == 1),
+            "read_after_more": sum(1 for r in rows if r["read"] and r["tries"] > 1),
+            "none_read": sum(1 for r in rows if not r["read"] and not r.get("not_served")),
+            "not_served": sum(1 for r in rows if r.get("not_served"))}
 
 
 def not_served_counts(results: list[dict]) -> dict:
@@ -487,7 +544,11 @@ def run(arguments) -> dict:
     if params != probe_params():
         (out / "probe.json").write_text(json.dumps({"model": arguments.probe_model, "params": params}, indent=1))
     oss = guarded_endpoint(arguments.probe_model, arguments.probe_url, params, out / "not_served.jsonl")
-    summarizer = LLMSummarize(oss, prompt=arguments.prompt)
+    writer = oss
+    if arguments.read_summaries:
+        writer = reading_endpoint(arguments.probe_model, arguments.probe_url, params, out / "not_served.jsonl", arguments.prompt,
+                                  out / "summary_reads.jsonl")
+    summarizer = LLMSummarize(writer, prompt=arguments.prompt)
     unused = Endpoint("bedrock-judge", api_key="unused")
     reuse = contextlib.nullcontext()
     if arguments.reuse_full:
@@ -509,7 +570,11 @@ def run(arguments) -> dict:
         settings = _judge_settings(judge)
     ids = {row.id for row in instances}
     results = [r for r in map(json.loads, (out / "results.jsonl").read_text().splitlines()) if r["id"] in ids]
-    return _report(out, results, settings, "summary.csv")
+    report = _report(out, results, settings, "summary.csv")
+    if arguments.read_summaries:
+        report["summary_reads"] = summary_read_counts(out / "summary_reads.jsonl")
+        (out / "report.json").write_text(json.dumps(report, indent=1))
+    return report
 
 
 def main(argv=None) -> int:
@@ -532,6 +597,8 @@ def main(argv=None) -> int:
     parser.add_argument("--probe-model", default="openai/gpt-oss-120b")
     parser.add_argument("--effort", default="low", help='the probe model\'s reasoning effort; "none" sends none')
     parser.add_argument("--output-cap", type=int, default=OUTPUT_CAP, help="the probe model's output cap, summaries included")
+    parser.add_argument("--read-summaries", action="store_true",
+                        help="read each summary by the long run's rule and ask again when a reply holds none (a second model's summaries)")
     parser.add_argument("--revision", default=DATA_REVISION, help="Hugging Face revision of the instances")
     parser.add_argument("--judge", default="bedrock", choices=("bedrock", "defer"),
                         help="defer: leave verdicts empty, for --judge-later where the judge key is")

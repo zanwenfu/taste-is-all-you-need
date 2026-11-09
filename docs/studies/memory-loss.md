@@ -135,6 +135,21 @@ Added after the first full cell was read, before any other cell ran, because the
 favours short early versions: the newest notes read whole, with and without one search of the older versions after them, under both
 wordings. They run on every cell, the first included.
 
+A second agent, Laguna S 2.1 (the long run's model), answers the main cell (Anthropic's prompt, one round, 4,096 tokens) with no
+reasoning effort sent and an output cap of 16,384. It writes its own summaries, baselines, notes and told summaries and answers every
+probe; the memory's own parts stay the study's (the headers its writer made and the rule records the study's reader wrote), and its rows
+are judged apart on gpt-oss-120b, so that only the agent changes. Set on Nov 9, after its small test on one history (15 cases) and
+before any full cell of it ran: that test found it carrying on the work in place of writing, with tool calls or the end of its thinking
+in 105 of its 360 notes versions (every case had some) and 3 of its 15 summaries holding no summary at all, as on its first long-run
+session. Its writers now follow the long run's rule. A notes reply that carries on the work, or only repeats that there are no notes,
+is asked again with the long run's sentence after the conversation, up to three tries, and after the last the notes stay as they were for
+that round, counted on the case's record; the first ask is word for word what gpt-oss-120b was asked. A summary, in the benchmark's own
+path and the told summary alike, is what its prompt asked for and nothing around it, and a reply with none is asked again, up to three
+tries; after the last the package's own reply is kept, counted. On the small test's stored replies this rule finds a summary in 12 of
+the 15 baselines and all 15 told summaries. gpt-oss-120b's rows are untouched: its writers run as they always did. Its multiple-choice
+answers are graded by the package's rule, the last line alone; 8 of its 270 on the small test were unreadable that way (an option
+written out after the letter, a stray closing tag, a tool call after the answer), and are reported as unreadable, as for every model.
+
 ## The long run
 
 mini-swe-agent 2.4.6, its default agent, with three hooks: a compaction step at a stated token count, using the two

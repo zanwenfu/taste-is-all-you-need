@@ -1410,3 +1410,75 @@ def test_a_notes_file_is_judged_for_whether_it_stored_the_rule(tmp_path: Path) -
     judge_stored(notes, {"a": "r", "b": "r", "c": "r"}, verdict, out, workers=1)
     assert len(asked) == before, "a stopped run picks up where it was"
 
+
+
+# ------------------------------------------------------------------ a second model's writers write rather than work (Nov 9)
+# On Laguna S 2.1's small test of the matrix, 105 of its 360 notes versions and 3 of its 15 summaries carried on the work in place of writing. The long run's
+# rule, read on that model, now reads them too: a reply that works is asked again, the first ask staying word for word what the study's model was asked.
+
+from studies.memory_probe.notes import NOTES_LAST  # noqa: E402
+
+_WORKING = "Let me fix it now.<tool_call>bash<arg_key>command</arg_key><arg_value>ls</arg_value></tool_call>"
+
+
+def test_a_note_taker_that_carries_on_the_work_is_asked_again_with_the_long_runs_sentence_and_only_then() -> None:
+    asked: list[str] = []
+    replies = iter([_WORKING, "notes one", "notes two", "</think>notes", "notes three"])
+
+    def ask(prompt: str) -> dict:
+        asked.append(prompt)
+        return {"text": next(replies), "finish_reason": "stop"}
+
+    kept_over = [0]
+    assert take_notes(_history(), ask, keep_to_notes=True, kept_over=kept_over) == ["notes one", "notes two", "notes three"]
+    assert kept_over == [0]
+    assert not asked[0].endswith(NOTES_LAST) and asked[1] == asked[0] + NOTES_LAST, "the first ask is the study model's own"
+    assert not asked[2].endswith(NOTES_LAST) and asked[4] == asked[3] + NOTES_LAST
+    plain = iter([_WORKING, "notes two", "notes three"])
+    assert take_notes(_history(), lambda prompt: {"text": next(plain), "finish_reason": "stop"})[0] == _WORKING, "off, nothing changes"
+
+
+def test_three_working_replies_keep_the_notes_as_they_were_and_say_so() -> None:
+    asked: list[str] = []
+    replies = iter(["notes one", _WORKING, _WORKING, _WORKING, "notes three"])
+
+    def ask(prompt: str) -> dict:
+        asked.append(prompt)
+        return {"text": next(replies), "finish_reason": "stop"}
+
+    kept_over = [0]
+    assert take_notes(_history(), ask, keep_to_notes=True, kept_over=kept_over) == ["notes one", "notes three"]
+    assert kept_over == [1] and "notes one" in asked[-1], "the next round starts from the notes kept"
+    with pytest.raises(ValueError, match="no notes"):
+        take_notes(_history(), lambda prompt: {"text": _WORKING, "finish_reason": "stop"}, keep_to_notes=True)
+
+
+def test_notes_kept_to_writing_say_how_many_rounds_kept_the_notes_over(tmp_path: Path) -> None:
+    replies = iter(["notes one", _WORKING, _WORKING, _WORKING, "notes three"])
+    path = tmp_path / "notes.jsonl"
+    counts = write_notes([_case()], lambda prompt: {"text": next(replies), "finish_reason": "stop"}, path, workers=1, keep_to_notes=True)
+    assert counts == {"cases": 1, "written": 1, "failed": 0}
+    assert json.loads(path.read_text()) == {"id": _case()["id"], "versions": ["notes one", "notes three"], "kept_over": 1}
+    plain = tmp_path / "plain.jsonl"
+    write_notes([_case()], lambda prompt: {"text": "n", "finish_reason": "stop"}, plain, workers=1)
+    assert set(json.loads(plain.read_text())) == {"id", "versions"}, "off, the rows are as they were"
+
+
+def test_a_second_models_told_summary_is_read_by_the_long_runs_rule_and_asked_again_when_it_holds_none(tmp_path: Path) -> None:
+    replies = {"turn 0": iter(["<summary>The user wants drafts first, always.</summary>\n\nNow let me run it.<tool_call>bash</tool_call>"]),
+               "turn 1": iter(["<tool_call>write_file</tool_call>", "<summary>The second try holds the summary.</summary>"]),
+               "turn 2": iter(["<tool_call>a</tool_call>", "Let me keep going with it.", "<tool_call>b</tool_call>"])}
+    cases = [{"id": f"c{n}", "messages": [{"role": "user", "content": f"turn {n}"}]} for n in range(3)]
+
+    def package(option: str, messages: list[dict]) -> list[dict]:
+        return [*messages, {"role": "user", "content": f"Summarize, {option}."}]
+
+    out = tmp_path / "told"
+    counts = write_summaries(cases, "anthropic", lambda messages: (next(replies[messages[0]["content"]]), "stop"), out, workers=1,
+                             package_prompt=package, read_summaries=True)
+    assert counts == {"cases": 3, "written": 3}
+    rows = {row["id"]: row for row in map(json.loads, (out / "summaries.jsonl").read_text().splitlines())}
+    assert rows["c0"] == {"id": "c0", "prompt": "anthropic", "k": 1, "summary": "The user wants drafts first, always.", "read": True, "tries": 1}
+    assert rows["c1"]["summary"] == "The second try holds the summary." and rows["c1"]["tries"] == 2
+    assert rows["c2"] == {"id": "c2", "prompt": "anthropic", "k": 1, "summary": "<tool_call>b</tool_call>", "read": False, "tries": 3}, \
+        "none in three tries keeps the package's own reply, and says so"

@@ -19,7 +19,12 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from studies.memory_probe.replies import read_summary
+
 CLAUSE = "Keep anything the user asked the assistant to keep doing."
+# A second model may carry on the work in place of summarizing (Laguna S 2.1, Nov 6 and 9): with read_summaries, a reply is read by the long run's rule
+# (what the prompt asked for, nothing around it) and asked again when it holds none; after the last try the package's own reply is kept, and the row says so.
+SUMMARY_TRIES = 3
 
 
 def told_prompt(prompt: list[dict]) -> list[dict]:
@@ -29,7 +34,7 @@ def told_prompt(prompt: list[dict]) -> list[dict]:
 
 
 def write_summaries(cases: list[dict], option: str, ask: Callable[[list[dict]], tuple[str, str]], out: Path, *, workers: int,
-                    package_prompt: Callable[[str, list[dict]], list[dict]]) -> dict[str, int]:
+                    package_prompt: Callable[[str, list[dict]], list[dict]], read_summaries: bool = False) -> dict[str, int]:
     """One round per case. A summary the output cap cut stops the run: its end would be lost silently, and this arm would
     look worse for no real reason. A stopped run picks up where it was."""
     out = Path(out)
@@ -41,11 +46,27 @@ def write_summaries(cases: list[dict], option: str, ask: Callable[[list[dict]], 
     lock = threading.Lock()
 
     def one(case: dict) -> None:
-        text, finish = ask(told_prompt(package_prompt(option, case["messages"])))
-        if finish == "length" or not text.strip():
-            raise ValueError(f"{case['id']}: the summary was cut off or empty")
+        messages = told_prompt(package_prompt(option, case["messages"]))
+        row = {"id": case["id"], "prompt": option, "k": 1}
+        if not read_summaries:
+            text, finish = ask(messages)
+            if finish == "length" or not text.strip():
+                raise ValueError(f"{case['id']}: the summary was cut off or empty")
+            row["summary"] = text
+        else:
+            for tries in range(1, SUMMARY_TRIES + 1):
+                text, finish = ask(messages)
+                summary = None if finish == "length" else read_summary(option, text)
+                if summary:
+                    break
+            if summary:
+                row |= {"summary": summary, "read": True, "tries": tries}
+            elif finish == "length" or not text.strip():
+                raise ValueError(f"{case['id']}: the summary was cut off or empty")
+            else:
+                row |= {"summary": text, "read": False, "tries": tries}
         with lock, path.open("a") as written:
-            written.write(json.dumps({"id": case["id"], "prompt": option, "k": 1, "summary": text}) + "\n")
+            written.write(json.dumps(row) + "\n")
 
     with ThreadPoolExecutor(max(1, workers)) as pool:
         list(pool.map(one, todo))
@@ -61,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--effort", default="low", help='the model\'s reasoning effort; "none" sends none')
     parser.add_argument("--output-cap", type=int, help="the summary's output cap; the package's 4,096 when not given")
+    parser.add_argument("--read-summaries", action="store_true",
+                        help="read each reply by the long run's rule and ask again when it holds no summary (a second model's summaries)")
     arguments = parser.parse_args(argv)
 
     from conpact import Endpoint
@@ -78,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     cases = [json.loads(line) for line in (Path(arguments.inputs) / "cases.jsonl").read_text().splitlines()]
     cases = cases[: arguments.limit] if arguments.limit else cases
     print(json.dumps(write_summaries(cases, arguments.prompt, ask, Path(arguments.out), workers=arguments.workers,
-                                     package_prompt=summarization_prompt)))
+                                     package_prompt=summarization_prompt, read_summaries=arguments.read_summaries)))
     return 0
 
 

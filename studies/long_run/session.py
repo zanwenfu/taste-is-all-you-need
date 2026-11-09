@@ -48,6 +48,10 @@ from studies.memory_probe.cases import (
     keep_newest,
     search_with,
 )
+from studies.memory_probe.notes import _NO_NOTES
+from studies.memory_probe.notes import NOTES_LAST as _NOTES_LAST
+from studies.memory_probe.replies import carries_on_the_work as _carries_on_the_work
+from studies.memory_probe.replies import read_summary
 from studies.memory_probe.stores import GitTurns, NotesStore
 from taste.memstore import CommitHeader
 
@@ -82,44 +86,7 @@ def load_session(raw: dict) -> dict:
 
 # A model that thinks in its reply, with a long conversation pasted in, often carries on the work after a summary or in place of one. Of the 161 summaries of the first Laguna session 39 had
 # other text around the block, and 7 were no summary at all, and the next call had no task in front of it. So a summary is what the published prompt asked for, and nothing around it.
-_SUMMARY_BLOCK = re.compile(r"(?:<summary>|\[summary\])(.*?)(?:</summary>|\[/summary\])", re.S)
-_SUMMARY_OPEN = re.compile(r"^\s*(?:<summary>|\[summary\])(.*)$", re.S)
-_WORK_MARK = re.compile(r"</?tool_call>|</?arg_key>|</?arg_value>|</think>")
-_WORK_LINE = re.compile(r"^\s*(?:\[bash\]\s*\{|<bash\b)", re.M)  # a line that is a call, in the transcript's own form; a summary may name one mid-sentence
-_PI_FIRST, _PI_LAST = re.compile(r"^## Goal\b", re.M), re.compile(r"^## Next Steps\b", re.M)
-_FEWEST_WORDS = 5  # a mention of the form, such as <summary>...</summary>, is not a summary
-
-
-def _carries_on_the_work(text: str) -> re.Match | None:
-    """Where a reply turns from writing into working, if it does."""
-    found = [match for match in (_WORK_MARK.search(text), _WORK_LINE.search(text)) if match]
-    return min(found, key=lambda match: match.start()) if found else None
-
-
-def _a_summary(text: str) -> bool:
-    return len(re.findall(r"\w+", text)) >= _FEWEST_WORDS
-
-
-def read_summary(option: str, reply: str) -> str | None:
-    """The summary in a reply, by what its prompt asked for, or None if there is none: Anthropic's asks for a block, whose closing tag some models leave out, and Pi's for its headings, each on a
-    line of its own. What comes before the end of the model's thinking is thinking, whatever it mentions."""
-    text = reply.rsplit("</think>", 1)[-1]
-    if option == "pi_mono":
-        first = _PI_FIRST.search(text)
-        if not first:
-            return None
-        text = text[first.start():]
-        work = _carries_on_the_work(text)
-        text = (text[:work.start()] if work else text).strip()
-        return text if _PI_LAST.search(text) and _a_summary(text) else None
-    blocks = [block.strip() for block in _SUMMARY_BLOCK.findall(text)]
-    opened = _SUMMARY_OPEN.match(text)
-    if not blocks and opened:
-        blocks = [opened.group(1).strip()]
-    whole = [block for block in blocks if _a_summary(block) and not _carries_on_the_work(block)]
-    return max(whole, key=len) if whole else None
-
-
+# The reader itself is in studies.memory_probe.replies (moved Nov 9, unchanged), so that the matrix reads a second model's replies by the same rule.
 def make_summarizer(chat: Callable, option: str, package_prompt: Callable, *, tries: int = 3, on_reply: Callable[[dict], None] = lambda row: None) -> Callable:
     """The published summary prompts, each later round given the previous summary. A reply empty, cut off or with no summary in it is asked again, and none after the last try gives None."""
 
@@ -158,8 +125,7 @@ def make_reader(chat: Callable) -> tuple[Callable[[str], list[str]], list[int]]:
 
 # A long conversation pasted in makes a model that thinks first carry on the work: on the first real sessions of Laguna S 2.1, 6 of 12 versions held tool calls. So the instruction comes
 # again last, as a summary prompt's does, and a reply that is still not notes is not taken for them. Read on real parts of a session before any main run: 0 of 12 with tool text, against 1 of 12.
-_NOTES_LAST = "\n\nThat was the newest part of the conversation. Do not continue it, run nothing and call no tool. Reply now with the new notes file only."
-_NO_NOTES = "(no notes yet)"
+# The sentence and the placeholder live with the matrix's note-taker since Nov 9, unchanged, so that both read a model's notes alike.
 
 
 def make_note_taker(chat: Callable, style: str, store: NotesStore, skipped: list[int]) -> Callable[[list[dict]], None]:

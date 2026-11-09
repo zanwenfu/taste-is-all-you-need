@@ -25,9 +25,13 @@ fail() { echo "FAILED: $*"; kill ${PID:-} ${SMI:-} 2>/dev/null; exit 1; }
 PROBE_MODEL=${PROBE_MODEL:-$MODEL}; PROBE_EFFORT=${PROBE_EFFORT:-low}; PROBE_CAP=${PROBE_CAP:-4096}; REPEATED_FROM=${REPEATED_FROM:-}
 # VARIANT=published: the benchmark's own cases, unchanged, for another agent on the matrix's main cell.
 VARG=(--variant "$V"); [ "$V" = published ] && VARG=()
+# Another agent's summaries are read by the long run's rule and asked again when a reply holds none (READS): Laguna S 2.1 carried on the work in place of 3 of
+# its 15 summaries on the matrix's small test (Nov 9). The study model's baselines run as they always did.
+READS=()
 if [ "$PROBE_MODEL" != "$MODEL" ]; then
   [ -n "${SERVER_URL:-}" ] || fail "another agent needs SERVER_URL"
   [ -n "$REPEATED_FROM" ] || fail "another agent keeps the study reader's rule records: REPEATED_FROM"
+  READS=(--read-summaries)
 fi
 echo "start $(date -u +%FT%TZ) on $(hostname) code $TASTE_COMMIT variant $V prompt $PR histories $HISTORIES out $OUT"
 nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv -l 60 > $JOB/gpu.csv &
@@ -53,7 +57,7 @@ printf -v NAME 'h%02d-%02d' ${HISTORIES%%:*} ${HISTORIES##*:}  # the name the ex
 mkdir -p $OUT/full/hermes-$PR $OUT/repeated/$PR
 T1=$(date +%s)
 $RUN $D/venv/bin/python -m studies.context_rot.conpact_bridge --source hermes --histories $HISTORIES ${VARG[@]+"${VARG[@]}"} --prompt $PR \
-  --judge defer --probe-url $URL --probe-model $PROBE_MODEL --effort $PROBE_EFFORT --output-cap $PROBE_CAP --workers $WORKERS --out $OUT/full/hermes-$PR/$NAME > $OUT/full-$PR.report.json 2> $OUT/full-$PR.stderr.log || fail "baseline"
+  --judge defer --probe-url $URL --probe-model $PROBE_MODEL --effort $PROBE_EFFORT --output-cap $PROBE_CAP ${READS[@]+"${READS[@]}"} --workers $WORKERS --out $OUT/full/hermes-$PR/$NAME > $OUT/full-$PR.report.json 2> $OUT/full-$PR.stderr.log || fail "baseline"
 echo "baseline seconds $(( $(date +%s) - T1 ))"
 if [ "$V" = cued ]; then
   kill $PID $SMI 2>/dev/null; wait $PID 2>/dev/null

@@ -25,11 +25,14 @@ fail() { echo "FAILED: $*"; kill ${PID:-} ${SMI:-} 2>/dev/null; exit 1; }
 # gpt-oss-120b answers the same cases with the headers the memory's own writer made (HEADERS_FROM), on a server already up (SERVER_URL), and its rows are
 # judged apart on gpt-oss-120b (JUDGE=later), so that only the agent changes. AGENT_EFFORT "none" sends no reasoning effort; AGENT_CAP sets the answer,
 # notes and summary caps, for a model that thinks at length.
-AGENT_MODEL=${AGENT_MODEL:-$MODEL}; AGENT_EFFORT=${AGENT_EFFORT:-low}; AGENT_CAP=${AGENT_CAP:-}
+# Another agent's writers are kept to writing (KEEP, READS): Laguna S 2.1 carried on the work in 105 of its 360 notes versions on the matrix's small test (Nov 9),
+# so a notes reply that works is asked again with the long run's sentence last, and a told summary is read by the long run's rule. The study model's run as they did.
+AGENT_MODEL=${AGENT_MODEL:-$MODEL}; AGENT_EFFORT=${AGENT_EFFORT:-low}; AGENT_CAP=${AGENT_CAP:-}; KEEP=(); READS=()
 if [ "$AGENT_MODEL" != "$MODEL" ]; then
   [ -n "${SERVER_URL:-}" ] || fail "another agent needs SERVER_URL"
   { [ -n "$HEADERS_FROM" ] && [ -e "$HEADERS_FROM/turn-headers.jsonl" ]; } || fail "another agent keeps the memory's own headers: HEADERS_FROM"
   [ "${JUDGE:-}" = later ] || fail "another agent's rows are judged apart, on gpt-oss-120b: JUDGE=later"
+  KEEP=(--keep-to-notes); READS=(--read-summaries)
 fi
 echo "start $(date -u +%FT%TZ) on $(hostname) code $TASTE_COMMIT cell $PR k$K budget $BUDGET in $IN out $OUT"
 nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv -l 60 > $JOB/gpu.csv &
@@ -77,7 +80,7 @@ if [ "${WRITERS:-1}" = 1 ]; then
     for style in told neutral; do
       T1=$(date +%s)
       for try in 1 2 3; do
-        $PY -m studies.memory_probe.notes --inputs $IN --url $URL --model $AGENT_MODEL --effort $AGENT_EFFORT ${AGENT_CAP:+--max-tokens $AGENT_CAP} --style $style --workers 32 --out $OUT/notes-$style.jsonl > $JOB/notes-$style.log 2>&1
+        $PY -m studies.memory_probe.notes --inputs $IN --url $URL --model $AGENT_MODEL --effort $AGENT_EFFORT ${AGENT_CAP:+--max-tokens $AGENT_CAP} ${KEEP[@]+"${KEEP[@]}"} --style $style --workers 32 --out $OUT/notes-$style.jsonl > $JOB/notes-$style.log 2>&1
         code=$?; [ $code = 0 ] && break
       done
       [ $code = 0 ] || FAILED=$((FAILED + 1))
@@ -175,7 +178,7 @@ done
 # case's history word for word, so its summaries are the published case's too, and this row belongs to that set.
 if [ "$K" = 1 ] && [ "$BUDGET" = 4096 ] && [ "${WRITERS:-1}" = 1 ] && wanted summary-told; then
   T1=$(date +%s)
-  $RUN $D/venv/bin/python -m studies.memory_probe.told_summary --inputs $IN --prompt $PR --url $URL --model $AGENT_MODEL --effort $AGENT_EFFORT ${AGENT_CAP:+--output-cap $AGENT_CAP} --out $OUT/told-$PR > $JOB/told-$PR.log 2>&1
+  $RUN $D/venv/bin/python -m studies.memory_probe.told_summary --inputs $IN --prompt $PR --url $URL --model $AGENT_MODEL --effort $AGENT_EFFORT ${AGENT_CAP:+--output-cap $AGENT_CAP} ${READS[@]+"${READS[@]}"} --out $OUT/told-$PR > $JOB/told-$PR.log 2>&1
   code=$?; [ $code = 0 ] || FAILED=$((FAILED + 1))
   echo "told summaries exit $code seconds $(( $(date +%s) - T1 )) $(tail -1 $JOB/told-$PR.log | cut -c1-200)"
   PUBLISHED=$IN; IN=$OUT/told-$PR

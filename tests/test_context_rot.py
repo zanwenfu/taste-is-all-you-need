@@ -665,3 +665,37 @@ def test_a_job_within_its_limit_finishes_and_says_nothing(tmp_path: Path) -> Non
     judge = _PricedJudge()
     assert lme_judge.judge_file(answers, reference, judge, short_name="stand", workers=1, stop_at_usd=1.0).exists()
     assert judge.asked == 3
+
+
+# ------------------------------------------------------------------ a second model's summaries in the package's own path (Nov 9)
+
+
+class _Inner:
+    """Stands in for the OpenAI client the package's summarizer calls."""
+
+    def __init__(self, replies):
+        self.chat, self.completions, self.calls, self._replies = self, self, 0, iter(replies)
+
+    def create(self, **kwargs):
+        self.calls += 1
+        text, finish = next(self._replies)
+        message = types.SimpleNamespace(content=text, role="assistant")
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason=finish)],
+                                     usage=types.SimpleNamespace(prompt_tokens=1, completion_tokens=1))
+
+
+def test_a_second_models_summary_in_the_package_path_is_read_by_the_long_runs_rule(tmp_path: Path) -> None:
+    log = tmp_path / "reads.jsonl"
+    inner = _Inner([("<tool_call>x</tool_call>", "stop"), ("<summary>Always draft first, then wait.</summary> then <tool_call>y</tool_call>", "stop")])
+    reply = conpact_bridge.SummaryReader(inner, "anthropic", log).chat.completions.create(model="m", messages=[])
+    assert reply.choices[0].message.content == "Always draft first, then wait." and inner.calls == 2
+    cut = _Inner([("<summary>half of a summary that was", "length"), ("<summary>The whole summary, at last.</summary>", "stop")])
+    assert conpact_bridge.SummaryReader(cut, "anthropic", log).chat.completions.create().choices[0].message.content == "The whole summary, at last."
+    none = _Inner([("<tool_call>a</tool_call>", "stop"), ("Let me go on.", "stop"), ("<tool_call>c</tool_call>", "stop")])
+    assert conpact_bridge.SummaryReader(none, "anthropic", log).chat.completions.create().choices[0].message.content == "<tool_call>c</tool_call>", \
+        "none in three tries leaves the package's own reply"
+    refused = _Inner([(conpact_bridge.NOT_SERVED, "not_served")])
+    assert conpact_bridge.SummaryReader(refused, "anthropic", log).chat.completions.create().choices[0].message.content == conpact_bridge.NOT_SERVED
+    assert refused.calls == 1, "a call the server could not take is not asked again"
+    assert [json.loads(line) for line in log.read_text().splitlines()] == [
+        {"tries": 2, "read": True}, {"tries": 2, "read": True}, {"tries": 3, "read": False}, {"tries": 1, "read": False, "not_served": True}]
