@@ -149,7 +149,7 @@ unless it carries on the work, is empty or was cut off by the output cap: then i
 the package's own reply is kept, counted. A reply in no particular form is kept, as the package keeps it. The same rule read over
 gpt-oss-120b's stored writers in every reported cell (Nov 9) finds none of its 17,280 notes versions carrying on the work, and 3 of its
 3,300 summaries, all three told summaries of the published cell that name the tool-call tag in prose rather than call a tool; they stay
-as stored, so the two models' rows are read alike. gpt-oss-120b's writers run as they always did. Multiple-choice answers are graded by
+as stored, so the two models' rows are read alike. Set on Nov 9 at 8:41 AM ET, during the full cell's summaries and before any of its answers: on the full cell the second agent's summaries came back clean less often than on the small test (on its first try, which stopped for another reason, 18 of 150 were never clean after three asks, against 1 of 15 on the small test), so every row of it that reads a summary is reported on all its cases and again on the cases whose kept summary is clean by the same rule, with both counts. Its arms share the same summaries, so its comparisons between memories hold either way; the comparison with gpt-oss-120b says how many of its summaries were not clean. gpt-oss-120b's writers run as they always did. Multiple-choice answers are graded by
 the package's rule, the last line alone; 8 of the second agent's 270 on its first small test were unreadable that way (an option
 written out after the letter, a stray closing tag, a tool call after the answer), and are reported as unreadable, as for every model.
 
