@@ -200,10 +200,17 @@ shorter than asked. The paper reports every valid session that ended by 6 am ET 
 dropped or added because of what it showed.
 
 **Session length, set on 2026-11-09 before any session on the final code had ended.** The first session, seed 102 on Pi's prompt,
-holds 39 tasks. Every later session holds at most 24. With eleven arms on two GPUs a task took about 25 minutes in that session, so
-39-task sessions would have given about six sessions per summary prompt by the jobs' ends, the least the sign test above can use,
-with none to spare for a failed one. 24 tasks still take each arm past 100 compactions at the four to six a task seen so far, so
-every bin above is reached. The choice rests on GPU time alone; no obedience had been read from any session when it was made.
+holds 39 tasks. Every later session holds at most 30. With eleven arms on two GPUs the slowest arm took about 30 minutes a task in
+that session, so 39-task sessions would have given about six sessions per summary prompt by the jobs' ends, the least the sign test
+above can use, with none to spare for a failed one; 30 tasks give about eight. The cap keeps the second of the two points the study
+set out to report, 10 and 100 compactions: by 2:34 am ET, over the tasks each arm had finished in seed 102, compactions per task were
+3.62 for harness search, 3.92 notes neutral, 4.20 Taste with the sentence, 4.79 compaction alone, 4.89 told to check, 4.93 rule list,
+5.30 harness search with the bare header, 5.38 notes told, 5.45 Taste with nothing said and 6.91 restated, so 30 tasks take the
+slowest to about 109. One task gave anywhere from 0 to 20 compactions, so in a seed of lighter tasks an arm may stop short of 100;
+the bin over 100 then holds the arms and sessions that passed it, and seed 102 passes it in every arm at these rates. A first version
+of this paragraph, the same night, set 24 tasks and said every arm would pass 100; at 3.62 a task that is 87, so it was corrected
+before any session it governed had started. The choice rests on GPU time and these compaction counts; no obedience had been read
+from any session when it was made.
 
 An independent review of this harness on 2026-11-06 found that the search also held the system prompt, that what the harness delivered had lost each hit's date and
 replacement mark, and that the long run's message for a reply with no command was not mini-swe-agent's. All were fixed, and the runs before that commit are not reported.
