@@ -17,7 +17,9 @@ dollars and wall-clock. This package drives it and analyses it:
   policy tree that picks a recovery from what a harness can observe.
 - ``map_driver`` and ``recovery_driver``: resumable drivers. Each run reads the
   jobs it started, decides the next ones and writes their command lines; its
-  state is one JSON file.
+  state is one JSON file. ``recheck_driver`` and ``requirement_driver`` check a
+  recovery state's final states again: told the original task alone, or told
+  one requirement of it.
 
 The checker and the trajectory reader are ``taste.agents.checker`` and
 ``taste.agents.trajectory_reader``: their task text, verdicts, feedback, step
