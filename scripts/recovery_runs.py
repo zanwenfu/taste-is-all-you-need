@@ -35,6 +35,19 @@ checks), --prior-checkpoints rebuild rebuilds those states from the record.
 With --base-outcome passed (or any), the base runs that passed the hidden tests
 are runs too (or instead): what the checker and the recoveries do to work that
 was already right. Arms told the hidden tests' failures need failed runs.
+--only-runs a,b takes only the base runs named (the others still give budgets).
+
+With --agent-command-seconds N --agent-command-languages go[,rust], every agent
+trial of a task in those repository languages may run each command for N
+seconds instead of the agent's own limit (mini-swe-agent: 30); its settings
+record it, and every other trial keeps its own.
+
+With --final-change-chars N every agent trial reads its final change when it
+ends (git's diff of the task's files against their base commit, with the
+changed paths), kept up to N characters, and each episode's outcome holds its
+last trial's ("final"). With --keep-final-saves true the saves of each
+episode's last trial are never pruned, for a later check of that state
+(scripts/recovery_requirements.py).
 
 The reader file is JSON: {"<run>": <reading>} or a list of readings with a
 "run", a reading being ``read_trajectory``'s {"step", "reason", "confidence"};
@@ -68,7 +81,9 @@ OPTIONS = {"prefix": str, "model": str, "mode": str, "calibration_report": str, 
            "prior_checkpoints": str, "arm_order_seed": int, "tests_feedback_chars": int, "tests_code_chars": int,
            "tests_full_chars": int, "save_final": lambda raw: truth(raw), "max_active_runs": int,
            "equal_allowance": lambda raw: truth(raw), "keep_base_saves": lambda raw: truth(raw), "base_outcome": str,
-           "first_only_checked": lambda raw: truth(raw)}
+           "first_only_checked": lambda raw: truth(raw), "only_runs": lambda raw: names(raw),
+           "agent_command_seconds": int, "agent_command_languages": lambda raw: names(raw),
+           "final_change_chars": int, "keep_final_saves": lambda raw: truth(raw)}
 
 
 def truth(raw):

@@ -111,6 +111,15 @@ is charged without the time branching spent bringing its prefix back
 Every trial is graded by the hidden tests; the episode's outcome is its last
 trial's grade, and no grade decides anything.
 
+Two settings, off by default, serve the longer paper's checks. With
+``final_change_chars`` every agent trial reads its final change when it ends
+(``taste.benchmarks.final_change``) and each episode's outcome keeps its last
+trial's, with that trial's save (``final``); with ``keep_final_saves`` those
+saves outlive the prune, for ``requirement_driver`` to check that very state.
+With ``agent_command_seconds`` and ``agent_command_languages`` the agent
+trials of tasks in those repository languages (``task_language``) may run
+each command that long, and say so in their settings.
+
 State (``kind`` taste.recovery_runs/1), beside the shared fields of ``driver``:
 
     runs.<run>.budget               {"usd", "seconds", "runs", "source"}
@@ -129,12 +138,14 @@ import copy
 import json
 import math
 import random
+import re
+import tomllib
 from pathlib import Path
 
 from taste.agents import agentrewind
 from taste.agents.checker import BARE_FEEDBACK, checker_task, feedback
 from taste.agents.trajectory_reader import rewind_point
-from taste.benchmarks import branch_trial
+from taste.benchmarks import branch_trial, final_change
 from taste.recovery_study import jobs, records, search, state, test_failures
 from taste.recovery_study.commands import gaming_flags
 from taste.recovery_study.driver import COMMON, PARTIAL_CHECKPOINT, Driver, own_final
@@ -201,6 +212,19 @@ PRIOR_CHECKPOINT = ("the checkpoint was saved by an earlier study, on a host tha
 # same fault, retried, cost about 50 minutes an attempt (study S grid, Nov 2).
 NOT_STARTED_CHECKS = 2
 ENDS = ("done", "budget", "no_submission", "agent_failed", "check_failed", "rewind_unfaithful", "first_only")
+# SWE-bench Multilingual's languages: the last of a task's tags names one (scripts/prepare_multilingual.py).
+TAGGED_LANGUAGES = ("c", "cpp", "go", "java", "javascript", "php", "ruby", "rust")
+# SWE-Bench Pro V2's eleven repositories by language; its tasks are named instance_<owner>__<repo>-<commit>-...
+# The four in Go are those the analysis splits the runs by (flipt, vuls, teleport, navidrome).
+PRO_LANGUAGES = {"NodeBB/NodeBB": "javascript", "ansible/ansible": "python", "element-hq/element-web": "typescript",
+                 "flipt-io/flipt": "go", "future-architect/vuls": "go", "gravitational/teleport": "go",
+                 "internetarchive/openlibrary": "python", "navidrome/navidrome": "go",
+                 "protonmail/webclients": "typescript", "qutebrowser/qutebrowser": "python",
+                 "tutao/tutanota": "typescript"}
+_PRO_TASK = re.compile(r"instance_(.+?)__(.+?)-[0-9a-f]{40}(?:-|$)")
+# The longest a command may run in a trial: the terminal's own limit (TrialSettings.command_seconds), which an agent's
+# longer limit (agent_command_seconds) must not pass, or the terminal would cut it short unsaid.
+COMMAND_CEILING = 600
 
 DEFAULTS = {
     **COMMON,
@@ -261,8 +285,34 @@ DEFAULTS = {
     # The base runs taken, by name, of those the outcome allows; empty: all. The others are still read, so a task's
     # budget does not change with the list.
     "only_runs": [],
+    # A longer limit on each of the agent's commands for the tasks in these repository languages (task_language):
+    # every agent trial of such a task gets agent_command_seconds = this, which its record keeps; every other trial,
+    # the checker's among them, keeps its own. 0: the agent's own limit everywhere (mini-swe-agent: 30 s).
+    "agent_command_seconds": 0,
+    "agent_command_languages": [],
+    # Each episode's final state, kept as text: every agent trial reads its final change when it ends (git's diff of
+    # the task's files against their base commit, and the changed paths; taste.benchmarks.final_change), kept up to
+    # this many characters, and an episode's outcome holds its last trial's, with that trial's save. 0: not read.
+    "final_change_chars": 0,
+    # The saves of each episode's last trial are never released (released_saves), so that a later check of the
+    # episode's final state (taste.recovery_study.requirement_driver) restores that very state.
+    "keep_final_saves": False,
 }
 BASE_OUTCOMES = ("failed", "passed", "any")
+
+
+def task_language(task_dir):
+    """A task's repository language: SWE-bench Multilingual's, the last of its task.toml tags; SWE-Bench Pro's, its
+    repository's (``PRO_LANGUAGES``, from the task's name); None when neither says."""
+    task_dir = Path(task_dir)
+    try:
+        tags = (tomllib.loads((task_dir / "task.toml").read_text()).get("metadata") or {}).get("tags") or []
+    except (OSError, ValueError):
+        tags = []
+    if tags and tags[-1] in TAGGED_LANGUAGES:
+        return tags[-1]
+    found = _PRO_TASK.match(task_dir.name)
+    return PRO_LANGUAGES.get(f"{found.group(1)}/{found.group(2)}") if found else None
 
 
 def readings(path):
@@ -375,6 +425,22 @@ class RecoveryDriver(Driver):
                 raise ValueError(f"{name} must be at least 200: room for the failing tests' names")
         if not settings["budget_runs"] >= 1:
             raise ValueError("budget_runs must be at least 1: a recovery can afford one base run")
+        seconds, languages = settings["agent_command_seconds"], settings["agent_command_languages"]
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or not 0 <= seconds <= COMMAND_CEILING:
+            raise ValueError(f"agent_command_seconds must be whole seconds, 0 (the agent's own) to {COMMAND_CEILING}")
+        if not isinstance(languages, list) or not all(isinstance(name, str) and name for name in languages):
+            raise ValueError("agent_command_languages must be a list of languages' names")
+        if bool(seconds) != bool(languages):
+            raise ValueError("agent_command_seconds and agent_command_languages go together")
+        if seconds and "agent_command_seconds" in settings["ak"]:
+            raise ValueError("agent_command_seconds is given by language here, not in ak as well")
+        chars = settings["final_change_chars"]
+        if isinstance(chars, bool) or not isinstance(chars, int) or (
+                chars and not final_change.LEAST_CHARS <= chars <= final_change.MOST_CHARS):
+            raise ValueError(f"final_change_chars must be 0 (not read) or "
+                             f"{final_change.LEAST_CHARS:,}-{final_change.MOST_CHARS:,}")
+        if not isinstance(settings["keep_final_saves"], bool):
+            raise ValueError("keep_final_saves must be true or false")
 
     def use(self, oracle=None, reader=None):
         """The map's results (``MapDriver.summary``) and the trajectory reader's readings."""
@@ -404,6 +470,9 @@ class RecoveryDriver(Driver):
                 run["skipped"] = f"the base run did not submit ({run['base']['exit_status']})"
             if run.get("skipped"):
                 continue
+            if self.settings["agent_command_seconds"]:
+                # Which limit its agent trials get: its task's language, as read when the run was taken.
+                run["language"] = task_language(Path(run["tasks_dir"]) / run["task"])
             found = self._budget(run)
             if isinstance(found, str):
                 run["skipped"] = found
@@ -581,6 +650,11 @@ class RecoveryDriver(Driver):
         base = run.get("base") or {}
         return self._save_name(base.get("final_saved"), base.get("final_checkpoint"), base.get("token"))
 
+    @staticmethod
+    def _last_round(episode):
+        """The round whose trial is the episode's outcome (its last with one), as a list of at most one."""
+        return [step for step in episode["rounds"] if step.get("agent")][-1:]
+
     def _round_saves(self, episode):
         """The saves an episode's rounds made: each live trial's own, and any rebuilt for its check."""
         names = []
@@ -606,6 +680,8 @@ class RecoveryDriver(Driver):
             for arm in (run.get("arms") or {}).values():
                 for episode in arm["episodes"]:
                     (released if episode["end"] else needed).update(self._round_saves(episode))
+                    if episode["end"] and self.settings["keep_final_saves"]:
+                        needed.update(self._round_saves({"rounds": self._last_round(episode)}))
         for entry in self.data["fresh"].values():
             if entry["kind"] == "base" and entry.get("solved"):
                 name = self._save_name(entry.get("final_saved"), entry.get("final_checkpoint"), entry.get("token"))
@@ -895,6 +971,16 @@ class RecoveryDriver(Driver):
         extra = handoff_seconds(settings) + (self.settings["prefix_allowance"] if allowance else 0.0)
         return jobs.caps(usd, seconds + extra)
 
+    def _trial_extras(self, run):
+        """What every agent trial of this run adds to its settings: the longer command limit, for a task in the
+        languages asked for, and the cap on the final change it reads."""
+        values, extras = self.settings, {}
+        if values["agent_command_seconds"] and run.get("language") in values["agent_command_languages"]:
+            extras["agent_command_seconds"] = values["agent_command_seconds"]
+        if values["final_change_chars"]:
+            extras["final_change_chars"] = values["final_change_chars"]
+        return extras
+
     def _emit_first(self, run_id, run, name, arm, job, attempts):
         """Round one of an arm's episodes, as one job of ``attempts`` trials."""
         values, reply = self.settings, run["check"]["reply"]
@@ -933,6 +1019,7 @@ class RecoveryDriver(Driver):
         settings.update(self._caps(run["budget"]["usd"], run["budget"]["seconds"], base, branch=bool(prepare)))
         if self.settings["save_final"]:
             settings["final_checkpoint"] = f"{job}-final"
+        settings.update(self._trial_extras(run))
         self.emit(self.harbor_job(job, run, settings, attempts, prepare=prepare),
                   run=run_id, arm=name, purpose="first", recovery=recovery, step=step,
                   **_rebuilt(found, checkpoint))
@@ -967,7 +1054,7 @@ class RecoveryDriver(Driver):
                                     note=self._note(job, agentrewind.notebook(rewind["notes"])), rewind=notes,
                                     **where)
                 files["final_checkpoint"] = f"{job}-final"
-            settings = {**base, **files, **caps}
+            settings = {**base, **files, **caps, **self._trial_extras(run)}
             self.emit(self.harbor_job(job, run, settings, 1, prepare=[export]), run=run_id, arm=name,
                       purpose="round", episode=index, round=len(episode["rounds"]), rewind_target=rewind["target"])
             current["agent_jobs"].append(job)
@@ -1013,6 +1100,7 @@ class RecoveryDriver(Driver):
             prepare = [export]
         if values["save_final"]:
             settings["final_checkpoint"] = f"{job}-final"
+        settings.update(self._trial_extras(run))
         self.emit(self.harbor_job(job, run, settings, 1, prepare=prepare), run=run_id, arm=name,
                   purpose="round", episode=index, round=len(episode["rounds"]), **_rebuilt(found, checkpoint))
         current["agent_jobs"].append(job)
@@ -1038,7 +1126,18 @@ class RecoveryDriver(Driver):
             reward, solved = 0.0, False  # intention to treat: the rewind it chose could not be brought back
         return {"end": episode["end"], "rounds": len(trials), "reward": reward, "solved": solved,
                 **{key: round(value, 6) for key, value in spent.items()},
-                "verdicts": verdicts, "changed_paths": paths, "flags": flags}
+                "verdicts": verdicts, "changed_paths": paths, "flags": flags,
+                **({"final": self.final_of(last)} if self.settings["final_change_chars"] else {})}
+
+    def final_of(self, trial):
+        """A trial's final state as kept: its own save (None when it saved none whole), the paths that save holds as
+        changed, and its final change (``taste.benchmarks.final_change``: the diff against the base commit and the
+        changed paths, under the cap recorded; None when the trial read none)."""
+        settings = trial.get("settings") or {}
+        return {"trial": trial["trial"], "token": trial.get("token"),
+                "save": self._save_name(trial.get("final_saved"), settings.get("final_checkpoint"), trial.get("token")),
+                "save_changed_paths": trial.get("final_changed_paths"), "change": trial.get("final_change"),
+                "cap_chars": self.settings["final_change_chars"]}
 
     def summary(self):
         """Per run: budget, the initial verdict, rewind sources, and each arm's episode outcomes."""
@@ -1052,6 +1151,7 @@ class RecoveryDriver(Driver):
                            "episodes": [self._rewinds(arm, episode, self.outcome(episode)) for episode in arm["episodes"]]}
                     for name, arm in run["arms"].items()}
             out[run_id] = {**base, "status": run.get("status", "checking"), "steps": run["steps"],
+                           **({"language": run["language"]} if "language" in run else {}),
                            "budget": run["budget"], "features": run["features"], "rules": run["rules"],
                            "verdict": run["check"]["reply"], "sources": run["sources"], "arms": arms,
                            "check_usd": round(math.fsum(s["cost_usd"] or 0.0

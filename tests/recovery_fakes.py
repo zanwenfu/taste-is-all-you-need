@@ -88,9 +88,10 @@ def record(trials_root, token, steps, *, task="Fix the bug.", exit_status="Submi
 def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None, model="azure/gpt-6-luna",
           tasks_dir="/study/tasks", seconds=120.0, cost=0.02, exit_status="Submitted", branch=None,
           handed_back=None, exception=None, name=None, task_text="Fix the bug.", audit_flags=(), verifier=None,
-          cache=(0, 0, 0), image=None, stopped_by="", final=None):
+          cache=(0, 0, 0), image=None, stopped_by="", final=None, change=None):
     """One finished Harbor trial; with steps, its settled Taste record; with ``handed_back``, its final reply;
-    with ``verifier`` ({file name: text}), what its grader left in its verifier folder.
+    with ``verifier`` ({file name: text}), what its grader left in its verifier folder; with ``change``, the final
+    change it read (``taste.benchmarks.final_change``).
 
     ``seconds`` is the agent's execution by Harbor's clock (None: it never
     ran). Taste's own count of the run's time differs from it on purpose: the
@@ -109,6 +110,8 @@ def trial(jobs_dir, job, task, *, reward, trials_root, steps=None, settings=None
         taste["image_id"] = image
     if final is not None:
         taste["final_checkpoint"] = final
+    if change is not None:
+        taste["final_change"] = change
     if steps is not None:
         record(trials_root, token, steps, task=task_text, exit_status=exit_status, cost=cost, cache=cache,
                stopped_by=stopped_by)
