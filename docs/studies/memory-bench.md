@@ -168,6 +168,28 @@ refuses to write any table unless every row named here is there and no other, fr
 question answered and judged, each answer to the prompt on record, each verdict to the answer on record, and Mem0 and the headers on the settings named here. A row that fails stops the job, so
 nothing reads on from it. The dev part rehearses every stage on the commit about to be frozen.
 
+## Dates written into the raw history, a follow-up test (Nov 9)
+
+The held-out comparison found Mem0's lead over plain git concentrated in the date questions. At 8,000 tokens it is all there: 101
+against 86 of the 120 date questions, and 259 against 260 on the other 330, with gpt-oss-120b reading. Mem0, as run, is given each
+session's date when it stores a memory, and its model writes calendar dates into the facts it keeps. Plain git keeps "yesterday" as
+it was said, with the session's date in a header line, so the reader must work the date out. This test asks how much of the lead
+comes from that alone.
+
+A pass with no model (`studies/memory_bench/dates.py`) follows each relative date in what people said ("yesterday", "two weeks
+ago", "last Friday") with the date it names, worked out from the session's date, and leaves ambiguous ones ("on Friday", "a few
+days ago") alone. The system `taste_git_dated` is plain Taste over that history. It was built and frozen on the practice part only,
+at commit `bc3fd2d`. The assistant's replies are left as they were, a choice made on 60 sampled practice dates, where people's dates
+were right and the assistant's were mostly a reply's "today". On the practice part the dated history delivers the same evidence as
+plain git at every budget, with the same tokens, so the test isolates the dates.
+
+Plain git as it was, plain git with dates and Mem0 (its memories from the held-out run) are answered and judged again, together.
+Each budget's three rows are read and judged on one server session of gpt-oss-120b, at the held-out run's reading and judging
+settings, so that no new row is compared with an old one. Byte-identical prompts change 17 to 35 of 450 verdicts between sessions.
+The practice part runs first. The held-out part runs 8,000 tokens first, then 2,000, 4,000 and 16,000, a whole budget at a time,
+in the gaps between the long-run sessions on the study's GPU jobs. The prediction is written after the practice answers and before
+any held-out answer of this test exists, and committed before the held-out answers.
+
 ## Running on a full cluster
 
 The stages may run as tasks on GPU jobs the study already holds, for when the queue would keep them from their day: the same job scripts and rows, in the same order, kept by marks on the shared disk, so that nothing rests on a login node. A held job ends itself when its GPUs have rested with no work for an hour, or for 8 hours whatever says it is running. Llama reads about 3,000 prompt tokens a second on two GPUs, about 21 hours for this part on one server by the practice run, so a second server takes LoCoMo if one can be had, and on each the rows the comparison turns on go first: Taste with and without headers, the keyword list, Mem0 and MemPalace's product path. On one server LongMemEval goes first, since the second judge needs only those answers. The first reader's server there also carries the tool-call flags the long run needs, which a request with no tools does not use, and one wide window for every stage; the rehearsal runs on the same. On a shared server a reader's cost comes from its answers, and GPU-hours from the record of the job that keeps the GPUs.
