@@ -93,10 +93,14 @@ def write_dates(text: str, day: dt.date) -> str:
 
 
 def dated_session(session: dict) -> dict:
-    """A session with its turns' text dated from its own date; one whose date cannot be read is kept as it was."""
+    """A session with what its people said dated from its own date; the assistant's replies are kept as they were, as are
+    sessions whose date cannot be read. Read on the practice part only (Nov 9, 6:00 pm ET, 60 sampled dates): the dates
+    in people's words were right, and the assistant's were mostly a reply's "today", which named nothing a question asks
+    about; Mem0, as run, keeps facts about the user. LoCoMo's two speakers are both people, and both are dated."""
     day = session_day(str(session.get("date", "")))
     if day is None:
         return session
-    turns = [{**turn, "content": write_dates(turn["content"], day)} if isinstance(turn.get("content"), str) else turn
+    turns = [{**turn, "content": write_dates(turn["content"], day)}
+             if isinstance(turn.get("content"), str) and turn.get("role") != "assistant" else turn
              for turn in session["turns"]]
     return {**session, "turns": turns}

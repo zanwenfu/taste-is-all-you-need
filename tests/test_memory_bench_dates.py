@@ -72,6 +72,17 @@ def test_the_dated_store_holds_and_delivers_dated_text_and_plain_taste_does_not(
         plain.close()
 
 
+def test_only_what_people_said_is_dated_not_the_assistants_replies() -> None:
+    lme = {"sid": "s1", "date": "2023/05/20 (Sat) 02:21", "turns": [{"role": "user", "content": "I moved in last week."},
+                                                                      {"role": "assistant", "content": "How can I help you today?"}]}
+    dated = dated_session(lme)
+    assert dated["turns"][0]["content"] == "I moved in last week [the week of 2023-05-08]."
+    assert dated["turns"][1]["content"] == "How can I help you today?"
+    locomo = {"sid": "c1", "date": "1:56 pm on 8 May, 2023", "turns": [{"role": "Caroline", "content": "I went yesterday."},
+                                                                         {"role": "Melanie", "content": "Me too, last Friday."}]}
+    assert [turn["content"] for turn in dated_session(locomo)["turns"]] == ["I went yesterday [2023-05-07].", "Me too, last Friday [2023-05-05]."]
+
+
 def test_a_session_keeps_its_id_date_and_roles_and_only_its_text_changes() -> None:
     session = {"sid": "s1", "date": "2023/05/20 (Sat) 02:21", "turns": [{"role": "user", "content": "I finished it yesterday."},
                                                                           {"role": "assistant", "content": "Well done!", "has_answer": True}]}
