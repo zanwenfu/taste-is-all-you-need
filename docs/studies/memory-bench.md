@@ -187,8 +187,10 @@ Plain git as it was, plain git with dates and Mem0 (its memories from the held-o
 Each budget's three rows are read and judged on one server session of gpt-oss-120b, at the held-out run's reading and judging
 settings, so that no new row is compared with an old one. Byte-identical prompts change 17 to 35 of 450 verdicts between sessions.
 The practice part runs first. The held-out part runs 8,000 tokens first, then 2,000, 4,000 and 16,000, a whole budget at a time,
-in the gaps between the long-run sessions on the study's GPU jobs. The prediction is written after the practice answers and before
-any held-out answer of this test exists, and committed before the held-out answers.
+in the gaps between the long-run sessions on the study's GPU jobs. A budget starts only when its reading and judging fit before the
+hold's hard stop. A budget cut by a stop all the same has its partial answers set aside, unread, and is read and judged again whole in
+the next hold. The prediction is written after the practice answers and before any held-out answer of this test exists, and
+committed before the held-out answers.
 
 **Practice part (50 questions, 13 of them date questions), read Nov 9 by 7:09 pm Eastern:**
 - Every row was answered and judged, with none failed.
