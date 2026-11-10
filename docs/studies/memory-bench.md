@@ -269,6 +269,20 @@ does not touch. The practice part shows nothing either way, and the stamp costs 
 Mem0's date lead or more at 8,000 or 16,000, this prediction undershot. If it gains nothing on the date questions at both budgets, the
 reading that each fact needs its own date is wrong.
 
+**Record for both date tries, written Nov 10 by 7:04 am Eastern, after every held-out answer of both.**
+- An independent recount was made from the raw files with its own code, read-only, at 6:55 to 7:02 am. It matched every count, sign test and
+  Holm value above and below. All 72 answer, verdict and record files hold the same 450 questions. Every answer's prompt matches its record,
+  every verdict its answer, and each verdict file's settings name its answers file.
+- Reading start times are not in the stage marks, which record only ends. They are in the hold tasks' own logs: the date test's first held-out
+  reading started 7:10:52 pm on Nov 9, 23 seconds after its prediction's commit; the stamped follow-up's started 5:24:24 am on Nov 10, 40
+  minutes after its prediction's commit, and its reading script refuses to run without the commit in a marker file.
+- Before the stamped prediction, the held-out retrieval records of plain git and plain git stamped had been built, and their evidence totals
+  read: every evidence round delivered for 233, 315, 356 and 380 of 425 questions against 231, 311, 354 and 381. No answer of it existed.
+- Plain git, read on identical prompts in the two server sessions, scored 299 and 300, 324 and 333, 336 and 343, 348 and 346, and on the
+  date questions 77 and 80, 84 and 83, 82 and 87, 88 and 83. The judge gave the same verdict every time it met the same answer (156 cases),
+  so the swing comes from the reader, whose answers to identical prompts differ in wording about 95% of the time at temperature 0. The
+  largest date-question gain of either try, the stamped try's 10 at 16,000 tokens, is the size of that swing.
+
 ## Running on a full cluster
 
 The stages may run as tasks on GPU jobs the study already holds, for when the queue would keep them from their day: the same job scripts and rows, in the same order, kept by marks on the shared disk, so that nothing rests on a login node. A held job ends itself when its GPUs have rested with no work for an hour, or for 8 hours whatever says it is running. Llama reads about 3,000 prompt tokens a second on two GPUs, about 21 hours for this part on one server by the practice run, so a second server takes LoCoMo if one can be had, and on each the rows the comparison turns on go first: Taste with and without headers, the keyword list, Mem0 and MemPalace's product path. On one server LongMemEval goes first, since the second judge needs only those answers. The first reader's server there also carries the tool-call flags the long run needs, which a request with no tools does not use, and one wide window for every stage; the rehearsal runs on the same. On a shared server a reader's cost comes from its answers, and GPU-hours from the record of the job that keeps the GPUs.
