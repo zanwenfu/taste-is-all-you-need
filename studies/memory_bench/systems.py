@@ -177,6 +177,16 @@ class DatedTasteGit(TasteGit):
         super().ingest([dated_session(session) for session in sessions], unit)
 
 
+class StampedTasteGit(TasteGit):
+    """DatedTasteGit with each of the people's turns also beginning with its session's day, so every statement carries a
+    date the way Mem0's facts do (studies/memory_bench/dates.py, stamped_session). Everything else is plain Taste."""
+
+    def ingest(self, sessions: list[dict], unit: str | None = None) -> None:
+        from studies.memory_bench.dates import stamped_session
+
+        super().ingest([stamped_session(session) for session in sessions], unit)
+
+
 @lru_cache(maxsize=4)
 def _rankings(path: str, stamp: tuple[int, int]) -> dict[str, dict]:
     """Read once per process, and again if the file changes (``stamp`` is its time and size)."""

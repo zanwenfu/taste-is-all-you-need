@@ -104,3 +104,19 @@ def dated_session(session: dict) -> dict:
              if isinstance(turn.get("content"), str) and turn.get("role") != "assistant" else turn
              for turn in session["turns"]]
     return {**session, "turns": turns}
+
+
+def stamped_session(session: dict) -> dict:
+    """A dated session whose people's turns each also begin with the session's day in brackets, "[2023-05-20] ", the way
+    each of Mem0's facts carries a date. Added Nov 9 after the held-out date test: where plain git with dates had all the
+    evidence and still lost a date question to Mem0, the reader most often failed to tie an event told with no relative
+    date to its session's date, which the raw history shows only in the session's header line. Still no model call."""
+    day = session_day(str(session.get("date", "")))
+    if day is None:
+        return session
+    stamp = f"[{day.isoformat()}] "
+    dated = dated_session(session)
+    turns = [{**turn, "content": stamp + turn["content"]}
+             if isinstance(turn.get("content"), str) and turn.get("role") != "assistant" and not turn["content"].startswith(stamp) else turn
+             for turn in dated["turns"]]
+    return {**dated, "turns": turns}

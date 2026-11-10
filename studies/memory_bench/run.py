@@ -39,6 +39,7 @@ from studies.memory_bench.systems import (
     NoMemory,
     Oracle,
     Precomputed,
+    StampedTasteGit,
     System,
     TasteGit,
 )
@@ -77,6 +78,8 @@ def make_system(name: str, gold: lme.Gold | None, workdir: Path, *, unit: str = 
         return TasteGit(workdir, unit=unit, commit_per=commit_per, header_writer=stored_writer(headers))
     if name == "taste_git_dated":
         return DatedTasteGit(workdir, unit=unit, commit_per=commit_per)
+    if name == "taste_git_stamped":
+        return StampedTasteGit(workdir, unit=unit, commit_per=commit_per)
     raise ValueError(f"unknown system {name!r}")
 
 

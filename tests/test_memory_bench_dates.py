@@ -2,7 +2,7 @@
 
 import datetime as dt
 
-from studies.memory_bench.dates import dated_session, session_day, write_dates
+from studies.memory_bench.dates import dated_session, session_day, stamped_session, write_dates
 
 SATURDAY = dt.date(2023, 5, 20)
 
@@ -91,3 +91,47 @@ def test_a_session_keeps_its_id_date_and_roles_and_only_its_text_changes() -> No
     assert dated["turns"][0] == {"role": "user", "content": "I finished it yesterday [2023-05-19]."}
     assert dated["turns"][1] == session["turns"][1]
     assert session["turns"][0]["content"] == "I finished it yesterday.", "the original session is not changed"
+
+
+def test_each_persons_turn_is_stamped_with_its_sessions_day_on_top_of_the_date_pass() -> None:
+    session = {"sid": "s1", "date": "2023/05/20 (Sat) 02:21", "turns": [{"role": "user", "content": "I moved in last week."},
+                                                                          {"role": "user", "content": "I just started reading The Nightingale."},
+                                                                          {"role": "assistant", "content": "How can I help you today?"}]}
+    stamped = stamped_session(session)
+    assert [turn["content"] for turn in stamped["turns"]] == ["[2023-05-20] I moved in last week [the week of 2023-05-08].",
+                                                               "[2023-05-20] I just started reading The Nightingale.",
+                                                               "How can I help you today?"]
+    assert stamped["sid"] == "s1" and stamped["date"] == session["date"]
+    assert session["turns"][0]["content"] == "I moved in last week.", "the original session is not changed"
+
+
+def test_a_session_is_stamped_once_and_an_undated_one_not_at_all() -> None:
+    session = {"sid": "s1", "date": "2023/05/20 (Sat) 02:21", "turns": [{"role": "user", "content": "I finished it yesterday."}]}
+    once = stamped_session(session)
+    assert stamped_session(once) == once
+    undated = {"sid": "s2", "date": "sometime", "turns": [{"role": "user", "content": "yesterday"}]}
+    assert stamped_session(undated) is undated
+
+
+def test_both_of_locomos_speakers_are_stamped() -> None:
+    locomo = {"sid": "c1", "date": "1:56 pm on 8 May, 2023", "turns": [{"role": "Caroline", "content": "I went yesterday."},
+                                                                         {"role": "Melanie", "content": "Me too."}]}
+    assert [turn["content"] for turn in stamped_session(locomo)["turns"]] == ["[2023-05-08] I went yesterday [2023-05-07].", "[2023-05-08] Me too."]
+
+
+def test_the_stamped_store_holds_and_delivers_stamped_text(tmp_path) -> None:
+    from studies.memory_bench.run import make_system
+
+    session = {"sid": "s1", "date": "2023/05/20 (Sat) 02:21",
+               "turns": [{"role": "user", "content": "I started reading The Nightingale yesterday."}, {"role": "assistant", "content": "Enjoy it."}]}
+    stamped, plain = make_system("taste_git_stamped", None, tmp_path), make_system("taste_git", None, tmp_path)
+    try:
+        stamped.ingest([session])
+        plain.ingest([session])
+        got, kept = stamped.retrieve("Nightingale reading")[0], plain.retrieve("Nightingale reading")[0]
+        assert got.turns[0]["content"] == "[2023-05-20] I started reading The Nightingale yesterday [2023-05-19]."
+        assert got.turns[1]["content"] == "Enjoy it."
+        assert (got.session, got.rounds, got.date) == (kept.session, kept.rounds, kept.date)
+    finally:
+        stamped.close()
+        plain.close()
