@@ -254,7 +254,7 @@ stamped against plain git scored 33 against 34, 36 against 37, 37 against 38 and
 tokens. On the 13 date questions it scored 7 against 7, 9 against 10, 9 against 9 and 9 against 9. Mem0 scored 40, 42, 40 and 43. There is
 no sign either way, on too few questions to say more.
 
-**Prediction for the held-out part, written Nov 10 by 4:46 am Eastern, before any held-out answer of this follow-up exists.** It concerns
+**Prediction for the held-out part, written Nov 10 by 4:44 am Eastern (committed 4:44:03 am), before any held-out answer of this follow-up exists.** It concerns
 plain git stamped against plain git read in the same server session, on gpt-oss-120b, with the main judge.
 1. On all 450 questions, a change between 5 fewer and 20 more questions at each budget, about what the date pass gave (0, 13 and 15).
    None of the changes survives Holm's correction over both tries and every budget.
