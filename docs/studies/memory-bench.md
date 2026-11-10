@@ -212,6 +212,17 @@ Why: the pass dates only explicit relative expressions. Many date questions turn
 which Mem0's model dates from the session, and which a raw history leaves to the session's header. If points 1 and 2 hold, Mem0's date
 lead needs a model's reading of the event, not date arithmetic; if dates close half its date lead or more, this prediction was wrong.
 
+**Correction, written Nov 9 by 7:55 pm Eastern, after the held-out answers at 2,000 and 8,000 tokens were read.**
+- The dated history delivers the same gold evidence as plain git, with recall at the budget within half a point at both budgets. It does not
+  deliver the same other pieces, because the written dates change the words and lengths the search ranks by. The pieces delivered match for 296,
+  240, 143 and 59 of the 450 questions at 2,000, 4,000, 8,000 and 16,000 tokens.
+- The test therefore measures writing dates into the history as a whole, through what the search finds and what the reader sees. It does not
+  isolate the dates, as the paragraph above says. The questions whose pieces match exactly, with only the dates added, are reported apart, as
+  exploratory: 95 at 2,000 tokens and 94 at 8,000.
+- The score `evidence_survived` matches the evidence word for word, which the written dates break, so it is not compared across the two git rows.
+- Questions whose two prompts are byte-identical, because no relative date reached the reader, measure the reader's own noise within one
+  server session. Their verdicts changed for 11 of 201 at 2,000 tokens and 5 of 52 at 8,000.
+
 ## Running on a full cluster
 
 The stages may run as tasks on GPU jobs the study already holds, for when the queue would keep them from their day: the same job scripts and rows, in the same order, kept by marks on the shared disk, so that nothing rests on a login node. A held job ends itself when its GPUs have rested with no work for an hour, or for 8 hours whatever says it is running. Llama reads about 3,000 prompt tokens a second on two GPUs, about 21 hours for this part on one server by the practice run, so a second server takes LoCoMo if one can be had, and on each the rows the comparison turns on go first: Taste with and without headers, the keyword list, Mem0 and MemPalace's product path. On one server LongMemEval goes first, since the second judge needs only those answers. The first reader's server there also carries the tool-call flags the long run needs, which a request with no tools does not use, and one wide window for every stage; the rehearsal runs on the same. On a shared server a reader's cost comes from its answers, and GPU-hours from the record of the job that keeps the GPUs.
