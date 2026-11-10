@@ -249,6 +249,26 @@ Because the idea came from the held-out questions themselves, a gain here is a f
 - Plain git with dates also gained on the questions that are not about dates, by 11 at 4,000 tokens (15 against 4) and by 9 at 8,000
   (17 against 8). Nobody predicted this. It is reported as an open exploratory finding, not explained.
 
+**Practice part, read Nov 10 by 4:43 am Eastern.** All 600 answers were read and judged in one server session, with none failed. Plain git
+stamped against plain git scored 33 against 34, 36 against 37, 37 against 38 and 38 against 39 of 50 at 2,000, 4,000, 8,000 and 16,000
+tokens. On the 13 date questions it scored 7 against 7, 9 against 10, 9 against 9 and 9 against 9. Mem0 scored 40, 42, 40 and 43. There is
+no sign either way, on too few questions to say more.
+
+**Prediction for the held-out part, written Nov 10 by 4:46 am Eastern, before any held-out answer of this follow-up exists.** It concerns
+plain git stamped against plain git read in the same server session, on gpt-oss-120b, with the main judge.
+1. On all 450 questions, a change between 5 fewer and 20 more questions at each budget, about what the date pass gave (0, 13 and 15).
+   None of the changes survives Holm's correction over both tries and every budget.
+2. On the 120 date questions at 8,000 and 16,000 tokens, where the evidence is most often in front of the reader, a gain of 4 to 10. That
+   closes at most half of Mem0's date lead there. At 2,000 and 4,000 tokens, where the evidence is often missing and a stamp cannot help,
+   between 3 fewer and 5 more.
+3. Mem0 still leads plain git stamped on the date questions at every budget.
+
+Why it is modest: the idea rests on 5 of the 12 date questions that plain git with dates lost at 8,000 tokens with all the evidence in
+front of the reader, read after the fact. Another 5 of those 12 turned on tying the wrong event to a date, and 2 on rounding, which a stamp
+does not touch. The practice part shows nothing either way, and the stamp costs about 2% of every budget. If the stamp closes half of
+Mem0's date lead or more at 8,000 or 16,000, this prediction undershot. If it gains nothing on the date questions at both budgets, the
+reading that each fact needs its own date is wrong.
+
 ## Running on a full cluster
 
 The stages may run as tasks on GPU jobs the study already holds, for when the queue would keep them from their day: the same job scripts and rows, in the same order, kept by marks on the shared disk, so that nothing rests on a login node. A held job ends itself when its GPUs have rested with no work for an hour, or for 8 hours whatever says it is running. Llama reads about 3,000 prompt tokens a second on two GPUs, about 21 hours for this part on one server by the practice run, so a second server takes LoCoMo if one can be had, and on each the rows the comparison turns on go first: Taste with and without headers, the keyword list, Mem0 and MemPalace's product path. On one server LongMemEval goes first, since the second judge needs only those answers. The first reader's server there also carries the tool-call flags the long run needs, which a request with no tools does not use, and one wide window for every stage; the rehearsal runs on the same. On a shared server a reader's cost comes from its answers, and GPU-hours from the record of the job that keeps the GPUs.
