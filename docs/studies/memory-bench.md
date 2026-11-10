@@ -223,6 +223,21 @@ lead needs a model's reading of the event, not date arithmetic; if dates close h
 - Questions whose two prompts are byte-identical, because no relative date reached the reader, measure the reader's own noise within one
   server session. Their verdicts changed for 11 of 201 at 2,000 tokens and 5 of 52 at 8,000.
 
+## Every person's turn stamped with its session's day, a second follow-up (Nov 9)
+
+This follow-up was designed after the date test's held-out answers, from a reading of the date questions Mem0 got right and
+plain git with dates got wrong. At 8,000 tokens there were 16 such questions. Plain git with dates had all the evidence in front of the
+reader in 12 of them. In 5 of those the reader said the date was not given, when the event had been told with no relative date and its
+date stood only in the session's header line. In another 5 it tied the wrong event to a date. Each of Mem0's facts carries its own date.
+
+The system `taste_git_stamped` (commit `1705b3a`, still no model) is plain git with dates, with every person's turn also beginning with
+its session's day in brackets ("[2023-05-20] "). That adds about 2% to a session, 41 tokens in 2,161 on the practice part. Plain git, plain
+git stamped and Mem0 are read and judged again, together, a budget at a time on one server session of gpt-oss-120b, as in the date test,
+practice part first. A budget cut by a hold's stop is set aside unread and rerun whole. The prediction is written after the practice answers
+and committed before any held-out answer of this follow-up exists.
+
+Because the idea came from the held-out questions themselves, a gain here is a follow-up on those questions, not an untouched test.
+
 ## Running on a full cluster
 
 The stages may run as tasks on GPU jobs the study already holds, for when the queue would keep them from their day: the same job scripts and rows, in the same order, kept by marks on the shared disk, so that nothing rests on a login node. A held job ends itself when its GPUs have rested with no work for an hour, or for 8 hours whatever says it is running. Llama reads about 3,000 prompt tokens a second on two GPUs, about 21 hours for this part on one server by the practice run, so a second server takes LoCoMo if one can be had, and on each the rows the comparison turns on go first: Taste with and without headers, the keyword list, Mem0 and MemPalace's product path. On one server LongMemEval goes first, since the second judge needs only those answers. The first reader's server there also carries the tool-call flags the long run needs, which a request with no tools does not use, and one wide window for every stage; the rehearsal runs on the same. On a shared server a reader's cost comes from its answers, and GPU-hours from the record of the job that keeps the GPUs.
