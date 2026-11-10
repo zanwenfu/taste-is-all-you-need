@@ -190,6 +190,26 @@ The practice part runs first. The held-out part runs 8,000 tokens first, then 2,
 in the gaps between the long-run sessions on the study's GPU jobs. The prediction is written after the practice answers and before
 any held-out answer of this test exists, and committed before the held-out answers.
 
+**Practice part (50 questions, 13 of them date questions), read Nov 9 by 7:09 pm Eastern:**
+- Every row was answered and judged, with none failed.
+- Plain git with dates against plain git got 36 against 35, 35 against 36, 37 against 38, and 36 against 38 at 2,000, 4,000, 8,000 and 16,000 tokens.
+- On the date questions alone it got 8 against 7, 8 against 10, 9 against 10, and 9 against 9.
+- Mem0 got 38, 41, 39 and 42.
+- There is no sign either way, on too few questions to say more.
+
+**Prediction for the held-out part, written Nov 9 by 7:11 pm Eastern, before any held-out answer of this test exists (gpt-oss-120b, the main judge):**
+1. Plain git with dates against plain git: no difference at any budget after Holm's correction over the four. The point estimate is within 4
+   questions of 450 at each budget.
+2. On the 120 date questions, dates close at most a quarter of Mem0's lead. The point estimate is 2 questions more than plain git at each budget,
+   between 3 fewer and 7 more.
+3. On the 330 other questions, no change, within 4 at each budget.
+4. Mem0's lead over plain git in this rerun stays as in the held-out run, within the noise between sessions: 14 to 26 on the date questions at
+   every budget, and on the others only at 2,000 and 4,000.
+
+Why: the pass dates only explicit relative expressions. Many date questions turn on events told with none ("I just started reading it"),
+which Mem0's model dates from the session, and which a raw history leaves to the session's header. If points 1 and 2 hold, Mem0's date
+lead needs a model's reading of the event, not date arithmetic; if dates close half its date lead or more, this prediction was wrong.
+
 ## Running on a full cluster
 
 The stages may run as tasks on GPU jobs the study already holds, for when the queue would keep them from their day: the same job scripts and rows, in the same order, kept by marks on the shared disk, so that nothing rests on a login node. A held job ends itself when its GPUs have rested with no work for an hour, or for 8 hours whatever says it is running. Llama reads about 3,000 prompt tokens a second on two GPUs, about 21 hours for this part on one server by the practice run, so a second server takes LoCoMo if one can be had, and on each the rows the comparison turns on go first: Taste with and without headers, the keyword list, Mem0 and MemPalace's product path. On one server LongMemEval goes first, since the second judge needs only those answers. The first reader's server there also carries the tool-call flags the long run needs, which a request with no tools does not use, and one wide window for every stage; the rehearsal runs on the same. On a shared server a reader's cost comes from its answers, and GPU-hours from the record of the job that keeps the GPUs.
