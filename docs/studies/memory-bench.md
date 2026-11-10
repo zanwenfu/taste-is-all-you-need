@@ -238,6 +238,17 @@ and committed before any held-out answer of this follow-up exists.
 
 Because the idea came from the held-out questions themselves, a gain here is a follow-up on those questions, not an untouched test.
 
+**Added Nov 9 by 8:15 pm Eastern, before any answer of this follow-up exists, after a review by another session:**
+- Plain git with dates and plain git stamped are two tries at one question, whether dates written into the raw history close Mem0's lead.
+  Both are reported. The stamped row is never read alone, nor picked afterwards as the date result.
+- Each try is compared with plain git read in its own server session, on all 450 questions and on the 120 date questions, at every budget
+  run. Holm's correction runs over both tries and every budget together: up to eight tests on all questions, and eight on the date
+  questions.
+- The prediction is kept modest, because the idea rests on 5 of the 12 date questions that plain git with dates lost at 8,000 tokens with
+  all the evidence in front of the reader, read after the fact.
+- Plain git with dates also gained on the questions that are not about dates, by 11 at 4,000 tokens (15 against 4) and by 9 at 8,000
+  (17 against 8). Nobody predicted this. It is reported as an open exploratory finding, not explained.
+
 ## Running on a full cluster
 
 The stages may run as tasks on GPU jobs the study already holds, for when the queue would keep them from their day: the same job scripts and rows, in the same order, kept by marks on the shared disk, so that nothing rests on a login node. A held job ends itself when its GPUs have rested with no work for an hour, or for 8 hours whatever says it is running. Llama reads about 3,000 prompt tokens a second on two GPUs, about 21 hours for this part on one server by the practice run, so a second server takes LoCoMo if one can be had, and on each the rows the comparison turns on go first: Taste with and without headers, the keyword list, Mem0 and MemPalace's product path. On one server LongMemEval goes first, since the second judge needs only those answers. The first reader's server there also carries the tool-call flags the long run needs, which a request with no tools does not use, and one wide window for every stage; the rehearsal runs on the same. On a shared server a reader's cost comes from its answers, and GPU-hours from the record of the job that keeps the GPUs.
