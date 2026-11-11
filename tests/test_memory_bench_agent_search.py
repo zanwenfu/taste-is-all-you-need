@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from studies.memory_bench.adapters.agent_search import AgentSearch, Reading, command, files_of, search
+from studies.memory_bench.adapters.agent_search import AgentSearch, Reading, command, commands, files_of, search
 from studies.memory_bench.core import deliver, item_text
 
 WORDS = lambda text: len(text.split())  # noqa: E731
@@ -119,3 +119,23 @@ def test_the_records_stage_keeps_the_whole_list_at_the_same_budget():
     items = agent.retrieve("q")
     delivered = deliver(items, 40, WORDS)
     assert delivered.items == tuple(items) and delivered.dropped == 0 and delivered.cut == 0
+
+
+def test_every_command_in_a_reply_runs_in_order_up_to_done():
+    assert commands("SEARCH: cat\nREAD: session-001 0\nDONE\nREAD: session-002 0") == [
+        ("SEARCH", "cat"), ("READ", "session-001 0"), ("DONE", "")]
+    ask, asked = scripted("Reading both.\nREAD: session-001 0\nREAD: session-002 0\nDONE")
+    agent = AgentSearch(ask, WORDS, 100)
+    agent.ingest(SESSIONS)
+    items = agent.retrieve("q")
+    assert [item.source for item in items] == ["session-001/r0", "session-002/r0"] and len(asked) == 1
+
+
+def test_done_with_nothing_read_is_nudged_once_then_accepted(tmp_path):
+    ask, asked = scripted("SEARCH: cat\nDONE", "DONE")
+    agent = AgentSearch(ask, WORDS, 100, trace=tmp_path / "t.jsonl")
+    agent.ingest(SESSIONS)
+    assert agent.retrieve("q") == [] and len(asked) == 2
+    assert "You have read nothing yet" in asked[1][-1]["content"] and "1 rounds match" in asked[1][-1]["content"]
+    trace = json.loads((tmp_path / "t.jsonl").read_text())
+    assert trace["stop"] == "done" and trace["steps"][0].get("nudged") and "said" in trace["steps"][0]

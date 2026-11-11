@@ -28,8 +28,8 @@ from studies.memory_bench.lme import rounds
 
 SYSTEM = (
     "You answer questions about a user's past chats with an assistant. The chats are stored as plain text files, one file per chat "
-    "session, oldest first. You cannot see their text yet. Find what you need with these commands, one per reply, written alone on the "
-    "last line of your reply:\n"
+    "session, oldest first. You cannot see their text yet. Find what you need with these commands, each written alone on its own line; "
+    "a reply may hold several, and they run in order:\n"
     "SEARCH: <words or a regular expression>\n"
     "  lists the rounds that match, oldest first, case-insensitive, each with a short excerpt (at most {hits}). A round is one user "
     "message and the assistant's replies to it.\n"
@@ -37,8 +37,9 @@ SYSTEM = (
     "  reads those rounds in full and keeps them for answering.\n"
     "DONE\n"
     "  when you have read what you need.\n"
-    "Only the rounds you READ are kept for the answer; excerpts from SEARCH are not. You may read at most {budget} tokens in all. "
-    "You have at most {steps} replies. Do not answer the question yourself: it is answered afterwards from what you read."
+    "Only the rounds you READ are kept for the answer; excerpts from SEARCH are not, so READ every round that may hold what the question "
+    "needs before DONE. You may read at most {budget} tokens in all. You have at most {steps} replies. Do not answer the question "
+    "yourself: it is answered afterwards from what you read."
 )
 
 FIRST = "Question date: {date}\nQuestion: {question}\n\nFiles (name, session date, rounds):\n{files}"
@@ -139,13 +140,22 @@ class Reading:
         return "\n\n".join(shown) + f"\n\n({self.used} of {self.budget} tokens read; {self.left} left)"
 
 
-def command(reply: str) -> tuple[str, str] | None:
-    """The last line of the reply that is a command."""
-    for line in reversed([line for line in reply.splitlines() if line.strip()]):
+def commands(reply: str) -> list[tuple[str, str]]:
+    """Every command line of the reply, in order, up to and including the first DONE."""
+    out: list[tuple[str, str]] = []
+    for line in reply.splitlines():
         found = _COMMAND.match(line.strip().strip("`"))
         if found:
-            return found.group(1).upper(), found.group(2).strip()
-    return None
+            out.append((found.group(1).upper(), found.group(2).strip()))
+            if out[-1][0] == "DONE":
+                break
+    return out
+
+
+def command(reply: str) -> tuple[str, str] | None:
+    """The last command line of the reply (kept for the tests of the first version)."""
+    found = commands(reply)
+    return found[-1] if found else None
 
 
 class AgentSearch:
@@ -164,36 +174,48 @@ class AgentSearch:
         listing = "\n".join(f"{name}  {parts[0].date if parts else ''}  {len(parts)}" for name, parts in self.files.items())
         messages = [{"role": "system", "content": SYSTEM.format(hits=self.hits, budget=self.budget, steps=self.steps)},
                     {"role": "user", "content": FIRST.format(date=date or "", question=query, files=listing)}]
-        log, stop = [], "steps"
+        log, stop, nudged = [], "steps", False
         for _ in range(self.steps):
             reply = self.ask(messages)
             text = reply.get("text") or ""
             messages.append({"role": "assistant", "content": text})
-            parsed = command(text)
-            entry = {"command": parsed, "finish_reason": reply.get("finish_reason"),
+            parsed = commands(text)
+            entry = {"commands": parsed, "said": text[-300:], "finish_reason": reply.get("finish_reason"),
                      "prompt_tokens": reply.get("prompt_tokens"), "completion_tokens": reply.get("completion_tokens")}
-            if parsed is None:
-                result = "No command found. End your reply with one line: SEARCH: ..., READ: ... or DONE."
-            elif parsed[0] == "DONE":
-                log.append(entry)
+            results, done = [], False
+            if not parsed:
+                results.append("No command found. Write SEARCH: ..., READ: ... or DONE, each on its own line.")
+            for verb, argument in parsed:
+                if verb == "DONE":
+                    done = True
+                    break
+                if verb == "SEARCH":
+                    results.append(search(self.files, argument, hits=self.hits) if argument else "SEARCH needs words or a pattern.")
+                    continue
+                found = _RANGE.match(argument)
+                if not found:
+                    results.append("Write READ: <file> <round> or READ: <file> <first>-<last>.")
+                    continue
+                first = int(found.group(2))
+                last = int(found.group(3)) if found.group(3) else first
+                results.append(reading.read(self.files, found.group(1), first, last))
+                if reading.left <= 0:
+                    break
+            if done and not reading.items and not nudged:
+                # Once only: an excerpt is not kept, so DONE with nothing read would leave the answer with nothing.
+                nudged, done = True, False
+                entry["nudged"] = True
+                results.append("You have read nothing yet, and excerpts are not kept. READ the rounds that hold what the question "
+                               "needs, then DONE.")
+            entry["result_chars"] = sum(len(result) for result in results)
+            log.append(entry)
+            if done:
                 stop = "done"
                 break
-            elif parsed[0] == "SEARCH":
-                result = search(self.files, parsed[1], hits=self.hits) if parsed[1] else "SEARCH needs words or a pattern."
-            else:
-                found = _RANGE.match(parsed[1])
-                if not found:
-                    result = "Write READ: <file> <round> or READ: <file> <first>-<last>."
-                else:
-                    first = int(found.group(2))
-                    last = int(found.group(3)) if found.group(3) else first
-                    result = reading.read(self.files, found.group(1), first, last)
-            entry["result_chars"] = len(result)
-            log.append(entry)
             if reading.left <= 0:
                 stop = "budget"
                 break
-            messages.append({"role": "user", "content": result})
+            messages.append({"role": "user", "content": "\n\n".join(results)})
         if self.trace:
             with self.lock, Path(self.trace).open("a") as written:
                 written.write(json.dumps({"qid": qid, "query": query, "budget": self.budget, "used": reading.used,
