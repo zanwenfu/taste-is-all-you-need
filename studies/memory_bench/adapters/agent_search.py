@@ -166,8 +166,13 @@ class AgentSearch:
         listing = "\n".join(f"{name}  {parts[0].date if parts else ''}  {len(parts)}" for name, parts in self.files.items())
         messages = [{"role": "system", "content": SYSTEM.format(hits=self.hits, budget=self.budget, steps=self.steps)},
                     {"role": "user", "content": FIRST.format(date=date or "", question=query, files=listing)}]
-        log, stop, nudged, offered = [], "steps", False, tools(self.hits)
-        for _ in range(self.steps):
+        log, stop, nudged, offered, warned = [], "steps", False, tools(self.hits), False
+        for turn in range(self.steps):
+            if not reading.items and not warned and turn == self.steps - 3:
+                # Once only, three turns before the cap: a model that keeps searching and never reads leaves the answer with nothing.
+                warned = True
+                messages.append({"role": "user", "content": "Three turns are left and you have read nothing yet. Read the rounds most "
+                                                            "likely to hold what the question needs now."})
             reply = self.ask(messages, offered)
             text, calls = reply.get("text") or "", reply.get("tool_calls") or []
             said = {"role": "assistant", "content": text}
@@ -177,7 +182,7 @@ class AgentSearch:
             messages.append(said)
             entry = {"calls": [[call["name"], call["arguments"][:200]] for call in calls], "said": text[-300:],
                      "finish_reason": reply.get("finish_reason"), "prompt_tokens": reply.get("prompt_tokens"),
-                     "completion_tokens": reply.get("completion_tokens")}
+                     "completion_tokens": reply.get("completion_tokens"), "warned": warned and turn == self.steps - 3}
             done = not calls  # an answer in words, with no tool asked, ends the turn as an agent's would
             for call in calls:
                 try:

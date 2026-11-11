@@ -158,3 +158,19 @@ def test_the_records_stage_keeps_the_whole_list_at_the_same_budget():
 def test_tools_are_offered_as_functions():
     names = [tool["function"]["name"] for tool in tools(30)]
     assert names == ["search", "read", "done"] and "at most 30" in tools(30)[0]["function"]["description"]
+
+
+def test_three_turns_before_the_cap_a_model_that_read_nothing_is_warned_once():
+    ask, asked = scripted([call("search", pattern="zzz")], [call("search", pattern="zzz")], [call("search", pattern="zzz")],
+                          [call("read", file="session-001", first_round=0)], [call("done")])
+    agent = AgentSearch(ask, WORDS, 100, steps=6)
+    agent.ingest(SESSIONS)
+    items = agent.retrieve("q")
+    assert [item.source for item in items] == ["session-001/r0"]
+    warned = [i for i, messages in enumerate(asked) if any("Three turns are left" in str(m.get("content")) for m in messages)]
+    assert warned and warned[0] == 3
+    ask, asked = scripted([call("read", file="session-001", first_round=0)], [call("search", pattern="zzz")])
+    agent = AgentSearch(ask, WORDS, 100, steps=4)
+    agent.ingest(SESSIONS)
+    agent.retrieve("q")
+    assert not any("Three turns are left" in str(m.get("content")) for messages in asked for m in messages)
