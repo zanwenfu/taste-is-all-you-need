@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from studies.memory_bench.adapters.agent_search import AgentSearch, Reading, command, commands, files_of, search
+from studies.memory_bench.adapters.agent_search import AgentSearch, Reading, files_of, search, tools
 from studies.memory_bench.core import deliver, item_text
 
 WORDS = lambda text: len(text.split())  # noqa: E731
@@ -23,12 +23,22 @@ SESSIONS = [
 ]
 
 
-def scripted(*replies: str):
+def call(name: str, **arguments) -> dict:
+    call.n = getattr(call, "n", 0) + 1
+    return {"id": f"c{call.n}", "name": name, "arguments": json.dumps(arguments)}
+
+
+def scripted(*replies):
+    """Each reply is a list of tool calls, or a string for an answer in words with no call."""
     asked: list[list[dict]] = []
 
-    def ask(messages: list[dict]) -> dict:
+    def ask(messages: list[dict], offered=None) -> dict:
         asked.append([dict(message) for message in messages])
-        return {"text": replies[min(len(asked) - 1, len(replies) - 1)], "finish_reason": "stop"}
+        assert offered and [tool["function"]["name"] for tool in offered] == ["search", "read", "done"]
+        reply = replies[min(len(asked) - 1, len(replies) - 1)]
+        if isinstance(reply, str):
+            return {"text": reply, "tool_calls": [], "finish_reason": "stop"}
+        return {"text": "", "tool_calls": reply, "finish_reason": "tool_calls"}
 
     return ask, asked
 
@@ -80,40 +90,64 @@ def test_bad_reads_say_why():
     assert reading.used == 0
 
 
-def test_command_is_the_last_command_line():
-    assert command("I will look.\nSEARCH: cat") == ("SEARCH", "cat")
-    assert command("READ: session-001 0-1\nthen\nDONE") == ("DONE", "")
-    assert command("`READ: session-002 0`") == ("READ", "session-002 0")
-    assert command("no command here") is None
-
-
 def test_the_loop_reads_what_it_is_told_and_stops_on_done(tmp_path):
-    ask, asked = scripted("SEARCH: cat", "READ: session-001 0", "DONE")
+    ask, asked = scripted([call("search", pattern="cat")], [call("read", file="session-001", first_round=0)], [call("done")])
     agent = AgentSearch(ask, WORDS, 100, trace=tmp_path / "trace.jsonl")
     agent.ingest(SESSIONS)
     items = agent.retrieve("What is my cat's name?", date="2023/07/01", qid="q1")
     assert [item.source for item in items] == ["session-001/r0"]
     assert "Question: What is my cat's name?" in asked[0][1]["content"] and "session-002" in asked[0][1]["content"]
-    assert "1 rounds match" in asked[1][-1]["content"]
+    assert asked[1][-2]["tool_calls"][0]["function"]["name"] == "search"
+    assert asked[1][-1]["role"] == "tool" and "1 rounds match" in asked[1][-1]["content"]
     trace = json.loads((tmp_path / "trace.jsonl").read_text())
     assert trace["stop"] == "done" and trace["qid"] == "q1" and trace["read"] == ["session-001/r0"]
 
 
+def test_several_calls_in_one_turn_run_in_order_and_each_gets_its_answer():
+    ask, asked = scripted([call("read", file="session-001", first_round=0, last_round=1), call("read", file="session-002", first_round=0)],
+                          [call("done")])
+    agent = AgentSearch(ask, WORDS, 100)
+    agent.ingest(SESSIONS)
+    items = agent.retrieve("q")
+    assert [item.source for item in items] == ["session-001/r0", "session-001/r1", "session-002/r0"]
+    assert [m["role"] for m in asked[1][-3:]] == ["assistant", "tool", "tool"]
+
+
+def test_an_answer_in_words_ends_the_turn_and_bad_arguments_are_told():
+    ask, asked = scripted([{"id": "x", "name": "read", "arguments": "{not json"}, call("read", file="session-001")],
+                          [call("read", file="session-001", first_round=1)], "The answer is Miso.")
+    agent = AgentSearch(ask, WORDS, 100)
+    agent.ingest(SESSIONS)
+    items = agent.retrieve("q")
+    assert [item.source for item in items] == ["session-001/r1"] and len(asked) == 3
+    assert "not valid JSON" in asked[1][-2]["content"] and "needs file and first_round" in asked[1][-1]["content"]
+
+
+def test_done_with_nothing_read_is_nudged_once_then_accepted(tmp_path):
+    ask, asked = scripted([call("search", pattern="cat"), call("done")], [call("done")])
+    agent = AgentSearch(ask, WORDS, 100, trace=tmp_path / "t.jsonl")
+    agent.ingest(SESSIONS)
+    assert agent.retrieve("q") == [] and len(asked) == 2
+    assert "You have read nothing yet" in asked[1][-1]["content"] and asked[1][-1]["role"] == "user"
+    trace = json.loads((tmp_path / "t.jsonl").read_text())
+    assert trace["stop"] == "done" and trace["steps"][0].get("nudged")
+
+
 def test_the_loop_stops_at_its_step_cap_and_when_the_budget_is_spent():
-    ask, asked = scripted("thinking, no command")
+    ask, asked = scripted([call("search", pattern="zzz")])
     agent = AgentSearch(ask, WORDS, 100, steps=3)
     agent.ingest(SESSIONS)
     assert agent.retrieve("q") == [] and len(asked) == 3
-    assert "No command found" in asked[-1][-1]["content"]
     whole = WORDS(item_text(files_of(SESSIONS)["session-002"][0].item()))
-    ask, asked = scripted("READ: session-002 0", "SEARCH: cat")
+    ask, asked = scripted([call("read", file="session-002", first_round=0)], [call("search", pattern="cat")])
     agent = AgentSearch(ask, WORDS, whole, steps=5)
     agent.ingest(SESSIONS)
     assert len(agent.retrieve("q")) == 1 and len(asked) == 1
 
 
 def test_the_records_stage_keeps_the_whole_list_at_the_same_budget():
-    ask, _ = scripted("READ: session-001 0-1", "READ: session-002 0", "DONE")
+    ask, _ = scripted([call("read", file="session-001", first_round=0, last_round=1)], [call("read", file="session-002", first_round=0)],
+                      [call("done")])
     agent = AgentSearch(ask, WORDS, 40)
     agent.ingest(SESSIONS)
     items = agent.retrieve("q")
@@ -121,21 +155,6 @@ def test_the_records_stage_keeps_the_whole_list_at_the_same_budget():
     assert delivered.items == tuple(items) and delivered.dropped == 0 and delivered.cut == 0
 
 
-def test_every_command_in_a_reply_runs_in_order_up_to_done():
-    assert commands("SEARCH: cat\nREAD: session-001 0\nDONE\nREAD: session-002 0") == [
-        ("SEARCH", "cat"), ("READ", "session-001 0"), ("DONE", "")]
-    ask, asked = scripted("Reading both.\nREAD: session-001 0\nREAD: session-002 0\nDONE")
-    agent = AgentSearch(ask, WORDS, 100)
-    agent.ingest(SESSIONS)
-    items = agent.retrieve("q")
-    assert [item.source for item in items] == ["session-001/r0", "session-002/r0"] and len(asked) == 1
-
-
-def test_done_with_nothing_read_is_nudged_once_then_accepted(tmp_path):
-    ask, asked = scripted("SEARCH: cat\nDONE", "DONE")
-    agent = AgentSearch(ask, WORDS, 100, trace=tmp_path / "t.jsonl")
-    agent.ingest(SESSIONS)
-    assert agent.retrieve("q") == [] and len(asked) == 2
-    assert "You have read nothing yet" in asked[1][-1]["content"] and "1 rounds match" in asked[1][-1]["content"]
-    trace = json.loads((tmp_path / "t.jsonl").read_text())
-    assert trace["stop"] == "done" and trace["steps"][0].get("nudged") and "said" in trace["steps"][0]
+def test_tools_are_offered_as_functions():
+    names = [tool["function"]["name"] for tool in tools(30)]
+    assert names == ["search", "read", "done"] and "at most 30" in tools(30)[0]["function"]["description"]

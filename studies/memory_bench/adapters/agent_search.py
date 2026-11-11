@@ -28,24 +28,34 @@ from studies.memory_bench.lme import rounds
 
 SYSTEM = (
     "You answer questions about a user's past chats with an assistant. The chats are stored as plain text files, one file per chat "
-    "session, oldest first. You cannot see their text yet. Find what you need with these commands, each written alone on its own line; "
-    "a reply may hold several, and they run in order:\n"
-    "SEARCH: <words or a regular expression>\n"
-    "  lists the rounds that match, oldest first, case-insensitive, each with a short excerpt (at most {hits}). A round is one user "
-    "message and the assistant's replies to it.\n"
-    "READ: <file> <round>   or   READ: <file> <first round>-<last round>\n"
-    "  reads those rounds in full and keeps them for answering.\n"
-    "DONE\n"
-    "  when you have read what you need.\n"
-    "Only the rounds you READ are kept for the answer; excerpts from SEARCH are not, so READ every round that may hold what the question "
-    "needs before DONE. You may read at most {budget} tokens in all. You have at most {steps} replies. Do not answer the question "
-    "yourself: it is answered afterwards from what you read."
+    "session, oldest first, listed below with their dates. You cannot see their text yet. Use the tools: search finds the rounds that "
+    "match words or a regular expression and shows a short excerpt of each; read reads rounds of a file in full and keeps them for "
+    "answering; call done when you have read what you need. A round is one user message and the assistant's replies to it. Only the "
+    "rounds you read are kept; excerpts from search are not, so read every round that may hold what the question needs. You may read at "
+    "most {budget} tokens in all, in at most {steps} turns. Do not answer the question yourself: it is answered afterwards from what you "
+    "read."
 )
 
 FIRST = "Question date: {date}\nQuestion: {question}\n\nFiles (name, session date, rounds):\n{files}"
 
-_COMMAND = re.compile(r"^\s*(SEARCH|READ|DONE)\b:?\s*(.*)$", re.IGNORECASE)
-_RANGE = re.compile(r"^(\S+)\s+(\d+)(?:\s*-\s*(\d+))?\s*$")
+
+def tools(hits: int) -> list[dict]:
+    """The three tools, as OpenAI-style function definitions."""
+    return [
+        {"type": "function", "function": {
+            "name": "search", "description": f"Rounds whose text matches, oldest first, case-insensitive, at most {hits}, each with a "
+                                          "short excerpt. Excerpts are not kept for answering.",
+            "parameters": {"type": "object", "properties": {"pattern": {"type": "string", "description": "words or a regular expression"}},
+                           "required": ["pattern"]}}},
+        {"type": "function", "function": {
+            "name": "read", "description": "Read rounds of one file in full and keep them for answering.",
+            "parameters": {"type": "object", "properties": {
+                "file": {"type": "string", "description": "a file name from the list, such as session-007"},
+                "first_round": {"type": "integer"}, "last_round": {"type": "integer", "description": "the same as first_round if left out"}},
+                "required": ["file", "first_round"]}}},
+        {"type": "function", "function": {"name": "done", "description": "Stop: you have read what the question needs.",
+                                          "parameters": {"type": "object", "properties": {}}}},
+    ]
 
 
 @dataclass(frozen=True)
@@ -140,24 +150,6 @@ class Reading:
         return "\n\n".join(shown) + f"\n\n({self.used} of {self.budget} tokens read; {self.left} left)"
 
 
-def commands(reply: str) -> list[tuple[str, str]]:
-    """Every command line of the reply, in order, up to and including the first DONE."""
-    out: list[tuple[str, str]] = []
-    for line in reply.splitlines():
-        found = _COMMAND.match(line.strip().strip("`"))
-        if found:
-            out.append((found.group(1).upper(), found.group(2).strip()))
-            if out[-1][0] == "DONE":
-                break
-    return out
-
-
-def command(reply: str) -> tuple[str, str] | None:
-    """The last command line of the reply (kept for the tests of the first version)."""
-    found = commands(reply)
-    return found[-1] if found else None
-
-
 class AgentSearch:
     """``ask(messages) -> dict`` with at least ``text``; a fresh reading per question."""
 
@@ -174,40 +166,49 @@ class AgentSearch:
         listing = "\n".join(f"{name}  {parts[0].date if parts else ''}  {len(parts)}" for name, parts in self.files.items())
         messages = [{"role": "system", "content": SYSTEM.format(hits=self.hits, budget=self.budget, steps=self.steps)},
                     {"role": "user", "content": FIRST.format(date=date or "", question=query, files=listing)}]
-        log, stop, nudged = [], "steps", False
+        log, stop, nudged, offered = [], "steps", False, tools(self.hits)
         for _ in range(self.steps):
-            reply = self.ask(messages)
-            text = reply.get("text") or ""
-            messages.append({"role": "assistant", "content": text})
-            parsed = commands(text)
-            entry = {"commands": parsed, "said": text[-300:], "finish_reason": reply.get("finish_reason"),
-                     "prompt_tokens": reply.get("prompt_tokens"), "completion_tokens": reply.get("completion_tokens")}
-            results, done = [], False
-            if not parsed:
-                results.append("No command found. Write SEARCH: ..., READ: ... or DONE, each on its own line.")
-            for verb, argument in parsed:
-                if verb == "DONE":
-                    done = True
-                    break
-                if verb == "SEARCH":
-                    results.append(search(self.files, argument, hits=self.hits) if argument else "SEARCH needs words or a pattern.")
-                    continue
-                found = _RANGE.match(argument)
-                if not found:
-                    results.append("Write READ: <file> <round> or READ: <file> <first>-<last>.")
-                    continue
-                first = int(found.group(2))
-                last = int(found.group(3)) if found.group(3) else first
-                results.append(reading.read(self.files, found.group(1), first, last))
+            reply = self.ask(messages, offered)
+            text, calls = reply.get("text") or "", reply.get("tool_calls") or []
+            said = {"role": "assistant", "content": text}
+            if calls:
+                said["tool_calls"] = [{"id": call["id"], "type": "function",
+                                       "function": {"name": call["name"], "arguments": call["arguments"]}} for call in calls]
+            messages.append(said)
+            entry = {"calls": [[call["name"], call["arguments"][:200]] for call in calls], "said": text[-300:],
+                     "finish_reason": reply.get("finish_reason"), "prompt_tokens": reply.get("prompt_tokens"),
+                     "completion_tokens": reply.get("completion_tokens")}
+            done = not calls  # an answer in words, with no tool asked, ends the turn as an agent's would
+            for call in calls:
+                try:
+                    arguments = json.loads(call["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    arguments = None
+                if call["name"] == "done":
+                    done, result = True, "Done."
+                elif not isinstance(arguments, dict):
+                    result = "The arguments were not valid JSON."
+                elif call["name"] == "search":
+                    pattern = str(arguments.get("pattern") or "")
+                    result = search(self.files, pattern, hits=self.hits) if pattern else "search needs a pattern."
+                elif call["name"] == "read":
+                    try:
+                        first = int(arguments["first_round"])
+                        last = int(arguments.get("last_round", first))
+                        result = reading.read(self.files, str(arguments.get("file", "")), first, last)
+                    except (KeyError, TypeError, ValueError):
+                        result = "read needs file and first_round (and last_round for a range)."
+                else:
+                    result = f"There is no tool {call['name']!r}."
+                messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
                 if reading.left <= 0:
                     break
             if done and not reading.items and not nudged:
-                # Once only: an excerpt is not kept, so DONE with nothing read would leave the answer with nothing.
+                # Once only: an excerpt is not kept, so stopping with nothing read would leave the answer with nothing.
                 nudged, done = True, False
                 entry["nudged"] = True
-                results.append("You have read nothing yet, and excerpts are not kept. READ the rounds that hold what the question "
-                               "needs, then DONE.")
-            entry["result_chars"] = sum(len(result) for result in results)
+                messages.append({"role": "user", "content": "You have read nothing yet, and excerpts are not kept. Read the rounds that "
+                                                            "hold what the question needs, then call done."})
             log.append(entry)
             if done:
                 stop = "done"
@@ -215,7 +216,6 @@ class AgentSearch:
             if reading.left <= 0:
                 stop = "budget"
                 break
-            messages.append({"role": "user", "content": "\n\n".join(results)})
         if self.trace:
             with self.lock, Path(self.trace).open("a") as written:
                 written.write(json.dumps({"qid": qid, "query": query, "budget": self.budget, "used": reading.used,
@@ -226,13 +226,17 @@ class AgentSearch:
         pass
 
 
-def chat_ask(client: Any, model: str, *, max_tokens: int, effort: str | None) -> Callable[[list[dict]], dict]:
+def chat_ask(client: Any, model: str, *, max_tokens: int, effort: str | None) -> Callable[..., dict]:
     extra = {"reasoning_effort": effort} if effort else {}
 
-    def ask(messages: list[dict]) -> dict:
-        reply = client.chat.completions.create(model=model, messages=messages, n=1, temperature=0, max_tokens=max_tokens, **extra)
+    def ask(messages: list[dict], offered: list[dict] | None = None) -> dict:
+        more = {"tools": offered, "tool_choice": "auto"} if offered else {}
+        reply = client.chat.completions.create(model=model, messages=messages, n=1, temperature=0, max_tokens=max_tokens, **extra,
+                                               **more)
         choice = reply.choices[0]
-        return {"text": choice.message.content or "", "finish_reason": choice.finish_reason,
+        calls = [{"id": call.id, "name": call.function.name, "arguments": call.function.arguments or "{}"}
+                 for call in (choice.message.tool_calls or [])]
+        return {"text": choice.message.content or "", "tool_calls": calls, "finish_reason": choice.finish_reason,
                 "prompt_tokens": reply.usage.prompt_tokens, "completion_tokens": reply.usage.completion_tokens}
 
     return ask
