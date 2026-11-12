@@ -140,7 +140,7 @@ def test_a_link_a_path_outside_or_a_name_not_listed_is_never_written(tmp_path):
     ledger.size = 6
     unlisted = tarfile.TarInfo(f"elsewhere/aaa111/{SCRIPT}")
     unlisted.size = 2
-    stream = raw_tar([(link, None), (escape, b"evil"), (ledger, b"ledger"), (unlisted, b"{}")])
+    stream = raw_tar([(link, None), (escape, b"evil"), (unlisted, b"{}"), (ledger, b"ledger")])
     members = {f"{ROOT}/aaa111/{TRAJECTORY}": 0, f"{ROOT}/aaa111/{LEDGER}": 6}
     account = restore.extract(stream, ["aaa111"], tmp_path / "out", members=members)
     assert restored(tmp_path / "out") == [f"aaa111/{LEDGER}"]
