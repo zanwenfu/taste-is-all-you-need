@@ -20,6 +20,11 @@ dollars and wall-clock. This package drives it and analyses it:
   state is one JSON file. ``recheck_driver`` and ``requirement_driver`` check a
   recovery state's final states again: told the original task alone, or told
   one requirement of it.
+- ``replay_driver``, ``replay_checks`` and ``archive_restore``: each episode's
+  final code rebuilt from its record with no model call (the records restored
+  from an archive, four files a trial), checked against the record (grade,
+  changed files, git's mode-only lines) and read as a diff; the losses tabled
+  by model and arm.
 
 The checker and the trajectory reader are ``taste.agents.checker`` and
 ``taste.agents.trajectory_reader``: their task text, verdicts, feedback, step

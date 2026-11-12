@@ -716,6 +716,11 @@ class RecoveryDriver(Driver):
                     partial = partial or ("", summary["changed_paths"])
         return partial
 
+    def state_extras(self):
+        """What a trial that rebuilds a checked state adds to its settings: nothing here (requirement_driver reads
+        its final change)."""
+        return {}
+
     def checker_text(self, run, view, paths):
         """What a check is told: the task as the checked agent got it, and the agent's own account of its work."""
         return checker_task(view["task"], view["final_message"], view["submission"], changed_paths=paths)
@@ -750,7 +755,7 @@ class RecoveryDriver(Driver):
         if values["mode"] == "restore" and state is None \
                 and len(self.counted(check["checkpoints"])) < values["check_attempts"]:
             name = jobs.job_name(values["prefix"], run["key"], *label, f"s{len(check['checkpoints']) + 1}")
-            settings = {**jobs.inherited(source["settings"], drop=jobs.CAPS), **values["ak"],
+            settings = {**jobs.inherited(source["settings"], drop=jobs.CAPS), **values["ak"], **self.state_extras(),
                         **jobs.branch(script, source["steps"], mode="rebuild", checkpoint=name, live=False)}
             self.emit(self.harbor_job(name, run, settings, 1, prepare=[export]), run=run_id,
                       purpose="final_state", **meta)

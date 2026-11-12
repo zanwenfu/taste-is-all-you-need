@@ -3,6 +3,7 @@
     sudo python3 scripts/recovery_requirements.py --state /root/study/req.json --source /root/study/rec.json \\
         --requirements /root/study/requirements.json --kept-saves /root/study/kept-saves.txt [--prefix req1] \\
         [--arms continue,retry_feedback] [--check-base true|false] [--rebuild true|false] \\
+        [--final-change-chars 60000] [--replayed /root/study/replay.json] \\
         [--checker-env SECRETS=/root/taste-secrets/bedrock.env] \\
         [--launcher /root/study/req-next.sh | --spool /root/study/spool] [--max-trials 24] \\
         [--json /root/study/req-summary.json]
@@ -13,7 +14,10 @@ The requirements file is JSON: {"<run>": "<the requirement, as the task text sta
 saves of each episode's last trial. A new state takes the recovery state's checker settings (model, effort, settings,
 route); those given here stand over them, each such change recorded as restated
 (``taste.recovery_study.requirement_driver``). The recovery state is only read, and must have finished the arms asked
-for.
+for. With --final-change-chars N each state this driver rebuilds is also read as a diff; with --replayed, the
+replay state of the same recovery state (scripts/recovery_replay.py), the states checked are the replay's kept
+rebuilds where no save of the trial's own is kept, restored from the replay's checkpoints (list them in the
+kept-saves file too), and an episode the replay lost is left out.
 
 Use as for the recoveries: run the launcher, wait, run this again. Exit status: 0 new jobs were written; 2 none, but
 jobs are still running; 3 every check is finished.
@@ -34,7 +38,7 @@ from taste.recovery_study.requirement_driver import RequirementDriver, verdicts
 
 OPTIONS = {"prefix": str, "source": str, "kept_saves": str, "requirements": str,
            "check_base": lambda raw: truth(raw), "rebuild": lambda raw: truth(raw), "check_attempts": int,
-           "concurrent": int, "work_dir": str}
+           "concurrent": int, "work_dir": str, "final_change_chars": int, "replayed": str}
 
 
 def truth(raw):

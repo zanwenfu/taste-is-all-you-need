@@ -15,21 +15,35 @@ Each state comes from its trial's own save where this host keeps it (``kept_save
 ``keep_final_saves`` keeps them from its prune), else, with ``rebuild``, it is rebuilt from the record and checked
 against it first, as the recovery's checks were; one that cannot be is left out. The checker is the study's own,
 unchanged: only its task text names the requirement (``requirement_task``). The recovery state is only read.
+
+Two settings, off by default, serve states whose saves are gone and whose trials read no final change (every run
+before Nov 9):
+
+- ``final_change_chars``: each trial that rebuilds a state for a check reads its final change
+  (``taste.benchmarks.final_change``), and the summary reads the diff there when the checked trial holds none;
+- ``replayed``: a replay state of the same recovery state (``taste.recovery_study.replay_driver``). Where this host
+  keeps neither the trial's own save nor a save its first check made, the state checked is the replay's kept rebuild
+  (faithful, graded as recorded, the same changed files), restored from the checkpoint the replay saved, and the
+  summary's diff is the replay's (mode-only lines left out). An episode the replay could not keep is left out
+  ("replay_lost"), not rebuilt again here: its state would lack the replay's checks. A kept rebuild whose save this
+  host no longer keeps is rebuilt as before.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 from pathlib import Path
 
 from taste.agents.checker import checker_task
-from taste.recovery_study import jobs
+from taste.recovery_study import jobs, replay_checks, state
 from taste.recovery_study.driver import own_final
 from taste.recovery_study.recheck_driver import DEFAULTS as RECHECK_DEFAULTS
 from taste.recovery_study.recheck_driver import RecheckDriver
 from taste.recovery_study.recovery_driver import RecoveryDriver, _slug, new_check
+from taste.recovery_study.replay_driver import ReplayDriver
 
 # The checker's task text ends with this line; the requirement goes just before it.
 CLOSING = "Gather your evidence in the container, then call submit_verdict."
@@ -53,7 +67,10 @@ DEFAULTS = {
     "control": [],
     "control_sample": 0,
     "check_base": False,    # also check each run's base state, the work the reviewer rejected
+    "replayed": "",         # a replay state of the same recovery state: its kept rebuilds are the states checked
 }
+# What the summary keeps of a final change.
+CHANGE_KEYS = ("diff_chars", "cut", "head_moved")
 
 
 def requirements(path):
@@ -88,6 +105,10 @@ class RequirementDriver(RecheckDriver):
     KIND = "taste.recovery_requirements/1"
     DEFAULTS = DEFAULTS
 
+    def __init__(self, path, data):
+        super().__init__(path, data)
+        self._replayed = {}
+
     @classmethod
     def validate(cls, settings):
         super().validate(settings)
@@ -97,6 +118,24 @@ class RequirementDriver(RecheckDriver):
             raise ValueError("nothing to check: name arms, or check_base")
         if not isinstance(settings["check_base"], bool):
             raise ValueError("check_base must be true or false")
+        if settings["replayed"] and not Path(settings["replayed"]).is_file():
+            raise ValueError("replayed must name the replay state (scripts/recovery_replay.py) of the recovery state")
+
+    def state_extras(self):
+        """A rebuild of a checked state reads its final change, when ``final_change_chars`` asks."""
+        chars = self.settings["final_change_chars"]
+        return {"final_change_chars": chars} if chars else {}
+
+    def _replay_rows(self):
+        """The replay's summary by item id ({} without ``replayed``); refused when it replays another state."""
+        path = self.settings["replayed"]
+        if not path:
+            return {}
+        data = state.load(path, ReplayDriver.KIND)
+        if data is None or data.get("source_sha256") != self.data["source_sha256"]:
+            raise ValueError("replayed is a replay of another recovery state (its source's SHA-256 differs)")
+        self.data["replayed_sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        return ReplayDriver(path, data).summary()
 
     def checker_text(self, run, view, paths):
         return requirement_task(checker_task(self.original_task(run), "", "", changed_paths=paths),
@@ -117,6 +156,7 @@ class RequirementDriver(RecheckDriver):
         if running:
             raise ValueError("these arms have episodes still running; finish the recovery state first: "
                              + ", ".join(running))
+        self._replayed = self._replay_rows()
         self.data["items"] = {}
         for run_id in sorted(wanted):
             run = theirs["runs"][run_id]
@@ -147,10 +187,20 @@ class RequirementDriver(RecheckDriver):
         check = {**new_check(), "checkpoints": [job for job in first["checkpoints"] if job in kept]}
         if own and own[0] in kept:
             check["own"] = list(own)
+        end, replayed = None if kept or self.settings["rebuild"] else "save_gone", None
+        row = self._replayed.get(item_id) if not (check.get("own") or check["checkpoints"]) else None
+        if row is not None and not row["kept"]:
+            end = "replay_lost"
+        elif row is not None and row["checkpoint"] and row["checkpoint"] in self.kept():
+            check["own"] = [row["checkpoint"], row["changed_paths"]]
+            change = row.get("change") or {}
+            replayed = {"checkpoint": row["checkpoint"],
+                        "change": {key: change.get(key) for key in CHANGE_KEYS} if change.get("read") else None}
+            end = None
         self.items[item_id] = {**fields, "first": list(first["verdict"]) if first.get("verdict") else None,
                                "first_saves": ([own[0]] if own else []) + list(first["checkpoints"]),
-                               "check": check, "verdict": None,
-                               "end": None if kept or self.settings["rebuild"] else "save_gone"}
+                               "check": check, "verdict": None, "end": end,
+                               **({"replayed": replayed} if replayed else {})}
 
     def _add_episode(self, theirs, run_id, name, recovery, index, episode, last):
         first, number = last["check"], episode["rounds"].index(last) + 1
@@ -204,24 +254,41 @@ class RequirementDriver(RecheckDriver):
 
     # Reporting -------------------------------------------------------------
 
+    def _rebuilt_change(self, checkpoint):
+        """The final change the trial that rebuilt and saved ``checkpoint`` read, mode-only lines left out; {}."""
+        job = self.jobs.get(checkpoint) or {}
+        for found in job.get("results") or ():
+            if found.get("checkpoint") == checkpoint and isinstance(found.get("final_change"), dict):
+                return replay_checks.change_view(found["final_change"])
+        return {}
+
     def summary(self):
         """Per check: the state checked (an episode's outcome or a base state) and what the hidden tests said of it,
         the requirement, the checker's verdict on it with its evidence, the first check's verdict on the same state
-        if it had one, and how the state was brought back ("same save", "rebuilt", "rebuilt in the check")."""
+        if it had one, and how the state was brought back ("same save", "replayed", "rebuilt", "rebuilt in the
+        check"); its final change, from the checked trial, else the replay or the rebuild (``final_change_from``)."""
         out = {}
         for item_id, item in self.items.items():
             run = self.runs[item["run"]]
             reply = self.trial(item["verdict"])["checker"] if item["verdict"] else None
             first = self.trial(item["first"])["checker"] if item["first"] else None
             graded = run["base"] if item["base"] else self.trial(item["agent"])
-            change = graded.get("final_change") or {}
-            where = None
+            where, restored, replayed = None, None, item.get("replayed")
             if item["verdict"]:
                 settings = jobs.JobSpec.from_dict(self.jobs[item["verdict"][0]]["spec"]).settings()
                 restored = settings.get(jobs.SETTING["checkpoint"]) if settings[jobs.SETTING["mode"]] == "restore" \
                     else None
-                where = "same save" if restored in item["first_saves"] else "rebuilt" if restored \
-                    else "rebuilt in the check"
+                where = "same save" if restored in item["first_saves"] \
+                    else "replayed" if replayed and restored == replayed["checkpoint"] \
+                    else "rebuilt" if restored else "rebuilt in the check"
+            change, origin = graded.get("final_change") or {}, None
+            if change:
+                origin = "agent trial"
+            elif replayed and where in (None, "replayed"):
+                change, origin = replayed["change"] or {}, "replay"
+            elif where == "rebuilt":
+                change = self._rebuilt_change(restored)
+                origin = "rebuild" if change else None
             out[item_id] = {
                 **{key: item[key] for key in ("run", "arm", "recovery", "episode", "round", "base", "ended", "end")},
                 "solved": graded.get("reward") == 1.0, "first_verdict": first and first["verdict"],
@@ -229,7 +296,8 @@ class RequirementDriver(RecheckDriver):
                 "verdict": reply and reply["verdict"], "confidence": reply and reply.get("confidence"),
                 "unmet_requirement": reply and reply.get("unmet_requirement"),
                 "evidence": reply and reply.get("evidence"), "state": where,
-                "final_change": {key: change.get(key) for key in ("diff_chars", "cut", "head_moved")} if change else None,
+                "final_change": {key: change.get(key) for key in CHANGE_KEYS} if change else None,
+                "final_change_from": origin if change else None,
                 "check_usd": round(math.fsum(summary["cost_usd"] or 0.0
                                              for _, summary in self.results(item["check"]["jobs"])), 6)}
         return out
