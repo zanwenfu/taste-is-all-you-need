@@ -46,9 +46,12 @@ class Mem0Turns:
             self.pending.append({"role": "assistant", "content": turn["content"]})
             self.flush()
             return
+        users_words = role == "user" and not turn.get("from_harness")
+        if users_words and self.pending:  # what came before the user's message goes in on its own, so Mem0's model, which thinks on the
+            self.flush()                  # user's words, reads them with the agent's reply alone, as Taste's rule reader reads them alone
         content = turn["content"] if role == "user" else f"Command output:\n{turn['content']}"
         self.pending.append({"role": "user", "content": content})
-        self.user_spoke = self.user_spoke or (role == "user" and not turn.get("from_harness"))
+        self.user_spoke = self.user_spoke or users_words
 
     def flush(self) -> None:
         """Add what is waiting as one exchange: before a search, so that it sees everything recorded, and at the end."""

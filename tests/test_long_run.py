@@ -1711,7 +1711,11 @@ def test_a_harness_message_or_a_commands_output_is_not_the_users_words_for_mem0(
     for turn in [{"role": "user", "content": "Use one tool call.", "from_harness": True}, {"role": "assistant", "content": "ok"},
                  {"role": "tool", "content": "out"}, {"role": "user", "content": "Also use ls -1."}, {"role": "assistant", "content": "ok"}]:
         store.add(turn)
-    assert fake.users == [False, True]
+    # the command's output waiting when the user spoke goes in on its own; the user's words go in with the agent's reply alone
+    assert fake.added == [[{"role": "user", "content": "Use one tool call."}, {"role": "assistant", "content": "ok"}],
+                          [{"role": "user", "content": "Command output:\nout"}],
+                          [{"role": "user", "content": "Also use ls -1."}, {"role": "assistant", "content": "ok"}]]
+    assert fake.users == [False, False, True] and store.commits == 3
 
 
 def test_the_mem0_block_takes_the_best_memories_up_to_the_budget_and_shows_them_oldest_first() -> None:
