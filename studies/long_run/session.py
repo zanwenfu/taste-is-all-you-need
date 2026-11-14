@@ -17,6 +17,8 @@ score it from the command record.
     notes_neutral  the same, not told that
     mem0_search    compaction, every message the agent records added to Mem0 (studies/long_run/mem0_store.py), and at each new task the
                    harness searches Mem0 with the task's own words and puts what comes back in the system prompt, as taste_search does
+    rules_file     compaction, and a rules file the agent keeps itself, as a project keeps an AGENTS.md: the system prompt says what it is
+                   for, one tool replaces it whole, and its newest version is in the system prompt at every call; no record, no reader
     no_compaction  a ceiling: the whole conversation, as long as it fits
     restated       a ceiling: compaction, with every rule told so far in the system prompt at every call
 
@@ -37,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from studies.context_rot.repeated import round_prompt
-from studies.long_run.agent import LongRunAgent, MemoryEnvironment, Stopped, ToolModel, render
+from studies.long_run.agent import RULES_FILE, LongRunAgent, MemoryEnvironment, Stopped, ToolModel, render
 from studies.long_run.score import score_session
 from studies.memory_bench.core import fill
 from studies.memory_ledger import BASELINE, ClaimRefused, check, stand_in_record
@@ -65,13 +67,21 @@ SEARCH_HEADER = ("Earlier turns from the record of this session that may bear on
 SEARCH_ARMS = {"taste_search": SEARCH_HEADER, "taste_search_bare": FOUND_HEADER}
 NOTE_ARMS = {"notes_told": "told", "notes_neutral": "neutral"}
 MEM0_ARMS = {"mem0_search": SEARCH_HEADER}
-ARMS = ("compaction", *TOOL_ARMS, *SEARCH_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated", *MEM0_ARMS)
+RULES_FILE_ARM = "rules_file"
+ARMS = ("compaction", *TOOL_ARMS, *SEARCH_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated", *MEM0_ARMS, RULES_FILE_ARM)
+# What the rules-file arm is told, once, in its system prompt. It names the file's use as plainly as the told note-taker is told to keep "anything the
+# user asked it to keep doing", and no more: no rule of the session is named, and the agent alone decides what goes in.
+RULES_FILE_SENTENCE = ("You also keep a rules file for this session, as a project keeps an AGENTS.md file. Its newest version is shown to you at every step, "
+                       "after this message, and it stays when the conversation is summarized and when you move to a new machine. When the user asks for "
+                       "something that should hold beyond the current step, such as a way of working for the rest of the session or a fact you will need "
+                       f"later, write it there with the {RULES_FILE} tool, which replaces the whole file.")
+RULES_FILE_HEADER = "Your rules file, as you last wrote it:"
 MEMORY_BUDGET = 4096
 EFFORT = "low"  # the reasoning effort on every model call of a session: the agent's, every writer's, and Mem0's
 MEM0_THINKING = "user"  # Mem0's model thinks on exchanges holding a user message, as Taste's rule reader reads them; not on command output (mem0_sidecar)
 MEM0_MAX_TOKENS = 4096  # Mem0's output cap without thinking, as in the chat comparison (memory_bench/swe.py MEM0_INGEST)
 MEM0_THINKING_MAX_TOKENS = 16384  # with thinking: over twice the longest reply that ended before the full run (6,214); one cut off is asked again without thinking (mem0_sidecar.Calls)
-_SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
+_SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}", RULES_FILE_ARM: f" {RULES_FILE_SENTENCE}"}
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 
@@ -165,6 +175,32 @@ def make_note_taker(chat: Callable, style: str, store: NotesStore, skipped: list
     return keep
 
 
+class RulesFile:
+    """The rules-file arm's file, kept on the host for the whole session and written only by the agent, through its one tool. A version too long
+    to show whole within ``budget`` tokens is refused, and the agent is told so, rather than shown cut; each kept version is on the record in ``log``."""
+
+    def __init__(self, log: Path, budget: int, count: Callable[[str], int]) -> None:
+        self.log, self.budget, self.count = log, budget, count
+        self.text, self.writes, self.refused = "", 0, 0
+
+    def answer(self, name: str, arguments: dict, *, call: int, task: str) -> tuple[str, bool]:
+        content = arguments.get("content")
+        if name != RULES_FILE or not isinstance(content, str):
+            self.refused += 1
+            return f"Not saved: {RULES_FILE} takes one argument, content, the whole new file as one string.", True
+        size = self.count(content)
+        if size > self.budget:
+            self.refused += 1
+            return f"Not saved: the rules file can hold at most {self.budget} tokens, and this version has {size}. The file is as it was.", True
+        self.text, self.writes = content, self.writes + 1
+        with self.log.open("a") as written:
+            written.write(json.dumps({"call": call, "task": task, "tokens": size, "content": content}) + "\n")
+        return "Saved. This is now your whole rules file, shown to you at every step.", False
+
+    def summary(self) -> dict[str, Any]:
+        return {"writes": self.writes, "refused": self.refused, "tokens": self.count(self.text), "final": self.text}
+
+
 EMPTY_TRIES = 3
 THIN_FOLD = 1000  # tokens a compaction must take off for it to count as one that folded anything much: a very long summary can leave a run compacting at every turn
 
@@ -236,6 +272,11 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
             said = [rule.get("restate") or rule["text"] for rule in rules
                     if rule["say"] == "first" or agent.n_calls + 1 >= rule["say"]]
             return f"{DELIVERED_HEADER}\n" + "\n".join(f"- {text}" for text in said) if said else ""
+    rules_file = RulesFile(out / "rules_file.jsonl", MEMORY_BUDGET, count) if arm == RULES_FILE_ARM else None
+    if rules_file is not None:
+
+        def standing() -> str:
+            return f"{RULES_FILE_HEADER}\n{rules_file.text}" if rules_file.text.strip() else ""
     actions = out / "actions.jsonl"
     if actions.exists():
         raise FileExistsError(f"{actions} already holds a run: a session has no resume, so give it a folder of its own")
@@ -258,10 +299,13 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
             written.write(json.dumps({"call": agent.n_calls, **row}) + "\n")
 
     summarize = None if arm == "no_compaction" else make_summarizer(chat, session.get("summary_prompt", "anthropic"), package_prompt, on_reply=on_summary_reply)
+    def write_file(name: str, arguments: dict) -> tuple[str, bool]:
+        return rules_file.answer(name, arguments, call=agent.n_calls, task=agent.task_name)
+
     agent = LongRunAgent(
-        ToolModel(chat, memory_tools=arm in TOOL_ARMS, observation_template=session["observation_template"],
+        ToolModel(chat, memory_tools=arm in TOOL_ARMS, file_tool=rules_file is not None, observation_template=session["observation_template"],
                   format_error_template=session["format_error_template"]),
-        MemoryEnvironment(None, store.answer if arm in TOOL_ARMS else None),
+        MemoryEnvironment(None, store.answer if arm in TOOL_ARMS else write_file if rules_file is not None else None),
         count=count, summarize=summarize, record=store.add if isinstance(store, GitTurns) or arm in MEM0_ARMS else None, on_action=on_action,
         standing=standing, on_compact=on_compact, on_prompt=on_prompt,
         system_template=session["system_template"] + _SAID_ABOUT_THE_RECORD.get(arm, ""),
@@ -372,6 +416,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
                "no_command": len(silent), "no_command_finish_reasons": reasons,
                "reader_calls": reader_calls[0], "reader_cut_off": reader_cut[0], "note_versions": note_versions, "searches": searches,
                "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None, "mem0": mem0_stats,
+               "rules_file": rules_file.summary() if rules_file is not None else None,
                "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary

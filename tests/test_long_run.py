@@ -588,6 +588,93 @@ def test_a_whole_session_from_the_command_line_with_a_real_shell(tmp_path: Path,
     assert summary["versions"]["mini_swe_agent"] == "2.4.6"
 
 
+def test_a_whole_rules_file_session_from_the_command_line_with_a_real_shell(tmp_path: Path, monkeypatch) -> None:
+    from studies.long_run.agent import RULES_FILE
+    from studies.long_run.session import RULES_FILE_HEADER
+
+    work = tmp_path / "project"
+    work.mkdir()
+    bash = lambda command: {"name": "bash", "arguments": {"command": command}}  # noqa: E731
+    long = " ".join(["word"] * 60)
+    kept = "- Run Python with -B, as in python3 -B a.py"
+    server = _stand_in_server([{"name": RULES_FILE, "arguments": {"content": kept}}, bash(f"echo {long}"), bash(f"echo python3 -B a.py {long}"),
+                               bash("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"), bash(f"echo {long}"), bash("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")])
+    file = tmp_path / "session.json"
+    file.write_text(json.dumps({**SESSION, "tasks": [{"name": "one", "instruction": "Do one.", "cwd": str(work)},
+                                                     {"name": "two", "instruction": "Do two.", "cwd": str(work)}]}))
+    monkeypatch.setattr(session_module, "package_prompt", lambda: _prompt)
+    try:
+        code = session_module.main(["--session", str(file), "--arm", "rules_file", "--url", f"http://127.0.0.1:{server.server_port}/v1",
+                                    "--model", "stand-in", "--tokenizer", "words", "--env", "local", "--out", str(tmp_path / "run"),
+                                    "--workdir", str(tmp_path / "w")])
+    finally:
+        server.shutdown()
+    summary = json.loads((tmp_path / "run" / "summary.json").read_text())
+    assert code == 0 and summary["valid"] and [o["exit_status"] for o in summary["outcomes"]] == ["Submitted", "Submitted"]
+    assert summary["compactions"] > 0 and summary["ledger"]["name"] == "baseline" and summary["memory_turns"] == 0
+    assert summary["rules_file"] == {"writes": 1, "refused": 0, "tokens": len(kept.split()), "final": kept}
+    assert summary["scores"]["bytes"]["applies"] == 1  # "echo python3 -B ..." alone: the file's own "python3 -B" is no command
+    prompts = [json.loads(line) for line in (tmp_path / "run" / "prompts.jsonl").read_text().splitlines()]
+    assert prompts and all(row["messages"][0]["content"].endswith(f"{RULES_FILE_HEADER}\n{kept}") for row in prompts)  # after every compaction
+
+
+def test_the_rules_file_arm_offers_its_one_tool_and_shows_the_agents_newest_file_at_every_later_call(tmp_path: Path) -> None:
+    from studies.long_run.agent import RULES_FILE
+    from studies.long_run.session import RULES_FILE_HEADER, RULES_FILE_SENTENCE
+
+    first, second = "- Run Python with -B, as in python3 -B a.py", "- Run Python with -B, as in python3 -B a.py\n- List folders with ls -1"
+    script = _Script([_reply([_call(RULES_FILE, {"content": first}, "f1")]), _bash("python3 -B a.py " + "word " * 30, "c1"), _bash(DONE, "c2"),
+                      _reply([_call(RULES_FILE, {"content": second}, "f2")]), _bash("ls " + "word " * 30, "c3"), _bash(DONE, "c4")])
+    summary = run_session(load_session(SESSION), arm="rules_file", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert all([t["function"]["name"] for t in call["tools"]] == ["bash", RULES_FILE] for call in script.sent)
+    systems = [call["messages"][0]["content"] for call in script.sent]
+    assert systems[0].endswith(RULES_FILE_SENTENCE) and RULES_FILE_HEADER not in systems[0]  # told what the file is for; nothing in it yet
+    assert all(system.endswith(f"{RULES_FILE_SENTENCE}\n\n{RULES_FILE_HEADER}\n{first}") for system in systems[1:4])
+    assert all(system.endswith(f"{RULES_FILE_SENTENCE}\n\n{RULES_FILE_HEADER}\n{second}") for system in systems[4:])
+    assert summary["compactions"] > 0 and summary["valid"] is True and not summary["resent"]
+    assert summary["rules_file"] == {"writes": 2, "refused": 0, "tokens": len(second.split()), "final": second}
+    rows = [json.loads(line) for line in (tmp_path / "run" / "rules_file.jsonl").read_text().splitlines()]
+    assert [(row["task"], row["content"]) for row in rows] == [("one", first), ("two", second)] and rows[0]["call"] < rows[1]["call"]
+    actions = [json.loads(line) for line in (tmp_path / "run" / "actions.jsonl").read_text().splitlines()]
+    writes = [row for row in actions if row["kind"] == RULES_FILE]
+    assert len(writes) == 2 and all(row["returncode"] == 0 and row["output"].startswith("Saved.") for row in writes)
+    # Only the agent's commands are scored: the file's "python3 -B" and "ls -1" are not commands
+    assert (summary["scores"]["bytes"]["applies"], summary["scores"]["bytes"]["obeyed"]) == (1, 1)
+    assert (summary["scores"]["ls"]["applies"], summary["scores"]["ls"]["obeyed"]) == (1, 0)
+
+
+def test_a_rules_file_too_long_to_show_whole_or_not_one_string_is_refused_and_the_file_stays(tmp_path: Path) -> None:
+    from studies.long_run.agent import RULES_FILE
+    from studies.long_run.session import MEMORY_BUDGET, RULES_FILE_HEADER
+
+    script = _Script([_reply([_call(RULES_FILE, {"content": "keep " * (MEMORY_BUDGET + 1)}, "f1")]), _reply([_call(RULES_FILE, {"content": 5}, "f2")]),
+                      _reply([_call(RULES_FILE, {"text": "x"}, "f3")]), _reply([_call(RULES_FILE, {"content": "keep " * MEMORY_BUDGET}, "f4")]),
+                      _bash(DONE, "c1"), _bash(DONE, "c2")])
+    summary = run_session(load_session({**SESSION, "compact_at_tokens": 0}), arm="rules_file", chat=_routed(script), make_env=lambda task: _Shell(),
+                          count=_count, out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert summary["rules_file"]["writes"] == 1 and summary["rules_file"]["refused"] == 3 and summary["rules_file"]["tokens"] == MEMORY_BUDGET
+    actions = [json.loads(line) for line in (tmp_path / "run" / "actions.jsonl").read_text().splitlines()]
+    assert [(row["returncode"], row["output"].split(":")[0]) for row in actions if row["kind"] == RULES_FILE] == [
+        (1, "Not saved"), (1, "Not saved"), (1, "Not saved"), (0, "Saved. This is now your whole rules file, shown to you at every step.")]
+    assert f"this version has {MEMORY_BUDGET + 1}" in actions[0]["output"]
+    systems = [call["messages"][0]["content"] for call in script.sent]
+    assert all(RULES_FILE_HEADER not in system for system in systems[:4]) and all(RULES_FILE_HEADER in system for system in systems[4:])
+
+
+def test_no_other_arm_is_offered_the_rules_file_or_told_of_it(tmp_path: Path) -> None:
+    from studies.long_run.agent import RULES_FILE
+    from studies.long_run.session import ARMS, RULES_FILE_SENTENCE
+
+    assert "rules_file" in ARMS
+    script = _Script([_reply([_call(RULES_FILE, {"content": "x"}, "f1")]), _bash(DONE, "c1"), _bash(DONE, "c2")])
+    summary = run_session(load_session({**SESSION, "compact_at_tokens": 0}), arm="compaction", chat=_routed(script), make_env=lambda task: _Shell(),
+                          count=_count, out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt)
+    assert [t["function"]["name"] for t in script.sent[0]["tools"]] == ["bash"] and RULES_FILE_SENTENCE not in script.sent[0]["messages"][0]["content"]
+    assert any(f"Unknown tool '{RULES_FILE}'" in str(m["content"]) for m in script.sent[1]["messages"] if m["role"] == "user")
+    assert summary["rules_file"] is None
+
+
 # ------------------------------------------------------------------ the real sessions, on Duke
 
 

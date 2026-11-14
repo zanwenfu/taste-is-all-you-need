@@ -37,6 +37,17 @@ from pydantic import Field
 from taste.memstore.tools import FETCH, SEARCH, definitions
 
 SUMMARY_LEAD = "The conversation so far was compacted. Summary of the earlier part:\n\n"
+# The rules-file arm's one tool, answered on the host like the memory tools: the agent keeps its own file, as a project keeps an AGENTS.md. Writing
+# it through a tool rather than a shell command keeps the file out of the score, which reads only the agent's commands.
+RULES_FILE = "write_rules_file"
+RULES_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": RULES_FILE,
+        "description": "Replace the whole of your rules file with the given text. The file is shown to you at every step for the rest of this session.",
+        "parameters": {"type": "object", "properties": {"content": {"type": "string", "description": "The whole new rules file"}}, "required": ["content"]},
+    },
+}
 OUTPUT_KEPT = 200_000  # characters of a command's output kept in the action log, and so scored; a memory call's output is kept whole
 _SENT_KEYS = ("role", "content", "tool_calls", "tool_call_id")
 
@@ -54,14 +65,14 @@ def render(message: dict) -> str:
 
 
 class ToolModel:
-    """mini-swe-agent's model interface over a chat function: bash, and in the memory arms the two memory tools."""
+    """mini-swe-agent's model interface over a chat function: bash, in the memory arms the two memory tools, and in the rules-file arm its one tool."""
 
-    def __init__(self, chat: Callable[[list[dict], list | None], Any], *, memory_tools: bool,
+    def __init__(self, chat: Callable[[list[dict], list | None], Any], *, memory_tools: bool, file_tool: bool = False,
                  observation_template: str = "{{output.output}}", format_error_template: str = "{{error}}") -> None:
-        self.chat, self.memory_tools = chat, memory_tools
+        self.chat, self.memory_tools, self.file_tool = chat, memory_tools, file_tool
         self.last_text = self.last_finish = self.last_error = self.last_arguments = ""
         self.observation_template, self.format_error_template = observation_template, format_error_template
-        self.tools = [BASH_TOOL, *(definitions("chat") if memory_tools else [])]
+        self.tools = [BASH_TOOL, *(definitions("chat") if memory_tools else []), *([RULES_FILE_TOOL] if file_tool else [])]
 
     def _refuse(self, error: str, *, has_tool_calls: bool = True) -> FormatError:
         """As mini-swe-agent does: its published template tells the model how to call a tool and how to submit."""
@@ -74,7 +85,7 @@ class ToolModel:
         if not calls:
             raise self._refuse("No tool calls found in the response. Every response MUST include at least one tool call.",
                                has_tool_calls=False)
-        allowed = {"bash", SEARCH, FETCH} if self.memory_tools else {"bash"}
+        allowed = {"bash", *((SEARCH, FETCH) if self.memory_tools else ()), *((RULES_FILE,) if self.file_tool else ())}
         actions = []
         for call in calls:
             name = call.function.name
@@ -124,7 +135,7 @@ class ToolModel:
         return {}
 
     def serialize(self) -> dict:
-        return {"info": {"config": {"model": {"memory_tools": self.memory_tools,
+        return {"info": {"config": {"model": {"memory_tools": self.memory_tools, "file_tool": self.file_tool,
                                               "tools": [t["function"]["name"] for t in self.tools]}}}}
 
 
