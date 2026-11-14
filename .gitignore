@@ -28,6 +28,7 @@ docs/*
 docs/banner/node_modules/
 docs/banner/out/
 docs/banner/package-lock.json
+!docs/agent-os.md
 !docs/architecture.md
 !docs/azure-harness.md
 !docs/studies/
