@@ -15,6 +15,9 @@ CODE=$D/code-${S:0:12}
 export APPTAINER_CACHEDIR=$D/cache/apptainer APPTAINER_TMPDIR=$D/tmp XDG_CACHE_HOME=$D/cache/xdg HF_HOME=$D/cache/hf HF_HUB_OFFLINE=1
 export TIKTOKEN_RS_CACHE_DIR=$D/cache/tiktoken VLLM_CACHE_ROOT=$D/cache/vllm PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8
 export TASTE_COMMIT=$S MSWEA_SILENT_STARTUP=1 MSWEA_GLOBAL_CONFIG_DIR=$L/config
+# The Mem0 arm runs Mem0 in the comparison's own environment and container, with its keyword search's model from the study's cache.
+export FASTEMBED_CACHE_PATH=$D/cache/fastembed MEM0_TELEMETRY=False ANONYMIZED_TELEMETRY=False
+MEM0_COMMAND="apptainer exec --home $D/cache/home --bind $D $IMG $D/bench/venv-mem0/bin/python"
 export GIT_AUTHOR_NAME=long-run GIT_AUTHOR_EMAIL=long-run@localhost GIT_COMMITTER_NAME=long-run GIT_COMMITTER_EMAIL=long-run@localhost
 OUT=$L/runs/$READER-$PROMPT-seed$SEED-$SLURM_JOB_ID; mkdir -p $OUT
 # Machines hold memory on a shared node: all of a seed's sit in one folder, gone with it however it ends. Seeds sharing a job's server each have their own.
@@ -51,14 +54,20 @@ else
   echo "load_seconds $(( $(date +%s) - T0 ))"
 fi
 cd $CODE
-$L/venv/bin/python -m studies.long_run.make_session --tasks-root $L/tb/terminal-bench-2-1 --agent-config $(ls $L/venv/lib/python3*/site-packages/minisweagent/config/mini.yaml) \
+# SESSION_FROM runs an earlier session's exact file again, so that a new arm is paired with the arms that ran it; otherwise the seed builds it.
+if [ -n "${SESSION_FROM:-}" ]; then
+  cp "$SESSION_FROM" $OUT/session.json || fail "no session file at $SESSION_FROM"; echo "session file copied from $SESSION_FROM, md5 $(md5sum < $OUT/session.json | cut -c1-32)"
+else
+  $L/venv/bin/python -m studies.long_run.make_session --tasks-root $L/tb/terminal-bench-2-1 --agent-config $(ls $L/venv/lib/python3*/site-packages/minisweagent/config/mini.yaml) \
   --seed $SEED --tasks $TASKS --compact-at $COMPACT_AT --keep-recent $KEEP --prompt $PROMPT --later-rule-at 20 --task-calls $TASK_CALLS --images $L/images-sif --stop-at $((131072 - MOST - 8000)) --out $OUT/session.json | cut -c1-400
+fi
 RUNS=()
 for ARM in $ARMS; do
   ( trap '' TERM  # this shell stays until its session has written its record; the session sets its own handler
     T1=$(date +%s)
+    EXTRA=(); [ $ARM = mem0_search ] && EXTRA=(--mem0-command "$MEM0_COMMAND")
     TMPDIR=$WORK/machines $L/venv/bin/python -m studies.long_run.session --session $OUT/session.json --arm $ARM --env machine --url $URL --model $MODEL \
-      --tokenizer $FOLDER/tokenizer.json --out $OUT/$ARM --workdir $WORK/$ARM --command-timeout 300 --max-tokens $MOST --writing-tokens $((2 * MOST)) > $OUT/$ARM.log 2>&1
+      --tokenizer $FOLDER/tokenizer.json --out $OUT/$ARM --workdir $WORK/$ARM --command-timeout 300 --max-tokens $MOST --writing-tokens $((2 * MOST)) "${EXTRA[@]}" > $OUT/$ARM.log 2>&1
     code=$?
     echo "$ARM exit $code seconds $(( $(date +%s) - T1 ))"; tail -1 $OUT/$ARM.log | cut -c1-900
     rm -rf $WORK/$ARM
