@@ -1710,7 +1710,8 @@ def test_the_mem0_block_takes_the_best_memories_up_to_the_budget_and_shows_them_
     store.flush()
     block, calls, kept, tokens = store.search_with("match", 12, _count)
     lines = block.split("\n")
-    assert lines[0].startswith("- oldest") and lines[1].startswith("- newest") and lines[2].startswith("- middle")
+    assert lines[0].startswith("- oldest") and lines[1].startswith("- middle") and lines[2].startswith("- newest")
+    assert lines[1] == "- middle third match"  # the one that did not fit is cut at a word, and nothing comes after it in rank
     assert tokens <= 12 and len(kept) == 3 and json.loads(calls[0]["arguments"])["query"] == "match"
 
 
