@@ -20,6 +20,7 @@ Writes one JSON result; exit 0 if the rebuild is kept (and every asked check agr
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -46,6 +47,10 @@ def main(argv=None):
     parser.add_argument("--check-restore", action="store_true")
     parser.add_argument("--empty-control", action="store_true")
     parser.add_argument("--keep-work", action="store_true")
+    parser.add_argument("--keep-owners", action="store_true",
+                        help="run the pulled SIF as is (its files keep their owners; root cannot write those of "
+                             "another group here)")
+    parser.add_argument("--processors", type=int, default=2, help="CPUs for building the root-owned image")
     arguments = parser.parse_args(argv)
 
     started = time.time()
@@ -66,10 +71,15 @@ def main(argv=None):
     result["image_check"] = replay.same_image(recorded.get("image_ids"), image)
     sif, pull_seconds = replay.pull(image, arguments.sif_dir / (image["config_digest"].replace(":", "-") + ".sif"))
     result["sif"] = {"path": str(sif), "bytes": sif.stat().st_size, "pull_seconds": round(pull_seconds, 1)}
-
     work = arguments.work / arguments.token
     if work.exists():
         shutil.rmtree(work)
+    work.mkdir(parents=True)
+    if not arguments.keep_owners:
+        # One uid and one gid are mapped here: the image's files are made root's so that root can write them.
+        sif, seconds = replay.root_owned(sif, sif.with_suffix(".root.sqfs"), work, processors=arguments.processors)
+        result["root_owned"] = {"path": str(sif), "bytes": sif.stat().st_size, "seconds": round(seconds, 1),
+                                "sha256": _sha256(sif)}
     rebuilt = replay.rebuild_trial(arguments.script, step, arguments.task_dir, sif, image, work=work / "rebuild",
                                    trial_dir=work / "trial-rebuild", tolerance=arguments.tolerance)
     result["rebuild"] = rebuilt
@@ -107,6 +117,14 @@ def main(argv=None):
                       "times": rebuilt.get("times"), "restore_ok": (result.get("restore") or {}).get("same_reward"),
                       "control_fails": (result.get("empty_control") or {}).get("tests_fail_on_image")}))
     return 0 if kept else 1
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _tail(path, lines=30):

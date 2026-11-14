@@ -115,6 +115,40 @@ def pull(image, sif, *, apptainer="apptainer"):
     return sif, time.monotonic() - started
 
 
+def squashfs_offset(sif, *, apptainer="apptainer"):
+    """Where a SIF's root file system (its squashfs partition) starts, from ``apptainer sif list``."""
+    done = subprocess.run([apptainer, "sif", "list", str(sif)], capture_output=True, timeout=120, check=True)
+    for line in done.stdout.decode().splitlines():
+        if "FS (Squashfs" in line:
+            return int(line.split("|")[3].split("-")[0])
+    raise RuntimeError("the SIF has no squashfs partition")
+
+
+def root_owned(sif, out, scratch, *, processors=2, apptainer="apptainer"):
+    """The image's files with every owner and group made root's: a squashfs file Apptainer runs as an image;
+    (path, seconds). Needed because one uid and one gid are mapped here: a file the image gives another group (the
+    SWE-Bench Pro images give /app to gid 1001) cannot be copied up into the overlay, so root could not write it.
+    Modes (setuid and setgid bits too), links and times are kept; extended attributes are not."""
+    out = Path(out)
+    if out.is_file():
+        return out, 0.0
+    started = time.monotonic()
+    rootfs = Path(scratch) / f"rootfs-{secrets.token_hex(4)}"
+    temporary = out.with_name(out.name + f".part-{secrets.token_hex(4)}")
+    try:
+        subprocess.run(["unsquashfs", "-n", "-no-xattrs", "-o", str(squashfs_offset(sif, apptainer=apptainer)),
+                        "-d", str(rootfs), str(sif)], capture_output=True, timeout=3600, check=True)
+        subprocess.run(["mksquashfs", str(rootfs), str(temporary), "-all-root", "-noappend", "-no-xattrs", "-quiet",
+                        "-processors", str(processors)], capture_output=True, timeout=3600, check=True)
+        temporary.replace(out)
+    finally:
+        temporary.unlink(missing_ok=True)
+        if rootfs.exists():
+            subprocess.run(["chmod", "-R", "u+rwX", str(rootfs)], capture_output=True, timeout=600)
+            shutil.rmtree(rootfs, ignore_errors=True)
+    return out, time.monotonic() - started
+
+
 # -- one rebuild -------------------------------------------------------------------------------------------------
 
 def task_config(task_dir):
