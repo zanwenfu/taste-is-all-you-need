@@ -1,14 +1,17 @@
 """Mem0 for one long session, in Mem0's own environment, reached over a local port (see ``mem0_store``).
 
     MEM0_TELEMETRY=False <venv-mem0 python> -m studies.long_run.mem0_sidecar --url URL --model NAME --max-tokens N \\
-        --effort low --thinking off --embedder sentence-transformers/all-MiniLM-L6-v2 --dims 384 --workdir DIR --replies replies.jsonl
+        --effort low --thinking off --json-mode off --embedder sentence-transformers/all-MiniLM-L6-v2 --dims 384 --workdir DIR --replies replies.jsonl
 
 It builds Mem0 exactly as the comparison does (``mem0_arm.mem0_config``: the served model through Mem0's vLLM
 provider, the local embedder, an in-memory vector store), and its model calls carry what every other call in the
 session carries: the reasoning effort, a 30-minute time-out and three tries (``tool_loop.http_chat``). With --thinking
 off they also ask the served model not to think first (``enable_thinking`` false in its chat template), as Mem0 expects a
 model that answers at once: with thinking on, Laguna spent the whole output cap thinking about a command's output on
-most exchanges that held one, and Mem0 got an empty reply. It counts every
+most exchanges that held one, and Mem0 got an empty reply. With --json-mode off they go without the response_format Mem0
+asks for (vLLM's guided JSON): with thinking off and JSON mode, Laguna answered an empty list even to the session's first
+message, which holds two standing instructions, and without JSON mode it wrote all of them down; Mem0 reads a JSON
+object from a plain reply as well, and a reply it cannot read is counted. It counts every
 model call, its tokens and finish reason, and every reply that does not parse, prints one line {"ready": PORT}, and
 answers POST /add, POST /search, POST /drain and GET /stats until it is stopped. Mem0 is imported only in ``main``, so
 the server itself can be tested without it.
@@ -78,14 +81,17 @@ class Adds:
 class Calls:
     """Every model call Mem0 makes, as the server answered it: seconds, finish reason and tokens, one line each in ``log``,
     and their totals. Wraps ``completions.create`` of Mem0's OpenAI client in place. A reply cut off by the output cap
-    reaches Mem0 as it is, as it would in Mem0's own use, and is counted."""
+    reaches Mem0 as it is, as it would in Mem0's own use, and is counted. Without ``json_mode``, Mem0's response_format is
+    left off each call."""
 
-    def __init__(self, completions: Any, log: Path | None = None) -> None:
-        self.create, self.log = completions.create, log
+    def __init__(self, completions: Any, log: Path | None = None, json_mode: bool = True) -> None:
+        self.create, self.log, self.json_mode = completions.create, log, json_mode
         self.calls, self.prompt_tokens, self.completion_tokens, self.cut_off = 0, 0, 0, 0
         completions.create = self
 
     def __call__(self, **params: Any) -> Any:
+        if not self.json_mode:
+            params.pop("response_format", None)
         started = time.perf_counter()
         reply = self.create(**params)
         finish = reply.choices[0].finish_reason if reply.choices else None
@@ -155,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-tokens", type=int, default=2000)
     parser.add_argument("--effort", help="the reasoning effort on every model call, as the session's own calls send it")
     parser.add_argument("--thinking", choices=("on", "off"), default="on", help="off asks the model to answer without thinking first")
+    parser.add_argument("--json-mode", choices=("on", "off"), default="on", help="off sends Mem0's calls without its response_format")
     parser.add_argument("--timeout", type=float, default=1800, help="seconds for one model call, as the session's own calls")
     parser.add_argument("--tries", type=int, default=3, help="tries of a model call that fails, as the session's own calls")
     parser.add_argument("--calls", help="a file for one line per model call: seconds, finish reason and tokens")
@@ -178,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("Mem0 is not using the served model and the local embedder")
     check_search_parts(memory)
     memory.llm.client = memory.llm.client.with_options(timeout=arguments.timeout, max_retries=arguments.tries - 1)
-    calls = Calls(memory.llm.client.chat.completions, log=Path(arguments.calls) if arguments.calls else None)
+    calls = Calls(memory.llm.client.chat.completions, log=Path(arguments.calls) if arguments.calls else None, json_mode=arguments.json_mode == "on")
     extra: dict[str, Any] = {"reasoning_effort": arguments.effort} if arguments.effort else {}
     if arguments.thinking == "off":
         extra["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}

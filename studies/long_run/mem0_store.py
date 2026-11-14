@@ -127,16 +127,17 @@ class SidecarClient:
                 self.process.kill()
 
 
-def start_sidecar(command: list[str], *, url: str, model: str, max_tokens: int, effort: str | None, thinking: str, embedder: str,
-                  dims: int, log: Path, workdir: Path, wait: float = 900.0) -> SidecarClient:
+def start_sidecar(command: list[str], *, url: str, model: str, max_tokens: int, effort: str | None, thinking: str, json_mode: str,
+                  embedder: str, dims: int, log: Path, workdir: Path, wait: float = 900.0) -> SidecarClient:
     """Start Mem0 in its own environment (``command`` runs that environment's Python) and wait for its ready line. Its
-    model calls carry ``effort`` as the session's own calls do, and ``thinking`` ("on" or "off"); each reply goes to log.replies.jsonl and each call's
+    model calls carry ``effort`` as the session's own calls do, ``thinking`` and ``json_mode`` ("on" or "off"); each reply goes to log.replies.jsonl and each call's
     seconds, finish reason and tokens to log.calls.jsonl."""
     root = Path(__file__).resolve().parents[2]
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = [*command, "-m", "studies.long_run.mem0_sidecar", "--url", url, "--model", model, "--max-tokens", str(max_tokens),
             "--embedder", embedder, "--dims", str(dims), "--workdir", str(workdir), "--replies", str(log.with_suffix(".replies.jsonl")),
-            "--calls", str(log.with_suffix(".calls.jsonl")), "--thinking", thinking, *(["--effort", effort] if effort else [])]
+            "--calls", str(log.with_suffix(".calls.jsonl")), "--thinking", thinking, "--json-mode", json_mode,
+            *(["--effort", effort] if effort else [])]
     with log.open("a") as errors:
         process = subprocess.Popen(argv, cwd=root, stdout=subprocess.PIPE, stderr=errors, text=True)
     started = time.monotonic()

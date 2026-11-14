@@ -1852,3 +1852,21 @@ def test_mem0s_model_calls_are_counted_with_their_tokens_and_cut_offs(tmp_path: 
     assert calls.totals() == {"model_calls": 2, "prompt_tokens": 400, "completion_tokens": 8212, "cut_off": 1}
     lines = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
     assert [line["finish"] for line in lines] == ["stop", "length"] and lines[1]["completion_tokens"] == 8192
+
+
+def test_without_json_mode_mem0s_calls_go_without_its_response_format() -> None:
+    from types import SimpleNamespace
+
+    from studies.long_run.mem0_sidecar import Calls
+
+    sent = []
+
+    class Completions:
+        def create(self, **params):
+            sent.append(params)
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop")], usage=None)
+
+    completions = Completions()
+    Calls(completions, json_mode=False)
+    completions.create(model="m", messages=[], response_format={"type": "json_object"}, temperature=0.0)
+    assert sent == [{"model": "m", "messages": [], "temperature": 0.0}]
