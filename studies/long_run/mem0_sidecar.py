@@ -1,7 +1,7 @@
 """Mem0 for one long session, in Mem0's own environment, reached over a local port (see ``mem0_store``).
 
     MEM0_TELEMETRY=False <venv-mem0 python> -m studies.long_run.mem0_sidecar --url URL --model NAME --max-tokens 4096 \\
-        --thinking user --thinking-max-tokens 32768 --effort low --embedder sentence-transformers/all-MiniLM-L6-v2 --dims 384 \\
+        --thinking user --thinking-max-tokens 16384 --effort low --embedder sentence-transformers/all-MiniLM-L6-v2 --dims 384 \\
         --workdir DIR --replies replies.jsonl --calls calls.jsonl
 
 It builds Mem0 exactly as the comparison does (``mem0_arm.mem0_config``: the served model through Mem0's vLLM
@@ -11,9 +11,11 @@ calls carry what every other call in the session carries: the reasoning effort, 
 prints one line {"ready": PORT}, and answers POST /add, POST /search, POST /drain and GET /stats until it is stopped.
 Mem0 is imported only in ``main``, so the server itself can be tested without it.
 
-Thinking (--thinking user). An add whose exchange holds a message from the user is written with the model thinking, the
-writers' output cap and up to three tries when the reply is cut off by the cap, as Taste's rule reader reads each user
-message. An add of command output only is written without thinking, at the chat comparison's cap. Measured on Laguna
+Thinking (--thinking user). An add whose exchange holds a message from the user is written with the model thinking, as
+Taste's rule reader reads each user message, under --thinking-max-tokens; a reply cut off there is asked for once more
+without thinking (see ``Calls``). An add of command output only is written without thinking, at the chat comparison's
+cap. On a three-task session before the full run, thinking replies that ended used 299 to 6,214 tokens, and the one that
+did not end ran to the 32,768 cap on all three tries, twelve minutes each. Measured on Laguna
 before the full run: with thinking on, a command's output led it to think until the cap on most such exchanges (8,192
 tokens in 173 s and 177 s, an empty reply), so thinking everywhere would cost hours per session and lose those exchanges
 anyway; with thinking off, JSON mode gave an empty list even for the session's first message, which holds two standing
@@ -86,44 +88,48 @@ class Adds:
 
 class Calls:
     """Every model call Mem0 makes, as the server answered it, wrapping ``completions.create`` of Mem0's OpenAI client in
-    place. ``thinking`` (set before each add) chooses the call's form: with it, the model thinks, the cap is
-    ``thinking_cap``, and a reply cut off by the cap is asked for again, up to ``tries`` in all; without it, the model answers
-    at once under ``plain_cap``. Each try is one line in ``log`` (seconds, thinking, finish reason, tokens); the totals count
-    every try, and a reply that reached Mem0 still cut off."""
+    place. ``thinking`` (set before each add) chooses the call's form: with it, the model thinks under ``thinking_cap``, and
+    a reply cut off by that cap is asked for once more without thinking, under ``plain_cap``; without it, the model answers
+    at once under ``plain_cap``. Asking a cut-off thinking reply again the same way does not help: on Laguna before the full
+    run, every one of six such tries was cut off again, at about twelve minutes each, and Mem0 then kept nothing of the
+    exchange. Each try is one line in ``log`` (seconds, thinking, finish reason, tokens); the totals count every try, the
+    plain tries made after a cut-off, and a reply that reached Mem0 still cut off."""
 
-    def __init__(self, completions: Any, *, plain_cap: int, thinking_cap: int, tries: int = 3, log: Path | None = None) -> None:
-        self.create, self.log, self.plain_cap, self.thinking_cap, self.tries = completions.create, log, plain_cap, thinking_cap, tries
+    def __init__(self, completions: Any, *, plain_cap: int, thinking_cap: int, log: Path | None = None) -> None:
+        self.create, self.log, self.plain_cap, self.thinking_cap = completions.create, log, plain_cap, thinking_cap
         self.thinking = False
-        self.calls = self.thinking_calls = self.prompt_tokens = self.completion_tokens = self.cut_off = self.left_cut_off = 0
+        self.calls = self.thinking_calls = self.prompt_tokens = self.completion_tokens = self.cut_off = self.fell_back = self.left_cut_off = 0
         completions.create = self
+
+    def _one(self, params: dict, thinking: bool, attempt: int) -> tuple[Any, str | None]:
+        extra = dict(params.get("extra_body") or {})
+        extra["chat_template_kwargs"] = {**extra.get("chat_template_kwargs", {}), "enable_thinking": thinking}
+        started = time.perf_counter()
+        reply = self.create(**{**params, "extra_body": extra, "max_tokens": self.thinking_cap if thinking else self.plain_cap})
+        finish = reply.choices[0].finish_reason if reply.choices else None
+        usage = getattr(reply, "usage", None)
+        prompt, completion = (getattr(usage, "prompt_tokens", 0) or 0), (getattr(usage, "completion_tokens", 0) or 0)
+        self.calls, self.thinking_calls = self.calls + 1, self.thinking_calls + thinking
+        self.prompt_tokens, self.completion_tokens = self.prompt_tokens + prompt, self.completion_tokens + completion
+        self.cut_off += finish == "length"
+        if self.log is not None:
+            with self.log.open("a") as written:
+                written.write(json.dumps({"seconds": round(time.perf_counter() - started, 1), "thinking": thinking, "try": attempt,
+                                          "finish": finish, "prompt_tokens": prompt, "completion_tokens": completion}) + "\n")
+        return reply, finish
 
     def __call__(self, **params: Any) -> Any:
         thinking = self.thinking
-        extra = dict(params.get("extra_body") or {})
-        extra["chat_template_kwargs"] = {**extra.get("chat_template_kwargs", {}), "enable_thinking": thinking}
-        params = {**params, "extra_body": extra, "max_tokens": self.thinking_cap if thinking else self.plain_cap}
-        for attempt in range(self.tries if thinking else 1):
-            started = time.perf_counter()
-            reply = self.create(**params)
-            finish = reply.choices[0].finish_reason if reply.choices else None
-            usage = getattr(reply, "usage", None)
-            prompt, completion = (getattr(usage, "prompt_tokens", 0) or 0), (getattr(usage, "completion_tokens", 0) or 0)
-            self.calls, self.thinking_calls = self.calls + 1, self.thinking_calls + thinking
-            self.prompt_tokens, self.completion_tokens = self.prompt_tokens + prompt, self.completion_tokens + completion
-            self.cut_off += finish == "length"
-            if self.log is not None:
-                with self.log.open("a") as written:
-                    written.write(json.dumps({"seconds": round(time.perf_counter() - started, 1), "thinking": thinking, "try": attempt + 1,
-                                              "finish": finish, "prompt_tokens": prompt, "completion_tokens": completion}) + "\n")
-            if finish != "length":
-                break
-        else:
-            self.left_cut_off += 1
+        reply, finish = self._one(params, thinking, 1)
+        if thinking and finish == "length":
+            self.fell_back += 1
+            reply, finish = self._one(params, False, 2)
+        self.left_cut_off += finish == "length"
         return reply
 
     def totals(self) -> dict[str, int]:
         return {"model_calls": self.calls, "thinking_calls": self.thinking_calls, "prompt_tokens": self.prompt_tokens,
-                "completion_tokens": self.completion_tokens, "cut_off": self.cut_off, "left_cut_off": self.left_cut_off}
+                "completion_tokens": self.completion_tokens, "cut_off": self.cut_off, "fell_back": self.fell_back, "left_cut_off": self.left_cut_off}
 
 
 def serve(memory: Any, *, stats: Callable[[], dict], port: int = 0, before: Callable[[bool], None] = lambda user: None) -> ThreadingHTTPServer:
@@ -177,10 +183,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-tokens", type=int, default=2000, help="the output cap of a call without thinking")
     parser.add_argument("--thinking", choices=("on", "off", "user"), default="on",
                         help="user: think only on an add whose exchange holds a message from the user")
-    parser.add_argument("--thinking-max-tokens", type=int, default=32768, help="the output cap of a call with thinking")
+    parser.add_argument("--thinking-max-tokens", type=int, default=16384, help="the output cap of a call with thinking")
     parser.add_argument("--effort", help="the reasoning effort on every model call, as the session's own calls send it")
     parser.add_argument("--timeout", type=float, default=1800, help="seconds for one model call, as the session's own calls")
-    parser.add_argument("--tries", type=int, default=3, help="tries of a model call that fails or, with thinking, is cut off")
+    parser.add_argument("--tries", type=int, default=3, help="tries of a model call that fails to answer")
     parser.add_argument("--calls", help="a file for one line per model call: seconds, thinking, finish reason and tokens")
     parser.add_argument("--device", default="cpu")
     arguments = parser.parse_args(argv)
@@ -203,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     check_search_parts(memory)
     memory.llm.client = memory.llm.client.with_options(timeout=arguments.timeout, max_retries=arguments.tries - 1)
     calls = Calls(memory.llm.client.chat.completions, plain_cap=arguments.max_tokens, thinking_cap=arguments.thinking_max_tokens,
-                  tries=arguments.tries, log=Path(arguments.calls) if arguments.calls else None)
+                  log=Path(arguments.calls) if arguments.calls else None)
     counted = Counted(memory.llm, log=Path(arguments.replies), extra={"reasoning_effort": arguments.effort} if arguments.effort else None)
     memory.llm = counted
 

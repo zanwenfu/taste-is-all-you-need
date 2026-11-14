@@ -1850,13 +1850,13 @@ def test_a_failed_mem0_add_ends_the_session_at_the_next_request_and_no_later_add
         server.shutdown()
 
 
-def test_mem0s_model_calls_think_only_when_asked_and_a_thinking_reply_cut_off_is_asked_again(tmp_path: Path) -> None:
+def test_mem0s_model_calls_think_only_when_asked_and_a_thinking_reply_cut_off_is_asked_again_without_thinking(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
     from studies.long_run.mem0_sidecar import Calls
 
-    replies = iter([("stop", 100, 20), ("length", 300, 64), ("length", 300, 64), ("stop", 300, 30), ("length", 50, 16), ("length", 50, 64),
-                    ("length", 50, 64), ("length", 50, 64)])
+    replies = iter([("stop", 100, 20), ("stop", 300, 30), ("length", 300, 64), ("stop", 300, 12), ("length", 50, 16), ("length", 50, 64),
+                    ("length", 50, 16)])
     sent = []
 
     class Completions:
@@ -1867,22 +1867,27 @@ def test_mem0s_model_calls_think_only_when_asked_and_a_thinking_reply_cut_off_is
                                    usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion))
 
     completions = Completions()
-    calls = Calls(completions, plain_cap=16, thinking_cap=64, tries=3, log=tmp_path / "calls.jsonl")
-    request = {"model": "m", "messages": [], "response_format": {"type": "json_object"}, "temperature": 0.0, "max_tokens": 2000}
+    calls = Calls(completions, plain_cap=16, thinking_cap=64, log=tmp_path / "calls.jsonl")
+    request = {"model": "m", "messages": [], "response_format": {"type": "json_object"}, "temperature": 0.0, "max_tokens": 2000,
+               "extra_body": {"chat_template_kwargs": {"other": 1}}}
     assert completions.create(**request).choices[0].finish_reason == "stop"  # no thinking: one call at the plain cap
     calls.thinking = True
-    assert completions.create(**request).choices[0].finish_reason == "stop"  # thinking: cut off twice, the third try ends
+    assert completions.create(**request).choices[0].finish_reason == "stop"  # thinking: it ends, one call at the thinking cap
+    assert completions.create(**request).choices[0].finish_reason == "stop"  # thinking: cut off, asked once more without thinking, which ends
     calls.thinking = False
     assert completions.create(**request).choices[0].finish_reason == "length"  # no thinking: a cut-off reply is not asked again
     calls.thinking = True
-    assert completions.create(**request).choices[0].finish_reason == "length"  # thinking: cut off on all three tries, Mem0 gets it so
+    assert completions.create(**request).choices[0].finish_reason == "length"  # thinking cut off, and the plain try too: Mem0 gets it so
     assert [(p["max_tokens"], p["extra_body"]["chat_template_kwargs"]["enable_thinking"]) for p in sent] == \
-        [(16, False), (64, True), (64, True), (64, True), (16, False), (64, True), (64, True), (64, True)]
-    assert all(p["response_format"] == {"type": "json_object"} and p["temperature"] == 0.0 for p in sent)  # Mem0's own request otherwise
-    assert calls.totals() == {"model_calls": 8, "thinking_calls": 6, "prompt_tokens": 1200, "completion_tokens": 386, "cut_off": 6,
-                              "left_cut_off": 2}
+        [(16, False), (64, True), (64, True), (16, False), (16, False), (64, True), (16, False)]
+    assert all(p["response_format"] == {"type": "json_object"} and p["temperature"] == 0.0 and p["model"] == "m"
+               and p["extra_body"]["chat_template_kwargs"]["other"] == 1 for p in sent)  # Mem0's own request otherwise
+    assert request["max_tokens"] == 2000 and "enable_thinking" not in request["extra_body"]["chat_template_kwargs"]  # Mem0's request is left as it was
+    assert calls.totals() == {"model_calls": 7, "thinking_calls": 3, "prompt_tokens": 1150, "completion_tokens": 222, "cut_off": 4,
+                              "fell_back": 2, "left_cut_off": 2}
     lines = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
-    assert [(line["thinking"], line["try"], line["finish"]) for line in lines[:4]] == [(False, 1, "stop"), (True, 1, "length"), (True, 2, "length"), (True, 3, "stop")]
+    assert [(line["thinking"], line["try"], line["finish"]) for line in lines] == [
+        (False, 1, "stop"), (True, 1, "stop"), (True, 1, "length"), (False, 2, "stop"), (False, 1, "length"), (True, 1, "length"), (False, 2, "length")]
 
 
 def test_the_sidecar_tells_each_add_whether_its_exchange_holds_the_users_words() -> None:

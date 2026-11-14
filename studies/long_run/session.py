@@ -70,6 +70,7 @@ MEMORY_BUDGET = 4096
 EFFORT = "low"  # the reasoning effort on every model call of a session: the agent's, every writer's, and Mem0's
 MEM0_THINKING = "user"  # Mem0's model thinks on exchanges holding a user message, as Taste's rule reader reads them; not on command output (mem0_sidecar)
 MEM0_MAX_TOKENS = 4096  # Mem0's output cap without thinking, as in the chat comparison (memory_bench/swe.py MEM0_INGEST)
+MEM0_THINKING_MAX_TOKENS = 16384  # with thinking: over twice the longest reply that ended before the full run (6,214); one cut off is asked again without thinking (mem0_sidecar.Calls)
 _SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
@@ -465,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
         from studies.long_run.mem0_store import start_sidecar
 
         return start_sidecar(shlex.split(arguments.mem0_command), url=arguments.url, model=arguments.model, max_tokens=MEM0_MAX_TOKENS,
-                             effort=EFFORT, thinking=MEM0_THINKING, thinking_max_tokens=arguments.writing_tokens, embedder=arguments.mem0_embedder, dims=arguments.mem0_dims, log=Path(arguments.out) / "mem0.log",
+                             effort=EFFORT, thinking=MEM0_THINKING, thinking_max_tokens=MEM0_THINKING_MAX_TOKENS, embedder=arguments.mem0_embedder, dims=arguments.mem0_dims, log=Path(arguments.out) / "mem0.log",
                              workdir=Path(arguments.workdir))
 
     summary = run_session(session, arm=arguments.arm, chat=lambda messages, tools: acting(messages, tools) if tools else writing(messages, None),
@@ -474,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
                           mem0=mem0 if arguments.arm in MEM0_ARMS else None,
                           versions={"mini_swe_agent": minisweagent.__version__, "model": arguments.model, "effort": EFFORT,
                                     **({"mem0_thinking": MEM0_THINKING, "mem0_max_tokens": MEM0_MAX_TOKENS,
-                                        "mem0_thinking_max_tokens": arguments.writing_tokens} if arguments.arm in MEM0_ARMS else {}), "env": arguments.env,
+                                        "mem0_thinking_max_tokens": MEM0_THINKING_MAX_TOKENS} if arguments.arm in MEM0_ARMS else {}), "env": arguments.env,
                                     "commit": os.environ.get("TASTE_COMMIT", ""), "summary_prompt": session.get("summary_prompt", "")})
     print(json.dumps({key: summary[key] for key in ("arm", "outcomes", "calls", "compactions", "memory_turns", "scores")}))
     if summary["ended_by"] or not summary["valid"]:
