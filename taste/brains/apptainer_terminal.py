@@ -25,6 +25,7 @@ It stands where ``docker_terminal`` stands for the task's commands, and says whe
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import posixpath
 import signal
@@ -125,6 +126,69 @@ def lower_argv(spec):
               'elif [ -e "$p" ]; then echo f; else echo -; fi; done')
     return [spec.apptainer, "exec", *namespace_args(), "--no-mount", "home,tmp,cwd", "--no-home", "--cleanenv",
             "--pwd", "/", spec.image, "/bin/sh", "-c", script]
+
+
+# Run by the image's python3 as the namespace's root (any python3 from 3.6): the upper folder's entries as JSON.
+WALKER = r"""
+import json, os, stat, sys
+root = sys.argv[1]
+def opaque(path, names):
+    if ".wh..wh..opq" in names:
+        return True
+    read = getattr(os, "getxattr", None)
+    for key in ("user.fuseoverlayfs.opaque", "trusted.overlay.opaque", "user.overlay.opaque") if read else ():
+        try:
+            if read(path, key, follow_symlinks=False) == b"y":
+                return True
+        except OSError:
+            pass
+    return False
+def fail(error):
+    raise error
+found = []
+for folder, dirs, files in os.walk(root, onerror=fail):
+    inside = "/" + os.path.relpath(folder, root) if folder != root else "/"
+    for name in sorted(dirs + files):
+        if name == ".wh..wh..opq":
+            continue
+        path = os.path.join(folder, name)
+        target = os.path.join(inside, name)
+        if name.startswith(".wh."):
+            found.append([os.path.join(inside, name[4:]), "whiteout", False])
+            continue
+        info = os.lstat(path)
+        if stat.S_ISCHR(info.st_mode) and info.st_rdev == 0:
+            found.append([target, "whiteout", False])
+        elif stat.S_ISDIR(info.st_mode):
+            found.append([target, "dir", opaque(path, os.listdir(path))])
+        elif stat.S_ISLNK(info.st_mode):
+            found.append([target, "link", False])
+        elif stat.S_ISREG(info.st_mode):
+            found.append([target, "file", False])
+        else:
+            found.append([target, "other", False])
+json.dump(found, sys.stdout)
+"""
+UPPER_MOUNT = "/.taste-upper"
+
+
+def walk_argv(spec):
+    """The image's python3, as the namespace's root, reading the overlay's upper folder (bound read-only)."""
+    return [spec.apptainer, "exec", *namespace_args(), "--no-mount", "home,tmp,cwd", "--no-home", "--cleanenv",
+            "--bind", f"{Path(spec.overlay) / 'upper'}:{UPPER_MOUNT}:ro", "--pwd", "/", spec.image,
+            "python3", "-c", WALKER, UPPER_MOUNT]
+
+
+def copy_overlay(spec, source, destination, *, seconds=CONTROL_SECONDS * 10):
+    """An overlay folder copied whole as the namespace's root (``cp -a``): what the host's user cannot read
+    (a folder of mode 000) is copied too, and deletions (character devices 0:0) are made again."""
+    Path(destination).mkdir(parents=True, exist_ok=True)
+    argv = [spec.apptainer, "exec", *namespace_args(), "--no-mount", "home,tmp,cwd", "--no-home", "--cleanenv",
+            "--bind", f"{source}:/.taste-src:ro", "--bind", f"{destination}:/.taste-dst", "--pwd", "/", spec.image,
+            "cp", "-a", "/.taste-src/.", "/.taste-dst/"]
+    done = subprocess.run(argv, capture_output=True, timeout=seconds, stdin=subprocess.DEVNULL)
+    if done.returncode != 0:
+        raise RuntimeError("the overlay could not be copied: " + done.stderr.decode("utf-8", "replace")[-500:])
 
 
 def docker_env(image_env, hostname, home="/root"):
@@ -329,18 +393,36 @@ class ApptainerTerminalBackend:
             found.update(zip(batch, answers, strict=True))
         return found
 
+    def upper_entries(self):
+        """The overlay's upper folder read as the namespace's root (``upper_entries`` in the image's python3): the
+        overlay keeps each file's mode on disk, so a folder the task made unreadable (mode 000) is unreadable to
+        this host's user, never to the namespace's root."""
+        done = subprocess.run(walk_argv(self.spec), capture_output=True, timeout=CONTROL_SECONDS * 5,
+                              stdin=subprocess.DEVNULL)
+        if done.returncode != 0:
+            raise RuntimeError("the overlay could not be read: " + done.stderr.decode("utf-8", "replace")[-500:])
+        return [(path, kind, bool(opaque)) for path, kind, opaque in json.loads(done.stdout)]
+
     def changes(self):
         """What the task changed against its image, in Docker's kinds: [(path, kind)], read from the overlay."""
-        entries = list(upper_entries(self.upper()))
+        entries = self.upper_entries()
         lower = self.lower_types([path for path, kind, _ in entries if kind != "whiteout"])
         return changes_from(entries, lower)
 
     def changed_paths(self, mounts=()):
         """The task's changed paths as a Docker checkpoint lists them (``taste.benchmarks.branch_trial``)."""
-        entries = list(upper_entries(self.upper()))
+        entries = self.upper_entries()
         lower = self.lower_types([path for path, kind, _ in entries if kind != "whiteout"])
         types = {path: kind for path, kind, _ in entries}
         return select(changes_from(entries, lower), types, mounts)
+
+    def save(self, destination):
+        """The task's files saved: the overlay folder copied whole (modes, owners, times, deletions and opaque marks)
+        as the namespace's root, while no command runs (the instance stopped). A new instance on the copy starts
+        from these files: that is a restore."""
+        if self.started:
+            raise TerminalFenced("a state is saved only while the instance is stopped")
+        copy_overlay(self.spec, self.spec.overlay, destination)
 
 
 def _feed(stream, data):

@@ -177,3 +177,15 @@ def test_tests_go_in_as_roots_files(tmp_path):
         members = archive.getmembers()
     assert sorted(member.name for member in members) == ["sub", "sub/t.sh"]
     assert {(member.uid, member.gid) for member in members} == {(0, 0)}
+
+
+def test_the_in_namespace_walker_reads_the_upper_folder_as_the_host_reader_does(tmp_path):
+    import json
+    import subprocess
+    import sys
+    upper = _upper(tmp_path)
+    done = subprocess.run([sys.executable, "-c", at.WALKER, str(upper)], capture_output=True, check=True)
+    walked = sorted((path, kind, bool(opaque)) for path, kind, opaque in json.loads(done.stdout))
+    assert walked == sorted(at.upper_entries(upper))
+    argv = at.walk_argv(_spec(tmp_path))
+    assert argv[argv.index("--bind") + 1] == f"{upper}:{at.UPPER_MOUNT}:ro" and "--fakeroot" in argv

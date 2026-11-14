@@ -18,7 +18,7 @@ export APPTAINER_CACHEDIR=$ROOT/cache
 WORK=/tmp/ap-replay-$SLURM_JOB_ID
 export APPTAINER_TMPDIR=$WORK/apptainer-tmp
 mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" "$RESULTS" "$ROOT/sif"
-trap 'rm -rf "$WORK"' EXIT
+trap 'chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 echo "host $(hostname) cpus $(nproc) start $(date '+%F %T %Z') code $CODE"
 apptainer --version
 status=0

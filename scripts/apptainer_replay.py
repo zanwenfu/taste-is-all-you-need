@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -81,22 +82,23 @@ def main(argv=None):
         result["root_owned"] = {"path": str(sif), "bytes": sif.stat().st_size, "seconds": round(seconds, 1),
                                 "sha256": _sha256(sif)}
     rebuilt = replay.rebuild_trial(arguments.script, step, arguments.task_dir, sif, image, work=work / "rebuild",
-                                   trial_dir=work / "trial-rebuild", tolerance=arguments.tolerance)
+                                   trial_dir=work / "trial-rebuild", tolerance=arguments.tolerance,
+                                   save_to=work / "state" if arguments.check_restore else None)
     result["rebuild"] = rebuilt
     result["judged"] = replay.judge(recorded, rebuilt, workdir=workdir, short=short)
     kept = bool(result["judged"].get("kept"))
     result["test_stdout_tail"] = _tail(work / "trial-rebuild" / "verifier" / "test-stdout.txt")
 
-    if arguments.check_restore and (work / "rebuild" / "overlay").is_dir():
-        restored = replay.check_restore(work / "rebuild" / "overlay", arguments.task_dir, sif, image,
+    if arguments.check_restore and rebuilt.get("saved"):
+        restored = replay.check_restore(work / "state", arguments.task_dir, sif, image,
                                         work=work / "restore", trial_dir=work / "trial-restore", workdir=workdir)
         restored["same_changed_paths"] = restored.get("changed_paths") == rebuilt.get("changed_paths")
         restored["same_reward"] = restored.get("reward") == rebuilt.get("reward")
         result["restore"] = restored
         kept = kept and restored["same_changed_paths"] and restored["same_reward"]
     if arguments.empty_control:
-        (work / "control" / "overlay").mkdir(parents=True)
-        control = replay.check_restore(work / "control" / "overlay", arguments.task_dir, sif, image,
+        (work / "control").mkdir(parents=True)
+        control = replay.check_restore(work / "control", arguments.task_dir, sif, image,
                                        work=work / "control2", trial_dir=work / "trial-control", workdir=workdir)
         control["tests_fail_on_image"] = control.get("reward") == 0.0
         control["test_stdout_tail"] = _tail(work / "trial-control" / "verifier" / "test-stdout.txt")
@@ -108,6 +110,8 @@ def main(argv=None):
     arguments.out.parent.mkdir(parents=True, exist_ok=True)
     arguments.out.write_text(json.dumps(result, indent=1, sort_keys=True, default=str) + "\n")
     if not arguments.keep_work:
+        # A folder the task made unreadable (mode 000) is unreadable to this user too until its mode is given back.
+        subprocess.run(["chmod", "-R", "u+rwX", str(work)], capture_output=True, timeout=600)
         shutil.rmtree(work, ignore_errors=True)
     judged = result["judged"]
     print(json.dumps({"token": arguments.token, "ok": kept, "faithful": judged.get("faithful"),

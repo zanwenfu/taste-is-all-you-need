@@ -33,10 +33,16 @@ import time
 import tomllib
 import urllib.parse
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
 from taste.benchmarks import final_change
-from taste.brains.apptainer_terminal import ApptainerSpec, ApptainerTerminalBackend, docker_env
+from taste.brains.apptainer_terminal import (
+    ApptainerSpec,
+    ApptainerTerminalBackend,
+    copy_overlay,
+    docker_env,
+)
 from taste.brains.branch_replay import REBUILD_OUTPUT_CHARS, ReplayScript, rebuild, rebuild_timeout
 from taste.brains.terminal_broker import TerminalRequest
 
@@ -210,7 +216,7 @@ def _quote(value):
 
 def rebuild_trial(script_path, step, task_dir, sif, image, *, work, trial_dir, tolerance=0,
                   command_seconds=COMMAND_SECONDS, final_change_chars=60000, verify_timeout=None, name=None,
-                  apptainer="apptainer"):
+                  apptainer="apptainer", save_to=None):
     """One recorded trial rebuilt to ``step`` and graded, in Apptainer. The summary a replay job's trial gives
     (``ReplayDriver.judge`` reads it), with the rebuild's rows and its phases' times."""
     raw = Path(script_path).read_bytes()
@@ -266,7 +272,15 @@ def rebuild_trial(script_path, step, task_dir, sif, image, *, work, trial_dir, t
             summary["final_change"] = (final_change.final_change(backend, workdir, commit, final_change_chars)
                                        if commit else {"read": False, "reason": why, "cap_chars": final_change_chars})
         clock = time.monotonic()
-        backend.restart("host")  # Harbor's verifier phase: public network, the same files
+        backend.stop()
+        if save_to:
+            # The files the verifier is about to grade, saved (as a trial's checkpoint is, before its verifier).
+            backend.save(save_to)
+            summary["saved"] = str(save_to)
+            summary["times"]["save"] = round(time.monotonic() - clock, 2)
+            clock = time.monotonic()
+        backend.spec = replace(backend.spec, network="host")  # Harbor's verifier phase: public network, same files
+        backend.start()
         summary["times"]["restart"] = round(time.monotonic() - clock, 2)
         graded = verify(backend, task_dir, trial_dir,
                         verify_timeout or float(config.get("verifier", {}).get("timeout_sec") or 3000),
@@ -285,13 +299,13 @@ def rebuild_trial(script_path, step, task_dir, sif, image, *, work, trial_dir, t
     return summary
 
 
-def check_restore(overlay, task_dir, sif, image, *, work, trial_dir, workdir="/app", name=None, apptainer="apptainer",
+def check_restore(saved, task_dir, sif, image, *, work, trial_dir, workdir="/app", name=None, apptainer="apptainer",
                   verify_timeout=None):
-    """A saved state brought back: the rebuilt overlay copied to a fresh one, a new instance on it, its changed paths
-    read and its tests run again. {changed_paths, reward, seconds}."""
+    """A saved state brought back: the saved overlay copied to a fresh one (as the namespace's root), a new instance
+    on it, its changed paths read and its tests run again. {changed_paths, reward, seconds}. An empty ``saved``
+    folder is the image untouched."""
     started = time.monotonic()
     fresh = Path(work) / "overlay"
-    shutil.copytree(overlay, fresh, symlinks=True)
     trial_dir = Path(trial_dir)
     for folder in ("agent", "verifier", "artifacts"):
         (trial_dir / folder).mkdir(parents=True, exist_ok=True)
@@ -303,6 +317,8 @@ def check_restore(overlay, task_dir, sif, image, *, work, trial_dir, workdir="/a
     backend = ApptainerTerminalBackend(spec)
     found = {}
     try:
+        copy_overlay(spec, saved, fresh)
+        found["copy_seconds"] = round(time.monotonic() - started, 2)
         backend.start()
         found["changed_paths"] = backend.changed_paths(mounts=LOG_MOUNTS)
         graded = verify(backend, task_dir, trial_dir, verify_timeout or 3000, cwd=image.get("workdir") or workdir)
