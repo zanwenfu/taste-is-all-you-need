@@ -377,6 +377,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
 
     ended_by = None
     mem0_stats = None
+    store_close_error = None
     try:
         try:
             agent.run_tasks(session["tasks"], prepared, worded=worded)
@@ -401,7 +402,10 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
             except Exception as error:
                 mem0_stats = {"error": f"{type(error).__name__}: {error}"[:1000]}
         if store:
-            store.close()
+            try:
+                store.close()
+            except Exception as error:  # a store that fails as it closes does not cost the session its record (seed 135's Mem0 did, Nov 14)
+                store_close_error = f"{type(error).__name__}: {error}"[:1000]
     rows = [json.loads(line) for line in actions.read_text().splitlines()] if actions.exists() else []
     silent = [row for row in rows if row["kind"] == "no_command"]
     reasons: dict[str, int] = {}
@@ -415,7 +419,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
                "valid": not agent.resent and ledger_refused is None and (bool(planted_on) or not session.get("first_prepare")),
                "no_command": len(silent), "no_command_finish_reasons": reasons,
                "reader_calls": reader_calls[0], "reader_cut_off": reader_cut[0], "note_versions": note_versions, "searches": searches,
-               "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None, "mem0": mem0_stats,
+               "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None, "mem0": mem0_stats, "store_close_error": store_close_error,
                "rules_file": rules_file.summary() if rules_file is not None else None,
                "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))

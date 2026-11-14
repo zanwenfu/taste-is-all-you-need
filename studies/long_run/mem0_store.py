@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -93,8 +94,10 @@ class Mem0Turns:
         return stand_in_record(BASELINE, code=f"{CODE}, searched by the harness at each new task")
 
     def close(self) -> None:
-        self.flush()
-        self.client.close()
+        try:
+            self.flush()
+        finally:  # the sidecar does not outlive the session, even when the last add fails (seed 135's did, Nov 14)
+            self.client.close()
 
 
 class SidecarClient:
@@ -107,8 +110,11 @@ class SidecarClient:
 
     def _post(self, path: str, body: dict, timeout: float | None) -> Any:
         request = urllib.request.Request(self.url + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as reply:
-            return json.loads(reply.read())
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as reply:
+                return json.loads(reply.read())
+        except urllib.error.HTTPError as error:  # the session's record says why, not only that the sidecar answered 500
+            raise RuntimeError(f"Mem0's sidecar answered {error.code} on {path}: {error.read().decode(errors='replace')[:1000]}") from None
 
     def add(self, messages: list[dict], user: bool = False) -> None:
         self._post("/add", {"messages": messages, "user": user}, self.timeout)
@@ -141,7 +147,7 @@ def start_sidecar(command: list[str], *, url: str, model: str, max_tokens: int, 
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = [*command, "-m", "studies.long_run.mem0_sidecar", "--url", url, "--model", model, "--max-tokens", str(max_tokens),
             "--embedder", embedder, "--dims", str(dims), "--workdir", str(workdir), "--replies", str(log.with_suffix(".replies.jsonl")),
-            "--calls", str(log.with_suffix(".calls.jsonl")), "--thinking", thinking,
+            "--calls", str(log.with_suffix(".calls.jsonl")), "--failures", str(log.with_suffix(".failed.jsonl")), "--thinking", thinking,
             "--thinking-max-tokens", str(thinking_max_tokens), *(["--effort", effort] if effort else [])]
     with log.open("a") as errors:
         process = subprocess.Popen(argv, cwd=root, stdout=subprocess.PIPE, stderr=errors, text=True)

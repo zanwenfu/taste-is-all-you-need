@@ -25,6 +25,12 @@ on and JSON mode, the first message's three instructions were written down. --th
 Adds are made by one worker thread, one at a time in the order they came, so the session goes on while Mem0 writes. A
 search first waits until every add before it is made, so Mem0 holds at each search exactly what it would hold had the
 session waited for each add; only the wall time changes.
+
+An add that fails keeps nothing of its exchange and the session goes on, as Mem0 itself does with a reply it cannot parse:
+Mem0 2.2.1 reads each item of the model's memory list with .get, and on Laguna one list held a memory and then two strings
+(seed 135, Nov 14), so that add raised before anything was stored, and the session, which then ended at the first failed add,
+lost three hours. Each failure is counted and written to --failures with its exchange. Three adds failing in a row end the
+session as before: that is a broken Mem0 or server, not one bad reply.
 """
 
 from __future__ import annotations
@@ -41,16 +47,18 @@ from pathlib import Path
 from typing import Any
 
 USER = "session"
+FAILS_IN_A_ROW = 3
 
 
 class Adds:
     """Mem0's adds, made in order by one worker thread. ``before`` is told, before each add, whether its exchange holds a
-    message from the user. The first add that fails is kept, no later add is made, and every later request answers with
-    that failure, so the session ends with it as it would have at the add itself."""
+    message from the user. An add that fails keeps nothing of its exchange; it is counted, written to ``failures`` with the
+    exchange, and the adds go on. Once FAILS_IN_A_ROW fail in a row, no later add is made and every later request answers
+    with that failure, so the session ends with it."""
 
-    def __init__(self, memory: Any, before: Callable[[bool], None] = lambda user: None) -> None:
-        self.memory, self.before, self.waiting = memory, before, queue.Queue()
-        self.made, self.seconds, self.longest, self.error = 0, 0.0, 0.0, None
+    def __init__(self, memory: Any, before: Callable[[bool], None] = lambda user: None, failures: Path | None = None) -> None:
+        self.memory, self.before, self.failures, self.waiting = memory, before, failures, queue.Queue()
+        self.made, self.failed, self.in_a_row, self.seconds, self.longest, self.error = 0, 0, 0, 0.0, 0.0, None
         threading.Thread(target=self._work, daemon=True).start()
 
     def _work(self) -> None:
@@ -60,17 +68,29 @@ class Adds:
                 if self.error is None:
                     started = time.perf_counter()
                     self.before(user)
-                    self.memory.add(messages, user_id=USER, infer=True)
-                    took = time.perf_counter() - started
-                    self.made, self.seconds, self.longest = self.made + 1, self.seconds + took, max(self.longest, took)
+                    try:
+                        self.memory.add(messages, user_id=USER, infer=True)
+                    except Exception as error:
+                        self._failed(messages, f"{type(error).__name__}: {error}"[:1000])
+                    else:
+                        took = time.perf_counter() - started
+                        self.made, self.seconds, self.longest, self.in_a_row = self.made + 1, self.seconds + took, max(self.longest, took), 0
             except Exception as error:
                 self.error = f"{type(error).__name__}: {error}"[:1000]
             finally:
                 self.waiting.task_done()
 
+    def _failed(self, messages: list[dict], error: str) -> None:
+        self.failed, self.in_a_row = self.failed + 1, self.in_a_row + 1
+        if self.failures is not None:
+            with self.failures.open("a") as written:
+                written.write(json.dumps({"add": self.made + self.failed, "error": error, "messages": messages}) + "\n")
+        if self.in_a_row >= FAILS_IN_A_ROW:
+            self.error = f"{FAILS_IN_A_ROW} Mem0 adds in a row failed, the last: {error}"
+
     def check(self) -> None:
         if self.error is not None:
-            raise RuntimeError(f"a Mem0 add failed: {self.error}")
+            raise RuntimeError(self.error)
 
     def put(self, messages: list[dict], user: bool = False) -> int:
         self.check()
@@ -82,7 +102,7 @@ class Adds:
         self.check()
 
     def stats(self) -> dict[str, Any]:
-        return {"adds_made": self.made, "adds_waiting": self.waiting.unfinished_tasks, "add_seconds": round(self.seconds, 1),
+        return {"adds_made": self.made, "adds_failed": self.failed, "adds_waiting": self.waiting.unfinished_tasks, "add_seconds": round(self.seconds, 1),
                 "add_seconds_longest": round(self.longest, 1), "add_error": self.error}
 
 
@@ -132,9 +152,10 @@ class Calls:
                 "completion_tokens": self.completion_tokens, "cut_off": self.cut_off, "fell_back": self.fell_back, "left_cut_off": self.left_cut_off}
 
 
-def serve(memory: Any, *, stats: Callable[[], dict], port: int = 0, before: Callable[[bool], None] = lambda user: None) -> ThreadingHTTPServer:
+def serve(memory: Any, *, stats: Callable[[], dict], port: int = 0, before: Callable[[bool], None] = lambda user: None,
+          failures: Path | None = None) -> ThreadingHTTPServer:
     """A server on 127.0.0.1 for one Mem0 ``memory``; the caller runs serve_forever. Adds go to one worker, in order."""
-    adds = Adds(memory, before)
+    adds = Adds(memory, before, failures)
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, body: Any, status: int = 200) -> None:
@@ -188,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=1800, help="seconds for one model call, as the session's own calls")
     parser.add_argument("--tries", type=int, default=3, help="tries of a model call that fails to answer")
     parser.add_argument("--calls", help="a file for one line per model call: seconds, thinking, finish reason and tokens")
+    parser.add_argument("--failures", help="a file for one line per add that failed: its number, the error and its exchange")
     parser.add_argument("--device", default="cpu")
     arguments = parser.parse_args(argv)
 
@@ -216,7 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     def before(user: bool) -> None:
         calls.thinking = arguments.thinking == "on" or (arguments.thinking == "user" and user)
 
-    server = serve(memory, stats=lambda: {"llm_calls": counted.calls, "llm_unparsed": counted.unparsed, **calls.totals()}, before=before)
+    server = serve(memory, stats=lambda: {"llm_calls": counted.calls, "llm_unparsed": counted.unparsed, **calls.totals()}, before=before,
+                   failures=Path(arguments.failures) if arguments.failures else None)
     print(json.dumps({"ready": server.server_address[1]}), flush=True)
     try:
         server.serve_forever()

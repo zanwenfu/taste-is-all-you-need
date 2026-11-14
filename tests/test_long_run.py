@@ -1903,9 +1903,46 @@ def test_mem0_adds_are_made_in_order_while_the_session_goes_on_and_a_search_wait
         server.shutdown()
 
 
-def test_a_failed_mem0_add_ends_the_session_at_the_next_request_and_no_later_add_is_made() -> None:
+def test_a_mem0_add_that_fails_keeps_nothing_of_its_exchange_and_is_counted_and_the_session_goes_on(tmp_path: Path) -> None:
     import threading
-    import urllib.error
+
+    from studies.long_run.mem0_sidecar import serve
+    from studies.long_run.mem0_store import SidecarClient
+
+    class OneBadReply:
+        """Mem0 2.2.1 reads each item of the model's memory list with .get; on Laguna one list held a memory and then two strings
+        (seed 135, Nov 14), and its add raised AttributeError there, before anything was stored."""
+
+        def __init__(self) -> None:
+            self.kept = []
+
+        def add(self, messages, *, user_id, infer, metadata=None):
+            if messages[0]["content"] == "two":
+                raise AttributeError("'str' object has no attribute 'get'")
+            self.kept.append(messages[0]["content"])
+            return {"results": []}
+
+        def search(self, query, *, filters, top_k, threshold):
+            return {"results": [{"memory": kept, "created_at": "t", "id": kept, "score": 0.5} for kept in self.kept]}
+
+    memory = OneBadReply()
+    server = serve(memory, stats=dict, failures=tmp_path / "failed.jsonl")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = SidecarClient(f"http://127.0.0.1:{server.server_address[1]}", timeout=5)
+        for word in ("one", "two", "three"):
+            client.add([{"role": "user", "content": word}])
+        assert [hit["memory"] for hit in client.search("q", limit=5)] == ["one", "three"]  # as Mem0 does with a reply it cannot parse
+        stats = client.stats()
+        assert stats["adds_made"] == 2 and stats["adds_failed"] == 1 and stats["add_error"] is None
+        line = json.loads((tmp_path / "failed.jsonl").read_text())
+        assert line["add"] == 2 and line["error"] == "AttributeError: 'str' object has no attribute 'get'" and line["messages"][0]["content"] == "two"
+    finally:
+        server.shutdown()
+
+
+def test_three_mem0_adds_failing_in_a_row_end_the_session_with_the_sidecars_own_words() -> None:
+    import threading
 
     from studies.long_run.mem0_sidecar import serve
     from studies.long_run.mem0_store import SidecarClient
@@ -1919,22 +1956,56 @@ def test_a_failed_mem0_add_ends_the_session_at_the_next_request_and_no_later_add
             raise TimeoutError("the model call timed out")
 
         def search(self, query, *, filters, top_k, threshold):
-            raise AssertionError("no search after a failed add")
+            raise AssertionError("no search after Mem0 stopped working")
 
     memory = Failing()
     server = serve(memory, stats=dict)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         client = SidecarClient(f"http://127.0.0.1:{server.server_address[1]}", timeout=5)
-        client.add([{"role": "user", "content": "one"}])
-        with pytest.raises(urllib.error.HTTPError) as raised:
-            client.search("q", limit=1)
-        assert "a Mem0 add failed: TimeoutError: the model call timed out" in raised.value.read().decode()
-        with pytest.raises(urllib.error.HTTPError):
-            client.add([{"role": "user", "content": "two"}])
-        assert memory.adds == 1 and client.stats()["add_error"] == "TimeoutError: the model call timed out"
+        for word in ("one", "two", "three"):
+            client.add([{"role": "user", "content": word}])
+        with pytest.raises(RuntimeError, match="3 Mem0 adds in a row failed, the last: TimeoutError: the model call timed out"):
+            client.search("q", limit=1)  # a broken Mem0 or server, not one bad reply: the session ends, and says why
+        with pytest.raises(RuntimeError, match="in a row failed"):
+            client.add([{"role": "user", "content": "four"}])
+        assert memory.adds == 3 and client.stats()["adds_failed"] == 3
     finally:
         server.shutdown()
+
+
+def test_the_mem0_sidecar_is_stopped_even_when_the_last_add_fails() -> None:
+    from studies.long_run.mem0_store import Mem0Turns
+
+    class Broken(_Mem0):
+        def add(self, messages: list[dict], user: bool = False) -> None:
+            raise RuntimeError("Mem0's sidecar answered 500")
+
+    fake = Broken()
+    store = Mem0Turns(fake)
+    store.add({"role": "user", "content": "left over"})
+    with pytest.raises(RuntimeError):
+        store.close()
+    assert fake.closed  # its process does not outlive the session
+
+
+def test_a_session_whose_mem0_fails_still_writes_its_record(tmp_path: Path) -> None:
+    class Dying(_Mem0):
+        def add(self, messages: list[dict], user: bool = False) -> None:
+            if len(self.added) >= 2:
+                raise RuntimeError("Mem0's sidecar answered 500 on /add: a Mem0 add failed")
+            super().add(messages, user)
+
+        def stats(self) -> dict:
+            raise RuntimeError("Mem0's sidecar answered 500 on /stats")
+
+    fake = Dying()
+    script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    summary = run_session(_search_session(), arm="mem0_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt, mem0=lambda: fake)
+    assert "a Mem0 add failed" in summary["ended_by"] and fake.closed
+    assert json.loads((tmp_path / "run" / "summary.json").read_text())["ended_by"] == summary["ended_by"]
+    assert "error" in summary["mem0"] and "a Mem0 add failed" in summary["store_close_error"] and summary["outcomes"]
 
 
 def test_mem0s_model_calls_think_only_when_asked_and_a_thinking_reply_cut_off_is_asked_again_without_thinking(tmp_path: Path) -> None:
