@@ -1,3 +1,11 @@
+> **Paper code (this branch).** This branch holds the code for the ICSE 2027 Student Research Competition entry
+> *Taste: A Git-Backed Memory for Long-Running Coding Agents*. The memory layer is in [`taste/memstore/`](taste/memstore/):
+> it keeps an agent session's messages unchanged as plain-text commits in a git repository, finds them again by keyword search
+> ([`keyword.py`](taste/memstore/keyword.py), BM25), and can hold the user's standing instructions in each commit's header
+> ([`objects.py`](taste/memstore/objects.py)). The long coding-session test is in [`studies/long_run/`](studies/long_run/), and
+> the comparison with Mem0 and MemPalace is in [`studies/memory_bench/`](studies/memory_bench/). The rest of this page
+> describes the earlier Taste agent operating system (release 0.2.0).
+
 <a href="https://zanwenfu.com/blog/agent_harness_blog">
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="docs/img/banner.png">
