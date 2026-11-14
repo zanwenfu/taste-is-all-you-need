@@ -1627,3 +1627,119 @@ def test_the_command_line_says_when_a_session_ended_badly(tmp_path: Path, monkey
                         str(tmp_path / "w"), "--arm", "taste", "--env", "local"])
     assert code == 1
 
+
+
+# ------------------------------------------------------------------ Mem0 as the session's memory
+
+
+class _Mem0:
+    """Stands in for the Mem0 sidecar: each add becomes one memory of its user words, and a search ranks the memories by
+    words shared with the query, as a real store would rank by meaning."""
+
+    def __init__(self) -> None:
+        self.added: list[list[dict]] = []
+        self.searched: list[str] = []
+        self.closed = False
+
+    def add(self, messages: list[dict]) -> None:
+        self.added.append(messages)
+
+    def search(self, query: str, limit: int) -> list[dict]:
+        self.searched.append(query)
+        words = set(query.lower().split())
+        memories = [{"memory": " ".join(m["content"] for m in batch if m["role"] == "user")[:200], "created_at": f"2026-01-01T00:00:{n:02d}",
+                     "id": str(n)} for n, batch in enumerate(self.added)]
+        ranked = sorted((m for m in memories if words & set(m["memory"].lower().split())), key=lambda m: -len(words & set(m["memory"].lower().split())))
+        return ranked[:limit]
+
+    def stats(self) -> dict:
+        return {"llm_calls": len(self.added), "llm_unparsed": 0}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_the_mem0_arm_adds_what_taste_stores_and_searches_each_new_tasks_own_words(tmp_path: Path) -> None:
+    from studies.long_run.session import SEARCH_HEADER
+
+    fake = _Mem0()
+    script = _Script([_bash(DONE, "c1"), _bash(DONE, "c2"), _bash(DONE, "c3")])
+    summary = run_session(_search_session(), arm="mem0_search", chat=_routed(script), make_env=lambda task: _Shell(), count=_count,
+                          out=tmp_path / "run", workdir=tmp_path / "w", package_prompt=_prompt, mem0=lambda: fake)
+    assert summary["valid"] and summary["ended_by"] is None
+    assert all([tool["function"]["name"] for tool in call["tools"]] == ["bash"] for call in script.sent)
+    # Nothing is stored before the first task, so nothing is searched; then each new task's own words, as Taste's search arm does.
+    assert fake.searched == ["Fix the Python script that counts lines.", "Tune the kernel scheduler."]
+    system = [call["messages"][0]["content"] for call in script.sent]
+    assert SEARCH_HEADER not in system[0] and SEARCH_HEADER in system[1] and "pass -B to Python" in system[1]
+    assert [row["task"] for row in summary["searches"]] == ["one", "two", "three"]
+    assert summary["searches"][1]["rules"]["bytes"]["in_block"] is True
+    # Every message the agent recorded reached Mem0, and the session closed it.
+    sent = [message["content"] for batch in fake.added for message in batch]
+    assert summary["memory_turns"] == len(sent) > 0 and fake.closed
+    assert summary["ledger"]["name"] == "baseline" and "mem0" in summary["ledger"]["code"]
+    assert summary["mem0"]["adds"] == len(fake.added) and summary["mem0"]["searches"] == 2 and summary["mem0"]["llm_unparsed"] == 0
+
+
+def test_each_mem0_add_is_one_exchange_ending_in_the_agents_reply(tmp_path: Path) -> None:
+    from studies.long_run.mem0_store import Mem0Turns
+
+    fake = _Mem0()
+    store = Mem0Turns(fake)
+    for turn in [{"role": "user", "content": "task"}, {"role": "assistant", "content": "ls"}, {"role": "tool", "content": "a.py"},
+                 {"role": "assistant", "content": "cat a.py"}, {"role": "user", "content": "left over"}]:
+        store.add(turn)
+    assert [[m["role"] for m in batch] for batch in fake.added] == [["user", "assistant"], ["user", "assistant"]]
+    assert fake.added[1][0]["content"] == "Command output:\na.py"  # Mem0 takes users and assistants; a tool's output goes in as what the user side saw
+    store.flush()  # before a search, and at the end, a turn still waiting is added on its own
+    assert fake.added[-1] == [{"role": "user", "content": "left over"}] and store.commits == 3
+
+
+def test_the_mem0_block_takes_the_best_memories_up_to_the_budget_and_shows_them_oldest_first() -> None:
+    from studies.long_run.mem0_store import Mem0Turns
+
+    class Ranked(_Mem0):
+        def search(self, query: str, limit: int) -> list[dict]:
+            self.searched.append(query)
+            return [{"memory": "newest but best match words", "created_at": "2026-01-03T00:00:00", "id": "c"},
+                    {"memory": "oldest second match words", "created_at": "2026-01-01T00:00:00", "id": "a"},
+                    {"memory": "middle third match " + "word " * 50, "created_at": "2026-01-02T00:00:00", "id": "b"}][:limit]
+
+    store = Mem0Turns(Ranked())
+    store.add({"role": "user", "content": "x"})
+    store.flush()
+    block, calls, kept, tokens = store.search_with("match", 12, _count)
+    lines = block.split("\n")
+    assert lines[0].startswith("- oldest") and lines[1].startswith("- newest") and lines[2].startswith("- middle")
+    assert tokens <= 12 and len(kept) == 3 and json.loads(calls[0]["arguments"])["query"] == "match"
+
+
+def test_the_mem0_sidecar_answers_add_search_and_stats_over_a_local_port() -> None:
+    import threading
+
+    from studies.long_run.mem0_sidecar import serve
+    from studies.long_run.mem0_store import SidecarClient
+
+    class Memory:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def add(self, messages, *, user_id, infer, metadata=None):
+            self.calls.append(("add", messages, user_id, infer))
+            return {"results": [{"memory": messages[0]["content"], "event": "ADD"}]}
+
+        def search(self, query, *, filters, top_k, threshold):
+            self.calls.append(("search", query, filters, top_k, threshold))
+            return {"results": [{"memory": "kept", "created_at": "t", "id": "1", "score": 0.5}]}
+
+    memory = Memory()
+    server = serve(memory, stats=lambda: {"llm_calls": 3, "llm_unparsed": 1})
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = SidecarClient(f"http://127.0.0.1:{server.server_address[1]}")
+        client.add([{"role": "user", "content": "hello"}])
+        assert client.search("hello", limit=7) == [{"memory": "kept", "created_at": "t", "id": "1", "score": 0.5}]
+        assert client.stats() == {"llm_calls": 3, "llm_unparsed": 1}
+        assert memory.calls[0][2:] == ("session", True) and memory.calls[1][2:] == ({"user_id": "session"}, 7, 0.0)
+    finally:
+        server.shutdown()

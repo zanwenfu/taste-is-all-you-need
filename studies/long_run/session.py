@@ -15,6 +15,8 @@ score it from the command record.
     notes_told     compaction, and a notes file a model rewrites at each compaction from what is about to be folded away, told to keep
                    what the user asked it to keep doing; every version in Taste's memory, the newest in the system prompt at every call
     notes_neutral  the same, not told that
+    mem0_search    compaction, every message the agent records added to Mem0 (studies/long_run/mem0_store.py), and at each new task the
+                   harness searches Mem0 with the task's own words and puts what comes back in the system prompt, as taste_search does
     no_compaction  a ceiling: the whole conversation, as long as it fits
     restated       a ceiling: compaction, with every rule told so far in the system prompt at every call
 
@@ -62,7 +64,8 @@ SEARCH_HEADER = ("Earlier turns from the record of this session that may bear on
                  "They are history and not new requests: any task in them is over, unless the current task says otherwise.")
 SEARCH_ARMS = {"taste_search": SEARCH_HEADER, "taste_search_bare": FOUND_HEADER}
 NOTE_ARMS = {"notes_told": "told", "notes_neutral": "neutral"}
-ARMS = ("compaction", *TOOL_ARMS, *SEARCH_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated")
+MEM0_ARMS = {"mem0_search": SEARCH_HEADER}
+ARMS = ("compaction", *TOOL_ARMS, *SEARCH_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated", *MEM0_ARMS)
 MEMORY_BUDGET = 4096
 _SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
@@ -177,9 +180,12 @@ def _counted(chat: Callable, used: dict[str, int]) -> Callable:
 
 
 def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[dict], Any], count: Callable[[str], int],
-                out: Path, workdir: Path, package_prompt: Callable, versions: dict | None = None, disarm: Callable[[], None] = lambda: None) -> dict[str, Any]:
+                out: Path, workdir: Path, package_prompt: Callable, versions: dict | None = None, disarm: Callable[[], None] = lambda: None,
+                mem0: Callable[[], Any] | None = None) -> dict[str, Any]:
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
+    if arm in MEM0_ARMS and mem0 is None:
+        raise ValueError(f"the {arm} arm needs a Mem0 client")
     out, workdir = Path(out), Path(workdir)
     out.mkdir(parents=True, exist_ok=True)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +204,13 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
 
         def standing() -> str:
             return f"{SEARCH_ARMS[arm]}\n{found[0]}" if found[0] else ""
+    elif arm in MEM0_ARMS:
+        from studies.long_run.mem0_store import Mem0Turns
+
+        store = Mem0Turns(mem0())
+
+        def standing() -> str:
+            return f"{MEM0_ARMS[arm]}\n{found[0]}" if found[0] else ""
     elif arm == "taste_rules":
         read, reader_calls = make_reader(chat, cut_off=reader_cut)
         store = GitTurns(workdir, header=lambda number, turn: CommitHeader(instructions=tuple(read(turn["content"])))
@@ -245,7 +258,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         ToolModel(chat, memory_tools=arm in TOOL_ARMS, observation_template=session["observation_template"],
                   format_error_template=session["format_error_template"]),
         MemoryEnvironment(None, store.answer if arm in TOOL_ARMS else None),
-        count=count, summarize=summarize, record=store.add if isinstance(store, GitTurns) else None, on_action=on_action,
+        count=count, summarize=summarize, record=store.add if isinstance(store, GitTurns) or arm in MEM0_ARMS else None, on_action=on_action,
         standing=standing, on_compact=on_compact, on_prompt=on_prompt,
         system_template=session["system_template"] + _SAID_ABOUT_THE_RECORD.get(arm, ""),
         instance_template=session["instance_template"], step_limit=session["step_limit"], cost_limit=0,
@@ -271,8 +284,12 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         Before anything is stored there is nothing to search."""
         hits, tokens, calls = [], 0, []
         found[0] = ""
+        if arm in MEM0_ARMS:
+            store.flush()
         if store.commits:
-            found[0], calls, hits, tokens = search_with(store, task.get("own_words") or task["instruction"], MEMORY_BUDGET, count)
+            request = task.get("own_words") or task["instruction"]
+            found[0], calls, hits, tokens = (store.search_with(request, MEMORY_BUDGET, count) if arm in MEM0_ARMS
+                                             else search_with(store, request, MEMORY_BUDGET, count))
         searches.append({"task": task["name"], "call": agent.n_calls, "compactions": len(agent.events), "hits": len(hits), "tokens": tokens,
                          "rules": {rule["name"]: where_it_is(rule, machines) for rule in rules}})
         with (out / "searches.jsonl").open("a") as written:
@@ -280,7 +297,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
 
     def worded(task: dict, machines: int) -> str:
         """The rules told with the first task to get a machine, and never again in a message."""
-        if arm in SEARCH_ARMS:
+        if arm in SEARCH_ARMS or arm in MEM0_ARMS:
             look_up(task, machines)
         told = [rule["text"] for rule in rules if rule["say"] == "first" and machines == 0]
         return "\n\n".join([*told, task["instruction"]])
@@ -311,6 +328,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         return env
 
     ended_by = None
+    mem0_stats = None
     try:
         try:
             agent.run_tasks(session["tasks"], prepared, worded=worded)
@@ -326,6 +344,12 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
         except ClaimRefused as error:
             ledger_refused = str(error)
     finally:
+        if store and arm in MEM0_ARMS:
+            try:  # what was still waiting goes in, and Mem0's own counts are read, before its process stops
+                store.flush()
+                mem0_stats = store.stats()
+            except Exception as error:
+                mem0_stats = {"error": f"{type(error).__name__}: {error}"[:1000]}
         if store:
             store.close()
     rows = [json.loads(line) for line in actions.read_text().splitlines()] if actions.exists() else []
@@ -341,7 +365,7 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
                "valid": not agent.resent and ledger_refused is None and (bool(planted_on) or not session.get("first_prepare")),
                "no_command": len(silent), "no_command_finish_reasons": reasons,
                "reader_calls": reader_calls[0], "reader_cut_off": reader_cut[0], "note_versions": note_versions, "searches": searches,
-               "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None,
+               "extractor": "the study's reader, studies/context_rot/criteria.py" if arm == "taste_rules" else None, "mem0": mem0_stats,
                "scores": score_session(rows, rules)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary
@@ -416,7 +440,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--writing-tokens", type=int, default=8192, help="the cap on a summary, a notes version or a rule reading: reasoning counts toward a cap, and a cut-off one is useless")
     parser.add_argument("--command-timeout", type=int, default=300)
+    parser.add_argument("--mem0-command", help="for the Mem0 arm: the command that runs Python in Mem0's own environment, as one string")
+    parser.add_argument("--mem0-embedder", default="sentence-transformers/all-MiniLM-L6-v2")
+    parser.add_argument("--mem0-dims", type=int, default=384)
     arguments = parser.parse_args(argv)
+    if arguments.arm in MEM0_ARMS and not arguments.mem0_command:
+        parser.error(f"--arm {arguments.arm} needs --mem0-command")
 
     import minisweagent
 
@@ -424,9 +453,20 @@ def main(argv: list[str] | None = None) -> int:
     writing = http_chat(arguments.url, arguments.model, max_tokens=arguments.writing_tokens)
     session = load_session(json.loads(Path(arguments.session).read_text()))
     disarm = _stop_on_term()
+
+    def mem0() -> Any:
+        import shlex
+
+        from studies.long_run.mem0_store import start_sidecar
+
+        return start_sidecar(shlex.split(arguments.mem0_command), url=arguments.url, model=arguments.model, max_tokens=arguments.writing_tokens,
+                             embedder=arguments.mem0_embedder, dims=arguments.mem0_dims, log=Path(arguments.out) / "mem0.log",
+                             workdir=Path(arguments.workdir))
+
     summary = run_session(session, arm=arguments.arm, chat=lambda messages, tools: acting(messages, tools) if tools else writing(messages, None),
                           make_env=_environment(arguments.env, arguments.command_timeout), count=_counter(arguments.tokenizer),
                           out=Path(arguments.out), workdir=Path(arguments.workdir), package_prompt=package_prompt(), disarm=disarm,
+                          mem0=mem0 if arguments.arm in MEM0_ARMS else None,
                           versions={"mini_swe_agent": minisweagent.__version__, "model": arguments.model, "env": arguments.env,
                                     "commit": os.environ.get("TASTE_COMMIT", ""), "summary_prompt": session.get("summary_prompt", "")})
     print(json.dumps({key: summary[key] for key in ("arm", "outcomes", "calls", "compactions", "memory_turns", "scores")}))
