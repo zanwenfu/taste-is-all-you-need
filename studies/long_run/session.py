@@ -67,6 +67,8 @@ NOTE_ARMS = {"notes_told": "told", "notes_neutral": "neutral"}
 MEM0_ARMS = {"mem0_search": SEARCH_HEADER}
 ARMS = ("compaction", *TOOL_ARMS, *SEARCH_ARMS, "taste_rules", *NOTE_ARMS, "no_compaction", "restated", *MEM0_ARMS)
 MEMORY_BUDGET = 4096
+EFFORT = "low"  # the reasoning effort on every model call of a session: the agent's, every writer's, and Mem0's
+MEM0_THINKING = "off"  # Mem0 expects a model that answers at once; with thinking on, Laguna spent its whole cap thinking (mem0_sidecar)
 _SAID_ABOUT_THE_RECORD = {"taste_exists": f" {SENTENCE}", "taste_check": f" {SENTENCE} {LOOK}"}
 _SYSTEM = "You are a coding agent. Work on each task until it is done, then run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
@@ -345,8 +347,10 @@ def run_session(session: dict, *, arm: str, chat: Callable, make_env: Callable[[
             ledger_refused = str(error)
     finally:
         if store and arm in MEM0_ARMS:
-            try:  # what was still waiting goes in, and Mem0's own counts are read, before its process stops
-                store.flush()
+            try:  # what was still waiting goes in, and Mem0's own counts are read, before its process stops. A session that
+                store.flush()  # ended early does not wait for Mem0's last adds: its record says how many were still waiting
+                if ended_by is None:
+                    store.drain()
                 mem0_stats = store.stats()
             except Exception as error:
                 mem0_stats = {"error": f"{type(error).__name__}: {error}"[:1000]}
@@ -449,8 +453,8 @@ def main(argv: list[str] | None = None) -> int:
 
     import minisweagent
 
-    acting = http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens)
-    writing = http_chat(arguments.url, arguments.model, max_tokens=arguments.writing_tokens)
+    acting = http_chat(arguments.url, arguments.model, max_tokens=arguments.max_tokens, effort=EFFORT)
+    writing = http_chat(arguments.url, arguments.model, max_tokens=arguments.writing_tokens, effort=EFFORT)
     session = load_session(json.loads(Path(arguments.session).read_text()))
     disarm = _stop_on_term()
 
@@ -460,14 +464,15 @@ def main(argv: list[str] | None = None) -> int:
         from studies.long_run.mem0_store import start_sidecar
 
         return start_sidecar(shlex.split(arguments.mem0_command), url=arguments.url, model=arguments.model, max_tokens=arguments.writing_tokens,
-                             embedder=arguments.mem0_embedder, dims=arguments.mem0_dims, log=Path(arguments.out) / "mem0.log",
+                             effort=EFFORT, thinking=MEM0_THINKING, embedder=arguments.mem0_embedder, dims=arguments.mem0_dims, log=Path(arguments.out) / "mem0.log",
                              workdir=Path(arguments.workdir))
 
     summary = run_session(session, arm=arguments.arm, chat=lambda messages, tools: acting(messages, tools) if tools else writing(messages, None),
                           make_env=_environment(arguments.env, arguments.command_timeout), count=_counter(arguments.tokenizer),
                           out=Path(arguments.out), workdir=Path(arguments.workdir), package_prompt=package_prompt(), disarm=disarm,
                           mem0=mem0 if arguments.arm in MEM0_ARMS else None,
-                          versions={"mini_swe_agent": minisweagent.__version__, "model": arguments.model, "env": arguments.env,
+                          versions={"mini_swe_agent": minisweagent.__version__, "model": arguments.model, "effort": EFFORT,
+                                    **({"mem0_thinking": MEM0_THINKING} if arguments.arm in MEM0_ARMS else {}), "env": arguments.env,
                                     "commit": os.environ.get("TASTE_COMMIT", ""), "summary_prompt": session.get("summary_prompt", "")})
     print(json.dumps({key: summary[key] for key in ("arm", "outcomes", "calls", "compactions", "memory_turns", "scores")}))
     if summary["ended_by"] or not summary["valid"]:

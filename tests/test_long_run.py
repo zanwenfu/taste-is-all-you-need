@@ -1639,10 +1639,14 @@ class _Mem0:
     def __init__(self) -> None:
         self.added: list[list[dict]] = []
         self.searched: list[str] = []
+        self.drained = 0
         self.closed = False
 
     def add(self, messages: list[dict]) -> None:
         self.added.append(messages)
+
+    def drain(self) -> None:
+        self.drained += 1
 
     def search(self, query: str, limit: int) -> list[dict]:
         self.searched.append(query)
@@ -1679,6 +1683,7 @@ def test_the_mem0_arm_adds_what_taste_stores_and_searches_each_new_tasks_own_wor
     assert summary["memory_turns"] == len(sent) > 0 and fake.closed
     assert summary["ledger"]["name"] == "baseline" and "mem0" in summary["ledger"]["code"]
     assert summary["mem0"]["adds"] == len(fake.added) and summary["mem0"]["searches"] == 2 and summary["mem0"]["llm_unparsed"] == 0
+    assert fake.drained == 1 and "search_seconds" in summary["mem0"]  # a session that ended normally waits for Mem0's last adds
 
 
 def test_each_mem0_add_is_one_exchange_ending_in_the_agents_reply(tmp_path: Path) -> None:
@@ -1740,7 +1745,110 @@ def test_the_mem0_sidecar_answers_add_search_and_stats_over_a_local_port() -> No
         client = SidecarClient(f"http://127.0.0.1:{server.server_address[1]}")
         client.add([{"role": "user", "content": "hello"}])
         assert client.search("hello", limit=7) == [{"memory": "kept", "created_at": "t", "id": "1", "score": 0.5}]
-        assert client.stats() == {"llm_calls": 3, "llm_unparsed": 1}
+        client.drain()
+        stats = client.stats()
+        assert stats["llm_calls"] == 3 and stats["llm_unparsed"] == 1 and stats["adds_made"] == 1 and stats["adds_waiting"] == 0
+        assert stats["add_error"] is None
         assert memory.calls[0][2:] == ("session", True) and memory.calls[1][2:] == ({"user_id": "session"}, 7, 0.0)
     finally:
         server.shutdown()
+
+
+def test_mem0_adds_are_made_in_order_while_the_session_goes_on_and_a_search_waits_for_them() -> None:
+    import threading
+
+    from studies.long_run.mem0_sidecar import serve
+    from studies.long_run.mem0_store import SidecarClient
+
+    gate = threading.Event()
+
+    class Slow:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def add(self, messages, *, user_id, infer, metadata=None):
+            gate.wait(10)  # Mem0 writing its memories
+            self.calls.append(("add", messages[0]["content"]))
+            return {"results": []}
+
+        def search(self, query, *, filters, top_k, threshold):
+            self.calls.append(("search", query))
+            return {"results": []}
+
+    memory = Slow()
+    server = serve(memory, stats=dict)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = SidecarClient(f"http://127.0.0.1:{server.server_address[1]}", timeout=5)
+        for word in ("one", "two", "three"):  # each add answers at once, though Mem0 is still busy
+            client.add([{"role": "user", "content": word}])
+        assert client.stats()["adds_waiting"] == 3 and memory.calls == []
+        found = []
+        searching = threading.Thread(target=lambda: found.append(client.search("q", limit=1)))
+        searching.start()
+        searching.join(0.5)
+        assert searching.is_alive()  # the search waits for the adds before it
+        gate.set()
+        searching.join(10)
+        assert found == [[]]
+        assert memory.calls == [("add", "one"), ("add", "two"), ("add", "three"), ("search", "q")]  # in order, then the search
+        assert client.stats()["adds_made"] == 3
+    finally:
+        gate.set()
+        server.shutdown()
+
+
+def test_a_failed_mem0_add_ends_the_session_at_the_next_request_and_no_later_add_is_made() -> None:
+    import threading
+    import urllib.error
+
+    from studies.long_run.mem0_sidecar import serve
+    from studies.long_run.mem0_store import SidecarClient
+
+    class Failing:
+        def __init__(self) -> None:
+            self.adds = 0
+
+        def add(self, messages, *, user_id, infer, metadata=None):
+            self.adds += 1
+            raise TimeoutError("the model call timed out")
+
+        def search(self, query, *, filters, top_k, threshold):
+            raise AssertionError("no search after a failed add")
+
+    memory = Failing()
+    server = serve(memory, stats=dict)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = SidecarClient(f"http://127.0.0.1:{server.server_address[1]}", timeout=5)
+        client.add([{"role": "user", "content": "one"}])
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            client.search("q", limit=1)
+        assert "a Mem0 add failed: TimeoutError: the model call timed out" in raised.value.read().decode()
+        with pytest.raises(urllib.error.HTTPError):
+            client.add([{"role": "user", "content": "two"}])
+        assert memory.adds == 1 and client.stats()["add_error"] == "TimeoutError: the model call timed out"
+    finally:
+        server.shutdown()
+
+
+def test_mem0s_model_calls_are_counted_with_their_tokens_and_cut_offs(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from studies.long_run.mem0_sidecar import Calls
+
+    replies = iter([("stop", 100, 20), ("length", 300, 8192)])
+
+    class Completions:
+        def create(self, **params):
+            finish, prompt, completion = next(replies)
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish)],
+                                   usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion))
+
+    completions = Completions()
+    calls = Calls(completions, log=tmp_path / "calls.jsonl")
+    completions.create(model="m", messages=[])  # Mem0's own call, through the wrapper put in its place
+    completions.create(model="m", messages=[])
+    assert calls.totals() == {"model_calls": 2, "prompt_tokens": 400, "completion_tokens": 8212, "cut_off": 1}
+    lines = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert [line["finish"] for line in lines] == ["stop", "length"] and lines[1]["completion_tokens"] == 8192

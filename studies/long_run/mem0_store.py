@@ -7,8 +7,9 @@ exchange, the turns since the agent last spoke and the agent's reply, and a comm
 user side saw. At each new task the harness searches with the task's own words, as it does for Taste, and the
 memories that come back go in front of the agent under the same header and the same token budget.
 
-The session's own model writes Mem0's memories, as it writes the agent's own notes in the notes arms. No taste/
-code is in this path, so its ledger entry is a baseline.
+The session's own model writes Mem0's memories, with the session's own reasoning effort, as it writes the agent's own
+notes in the notes arms. Mem0 makes its adds in order while the session goes on, and a search waits for every add
+before it (see ``mem0_sidecar``). No taste/ code is in this path, so its ledger entry is a baseline.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ class Mem0Turns:
         self.pending: list[dict] = []
         self.commits = 0  # adds made, so that a search before anything is stored can be skipped, as for Taste
         self.searches = 0
+        self.search_seconds = 0.0  # what the searches waited, for Mem0's adds before them and for the search itself
 
     def add(self, turn: dict) -> None:
         role = turn["role"]
@@ -58,7 +60,9 @@ class Mem0Turns:
         at a word, and shown oldest first, as Taste's search shows what it found. Returns (the block, the call, the
         memories kept, their tokens)."""
         self.searches += 1
+        started = time.monotonic()
         hits = self.client.search(request, limit=TOP_K)
+        self.search_seconds += time.monotonic() - started
         call = {"name": "mem0.search", "arguments": json.dumps({"query": request, "limit": TOP_K}), "output": json.dumps(hits), "failed": False}
         kept, used = [], 0
         for rank, hit in enumerate(hits):
@@ -72,8 +76,12 @@ class Mem0Turns:
         shown = sorted(kept, key=lambda memory: (memory["created_at"], memory["rank"]))
         return "\n".join(f"- {memory['memory']}" for memory in shown), [call], kept, used
 
+    def drain(self) -> None:
+        """Wait until Mem0 has made every add sent to it."""
+        self.client.drain()
+
     def stats(self) -> dict[str, Any]:
-        return {"adds": self.commits, "searches": self.searches, **self.client.stats()}
+        return {"adds": self.commits, "searches": self.searches, "search_seconds": round(self.search_seconds, 1), **self.client.stats()}
 
     def ledger(self, mode: str = "single_query") -> dict[str, Any]:
         """A baseline: no taste/ code in the path. The harness searched it once at each new task."""
@@ -85,21 +93,26 @@ class Mem0Turns:
 
 
 class SidecarClient:
-    """The session's side of the sidecar: JSON over a local port, standard library only."""
+    """The session's side of the sidecar: JSON over a local port, standard library only. An add only queues its exchange,
+    so it answers at once. A search and a drain wait for every add before them, with no time limit of their own: each
+    model call has its own time-out and tries, and a sidecar that stops closes the connection."""
 
-    def __init__(self, url: str, *, process: subprocess.Popen | None = None, timeout: float = 900.0) -> None:
+    def __init__(self, url: str, *, process: subprocess.Popen | None = None, timeout: float = 120.0) -> None:
         self.url, self.process, self.timeout = url.rstrip("/"), process, timeout
 
-    def _post(self, path: str, body: dict) -> Any:
+    def _post(self, path: str, body: dict, timeout: float | None) -> Any:
         request = urllib.request.Request(self.url + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=self.timeout) as reply:
+        with urllib.request.urlopen(request, timeout=timeout) as reply:
             return json.loads(reply.read())
 
     def add(self, messages: list[dict]) -> None:
-        self._post("/add", {"messages": messages})
+        self._post("/add", {"messages": messages}, self.timeout)
 
     def search(self, query: str, limit: int) -> list[dict]:
-        return self._post("/search", {"query": query, "limit": limit})["results"]
+        return self._post("/search", {"query": query, "limit": limit}, None)["results"]
+
+    def drain(self) -> None:
+        self._post("/drain", {}, None)
 
     def stats(self) -> dict[str, Any]:
         with urllib.request.urlopen(self.url + "/stats", timeout=60) as reply:
@@ -114,13 +127,16 @@ class SidecarClient:
                 self.process.kill()
 
 
-def start_sidecar(command: list[str], *, url: str, model: str, max_tokens: int, embedder: str, dims: int, log: Path,
-                  workdir: Path, wait: float = 900.0) -> SidecarClient:
-    """Start Mem0 in its own environment (``command`` runs that environment's Python) and wait for its ready line."""
+def start_sidecar(command: list[str], *, url: str, model: str, max_tokens: int, effort: str | None, thinking: str, embedder: str,
+                  dims: int, log: Path, workdir: Path, wait: float = 900.0) -> SidecarClient:
+    """Start Mem0 in its own environment (``command`` runs that environment's Python) and wait for its ready line. Its
+    model calls carry ``effort`` as the session's own calls do, and ``thinking`` ("on" or "off"); each reply goes to log.replies.jsonl and each call's
+    seconds, finish reason and tokens to log.calls.jsonl."""
     root = Path(__file__).resolve().parents[2]
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = [*command, "-m", "studies.long_run.mem0_sidecar", "--url", url, "--model", model, "--max-tokens", str(max_tokens),
-            "--embedder", embedder, "--dims", str(dims), "--workdir", str(workdir), "--replies", str(log.with_suffix(".replies.jsonl"))]
+            "--embedder", embedder, "--dims", str(dims), "--workdir", str(workdir), "--replies", str(log.with_suffix(".replies.jsonl")),
+            "--calls", str(log.with_suffix(".calls.jsonl")), "--thinking", thinking, *(["--effort", effort] if effort else [])]
     with log.open("a") as errors:
         process = subprocess.Popen(argv, cwd=root, stdout=subprocess.PIPE, stderr=errors, text=True)
     started = time.monotonic()
