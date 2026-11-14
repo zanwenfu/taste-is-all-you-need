@@ -35,6 +35,7 @@ class Mem0Turns:
     def __init__(self, client: Any) -> None:
         self.client = client
         self.pending: list[dict] = []
+        self.user_spoke = False  # the waiting exchange holds a message from the user (not the harness's, not a command's output)
         self.commits = 0  # adds made, so that a search before anything is stored can be skipped, as for Taste
         self.searches = 0
         self.search_seconds = 0.0  # what the searches waited, for Mem0's adds before them and for the search itself
@@ -47,12 +48,13 @@ class Mem0Turns:
             return
         content = turn["content"] if role == "user" else f"Command output:\n{turn['content']}"
         self.pending.append({"role": "user", "content": content})
+        self.user_spoke = self.user_spoke or (role == "user" and not turn.get("from_harness"))
 
     def flush(self) -> None:
         """Add what is waiting as one exchange: before a search, so that it sees everything recorded, and at the end."""
         if self.pending:
-            self.client.add(self.pending)
-            self.pending = []
+            self.client.add(self.pending, user=self.user_spoke)
+            self.pending, self.user_spoke = [], False
             self.commits += 1
 
     def search_with(self, request: str, budget: int, count: Callable[[str], int]) -> tuple[str, list[dict], list[dict], int]:
@@ -105,8 +107,8 @@ class SidecarClient:
         with urllib.request.urlopen(request, timeout=timeout) as reply:
             return json.loads(reply.read())
 
-    def add(self, messages: list[dict]) -> None:
-        self._post("/add", {"messages": messages}, self.timeout)
+    def add(self, messages: list[dict], user: bool = False) -> None:
+        self._post("/add", {"messages": messages, "user": user}, self.timeout)
 
     def search(self, query: str, limit: int) -> list[dict]:
         return self._post("/search", {"query": query, "limit": limit}, None)["results"]
@@ -127,17 +129,17 @@ class SidecarClient:
                 self.process.kill()
 
 
-def start_sidecar(command: list[str], *, url: str, model: str, max_tokens: int, effort: str | None, thinking: str, json_mode: str,
+def start_sidecar(command: list[str], *, url: str, model: str, max_tokens: int, effort: str | None, thinking: str, thinking_max_tokens: int,
                   embedder: str, dims: int, log: Path, workdir: Path, wait: float = 900.0) -> SidecarClient:
     """Start Mem0 in its own environment (``command`` runs that environment's Python) and wait for its ready line. Its
-    model calls carry ``effort`` as the session's own calls do, ``thinking`` and ``json_mode`` ("on" or "off"); each reply goes to log.replies.jsonl and each call's
+    model calls carry ``effort`` as the session's own calls do; ``thinking`` is on, off or user (see ``mem0_sidecar``); each reply goes to log.replies.jsonl and each call's
     seconds, finish reason and tokens to log.calls.jsonl."""
     root = Path(__file__).resolve().parents[2]
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = [*command, "-m", "studies.long_run.mem0_sidecar", "--url", url, "--model", model, "--max-tokens", str(max_tokens),
             "--embedder", embedder, "--dims", str(dims), "--workdir", str(workdir), "--replies", str(log.with_suffix(".replies.jsonl")),
-            "--calls", str(log.with_suffix(".calls.jsonl")), "--thinking", thinking, "--json-mode", json_mode,
-            *(["--effort", effort] if effort else [])]
+            "--calls", str(log.with_suffix(".calls.jsonl")), "--thinking", thinking,
+            "--thinking-max-tokens", str(thinking_max_tokens), *(["--effort", effort] if effort else [])]
     with log.open("a") as errors:
         process = subprocess.Popen(argv, cwd=root, stdout=subprocess.PIPE, stderr=errors, text=True)
     started = time.monotonic()

@@ -1638,12 +1638,14 @@ class _Mem0:
 
     def __init__(self) -> None:
         self.added: list[list[dict]] = []
+        self.users: list[bool] = []
         self.searched: list[str] = []
         self.drained = 0
         self.closed = False
 
-    def add(self, messages: list[dict]) -> None:
+    def add(self, messages: list[dict], user: bool = False) -> None:
         self.added.append(messages)
+        self.users.append(user)
 
     def drain(self) -> None:
         self.drained += 1
@@ -1698,6 +1700,18 @@ def test_each_mem0_add_is_one_exchange_ending_in_the_agents_reply(tmp_path: Path
     assert fake.added[1][0]["content"] == "Command output:\na.py"  # Mem0 takes users and assistants; a tool's output goes in as what the user side saw
     store.flush()  # before a search, and at the end, a turn still waiting is added on its own
     assert fake.added[-1] == [{"role": "user", "content": "left over"}] and store.commits == 3
+    assert fake.users == [True, False, True]  # which exchanges hold a message from the user, and so get Mem0's model thinking
+
+
+def test_a_harness_message_or_a_commands_output_is_not_the_users_words_for_mem0() -> None:
+    from studies.long_run.mem0_store import Mem0Turns
+
+    fake = _Mem0()
+    store = Mem0Turns(fake)
+    for turn in [{"role": "user", "content": "Use one tool call.", "from_harness": True}, {"role": "assistant", "content": "ok"},
+                 {"role": "tool", "content": "out"}, {"role": "user", "content": "Also use ls -1."}, {"role": "assistant", "content": "ok"}]:
+        store.add(turn)
+    assert fake.users == [False, True]
 
 
 def test_the_mem0_block_takes_the_best_memories_up_to_the_budget_and_shows_them_oldest_first() -> None:
@@ -1832,41 +1846,64 @@ def test_a_failed_mem0_add_ends_the_session_at_the_next_request_and_no_later_add
         server.shutdown()
 
 
-def test_mem0s_model_calls_are_counted_with_their_tokens_and_cut_offs(tmp_path: Path) -> None:
+def test_mem0s_model_calls_think_only_when_asked_and_a_thinking_reply_cut_off_is_asked_again(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
     from studies.long_run.mem0_sidecar import Calls
 
-    replies = iter([("stop", 100, 20), ("length", 300, 8192)])
-
-    class Completions:
-        def create(self, **params):
-            finish, prompt, completion = next(replies)
-            return SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish)],
-                                   usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion))
-
-    completions = Completions()
-    calls = Calls(completions, log=tmp_path / "calls.jsonl")
-    completions.create(model="m", messages=[])  # Mem0's own call, through the wrapper put in its place
-    completions.create(model="m", messages=[])
-    assert calls.totals() == {"model_calls": 2, "prompt_tokens": 400, "completion_tokens": 8212, "cut_off": 1}
-    lines = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
-    assert [line["finish"] for line in lines] == ["stop", "length"] and lines[1]["completion_tokens"] == 8192
-
-
-def test_without_json_mode_mem0s_calls_go_without_its_response_format() -> None:
-    from types import SimpleNamespace
-
-    from studies.long_run.mem0_sidecar import Calls
-
+    replies = iter([("stop", 100, 20), ("length", 300, 64), ("length", 300, 64), ("stop", 300, 30), ("length", 50, 16), ("length", 50, 64),
+                    ("length", 50, 64), ("length", 50, 64)])
     sent = []
 
     class Completions:
         def create(self, **params):
             sent.append(params)
-            return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop")], usage=None)
+            finish, prompt, completion = next(replies)
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish)],
+                                   usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion))
 
     completions = Completions()
-    Calls(completions, json_mode=False)
-    completions.create(model="m", messages=[], response_format={"type": "json_object"}, temperature=0.0)
-    assert sent == [{"model": "m", "messages": [], "temperature": 0.0}]
+    calls = Calls(completions, plain_cap=16, thinking_cap=64, tries=3, log=tmp_path / "calls.jsonl")
+    request = {"model": "m", "messages": [], "response_format": {"type": "json_object"}, "temperature": 0.0, "max_tokens": 2000}
+    assert completions.create(**request).choices[0].finish_reason == "stop"  # no thinking: one call at the plain cap
+    calls.thinking = True
+    assert completions.create(**request).choices[0].finish_reason == "stop"  # thinking: cut off twice, the third try ends
+    calls.thinking = False
+    assert completions.create(**request).choices[0].finish_reason == "length"  # no thinking: a cut-off reply is not asked again
+    calls.thinking = True
+    assert completions.create(**request).choices[0].finish_reason == "length"  # thinking: cut off on all three tries, Mem0 gets it so
+    assert [(p["max_tokens"], p["extra_body"]["chat_template_kwargs"]["enable_thinking"]) for p in sent] == \
+        [(16, False), (64, True), (64, True), (64, True), (16, False), (64, True), (64, True), (64, True)]
+    assert all(p["response_format"] == {"type": "json_object"} and p["temperature"] == 0.0 for p in sent)  # Mem0's own request otherwise
+    assert calls.totals() == {"model_calls": 8, "thinking_calls": 6, "prompt_tokens": 1200, "completion_tokens": 386, "cut_off": 6,
+                              "left_cut_off": 2}
+    lines = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert [(line["thinking"], line["try"], line["finish"]) for line in lines[:4]] == [(False, 1, "stop"), (True, 1, "length"), (True, 2, "length"), (True, 3, "stop")]
+
+
+def test_the_sidecar_tells_each_add_whether_its_exchange_holds_the_users_words() -> None:
+    import threading
+
+    from studies.long_run.mem0_sidecar import serve
+    from studies.long_run.mem0_store import SidecarClient
+
+    seen = []
+
+    class Memory:
+        def add(self, messages, *, user_id, infer, metadata=None):
+            seen.append(("add", messages[0]["content"]))
+            return {"results": []}
+
+        def search(self, query, *, filters, top_k, threshold):
+            return {"results": []}
+
+    server = serve(Memory(), stats=dict, before=lambda user: seen.append(("user", user)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = SidecarClient(f"http://127.0.0.1:{server.server_address[1]}", timeout=5)
+        client.add([{"role": "user", "content": "use ls -1"}], user=True)
+        client.add([{"role": "user", "content": "Command output:\na.py"}])
+        client.drain()
+        assert seen == [("user", True), ("add", "use ls -1"), ("user", False), ("add", "Command output:\na.py")]
+    finally:
+        server.shutdown()
