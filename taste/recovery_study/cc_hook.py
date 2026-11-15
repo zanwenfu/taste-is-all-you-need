@@ -80,7 +80,13 @@ def pre_tool_use(event, config, state):
     rewritten = {**given, "command": container_command(command, config["container"], config["cwd"], settings,
                                                        user=config.get("user"), timeout=config["timeout"]),
                  "timeout": config["tool_timeout_ms"], "run_in_background": False}
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": rewritten}}
+    # The hook approves the command it has just confined to the review's own container (the user's yes, Sun Nov 15
+    # 2026, 3:15 pm ET): without it Claude Code's own check refused a 'sh -c' script with rm that it could not read,
+    # so a third of one task family's reviews failed, where Luna's checker could run any command in its container.
+    # Only this rewritten command is approved; every other tool and every refused command is still denied above.
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                   "permissionDecisionReason": "confined to the review's own container",
+                                   "updatedInput": rewritten}}
 
 
 def post_tool_batch(event, config, state):

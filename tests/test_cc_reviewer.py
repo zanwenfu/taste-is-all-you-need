@@ -243,6 +243,8 @@ def test_a_review_runs_its_commands_in_the_container_and_gives_the_checkers_reco
         assert args[args.index(flag) + 1] == value
     rewritten = call["hooks"][0]["out"]["hookSpecificOutput"]["updatedInput"]
     assert rewritten["command"].startswith("docker exec -w /app c0ffee /bin/sh -c ")
+    # The hook approves exactly the command it confined to the container (Nov 15), and nothing it denies.
+    assert call["hooks"][0]["out"]["hookSpecificOutput"]["permissionDecision"] == "allow"
     assert rewritten["timeout"] == 150_000 and rewritten["run_in_background"] is False
     assert call["hooks"][0]["response"].startswith("exit code: 0\noutput:\ndef add(a, b):")
     # Preflight, then cat; and when the container started, read before and after the review.
