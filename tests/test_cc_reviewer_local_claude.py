@@ -120,7 +120,8 @@ def test_every_command_runs_only_as_docker_exec_into_the_container(local):
     assert review.hook["token_in_env"] is False
     commands = [call["command"] for call in local.docker() if "command" in call]
     assert commands == ["ls", "cat calc.py ; echo HOSTSIDE", "echo $(whoami) ~"]
-    assert {call["container"] for call in local.docker()} == {"c0ffee"}
+    # Every docker call names the review's own container (the transport check's inspect calls name it as "inspect").
+    assert {call.get("container") or call.get("inspect") for call in local.docker()} == {"c0ffee"}
     results = tool_results(local.requests()[-1])
     assert results[0].rstrip() == "exit code: 0\noutput:\ncalc.py"            # the container's folder, not the host's
     assert "HOSTSIDE" not in results[1].replace("cat: HOSTSIDE", "")

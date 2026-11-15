@@ -239,7 +239,8 @@ def test_a_review_runs_its_commands_in_the_container_and_gives_the_checkers_reco
     args = call["argv"]
     for flag, value in (("--model", "claude-haiku-5-5"), ("--max-turns", "30"), ("--tools", "Bash"),
                         ("--output-format", "json"), ("--effort", "medium"), ("--max-budget-usd", "2"),
-                        ("--allowedTools", "Bash(docker exec -w /app c0ffee /bin/sh -c *)")):
+                        ("--allowedTools", "Bash(docker exec -w /app c0ffee /bin/sh -c *)"),
+                        ("--permission-mode", "bypassPermissions")):
         assert args[args.index(flag) + 1] == value
     rewritten = call["hooks"][0]["out"]["hookSpecificOutput"]["updatedInput"]
     assert rewritten["command"].startswith("docker exec -w /app c0ffee /bin/sh -c ")

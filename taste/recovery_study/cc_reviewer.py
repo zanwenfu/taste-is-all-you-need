@@ -345,8 +345,11 @@ def claude_settings(container, cwd, user, hook_config, settings: ReviewSettings)
     return {
         "permissions": {"allow": [allow_rule(container, cwd, user, settings.docker)],
                         "deny": ["Read", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task",
-                                 "Glob", "Grep", "mcp__*"],
-                        "disableBypassPermissionsMode": "disable"},
+                                 "Glob", "Grep", "mcp__*"]},
+        # Bypass mode is on (the user's yes, Sun Nov 15 2026, about 5:20 pm ET): Claude Code refused complex scripts
+        # it could not parse (heredocs, rm -rf in /tmp, inline Python) even with the hook's approval, and nobody can
+        # approve in -p. The hook stays the boundary: every Bash command is rewritten into the review's own container,
+        # every other tool is denied, and --tools Bash leaves no other tool to call.
         # Before a tool runs: a hook that fails for any reason blocks the call (exit 2). After a batch: it counts
         # the step and announces the last; failing there only loses the count.
         # A hook that times out does not block its call, so the limit is far past the hook's few milliseconds.
@@ -363,7 +366,7 @@ def command_line(settings: ReviewSettings, paths, *, container, cwd, user, sessi
     args = [settings.claude, "-p", "--output-format", "json", "--model", settings.model, "--effort", settings.effort,
             "--settings", str(paths["settings"]), "--setting-sources", "", "--strict-mcp-config",
             "--tools", "Bash", "--allowedTools", allow_rule(container, cwd, user, settings.docker),
-            "--disallowedTools", "mcp__*", "--permission-prompts", "none",
+            "--disallowedTools", "mcp__*", "--permission-prompts", "none", "--permission-mode", "bypassPermissions",
             "--max-turns", str(turns if turns is not None else settings.max_steps),
             "--max-budget-usd", f"{settings.max_usd:g}",
             "--json-schema", json.dumps(VERDICT_SCHEMA, separators=(",", ":"))]
