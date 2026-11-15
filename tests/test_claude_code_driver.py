@@ -43,7 +43,8 @@ class FakeClaude:
         on_line(json.dumps({"type": "assistant", "parent_tool_use_id": None, "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": f"call-{number}", "name": "Bash", "input": {"command": self.bash_command}}]}}) + "\n")
         if self.result:
-            on_line(json.dumps({"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": self.cost,
+            # As real Claude Code does, the total is the resumed session's running total: each call adds self.cost to it.
+            on_line(json.dumps({"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": self.cost * number,
                                 "session_id": "sess-1", "num_turns": 2, "permission_denials": []}) + "\n")
         return 0
 
@@ -221,7 +222,21 @@ def test_run_stops_when_the_session_budget_is_spent(tmp_path):
     plan, fake = _plan(tmp_path), FakeClaude(cost=0.6)
     record = _run(plan, fake, session_usd=1.5)
     assert len(fake.calls) == 3 and record["ended_by"] == "budget"
-    assert [call["argv"][call["argv"].index("--max-budget-usd") + 1] for call in fake.calls] == ["1.00", "0.90", "0.30"]
+    # the cap is on the running total: 0 + 1.00, then 0.60 + 0.90, then 1.20 + 0.30
+    assert [call["argv"][call["argv"].index("--max-budget-usd") + 1] for call in fake.calls] == ["1.00", "1.50", "1.50"]
+
+
+def test_the_running_total_is_not_added_up_again(tmp_path):
+    totals = iter([0.032, 0.058, 0.077, 0.087, 0.171, 0.266])  # the pilot's floor session, first six calls
+
+    class Running(FakeClaude):
+        def __call__(self, argv, **options):
+            self.cost = next(totals) / (len(self.calls) + 1)  # so that cost * number is the next running total
+            return super().__call__(argv, **options)
+
+    record = _run(_plan(tmp_path), Running())
+    assert record["spent_usd"] == pytest.approx(0.266)
+    assert [call["cost_usd"] for call in record["calls"]] == pytest.approx([0.032, 0.026, 0.019, 0.010, 0.084, 0.095])
 
 
 def test_run_stops_on_a_call_with_no_result(tmp_path):

@@ -296,6 +296,10 @@ def run(plan: SessionPlan, *, execute: bool = False, per_call_usd: float, sessio
                               "claude_version": claude_version(plan.claude) if caller is call_claude else "not run",
                               "started": now(), "calls": [], "spent_usd": 0.0, "ended_by": None}
     session_id: str | None = None
+    # Claude Code's total_cost_usd (and its modelUsage tokens) is the resumed session's running total, not one call's (the pilot,
+    # Nov 15: the tokens grew from 70K to 659K cached over 11 calls). So a call's cost is the change in that total, and the cap given
+    # to Claude Code is on the running total too.
+    reported_total = 0.0
     with plan.stream.open("a") as stream:
         for number, turn in enumerate(plan.turns):
             left = session_usd - record["spent_usd"]
@@ -305,7 +309,8 @@ def run(plan: SessionPlan, *, execute: bool = False, per_call_usd: float, sessio
             if turn.task:
                 write_starting_files(plan.project, turn.task)
             budget = min(per_call_usd, left)
-            argv = command(budget_usd=budget, resume=session_id, model=plan.model, permission_mode=plan.permission_mode, claude=plan.claude)
+            argv = command(budget_usd=reported_total + budget, resume=session_id, model=plan.model, permission_mode=plan.permission_mode,
+                           claude=plan.claude)
             stream.write(json.dumps({"type": "study_turn", "turn": turn.id, "kind": turn.kind, "tells": list(turn.tells), "index": number,
                                      "time": now(), "prompt": turn.prompt}) + "\n")
             stream.flush()
@@ -327,11 +332,14 @@ def run(plan: SessionPlan, *, execute: bool = False, per_call_usd: float, sessio
             code = caller(argv, env=env, cwd=plan.project, stdin_line=user_message(turn.prompt), timeout_s=timeout_s, on_line=on_line,
                           stderr_path=plan.out / "stderr.log")
             result = seen.get("result") or {}
-            cost = float(result.get("total_cost_usd") or 0.0)
+            total = float(result.get("total_cost_usd") or 0.0)
+            cost = total - reported_total if total >= reported_total else total  # a total that went down started afresh
+            reported_total = total
             record["spent_usd"] = round(record["spent_usd"] + cost, 6)
             session_id = result.get("session_id") or seen.get("session_id") or session_id
             record["calls"].append({"turn": turn.id, "exit": code, "seconds": round(time.monotonic() - started, 1), "budget_usd": budget,
-                                    "cost_usd": cost, "subtype": result.get("subtype"), "session_id": session_id})
+                                    "cost_usd": round(cost, 6), "reported_total_usd": total, "subtype": result.get("subtype"),
+                                    "session_id": session_id})
             stream.write(json.dumps({"type": "study_call_end", "turn": turn.id, "exit": code, "time": now()}) + "\n")
             stream.flush()
             say(f"{plan.arm} {turn.id}: exit {code}, ${cost:.2f}, ${record['spent_usd']:.2f} of ${session_usd:.2f} spent")
