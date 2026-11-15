@@ -427,6 +427,46 @@ def transcript_counts(config, session, *, tools=False):
     return len(calls), split
 
 
+# The first line the container wrapper prints for every command it ran (``container_script``): ``exit code: N`` (or
+# ``exit code: none ...`` at the time limit), or ``(exit code: N)`` when it could not make its temporary file. A result
+# without it did not come from the wrapper: Docker's own error (no daemon, no such container, a lost connection).
+WRAPPER_LINE = re.compile(r"^\(?exit code: ", re.M)
+
+
+def _result_text(content):
+    """A tool result's text, as the transcript holds it: a string, or a list of text blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(_result_text(block.get("text", "")) if isinstance(block, dict) else str(block) for block in content)
+    return ""
+
+
+def tool_results(config, session):
+    """From the session's transcript: each tool call's result as the model got it, by tool-use ID."""
+    found = {}
+    for path in glob.glob(str(Path(config) / "projects" / "*" / f"{session}.jsonl")):
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get("message") if isinstance(entry, dict) else None
+                if entry.get("type") != "user" or not isinstance(message, dict) or not isinstance(message.get("content"), list):
+                    continue
+                for block in message["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        found[block.get("tool_use_id")] = _result_text(block.get("content"))
+    return found
+
+
+def transport_failures(config, session, rewritten):
+    """The commands sent into the container whose result the model got lacks the wrapper's exit line."""
+    results = tool_results(config, session)
+    return [call for call in rewritten if call in results and not WRAPPER_LINE.search(results[call])]
+
+
 @dataclass
 class Review:
     """One review's outcome: the checker-format submission, or why there is none."""
@@ -484,6 +524,19 @@ class Runner:
             raise ReviewFailed("container preflight failed: " + redact((done.stdout + done.stderr)[-500:], self._token))
         return "has:timeout" in done.stdout
 
+    def started_at(self, container):
+        """When the container last started (``docker inspect``); ``ReviewFailed`` if it cannot be read."""
+        args = [self.settings.docker, "inspect", "-f", "{{.State.StartedAt}}", container]
+        try:
+            done = subprocess.run(args, capture_output=True, text=True, timeout=60,
+                                  env={name: self.environ[name] for name in ENV_ALLOW if name in self.environ}
+                                  | {"HOME": self.environ.get("HOME", "/")})
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ReviewFailed(f"the container could not be inspected: {error}") from None
+        if done.returncode != 0:
+            raise ReviewFailed("the container could not be inspected: " + redact(done.stderr[-300:], self._token))
+        return done.stdout.strip()
+
     def review(self, container, cwd, task_text, work_dir, *, user=None, preflight=True):
         """Review the work in ``container`` at ``cwd``; ``task_text`` is the checker's task text as the checker gets
         it. Raises ``StopJob`` when the subscription cannot serve, ``ReviewFailed`` on other errors."""
@@ -494,6 +547,9 @@ class Runner:
             raise ValueError("a container is named by its ID or name")
         prompt = reviewer_task(task_text)
         timeout = self.preflight(container, cwd, user) if preflight else True
+        # When the container started: a restart during the review (the machine powered off, Docker restarted) means
+        # the commands may have run on another state than the one under review.
+        began_at = self.started_at(container) if preflight else None
         work = Path(work_dir)
         if work.exists():
             shutil.rmtree(work)
@@ -525,6 +581,12 @@ class Runner:
             self._tripwire(paths, session)
             raise
         state = self._tripwire(paths, session)
+        lost = transport_failures(paths["config"], session, state.get("rewritten") or [])
+        if lost:
+            raise ReviewFailed(f"transport_failed: {len(lost)} of {len(state.get('rewritten') or [])} commands did not "
+                               "reach the container (no wrapper exit line in their result); the review is not kept")
+        if began_at is not None and self.started_at(container) != began_at:
+            raise ReviewFailed("container_restarted: the container started again during the review; it is not kept")
         if ended != "verdict" and state.get("last_step") and ended in ("steps", "format_errors"):
             ended = state["last_step"]
         calls, split = transcript_counts(paths["config"], session)

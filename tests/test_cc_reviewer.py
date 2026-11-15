@@ -245,7 +245,9 @@ def test_a_review_runs_its_commands_in_the_container_and_gives_the_checkers_reco
     assert rewritten["command"].startswith("docker exec -w /app c0ffee /bin/sh -c ")
     assert rewritten["timeout"] == 150_000 and rewritten["run_in_background"] is False
     assert call["hooks"][0]["response"].startswith("exit code: 0\noutput:\ndef add(a, b):")
-    assert [entry.get("command") for entry in kit.docker_calls()] == [None, "cat calc.py"]  # preflight, then cat
+    # Preflight, then cat; and when the container started, read before and after the review.
+    assert [entry.get("command") for entry in kit.docker_calls() if entry["argv0"] == ["exec"]] == [None, "cat calc.py"]
+    assert [entry.get("inspect") for entry in kit.docker_calls() if entry["argv0"] == ["inspect"]] == ["c0ffee", "c0ffee"]
     no_token_anywhere(kit.tmp)
 
 
@@ -369,6 +371,52 @@ def test_a_container_that_is_not_there_fails_before_any_model_call(kit, tmp_path
     with pytest.raises(ReviewFailed):
         runner.review("c0ffee", "/app", TASK, tmp_path / "work")
     assert kit.calls() == []
+
+
+TWO_COMMANDS = [{"execute": True, "turns": [[{"name": "Bash", "input": {"command": "cat calc.py"}}],
+                                            [{"name": "Bash", "input": {"command": "ls"}}],
+                                            [{"name": "StructuredOutput", "input": DONE}]], "result": success(DONE, 3)}]
+
+
+def test_a_review_whose_commands_reached_the_container_is_kept(kit):
+    review = kit.review(TWO_COMMANDS)
+    assert review.reply["verdict"] == "done" and review.reply["commands"] == 2
+    assert [entry.get("inspect") for entry in kit.docker_calls() if "inspect" in entry] == ["c0ffee", "c0ffee"]
+
+
+def test_a_daemon_lost_mid_review_leaves_no_verdict(kit):
+    # Preflight (1st exec) and the first command (2nd) reach the container; from the 3rd on Docker answers with its own
+    # error. The model still gives a verdict, which the harness would accept: the review must not be kept.
+    (kit.tmp / "docker.jsonl.fail_from").write_text("3")
+    with pytest.raises(ReviewFailed, match="transport_failed: 1 of 2 commands"):
+        kit.review(TWO_COMMANDS)
+    assert [entry.get("failed") for entry in kit.docker_calls() if entry.get("argv0") == ["exec"]] == [None, None, True]
+
+
+def test_a_container_restarted_mid_review_leaves_no_verdict(kit):
+    (kit.tmp / "docker.jsonl.started").write_text("2026-11-15T01:00:00Z\n2026-11-15T03:30:00Z\n")
+    with pytest.raises(ReviewFailed, match="container_restarted"):
+        kit.review(TWO_COMMANDS)
+
+
+def test_a_container_that_cannot_be_inspected_fails_before_any_model_call(kit, tmp_path):
+    runner = kit.runner(TWO_COMMANDS)
+    docker = tmp_path / "bin" / "docker"
+    docker.write_text("#!/bin/sh\nif [ \"$1\" = inspect ]; then echo 'Error: No such object' >&2; exit 1; fi\n"
+                      "echo has:timeout\nexit 0\n")
+    with pytest.raises(ReviewFailed, match="could not be inspected"):
+        runner.review("c0ffee", "/app", TASK, tmp_path / "work")
+    assert kit.calls() == []
+
+
+def test_the_driver_keeps_a_lost_review_as_a_failure_to_retry(kit, tmp_path):
+    (kit.tmp / "docker.jsonl.fail_from").write_text("3")
+    runner = kit.runner(TWO_COMMANDS)
+    items, results = manifest(tmp_path, 1), tmp_path / "results.jsonl"
+    summary = cc_review_driver.drive(items, results, tmp_path / "w", runner, concurrency=1, log=lambda *_: None)
+    record = cc_review_driver.read_results(results)["run-0"]
+    assert summary["failed"] == 1 and record["reply"] is None and "transport_failed" in record["error"]
+    assert cc_review_driver.verdicts(results) == {"done": 0, "not_done": 0, "none": 0, "failed": 1}
 
 
 # -- the driver ---------------------------------------------------------------------------------------------------

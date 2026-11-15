@@ -72,6 +72,9 @@ def pre_tool_use(event, config, state):
         _event(state, "refused", command)
         return _deny(REFUSED.format(name=found))
     state["commands"] += 1
+    # Which calls went into the container: the runner reads each one's result back from the transcript and fails the
+    # review if the wrapper's exit line is not in it (the container, the daemon or the connection was lost).
+    state.setdefault("rewritten", []).append(event.get("tool_use_id"))
     _event(state, "command", command)
     settings = ReviewSettings(docker=config["docker"], **config["settings"])
     rewritten = {**given, "command": container_command(command, config["container"], config["cwd"], settings,

@@ -1,6 +1,8 @@
 """A stand-in for ``docker`` in the Claude Code reviewer's tests: it runs nothing.
 
-Installed as an executable named ``docker`` (``install(bin_dir, toy_dir, log)``), it answers the reviewer's
+Installed as an executable named ``docker`` (``install(bin_dir, toy_dir, log)``), it answers ``docker inspect -f
+{{.State.StartedAt}}`` (from ``<log>.started``, else a fixed time), can play a daemon that goes away (``<log>.fail_from``),
+and answers the reviewer's
 ``docker exec -w <cwd> <container> /bin/sh -c <script>`` from a local folder that stands for the container's working
 directory: it reads the reviewer's own command back out of the script (``command_from_script``) and answers ``cat``,
 ``ls``, ``pwd``, ``head`` and ``wc`` from the folder, in the checker's observation format; any other program is "not
@@ -79,8 +81,27 @@ def main(argv):
     toy, log, args = argv[1], argv[2], argv[3:]
     entry = {"argv0": args[:1]}
     try:
+        if args[:2] == ["inspect", "-f"] and args[2] == "{{.State.StartedAt}}":
+            # When the container started: the Nth line of <log>.started for the Nth inspect (the last repeated), so a
+            # test can make the container restart during a review; else one fixed time.
+            times = Path(log + ".started").read_text().split() if Path(log + ".started").exists() else []
+            seen = Path(log + ".inspects")
+            number = len(seen.read_text()) if seen.exists() else 0
+            seen.write_text("." * (number + 1))
+            entry.update(inspect=args[3])
+            print(times[min(number, len(times) - 1)] if times else "2026-11-15T00:00:00.000000000Z")
+            return 0
         if args[:1] != ["exec"]:
             raise ValueError("only exec")
+        # A daemon that goes away: from the Nth exec on (<log>.fail_from holds N), Docker's own error, no wrapper.
+        execs = sum(1 for line in Path(log).read_text().splitlines() if '"argv0": ["exec"]' in line) + 1 \
+            if Path(log).exists() else 1
+        fail_from = Path(log + ".fail_from")
+        if fail_from.exists() and execs >= int(fail_from.read_text()):
+            entry["failed"] = True
+            print("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+                  file=sys.stderr)
+            return 1
         rest = args[1:]
         cwd = "/"
         if rest[:1] == ["-w"]:

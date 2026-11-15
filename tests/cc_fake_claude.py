@@ -102,7 +102,14 @@ def main(argv):
                 done = subprocess.run(["/bin/sh", "-c", specific["updatedInput"]["command"]], capture_output=True,
                                       text=True, timeout=60, env=hook_env)
                 response = done.stdout + done.stderr
+            elif "updatedInput" in specific:
+                # Not run here: answered as the container wrapper answers a command with no output.
+                response = "exit code: 0\noutput:\n(none)"
             entry["response"] = response
+            # The result as Claude Code keeps it in the transcript, which the runner reads back.
+            with transcript.open("a") as handle:
+                handle.write(json.dumps({"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": block["id"], "content": response}]}}) + "\n")
             log["hooks"].append(entry)
             calls.append({"tool_name": block["name"], "tool_input": block["input"], "tool_use_id": block["id"],
                           "tool_response": response})
