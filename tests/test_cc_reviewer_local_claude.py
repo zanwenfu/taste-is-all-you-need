@@ -159,3 +159,13 @@ def test_a_hook_that_cannot_run_blocks_every_command_and_stops_the_job(local):
     assert caught.value.kind == "hook_bypassed"
     assert [call for call in local.docker() if "command" in call] == []
     assert "hook error" in json.dumps(local.requests()[-1]["messages"])
+
+
+def test_a_script_claude_code_cannot_read_still_runs_in_the_container(local):
+    # Sun Nov 15: Claude Code refused heredoc scripts with rm in -p ("requires approval, ... no approval surface"),
+    # even in bypass mode, so 10-18% of reviews failed closed. A reviewer's script must reach the container.
+    script = "cd /app && rm -rf /tmp/t && mkdir -p /tmp/t && cat > /tmp/t/x_test.go <<'EOF'\npackage x\nimport \"testing\"\nfunc TestX(t *testing.T) {}\nEOF\nls /tmp/t"
+    review = local.review([[bash(script)], verdict(DONE)])
+    results = tool_results(local.requests()[-1])
+    assert not any(r.startswith("Permission for this tool use was denied") for r in results), results
+    assert [call["command"] for call in local.docker() if "command" in call] == [script]
