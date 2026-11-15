@@ -7,7 +7,8 @@ session's transcript under ``CLAUDE_CONFIG_DIR``, sends each tool call through t
 command with ``/bin/sh`` when the run asks (the command is then a ``docker exec`` that the docker stand-in answers),
 and sends the batch through the PostToolBatch hook. Then it prints the run's result object and exits with its code.
 
-A run: {"turns": [[{"name": "Bash", "input": {...}}, ...], ...], "execute": bool, "skip_hook": bool,
+A run: {"turns": [[{"name": "Bash", "input": {...}}, ...], ...], "execute": bool, "skip_hook": bool, "no_ids": bool,
+"no_results": bool,
 "result": {...}, "exit": 0, "sleep": 0, "stderr": ""}. Every invocation is logged to ``calls.jsonl`` beside the
 scenario: its arguments, whether the token was in its environment, the prompt it read, and what the hooks said.
 """
@@ -90,9 +91,11 @@ def main(argv):
                 calls.append({"tool_name": block["name"], "tool_input": block["input"], "tool_use_id": block["id"],
                               "tool_response": "ran without the hook"})
                 continue
-            code, out, err = _hook(pre, {"hook_event_name": "PreToolUse", "tool_name": block["name"],
-                                         "tool_input": block["input"], "tool_use_id": block["id"],
-                                         "session_id": session}, hook_env)
+            event = {"hook_event_name": "PreToolUse", "tool_name": block["name"], "tool_input": block["input"],
+                     "tool_use_id": block["id"], "session_id": session}
+            if run.get("no_ids"):  # a Claude Code that sends its hook no tool-use ID
+                del event["tool_use_id"]
+            code, out, err = _hook(pre, event, hook_env)
             specific = out.get("hookSpecificOutput") or {}
             entry = {"event": "PreToolUse", "tool": block["name"], "exit": code, "out": out, "stderr": err[-300:]}
             response = "ok"
@@ -107,9 +110,10 @@ def main(argv):
                 response = "exit code: 0\noutput:\n(none)"
             entry["response"] = response
             # The result as Claude Code keeps it in the transcript, which the runner reads back.
-            with transcript.open("a") as handle:
-                handle.write(json.dumps({"type": "user", "message": {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": block["id"], "content": response}]}}) + "\n")
+            if not run.get("no_results"):  # no_results: a transcript that keeps no tool results
+                with transcript.open("a") as handle:
+                    handle.write(json.dumps({"type": "user", "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": block["id"], "content": response}]}}) + "\n")
             log["hooks"].append(entry)
             calls.append({"tool_name": block["name"], "tool_input": block["input"], "tool_use_id": block["id"],
                           "tool_response": response})

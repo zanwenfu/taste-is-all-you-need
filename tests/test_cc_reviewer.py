@@ -409,6 +409,42 @@ def test_a_container_that_cannot_be_inspected_fails_before_any_model_call(kit, t
     assert kit.calls() == []
 
 
+def test_a_review_whose_commands_have_no_tool_use_ids_fails_closed(kit):
+    # If Claude Code sent its hook no tool-use IDs, no result could be checked: the review is not kept.
+    with pytest.raises(ReviewFailed, match="transport_unverified: 2 commands went into the container, the hook knows 0"):
+        kit.review([{**TWO_COMMANDS[0], "no_ids": True}])
+
+
+def test_a_verdict_whose_commands_have_no_result_in_the_transcript_fails_closed(kit):
+    with pytest.raises(ReviewFailed, match="transport_unverified: 2 of 2 commands have no result"):
+        kit.review([{**TWO_COMMANDS[0], "no_results": True}])
+
+
+def test_only_the_token_line_of_an_env_file_reaches_the_reviewer(kit, tmp_path):
+    # The run reads the repository's own .env, which holds other keys too: only the token's value is taken, and only
+    # into the claude process's environment; no other variable of the file or of this process reaches it.
+    others = {"ANTHROPIC_API_KEY": KEYISH + "-other", "AWS_ACCESS_KEY_ID": "AKIA" + "FAKEFAKEFAKEFAKE",
+              "AWS_SECRET_ACCESS_KEY": "fake-aws-secret-0123456789", "AWS_BEARER_TOKEN_BEDROCK": "fake-bedrock-0123456789",
+              "OPENAI_API_KEY": "sk-" + "proj-fake-0123456789"}
+    env_file = tmp_path / "dot.env"
+    env_file.write_text("".join(f"{k}={v}\n" for k, v in others.items()) + f"export CLAUDE_CODE_OAUTH_TOKEN='{TOKEN}'\n"
+                        + "AWS_DEFAULT_REGION=us-east-1\n")
+    token = read_token(str(env_file), environ={})
+    assert token == TOKEN
+    cc_fake_claude.install(kit.bin, TWO_COMMANDS)
+    runner = Runner(token, ReviewSettings(claude=str(kit.bin / "claude"), docker="docker"), environ=kit.environ)
+    runner.review("c0ffee", "/app", TASK, tmp_path / "work")
+    (call,) = kit.calls()
+    assert call["token_present"] is True
+    leaked = [k for k in call["env_keys"] if k.startswith(("ANTHROPIC_", "AWS_", "OPENAI_"))]
+    assert leaked == [], leaked
+    for path in tmp_path.rglob("*"):
+        if path.is_file() and path != env_file:
+            data = path.read_bytes()
+            assert not any(value.encode() in data for value in others.values()), f"a value of the env file is in {path}"
+    no_token_anywhere(tmp_path / "work")
+
+
 def test_the_driver_keeps_a_lost_review_as_a_failure_to_retry(kit, tmp_path):
     (kit.tmp / "docker.jsonl.fail_from").write_text("3")
     runner = kit.runner(TWO_COMMANDS)

@@ -462,9 +462,11 @@ def tool_results(config, session):
 
 
 def transport_failures(config, session, rewritten):
-    """The commands sent into the container whose result the model got lacks the wrapper's exit line."""
+    """(lost, unanswered): the commands sent into the container whose result the model got lacks the wrapper's exit
+    line, and those with no result in the transcript at all."""
     results = tool_results(config, session)
-    return [call for call in rewritten if call in results and not WRAPPER_LINE.search(results[call])]
+    return ([call for call in rewritten if call in results and not WRAPPER_LINE.search(results[call])],
+            [call for call in rewritten if call not in results])
 
 
 @dataclass
@@ -581,10 +583,19 @@ class Runner:
             self._tripwire(paths, session)
             raise
         state = self._tripwire(paths, session)
-        lost = transport_failures(paths["config"], session, state.get("rewritten") or [])
+        # Fail closed: every command the hook sent into the container must be known by its tool-use ID, and each
+        # one's result must be the wrapper's. Without the IDs nothing could be checked, so the review is not kept.
+        rewritten, commands = state.get("rewritten") or [], int(state["commands"])
+        if commands and (len(rewritten) != commands or not all(rewritten)):
+            raise ReviewFailed(f"transport_unverified: {commands} commands went into the container, the hook knows "
+                               f"{sum(1 for call in rewritten if call)} of them by ID; the review is not kept")
+        lost, unanswered = transport_failures(paths["config"], session, rewritten)
         if lost:
-            raise ReviewFailed(f"transport_failed: {len(lost)} of {len(state.get('rewritten') or [])} commands did not "
-                               "reach the container (no wrapper exit line in their result); the review is not kept")
+            raise ReviewFailed(f"transport_failed: {len(lost)} of {len(rewritten)} commands did not reach the "
+                               "container (no wrapper exit line in their result); the review is not kept")
+        if unanswered and ended == "verdict":
+            raise ReviewFailed(f"transport_unverified: {len(unanswered)} of {len(rewritten)} commands have no result "
+                               "in the transcript of a review that gave a verdict; the review is not kept")
         if began_at is not None and self.started_at(container) != began_at:
             raise ReviewFailed("container_restarted: the container started again during the review; it is not kept")
         if ended != "verdict" and state.get("last_step") and ended in ("steps", "format_errors"):
