@@ -51,6 +51,9 @@ class ShellResult:
     output: str
     returncode: int
     timed_out: bool = False
+    # A replayed command's own time limit, as its record has it (None for a live command: the agent's limit applies).
+    # Not part of what a command printed, so not compared.
+    timeout_seconds: float | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

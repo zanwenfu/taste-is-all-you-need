@@ -272,7 +272,11 @@ class TasteEnvironment:
         result = self.host.run(self._shell(command), cwd=cwd or self.config.cwd, timeout_seconds=limit,
                                shown=command)
         if result.timed_out:
-            error = subprocess.TimeoutExpired(command, limit)
+            # A command replayed from a record is shown ended at the record's own limit, as the agent saw it then; the
+            # branch's request must equal the recorded one (a replayed 30-second kill under agent_command_seconds).
+            shown = limit if getattr(result, "timeout_seconds", None) is None else result.timeout_seconds
+            shown = int(shown) if float(shown).is_integer() else shown
+            error = subprocess.TimeoutExpired(command, shown)
             output = {"output": result.output, "returncode": -1,
                       "exception_info": f"An error occurred while executing the command: {error}",
                       "extra": {"exception_type": type(error).__name__, "exception": str(error)}}

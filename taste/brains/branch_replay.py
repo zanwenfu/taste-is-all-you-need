@@ -999,7 +999,9 @@ class ReplayHost:
                                       "output_chars": len(output), "output_sha256": text_sha(output)})
         if at_step and not self._runs:
             self._prefix_done()
-        return ShellResult(output, returncode, timed_out=timed_out)
+        # The record's own limit goes with the answer, so that an agent shows a command the record's limit cut off as
+        # the record showed it, whatever limit the branch's live commands have (agent_command_seconds).
+        return ShellResult(output, returncode, timed_out=timed_out, timeout_seconds=expected.timeout_seconds)
 
 
 def _cut(text, limit=65_536):

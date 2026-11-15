@@ -180,3 +180,32 @@ def test_a_branch_from_a_run_recorded_at_30_seconds_replays_it_and_gives_its_liv
     # Step 1 is the record's (its output answered from it); the first request after it is the recorded one.
     assert result.exit_status == "Submitted" and host.faithful and host.replayed == 1
     assert events[-1][1] == {"live": True, "context": "matched"} and live.limits == [120]
+
+
+def test_a_branch_replays_a_command_the_30_second_limit_killed_as_the_agent_saw_it():
+    # Nov 15 run, item 6: a base run recorded at 30 s whose first command was killed, branched with the longer limit.
+    # The replayed command must be shown as the record showed it ("after 30 seconds"), or the next request differs
+    # from the recorded one and the branch is unfaithful; only the live command gets the new limit.
+    MiniSweAgent = mini_swe_agent()
+    from taste.agents import ShellResult
+
+    class Killing(Live):
+        def run(self, command, *, cwd, timeout_seconds, shown=None):
+            if shown == "make test":
+                return ShellResult("", 137, timed_out=True)
+            return super().run(command, cwd=cwd, timeout_seconds=timeout_seconds, shown=shown)
+
+    recorder = Recorder(Killing(two_steps(), OUTPUTS))
+    first = MiniSweAgent(effort="low").run("Fix it.", recorder, cwd="/app", model_name="m")
+    assert first.exit_status == "Submitted"
+    recorded = json.dumps(list(first.messages), default=str)
+    assert "timed out after 30 seconds" in recorded
+    script = recorder.script()
+    assert [run["timed_out"] for step in script.to_dict()["steps"] for run in step["runs"]] == [True, False]
+    live, events = Timed([reply(f"echo {SENTINEL}", "c3")], OUTPUTS), []
+    host = ReplayHost(live, script, 1, record=lambda kind, payload: events.append((kind, payload)))
+    result = MiniSweAgent(effort="low", command_seconds=300).run("Fix it.", host, cwd="/app", model_name="m")
+    shown = json.dumps(list(result.messages), default=str)
+    assert host.faithful and host.replayed == 1, events[-3:]
+    assert "timed out after 30 seconds" in shown and "after 300 seconds" not in shown
+    assert result.exit_status == "Submitted" and live.limits == [300]
