@@ -387,7 +387,9 @@ def score_session(lines: Iterable[str | dict[str, Any]], tag: str, compaction_lo
                         _mark(scores["ls_one"], turn["id"], form == LS_ONE, call["compactions"])
                 elif name in _ECHOES and tag and (tag in segment or tag in call["output"]):
                     row["tag_echoed"] = True
-        if turn["kind"] == "task" and index > told.get("session_tag", len(turns)):
+        # The tag is due "before you finish": a task that never finished (no result line, as when a session is stopped mid-task)
+        # is not scored for it.
+        if turn["kind"] == "task" and index > told.get("session_tag", len(turns)) and turn["result"] is not None:
             _mark(scores["session_tag"], turn["id"], row["tag_echoed"], turn["compactions_at_end"])
         row["tag_mentioned"] = bool(tag) and any(tag in text for text in [*turn["texts"], *(call["command"] for call in turn["bash"])])
         result = turn["result"] or {}
@@ -401,7 +403,8 @@ def score_session(lines: Iterable[str | dict[str, Any]], tag: str, compaction_lo
             "override": override(turns, told.get("ls_one"), log_counts), "tasks": rows,
             "compactions": {"stream": totals["compactions"], "log_pre": sum(entry.get("event") == "PreCompact" for entry in entries),
                             "log_post": sum(entry.get("event") == "PostCompact" for entry in entries)},
-            "cost_usd": round(sum(row["cost_usd"] or 0 for row in rows.values()), 6), "usage": dict(usage),
+            # total_cost_usd is the resumed session's running total, so the session's cost is the largest one reported, not their sum
+            "cost_usd": round(max((row["cost_usd"] or 0 for row in rows.values()), default=0.0), 6), "usage": dict(usage),
             "cache_read_share": read / (read + fresh) if read + fresh else None, **{key: totals[key] for key in
                                                                                    ("tools", "bash_calls", "subagent_bash_calls", "broken_lines")}}
 

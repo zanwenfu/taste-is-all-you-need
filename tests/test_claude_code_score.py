@@ -59,14 +59,14 @@ def session():
     return [
         marker("task_01", tells=("python_B", "session_tag"), time=at(0)), {"type": "system", "subtype": "init", "session_id": "s1"},
         bash("b1", "cat .session_tag"), output("b1", TAG),
-        bash("b2", "cd t01 && python3 -B a.py; ls -la"), output("b2", "ok"), result(),
-        marker("task_02", time=at(1)), bash("b3", "python3 t02/b.py"), bash("b4", f"echo {TAG}"), output("b4", TAG), result(),
-        marker("task_03", time=at(2)), COMPACT, bash("b5", "ls -la t03"), said("Done."), result(),
-        marker("rule_ls", kind="rule", tells=("ls_one",), time=at(3)), said("Understood."), result(),
-        marker("task_04", time=at(4)), bash("b6", "ls -1 t04 && python3 -B -m unittest"), bash("b7", f"echo {TAG}"), result(),
+        bash("b2", "cd t01 && python3 -B a.py; ls -la"), output("b2", "ok"), result(0.1),
+        marker("task_02", time=at(1)), bash("b3", "python3 t02/b.py"), bash("b4", f"echo {TAG}"), output("b4", TAG), result(0.2),
+        marker("task_03", time=at(2)), COMPACT, bash("b5", "ls -la t03"), said("Done."), result(0.3),
+        marker("rule_ls", kind="rule", tells=("ls_one",), time=at(3)), said("Understood."), result(0.4),
+        marker("task_04", time=at(4)), bash("b6", "ls -1 t04 && python3 -B -m unittest"), bash("b7", f"echo {TAG}"), result(0.5),
         marker("task_05", time=at(5)), COMPACT, bash("b8", "ls -la t05", context=42000), bash("b9", "echo $(cat notes/tag.txt)"),
-        output("b9", TAG), result(),
-        marker("task_06", time=at(6)), bash("b10", "ls t06"), result(),
+        output("b9", TAG), result(0.6),
+        marker("task_06", time=at(6)), bash("b10", "ls t06"), result(0.7),
     ]
 
 
@@ -218,10 +218,17 @@ def test_compactions_from_the_stream_and_the_log_agree_turn_by_turn():
     assert summary["tasks"]["task_03"]["compactions_in_log"] == 1
 
 
+def test_a_task_stopped_before_it_finished_is_not_scored_for_the_tag():
+    lines = [marker("task_01", tells=("session_tag",)), result(0.1), marker("task_02", time=at(1)), bash("b1", f"echo {TAG}"),
+             result(0.2), marker("task_03", time=at(2)), bash("b2", "ls -1")]  # task_03 was cut off: no result line
+    scores = score_session(lines, TAG)["scores"]["session_tag"]
+    assert (scores["obeyed"], scores["applies"]) == (1, 1)
+
+
 def test_session_totals():
     summary = score_session(session(), TAG)
     assert summary["valid"] is True and summary["turns"] == 7 == summary["turns_with_result"]
-    assert summary["cost_usd"] == pytest.approx(0.7)
+    assert summary["cost_usd"] == pytest.approx(0.7)  # the running total at the end, not the sum 2.8 of the totals
     assert summary["cache_read_share"] == pytest.approx(0.8)
     assert summary["tools"] == {"Bash": 10} and summary["bash_calls"] == 10
 
