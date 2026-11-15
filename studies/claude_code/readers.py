@@ -17,7 +17,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from studies.claude_code.driver import OTHER_CREDENTIALS, SUBSCRIPTION_TOKEN
 from studies.context_rot.criteria import parse_reply, reader_prompt
+
+TOKEN_FILE_ENV = "CC_STUDY_TOKEN_FILE"  # the subscription token's file, when the hook's environment does not carry the token
 
 READER_MODEL = os.environ.get("CC_STUDY_READER_MODEL", "claude-haiku-5-5")
 READER_TIMEOUT_S = 90  # inside the hook's own timeout, which settings.py sets above the 30-second default
@@ -40,6 +43,15 @@ def claude_reader(message: str, *, run=subprocess.run, claude: str = "claude") -
             "--disallowedTools", "Bash,Edit,Write,Read,Glob,Grep,WebFetch,WebSearch"]
     env = {**os.environ, "CLAUDE_CONFIG_DIR": str(home / "config"), "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
            "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}
+    # Claude Code does not hand the subscription token to the commands its hooks start (the pilot's reader got "Not logged in",
+    # Nov 15), so the reader takes it from its file, for its own call only; it is never printed or saved. API credentials are dropped,
+    # as in the driver, so the reader too runs only on the subscription.
+    for name in OTHER_CREDENTIALS:
+        env.pop(name, None)
+    if not env.get(SUBSCRIPTION_TOKEN):
+        token_file = Path(os.environ.get(TOKEN_FILE_ENV) or Path.home() / ".config" / "claude-code-oauth-token")
+        if token_file.exists():
+            env[SUBSCRIPTION_TOKEN] = token_file.read_text().strip()
     done = run(argv, input=user["content"], capture_output=True, text=True, timeout=READER_TIMEOUT_S, check=False,
                cwd=str(home / "work"), env=env)
     if done.returncode != 0:

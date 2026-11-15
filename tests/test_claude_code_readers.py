@@ -35,6 +35,19 @@ def test_the_reader_loads_nothing_of_the_session(tmp_path, monkeypatch):
     assert MESSAGE in seen["input"] and seen["timeout"] < 120  # inside the hook's own timeout
 
 
+def test_without_the_token_in_its_environment_the_reader_takes_it_from_its_file(tmp_path, monkeypatch):
+    stand_in = "sk-ant-oat01-" + "r" * 40  # never a real token
+    (tmp_path / "token").write_text(stand_in + "\n")
+    monkeypatch.setenv(readers.READER_HOME_ENV, str(tmp_path / "reader"))
+    monkeypatch.setenv(readers.TOKEN_FILE_ENV, str(tmp_path / "token"))
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-" + "a" * 40)
+    seen = {}
+    readers.claude_reader(MESSAGE, run=_fake('{"standing": []}', seen=seen))
+    assert seen["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == stand_in
+    assert "ANTHROPIC_API_KEY" not in seen["env"]
+
+
 def test_only_quotes_found_word_for_word_are_kept(tmp_path, monkeypatch):
     monkeypatch.setenv(readers.READER_HOME_ENV, str(tmp_path / "reader"))
     quote = "For the rest of this session, whenever you run Python, pass it the -B flag, as in python3 -B script.py."
