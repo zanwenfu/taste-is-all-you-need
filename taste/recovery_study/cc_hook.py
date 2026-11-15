@@ -10,6 +10,10 @@ PreToolUse, for every tool call:
   checker's ``forbidden_reference``), when it is denied with the checker's message and nothing runs;
 - any other tool is denied.
 
+PermissionRequest, when Claude Code's own safety check still asks for approval of a command (a ``sh -c`` script with
+``rm`` it cannot parse asks even in bypass mode, and a PreToolUse "allow" does not answer it): allowed only for a
+command this hook wrote itself (its digest is kept from PreToolUse); anything else is denied.
+
 PostToolBatch, once per model reply that called tools: counts the step, and before the last one (the checker's rule:
 no room for two more steps, or for two more of the slowest so far within the time) tells the model so, once.
 
@@ -20,6 +24,7 @@ settings say ``|| exit 2``), which blocks the call.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import itertools
 import json
 import os
@@ -35,6 +40,10 @@ def _load(path):
 def _deny(reason):
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                    "permissionDecisionReason": reason}}
+
+
+def _digest(command):
+    return hashlib.sha256(str(command).encode()).hexdigest()
 
 
 def _event(state, kind, command=""):
@@ -80,6 +89,8 @@ def pre_tool_use(event, config, state):
     rewritten = {**given, "command": container_command(command, config["container"], config["cwd"], settings,
                                                        user=config.get("user"), timeout=config["timeout"]),
                  "timeout": config["tool_timeout_ms"], "run_in_background": False}
+    # Claude Code checks the rewritten command again and may still ask (PermissionRequest): only this one is answered.
+    state.setdefault("approved", []).append(_digest(rewritten["command"]))
     # The hook approves the command it has just confined to the review's own container (the user's yes, Sun Nov 15
     # 2026, 3:15 pm ET): without it Claude Code's own check refused a 'sh -c' script with rm that it could not read,
     # so a third of one task family's reviews failed, where Luna's checker could run any command in its container.
@@ -87,6 +98,19 @@ def pre_tool_use(event, config, state):
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                    "permissionDecisionReason": "confined to the review's own container",
                                    "updatedInput": rewritten}}
+
+
+def permission_request(event, config, state):
+    """Claude Code's own check asks to approve a call: yes only for a command this hook rewrote into the container."""
+    name, given = event.get("tool_name"), event.get("tool_input") or {}
+    command = given.get("command")
+    if name == "Bash" and isinstance(command, str) and _digest(command) in state.get("approved", ()):
+        _event(state, "approved", command)
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}
+    state["denied"] += 1
+    _event(state, "permission_denied", name)
+    return {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                   "decision": {"behavior": "deny", "message": "not a command the hook wrote"}}}
 
 
 def post_tool_batch(event, config, state):
@@ -126,6 +150,8 @@ def main(argv):
         state["token_in_env"] = bool(state.get("token_in_env")) or "CLAUDE_CODE_OAUTH_TOKEN" in os.environ
         if kind == "PreToolUse":
             out = pre_tool_use(event, config, state)
+        elif kind == "PermissionRequest":
+            out = permission_request(event, config, state)
         elif kind == "PostToolBatch":
             out = post_tool_batch(event, config, state)
         else:

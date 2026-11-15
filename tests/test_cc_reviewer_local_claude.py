@@ -164,8 +164,15 @@ def test_a_hook_that_cannot_run_blocks_every_command_and_stops_the_job(local):
 def test_a_script_claude_code_cannot_read_still_runs_in_the_container(local):
     # Sun Nov 15: Claude Code refused heredoc scripts with rm in -p ("requires approval, ... no approval surface"),
     # even in bypass mode, so 10-18% of reviews failed closed. A reviewer's script must reach the container.
-    script = "cd /app && rm -rf /tmp/t && mkdir -p /tmp/t && cat > /tmp/t/x_test.go <<'EOF'\npackage x\nimport \"testing\"\nfunc TestX(t *testing.T) {}\nEOF\nls /tmp/t"
+    # A live reviewer's command (vuls, Nov 15), denied without the PermissionRequest hook even in bypass mode.
+    script = ("cd /app && cat > reporter/sbom/zz_eval_test.go <<'EOF'\npackage sbom\nimport \"testing\"\n"
+              "func TestEvalParse(t *testing.T) {\n\tcases := [][3]string{\n"
+              "\t\t{\"npm\",\"@babel/core\",\"@babel|core|\"},\n\t}\n\tfor _, c := range cases {\n"
+              "\t\tns, n, sp := parsePkgName(c[0], c[1])\n\t\tgot := ns+\"|\"+n+\"|\"+sp\n"
+              "\t\tif got != c[2] { t.Errorf(\"%s %s: got %q want %q\", c[0], c[1], got, c[2]) }\n\t}\n}\nEOF\n"
+              "timeout 110 go test ./reporter/sbom/ -run TestEvalParse -v 2>&1 | tail -20; echo done")
     review = local.review([[bash(script)], verdict(DONE)])
     results = tool_results(local.requests()[-1])
     assert not any(r.startswith("Permission for this tool use was denied") for r in results), results
     assert [call["command"] for call in local.docker() if "command" in call] == [script]
+    assert [event["kind"] for event in review.hook["events"]] == ["command", "approved"]

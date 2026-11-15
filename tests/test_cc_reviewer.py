@@ -214,7 +214,21 @@ def test_the_settings_allow_bash_only_as_docker_exec(tmp_path):
     assert settings["permissions"]["allow"] == ["Bash(docker exec -w /app c0ffee /bin/sh -c *)"]
     assert {"Read", "Edit", "Write", "WebFetch", "WebSearch", "mcp__*"} <= set(settings["permissions"]["deny"])
     assert settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"].endswith("|| exit 2")
+    assert settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"].endswith("|| exit 2")
     assert TOKEN not in json.dumps(settings)
+
+
+def test_the_hook_approves_only_a_command_it_wrote():
+    from taste.recovery_study.cc_hook import _digest, permission_request
+    written = "docker exec -w /app c0ffee /bin/sh -c 'ls'"
+    state = {"denied": 0, "events": [], "approved": [_digest(written)]}
+    asked = {"hook_event_name": "PermissionRequest", "tool_name": "Bash"}
+    mine = permission_request({**asked, "tool_input": {"command": written}}, {}, state)
+    other = permission_request({**asked, "tool_input": {"command": "rm -rf /tmp/x"}}, {}, state)
+    read = permission_request({"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}, {}, state)
+    assert mine["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
+    assert other["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+    assert read["hookSpecificOutput"]["decision"]["behavior"] == "deny" and state["denied"] == 2
 
 
 # -- one review ---------------------------------------------------------------------------------------------------

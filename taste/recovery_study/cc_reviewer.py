@@ -353,8 +353,13 @@ def claude_settings(container, cwd, user, hook_config, settings: ReviewSettings)
         # Before a tool runs: a hook that fails for any reason blocks the call (exit 2). After a batch: it counts
         # the step and announces the last; failing there only loses the count.
         # A hook that times out does not block its call, so the limit is far past the hook's few milliseconds.
+        # Bypass mode still asks before a 'sh -c' script with rm that Claude Code cannot parse, and a PreToolUse
+        # "allow" does not answer it; under --permission-prompts none only a PermissionRequest hook can. The hook
+        # approves only a command it rewrote itself; with no answer (or a failure) the call is denied.
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": hook + " || exit 2",
                                                               "timeout": 300}]}],
+                  "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": hook + " || exit 2",
+                                                                     "timeout": 300}]}],
                   "PostToolBatch": [{"hooks": [{"type": "command", "command": hook, "timeout": 300}]}]},
         "disableAllHooks": False, "attribution": {"commit": "", "pr": ""}, "includeGitInstructions": False,
         "disableClaudeAiConnectors": True, "enableAllProjectMcpServers": False, "autoMemoryEnabled": False,
