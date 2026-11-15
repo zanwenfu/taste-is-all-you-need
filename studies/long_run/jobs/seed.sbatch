@@ -29,6 +29,10 @@ if [ $READER = laguna ]; then
   # It thinks before it answers, and a thought counts toward the output cap: at 8,192 a hard task lost three replies in a row to the cap, and so left its machine, in 8 of 10 arms of the first session.
   FOLDER=$D/models/laguna-s-2.1-nvfp4; MODEL=poolside/laguna-s-2.1; MOST=16384
   SERVE=(--tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs '{"enable_thinking": true}')
+elif [ $READER = llama ]; then
+  # A second model for the long run: no thinking, so the output cap is the one the gpt-oss run used.
+  FOLDER=$D/models/llama-3.1-70b-instruct; MODEL=meta-llama/Meta-Llama-3.1-70B-Instruct; MOST=4096
+  SERVE=(--tensor-parallel-size 2 --max-model-len 32768 --enable-auto-tool-choice --tool-call-parser llama3_json)
 else
   FOLDER=$D/models/gpt-oss-120b; MODEL=openai/gpt-oss-120b; MOST=4096
   SERVE=(--tool-call-parser openai)

@@ -16,7 +16,8 @@ if [ $READER = laguna ]; then
   SERVE=(--max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice --tensor-parallel-size 2 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --default-chat-template-kwargs '{"enable_thinking": true}')
 elif [ $READER = llama ]; then
   FOLDER=$D/models/llama-3.1-70b-instruct; MODEL=meta-llama/Meta-Llama-3.1-70B-Instruct
-  SERVE=(--tensor-parallel-size 2 --max-model-len 32768 --gpu-memory-utilization 0.92)
+  # The tool-call flags let it act in the long run as Laguna does (Llama 3.1's own JSON tool format); a request with no tools does not use them.
+  SERVE=(--tensor-parallel-size 2 --max-model-len 32768 --gpu-memory-utilization 0.92 --enable-auto-tool-choice --tool-call-parser llama3_json)
 else
   FOLDER=$D/models/gpt-oss-120b; MODEL=openai/gpt-oss-120b
   SERVE=(--max-model-len 131072 --gpu-memory-utilization 0.92 --enable-auto-tool-choice --tool-call-parser openai)
