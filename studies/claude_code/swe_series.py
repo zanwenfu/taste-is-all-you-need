@@ -67,10 +67,31 @@ REVISION = ("Thanks. Small change: from now on put the line saying which files y
 REVISED_AT = {"revise": 7}
 RESTATED_REVISED = {"revise": "Remember: keep your hand-backs short, under 150 words, end each one with a line saying which files you "
                               "changed, and don't touch the tests unless I ask."}
+# Rules added gradually (the user's direction, Nov 16 ~5:50 pm ET; design in notes/cc-memory-pilot-design.md): one long session of real
+# tasks; every other task the user adds one rule in passing, in an ordinary reply. Each rule goes against a habit Claude Code shows
+# when no rule asks otherwise (share of last night's 180 tasks with the habit: tests 40-60% touched in a new session, files line 0%
+# at the start, long hand-backs most tasks, markdown 68-78%, shell search 74%, shell reads 68%, python without -B 83%, "Tests run" 0%).
+# (task, what the user says, the rule as restated, the check's name)
+GRADUAL = (
+    (2, "Thanks. From now on, don't touch the tests unless I ask.", "don't touch the tests unless I ask", "tests"),
+    (4, "Looks good. Going forward, start each hand-back with a line saying which files you changed.",
+     "start each hand-back with a line saying which files you changed", "files_first"),
+    (6, "Nice. Keep your hand-backs under 150 words please, I don't read long ones.", "keep hand-backs under 150 words", "brief"),
+    (8, "Thanks. Also, plain text in your hand-backs please: no headings, no bold, no bullet or numbered lists.",
+     "plain text in hand-backs: no headings, no bold, no bullet or numbered lists", "plain"),
+    (10, "Good. When you search the code, use your Grep and Glob tools, not grep or find in the shell.",
+     "search the code with your Grep and Glob tools, not grep or find in the shell", "search_tools"),
+    (12, "Thanks. Read files with your Read tool, not cat, head, tail or sed in the shell.",
+     "read files with your Read tool, not cat, head, tail or sed in the shell", "read_tool"),
+    (14, "One more thing: whenever you run Python, use python -B.", "whenever you run Python, use python -B", "python_B"),
+    (16, "And end each hand-back with a line starting 'Tests run:' that lists the test commands you ran, or says none.",
+     "end each hand-back with a line starting 'Tests run:' that lists the test commands you ran, or says none", "tests_run_last"),
+)
+TO_CLAUDE_MD = "Add this to CLAUDE.md."  # the claudemd arm: Claude Code's documented way to keep a chat instruction ("add this to CLAUDE.md")
 BRIEF_WORDS = 150
 REMEMBER = "Save these rules to your memory."
 UPDATE_MEMORY = "Update your memory with this."  # the remember arm, at the change
-ARMS = ("shipped", "remember", "ours", "restated", "plain")
+ARMS = ("shipped", "remember", "claudemd", "ours", "restated", "plain")
 CONFIG_IN_CONTAINER = "/cc/config"
 CLAUDE_IN_CONTAINER = "/usr/local/bin/claude"
 CODE_IN_CONTAINER = "/cc/code"
@@ -156,7 +177,24 @@ def pick_tasks(tasks_root: Path, repo: str, count: int, seed: int, avoid: tuple[
 def opening(arm: str, ruleset: str = "two") -> str | None:
     if arm == "plain":
         return None
+    if arm == "claudemd":
+        return f"{OPENINGS[ruleset]} Add these rules to CLAUDE.md."
     return f"{OPENINGS[ruleset]} {REMEMBER}" if arm == "remember" else OPENINGS[ruleset]
+
+
+def gradual_head(arm: str, number: int) -> str | None:
+    """What precedes task ``number``'s instruction under the gradual rules: the rule the user adds at this task, if any (with "Add this
+    to CLAUDE.md." for the claudemd arm); the restated arm first repeats every rule added before this task."""
+    if arm == "plain":
+        return None
+    parts = []
+    earlier = [restated for task, _, restated, _ in GRADUAL if task < number]
+    if arm == "restated" and earlier:
+        parts.append("Remember: " + "; ".join(earlier) + ".")
+    said = next((message for task, message, _, _ in GRADUAL if task == number), None)
+    if said:
+        parts.append(f"{said} {TO_CLAUDE_MD}" if arm == "claudemd" else f"{said} {REMEMBER}" if arm == "remember" else said)
+    return " ".join(parts) or None
 
 
 def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | None, claude_binary: Path,
@@ -165,7 +203,7 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     """``sessions``: the 1-based task numbers that start a new session (the first always does). The rules head the first message."""
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
-    if ruleset not in OPENINGS:
+    if ruleset not in OPENINGS and ruleset != "gradual":
         raise ValueError(f"unknown rule set {ruleset!r}")
     if window is not None and not 100_000 <= window <= 1_000_000:
         raise ValueError("the compaction window must be 100,000 to 1,000,000 tokens (Claude Code's documented range)")
@@ -175,6 +213,11 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     rounds = []
     for number, folder in enumerate(task_folders, start=1):
         task = load_task(folder)
+        if ruleset == "gradual":
+            head = gradual_head(arm, number)
+            prompt = f"{head}\n\n{task.instruction}" if head else task.instruction
+            rounds.append(Round(f"round_{number:02d}", number, prompt, task, number in starts, tells_rules=head is not None))
+            continue
         told, changed = TOLD_AT[ruleset], REVISED_AT.get(ruleset)
         if changed and number == changed:
             head = None if arm == "plain" else f"{REVISION} {UPDATE_MEMORY}" if arm == "remember" else REVISION
@@ -312,6 +355,115 @@ def revise_checks(hand_back: str | None, patch: str, number: int, ruleset: str =
     found = files_where(hand_back)
     return {**casual_checks(hand_back, patch), "files_where": {**found, "asked": asked, "kept": found["where"] == asked,
                                                                "stale": asked == "end" and found["where"] == "start"}}
+
+
+_READERS = {"cat", "head", "tail", "less", "more", "nl", "bat"}
+_SEARCHERS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find"}
+# Options that take the next argument as their value, per program (grep's and sed's -n take none).
+_TAKES_VALUE = {"head": {"-n", "-c", "--lines", "--bytes"}, "tail": {"-n", "-c", "--lines", "--bytes"},
+                "grep": {"-m", "-A", "-B", "-C", "-e", "-f", "--max-count", "--context", "--regexp", "--file"},
+                "sed": {"-e", "-f", "--expression", "--file"}}
+_TAKES_VALUE.update({"egrep": _TAKES_VALUE["grep"], "fgrep": _TAKES_VALUE["grep"]})
+_SCRATCH_PATHS = ("/tmp", "/dev", "/var/tmp", "/proc")
+_MARKDOWN = re.compile(r"\*\*|^\s{0,3}#{1,6}\s|^\s*[-*+]\s+\S|^\s*\d+[.)]\s+\S", re.M)
+_TESTS_RUN = re.compile(r"^\W*tests?\s+run\s*:", re.I)
+
+
+def _operands(name: str, args: list[str]) -> list[str]:
+    """Arguments that are not options, nor an option's value, nor a redirection."""
+    out, skip, takes = [], False, _TAKES_VALUE.get(name, set())
+    for a in args:
+        if skip:
+            skip = False
+        elif a in takes:
+            skip = True
+        elif not a.startswith("-") and "<" not in a and ">" not in a:
+            out.append(a)
+    return out
+
+
+def _after_script(name: str, args: list[str], operands: list[str]) -> list[str]:
+    """For grep and sed the first operand is the pattern or script, unless one was given with -e or -f."""
+    given = any(a in ("-e", "-f", "--regexp", "--file", "--expression") for a in args)
+    return operands if given else operands[1:]
+
+
+def shell_reads(command: str) -> list[str]:
+    """Files read in the shell instead of with the Read tool: cat, head, tail, less, more, nl or bat on a file, or sed -n with a
+    file. Reading a pipe (pytest | tail -5), writing with cat > or a here-document, and scratch files (/tmp) do not count."""
+    from studies.claude_code.score import program, split_commands, words
+    found = []
+    for segment in split_commands(command):
+        name, args = program(words(segment))
+        if name == "cat" and any(a.startswith((">", "<<")) for a in args):
+            continue
+        operands = _operands(name, args)
+        files = _after_script(name, args, operands) if name == "sed" else operands
+        if name in _READERS | {"sed"} and (name != "sed" or "-n" in args) and files \
+                and not all(f.startswith(_SCRATCH_PATHS) for f in files):
+            found.append("sed -n" if name == "sed" else name)
+    return found
+
+
+def shell_searches(command: str) -> list[str]:
+    """Code searched in the shell instead of with the Grep or Glob tools: find, rg, ag, ack, git grep, and grep with -r or with a
+    path (grep reading a pipe, as in pytest | grep FAIL, and searches of scratch files do not count)."""
+    from studies.claude_code.score import program, split_commands, words
+    found = []
+    for segment in split_commands(command):
+        name, args = program(words(segment))
+        if name == "xargs":  # xargs grep searches the files fed to it
+            name, args = program([a for a in args if not a.startswith("-")])
+            if name in _SEARCHERS:
+                found.append(name)
+            continue
+        if name == "git" and args[:1] == ["grep"]:
+            found.append("git grep")
+            continue
+        if name not in _SEARCHERS:
+            continue
+        operands = _operands(name, args)
+        paths = operands if name == "find" else _after_script(name, args, operands)
+        recursive = "--recursive" in args or any(a.startswith("-") and not a.startswith("--") and ("r" in a or "R" in a) for a in args)
+        if paths and all(p.startswith(_SCRATCH_PATHS) for p in paths):
+            continue
+        if name in ("find", "rg", "ag", "ack") or recursive or paths:
+            found.append(name)
+    return found
+
+
+def tests_run_last(hand_back: str | None) -> bool:
+    """The hand-back ends with a line starting "Tests run:" (its last line, or the first line of its last paragraph)."""
+    blocks = [[line for line in (_DECOR.sub("", raw) for raw in b.splitlines()) if line]
+              for b in re.split(r"\n\s*\n", (hand_back or "").strip())]
+    blocks = [b for b in blocks if b]
+    return bool(blocks) and any(_TESTS_RUN.match(line) for line in (blocks[-1][0], blocks[-1][-1]))
+
+
+def gradual_checks(tools: list[dict[str, Any]], hand_back: str | None, patch: str, number: int) -> dict[str, Any]:
+    """Each gradual rule on one task: kept, how many chances it had to break (hand-back rules: one per task; tool rules: every search,
+    file read or python run), and whether the user had added it by this task."""
+    bash = [str(t.get("input", {}).get("command", "")) for t in tools if t.get("name") == "Bash"]
+    names = [t.get("name") for t in tools]
+    reads = [r for c in bash for r in shell_reads(c)]
+    searches = [x for c in bash for x in shell_searches(c)]
+    screen = screen_checks(tools, hand_back)
+    marks = _MARKDOWN.findall(hand_back or "")
+    first = files_where(hand_back)
+    py = screen["python_B"]
+    found = {
+        "tests": {**tests_rule(patch), "chances": 1},
+        "files_first": {"kept": first["where"] in ("start", "both"), "first_line": first["first_line"], "chances": 1},
+        "brief": {**screen["brief"], "chances": 1},
+        "plain": {"kept": not marks, "marks": len(marks), "chances": 1},
+        "search_tools": {"kept": not searches, "shell": searches[:10], "grep_glob_tool": names.count("Grep") + names.count("Glob"),
+                         "chances": len(searches) + names.count("Grep") + names.count("Glob")},
+        "read_tool": {"kept": not reads, "shell": reads[:10], "read_tool": names.count("Read"), "chances": len(reads) + names.count("Read")},
+        "python_B": {"kept": py["kept"], "with_B": py["with_B"], "without_B": py["without_B"], "chances": py["with_B"] + py["without_B"]},
+        "tests_run_last": {"kept": tests_run_last(hand_back), "chances": 1},
+    }
+    told = {key for task, _, _, key in GRADUAL if task <= number}
+    return {key: {**value, "told": key in told} for key, value in found.items()}
 
 
 def screen_checks(tools: list[dict[str, Any]], hand_back: str | None) -> dict[str, Any]:
@@ -600,6 +752,8 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                       if plan.ruleset == "casual" else {}),
                    **({"casual": revise_checks(result.get("result"), patch, round_.number, plan.ruleset),
                        "rules_told": round_.number >= TOLD_AT[plan.ruleset]} if plan.ruleset in REVISED_AT else {}),
+                   **({"gradual": gradual_checks(seen.get("tools", []), result.get("result"), patch, round_.number)}
+                      if plan.ruleset == "gradual" else {}),
                    "rule_2": tests, "patch_lines": patch.count("\n"),
                    **{f"grade_{k}": v for k, v in graded.items()}, "memory": memory, "session_id": session_id}
             record["rounds"].append(row)
@@ -617,7 +771,11 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                    "({f[first_line]!r:.70}), tests {x[kept]}".format(t=row["rules_told"], b=row["casual"]["brief"], f=row["casual"]["files_line"],
                                                                       x=row["casual"]["tests"]))
                 + ("" if "files_where" not in row.get("casual", {}) else " | files at {w[where]} (asked {w[asked]}, kept {w[kept]}, "
-                   "stale {w[stale]})".format(w=row["casual"]["files_where"])))
+                   "stale {w[stale]})".format(w=row["casual"]["files_where"]))
+                + ("" if "gradual" not in row else " | rules kept {k}/{n} told{broken}".format(
+                    k=sum(v["kept"] for v in row["gradual"].values() if v["told"] and v["chances"]),
+                    n=sum(1 for v in row["gradual"].values() if v["told"] and v["chances"]),
+                    broken="".join(f", broke {key}" for key, v in row["gradual"].items() if v["told"] and v["chances"] and not v["kept"]))))
             broke = not one["strict"] or not tests["kept"]
             if not result:
                 record["ended_by"] = "no_result"
@@ -652,7 +810,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--network", help="the docker network with no way out but the proxy")
     parser.add_argument("--window", type=int, help="CLAUDE_CODE_AUTO_COMPACT_WINDOW, 100000 to 1000000")
     parser.add_argument("--stop-on-break", action="store_true", help="end the series at the first task that breaks a rule")
-    parser.add_argument("--ruleset", choices=tuple(OPENINGS), default="two",
+    parser.add_argument("--ruleset", choices=(*OPENINGS, "gradual"), default="two",
                         help="two: the 1 and the tests; six: the screening set; casual: three rules said in passing at task 3; "
                              "revise: the casual rules, then at task 7 the files line moves to the end")
     parser.add_argument("--per-call-usd", type=float, default=3.0)

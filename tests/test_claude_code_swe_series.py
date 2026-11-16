@@ -385,3 +385,84 @@ def test_the_change_of_mind_is_scored_against_the_version_asked_at_each_task(tmp
     assert [w["kept"] for w in where] == [False, False, True, True, False, True, True, False]
     assert [w["stale"] for w in where] == [False] * 7 + [True]  # task 8 went back to the start: the old version of the rule
     assert all("brief" in r["casual"] and "tests" in r["casual"] for r in rows)
+
+
+def test_gradual_rules_arrive_one_every_other_task_and_each_arm_hears_them_as_planned(tmp_path, tasks):
+    tasks20 = [_task(tmp_path / "t20", n, gold_lines=200 - n) for n in range(1, 21)]
+    folders = s.pick_tasks(tasks20[0].parent, "ansible", 20, seed=3)
+    plan = lambda arm: s.plan_series(arm, folders, tmp_path / arm, model=None, claude_binary=tmp_path / "c", ruleset="gradual",  # noqa: E731
+                                     **({"code": tmp_path, "token_file": tmp_path / "t"} if arm == "ours" else {}))
+    shipped = plan("shipped")
+    assert [r.number for r in shipped.rounds if r.tells_rules] == [2, 4, 6, 8, 10, 12, 14, 16]
+    assert [r.number for r in shipped.rounds if r.new_session] == [1]
+    for task, said, _, _ in s.GRADUAL:
+        assert shipped.rounds[task - 1].prompt.startswith(said + "\n\n")
+        assert plan("claudemd").rounds[task - 1].prompt.startswith(f"{said} {s.TO_CLAUDE_MD}\n\n")
+    assert not any(s.TO_CLAUDE_MD in r.prompt or "Remember:" in r.prompt for r in shipped.rounds)
+    assert [r.prompt for r in plan("ours").rounds] == [r.prompt for r in shipped.rounds]
+    restated = plan("restated").rounds
+    assert not restated[1].prompt.startswith("Remember:") and restated[2].prompt.startswith("Remember: don't touch the tests unless I ask.\n\n")
+    assert restated[3].prompt.startswith("Remember: don't touch the tests unless I ask. " + s.GRADUAL[1][1] + "\n\n")
+    assert restated[16].prompt.startswith("Remember: " + "; ".join(g[2] for g in s.GRADUAL) + ".\n\n")
+    assert not any(r.tells_rules for r in plan("plain").rounds)
+    assert len({g[3] for g in s.GRADUAL}) == 8
+
+
+@pytest.mark.parametrize("command, reads", [
+    ("cat lib/x.py", ["cat"]),
+    ("cd /app && sed -n 1,40p lib/x.py", ["sed -n"]),
+    ("head -n 50 lib/x.py", ["head"]),
+    ("nl -ba lib/x.py | sed -n 10,20p", ["nl"]),
+    ("python -m pytest x 2>&1 | tail -5", []),
+    ("tail -n 20", []),
+    ("cat > /tmp/t.py <<'EOF'\nx = 1\nEOF", []),
+    ("cat <<'EOF' > lib/x.py\nx = 1\nEOF", []),
+    ("cat /tmp/out.txt", []),
+    ("sed -i 's/a/b/' lib/x.py", []),
+    ("tail -n 30 lib/x.py", ["tail"]),
+])
+def test_file_reads_in_the_shell_are_found(command, reads):
+    assert s.shell_reads(command) == reads
+
+
+@pytest.mark.parametrize("command, searches", [
+    ("grep -rn foo lib/", ["grep"]),
+    ("grep -n foo lib/x.py", ["grep"]),
+    ("find . -name '*.py'", ["find"]),
+    ("git grep -n foo", ["git grep"]),
+    ("find . -name '*.py' | xargs grep -l foo", ["find", "grep"]),
+    ("rg foo", ["rg"]),
+    ("python -m pytest -q | grep FAIL", []),
+    ("grep -E 'a|b'", []),
+    ("grep -c 'error TS' /tmp/out.txt", []),
+    ("grep -A 3 -n foo lib/x.py", ["grep"]),
+    ("grep -e foo lib/x.py", ["grep"]),
+    ("pytest -q 2>&1 | grep -n -e FAIL -e ERROR", []),
+])
+def test_code_searches_in_the_shell_are_found(command, searches):
+    assert s.shell_searches(command) == searches
+
+
+def test_each_gradual_rule_is_checked_with_its_chances_and_whether_it_was_told_yet():
+    tools = [{"name": "Bash", "input": {"command": "grep -rn parse lib/ && cat lib/x.py"}}, {"name": "Grep", "input": {"pattern": "x"}},
+             {"name": "Read", "input": {"file_path": "/app/lib/y.py"}}, {"name": "Bash", "input": {"command": "python -B -m pytest test/x.py"}}]
+    good = "Files changed: lib/x.py\n\nFixed the parser so tabs work.\n\nTests run: python -B -m pytest test/x.py"
+    patch = "diff --git a/lib/x.py b/lib/x.py\n"
+    checks = s.gradual_checks(tools, good, patch, number=9)
+    assert [k for k, v in checks.items() if v["told"]] == ["tests", "files_first", "brief", "plain"]
+    assert all(checks[k]["kept"] for k in ("tests", "files_first", "brief", "plain", "python_B", "tests_run_last"))
+    assert checks["search_tools"] == {"kept": False, "shell": ["grep"], "grep_glob_tool": 1, "chances": 2, "told": False}
+    assert checks["read_tool"]["kept"] is False and checks["read_tool"]["chances"] == 2
+    assert checks["python_B"]["chances"] == 1
+    bad = s.gradual_checks([], "**Files changed:**\n- `x.py`\n\nDone.", "diff --git a/test/units/test_x.py b/test/units/test_x.py\n", 20)
+    assert all(v["told"] for v in bad.values())
+    assert not bad["plain"]["kept"] and bad["files_first"]["kept"] and not bad["tests"]["kept"] and not bad["tests_run_last"]["kept"]
+    assert bad["search_tools"]["chances"] == bad["read_tool"]["chances"] == bad["python_B"]["chances"] == 0
+
+
+def test_gradual_checks_are_recorded_every_task(tmp_path, tasks):
+    plan = _plan(tmp_path, tasks, count=3, sessions=(1,), ruleset="gradual")
+    record = _run(plan, FakeDocker(touch_tests=()), FakeClaude(["Done.", "Files changed: none\n\nDone.", "Done."]))
+    rows = record["rounds"]
+    assert [sorted(k for k, v in r["gradual"].items() if v["told"]) for r in rows] == [[], ["tests"], ["tests"]]
+    assert record["ruleset"] == "gradual" and all("casual" not in r for r in rows)
