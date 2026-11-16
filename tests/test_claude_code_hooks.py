@@ -253,3 +253,15 @@ def test_rules_file_is_in_the_project(tmp_path):
 def test_unknown_arm_is_refused(tmp_path):
     with pytest.raises(ValueError):
         settings.hooks_block("other", project=tmp_path, state=tmp_path, python="python3")
+
+
+def test_the_ours_layer_keeps_its_rules_in_git_one_commit_per_reading_that_adds(tmp_path):
+    import subprocess
+    from studies.claude_code.hooks import rule_list_hook as hook
+    rules = tmp_path / "memory" / "rules.md"
+    event = {"prompt": "For the rest of this session, use python3 -B. From now on, list folders with ls -1.", "session_id": "s"}
+    hook.on_prompt(event, rules_path=rules, reader=hook.stub_reader, git=True)
+    hook.on_prompt(event, rules_path=rules, reader=hook.stub_reader, git=True)  # nothing new: no second commit
+    log = subprocess.run(["git", "-C", str(rules.parent), "log", "--format=%s"], capture_output=True, text=True).stdout.splitlines()
+    assert len(log) == 1 and log[0].startswith("rule: For the rest of this session") and log[0].endswith("(+1)")
+    assert hook.listed(rules) == hook.stub_reader(event["prompt"])

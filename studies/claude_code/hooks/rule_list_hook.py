@@ -58,17 +58,38 @@ def add(path: Path, found: list[str]) -> list[str]:
     return new
 
 
+def commit(path: Path, new: list[str], run=None) -> bool:
+    """Our git memory: the rules file lives in a git repository and each reading that adds rules is one commit, so the list has a
+    history that can be read, diffed and rolled back like the agent's code. A failure here is returned, never raised."""
+    import subprocess
+    run = run or subprocess.run
+    folder, git = Path(path).parent, ["git", "-c", "user.name=taste-memory", "-c", "user.email=memory@taste.invalid"]
+    try:
+        if not (folder / ".git").exists():
+            run([*git, "-C", str(folder), "init", "-q"], check=True, capture_output=True, timeout=30)
+        run([*git, "-C", str(folder), "add", Path(path).name], check=True, capture_output=True, timeout=30)
+        message = f"rule: {new[0][:72]}" + (f" (+{len(new) - 1})" if len(new) > 1 else "")
+        run([*git, "-C", str(folder), "commit", "-q", "-m", message], check=True, capture_output=True, timeout=30)
+        return True
+    except Exception:
+        return False
+
+
 def render(rules: list[str], limit: int = CONTEXT_LIMIT) -> str | None:
     """The list as the agent sees it, oldest first; when it cannot all fit, the newest rules are the ones kept."""
     return fit(HEADER, [(index, text) for index, text in reversed(list(enumerate(rules)))], limit) if rules else None
 
 
-def on_prompt(event: Mapping[str, Any], *, rules_path: Path, reader: Callable[[str], list[str]], log: Path | None = None) -> str | None:
+def on_prompt(event: Mapping[str, Any], *, rules_path: Path, reader: Callable[[str], list[str]], log: Path | None = None,
+              git: bool = False) -> str | None:
     prompt = str(event.get("prompt") or "")
     record: dict[str, Any] = {"time": now(), "mode": "prompt", "session_id": event.get("session_id"), "prompt_chars": len(prompt)}
     try:
         found = list(reader(prompt)) if prompt.strip() else []
-        record |= {"found": found, "added": add(rules_path, found)}
+        added = add(rules_path, found)
+        record |= {"found": found, "added": added}
+        if git and added:
+            record["committed"] = commit(rules_path, added)
     except Exception as error:  # the list so far still goes out; the driver stops the session on a logged error
         record["error"] = f"{type(error).__name__}: {error}"[:500]
     text = render(listed(rules_path))
@@ -93,6 +114,7 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
     parser.add_argument("mode", choices=("prompt", "compact"))
     parser.add_argument("--rules", required=True, type=Path)
     parser.add_argument("--log", type=Path)
+    parser.add_argument("--git", action="store_true", help="keep the rules file in a git repository, one commit per reading that adds")
     args = parser.parse_args(argv)
     stdin, stdout, environ = stdin or sys.stdin, stdout or sys.stdout, os.environ if environ is None else environ
     event = read_event(stdin)
@@ -107,7 +129,7 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
                 append_jsonl(args.log, {"time": now(), "mode": "prompt", "session_id": event.get("session_id"), "error": message})
             print(message, file=sys.stderr)
             return 1
-        output = on_prompt(event, rules_path=args.rules, reader=reader, log=args.log)
+        output = on_prompt(event, rules_path=args.rules, reader=reader, log=args.log, git=args.git)
     if output:
         stdout.write(output)
     return 0
