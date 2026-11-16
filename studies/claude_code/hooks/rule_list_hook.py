@@ -63,7 +63,10 @@ def commit(path: Path, new: list[str], run=None) -> bool:
     history that can be read, diffed and rolled back like the agent's code. A failure here is returned, never raised."""
     import subprocess
     run = run or subprocess.run
-    folder, git = Path(path).parent, ["git", "-c", "user.name=taste-memory", "-c", "user.email=memory@taste.invalid"]
+    # safe.directory: the memory folder is mounted from the host, so its owner differs from the container's root, and git refuses a
+    # repository owned by someone else ("dubious ownership", seen in the plumbing check of Nov 15) unless told it is safe.
+    folder = Path(path).parent
+    git = ["git", "-c", "safe.directory=*", "-c", "user.name=taste-memory", "-c", "user.email=memory@taste.invalid"]
     try:
         if not (folder / ".git").exists():
             run([*git, "-C", str(folder), "init", "-q"], check=True, capture_output=True, timeout=30)
