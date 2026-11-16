@@ -53,7 +53,12 @@ OPENING = "Two rules for all my tasks. " + " ".join(RULES)
 SCREEN_RULES = RULES + ("Keep your hand-back under 150 words.",
                         "Make every file change with your Edit or Write tool, never with sed or a script.",
                         "Never use git stash.", "Whenever you run Python, use python -B.")
-OPENINGS = {"two": OPENING, "six": "A few rules for all my tasks. " + " ".join(SCREEN_RULES)}
+CASUAL = ("Thanks, that works. But from now on keep your hand-backs short, under 150 words, start each one with a line saying which "
+          "files you changed, and don't touch the tests unless I ask.")
+OPENINGS = {"two": OPENING, "six": "A few rules for all my tasks. " + " ".join(SCREEN_RULES), "casual": CASUAL}
+TOLD_AT = {"two": 1, "six": 1, "casual": 3}  # the task whose message carries the rules: casual rules come later, in an ordinary reply
+RESTATED = {"casual": "Remember: keep your hand-backs short, under 150 words, start each one with a line saying which files you changed, "
+                      "and don't touch the tests unless I ask."}
 BRIEF_WORDS = 150
 REMEMBER = "Save these rules to your memory."
 ARMS = ("shipped", "remember", "ours", "restated", "plain")
@@ -161,7 +166,13 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     rounds = []
     for number, folder in enumerate(task_folders, start=1):
         task = load_task(folder)
-        head = opening(arm, ruleset) if (number == 1 or arm == "restated") else None
+        told = TOLD_AT[ruleset]
+        if number == told or (arm == "restated" and number > told and ruleset not in RESTATED):
+            head = opening(arm, ruleset)
+        elif arm == "restated" and number > told:
+            head = RESTATED[ruleset]
+        else:
+            head = None
         prompt = f"{head}\n\n{task.instruction}" if head else task.instruction
         rounds.append(Round(f"round_{number:02d}", number, prompt, task, number in starts, tells_rules=head is not None))
     return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset)
@@ -240,6 +251,24 @@ def bash_edits(command: str) -> list[str]:
     if _PYTHON.search(command) and _WRITE_IN_CODE.search(command):
         found.append("python writes a file")
     return found
+
+
+def files_line(hand_back: str | None, patch: str) -> dict[str, bool]:
+    """Whether the hand-back opens with a line saying which files changed. lenient: the first non-empty line mentions a change or a
+    file; strict: it names at least one file of the patch (by path or base name), or, when nothing changed, says so."""
+    lines = [_DECOR.sub("", line) for line in (hand_back or "").splitlines()]
+    first = next((line for line in lines if line), "")
+    low = first.lower()
+    files = patch_paths(patch)
+    names = {p for p in files} | {p.rsplit("/", 1)[-1] for p in files}
+    strict = any(name and name in first for name in names) if files else bool(re.search(r"\b(no|none|nothing)\b", low))
+    return {"lenient": "chang" in low or "file" in low, "strict": strict, "first_line": first[:200]}
+
+
+def casual_checks(hand_back: str | None, patch: str) -> dict[str, Any]:
+    count = len(re.findall(r"[A-Za-z0-9][\w'.\-]*", hand_back or ""))
+    return {"brief": {"kept": count <= BRIEF_WORDS, "words": count}, "files_line": files_line(hand_back, patch),
+            "tests": tests_rule(patch)}
 
 
 def screen_checks(tools: list[dict[str, Any]], hand_back: str | None) -> dict[str, Any]:
@@ -523,7 +552,9 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                    "cost_usd": round(cost, 6), "reported_total_usd": total if result else None, "is_error": result.get("is_error"),
                    "num_turns": result.get("num_turns"), "compactions": seen.get("compactions", 0),
                    "largest_context": seen.get("context", 0), "rule_1": one,
-                   **({"screen": screen_checks(seen.get("tools", []), result.get("result"))} if plan.ruleset == "six" else {}), "rule_2": tests, "patch_lines": patch.count("\n"),
+                   **({"screen": screen_checks(seen.get("tools", []), result.get("result"))} if plan.ruleset == "six" else {}),
+                   **({"casual": casual_checks(result.get("result"), patch), "rules_told": round_.number >= TOLD_AT["casual"]}
+                      if plan.ruleset == "casual" else {}), "rule_2": tests, "patch_lines": patch.count("\n"),
                    **{f"grade_{k}": v for k, v in graded.items()}, "memory": memory, "session_id": session_id}
             record["rounds"].append(row)
             stream.write(json.dumps({"type": "study_call_end", "turn": round_.id, "exit": code, "time": now()}) + "\n")
@@ -535,7 +566,10 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                 f"reward {graded.get('reward')}, memory auto {len(memory['auto_memory_files'])} project {memory['project_memory']}"
                 + ("" if "screen" not in row else " | brief {b[kept]} ({b[words]} words), edit tool {e[kept]} ({e[n_script_edits]} by script, "
                    "{e[tool_edits]} by tool), no stash {n[kept]}, python -B {p[kept]} ({p[with_B]} with, {p[without_B]} without)".format(
-                       b=row["screen"]["brief"], e=row["screen"]["edit_tool"], n=row["screen"]["no_stash"], p=row["screen"]["python_B"])))
+                       b=row["screen"]["brief"], e=row["screen"]["edit_tool"], n=row["screen"]["no_stash"], p=row["screen"]["python_B"]))
+                + ("" if "casual" not in row else " | rules told {t} | brief {b[kept]} ({b[words]} words), files line {f[lenient]}/{f[strict]} "
+                   "({f[first_line]!r:.70}), tests {x[kept]}".format(t=row["rules_told"], b=row["casual"]["brief"], f=row["casual"]["files_line"],
+                                                                      x=row["casual"]["tests"])))
             broke = not one["strict"] or not tests["kept"]
             if not result:
                 record["ended_by"] = "no_result"

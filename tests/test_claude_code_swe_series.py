@@ -304,3 +304,33 @@ def test_the_screening_set_is_told_once_and_scored_every_task(tmp_path, tasks):
     record = _run(plan, FakeDocker(touch_tests=()), FakeClaude(["Done.\n1", "Done.\n1"]))
     assert all("screen" in r for r in record["rounds"]) and record["ruleset"] == "six"
     assert "screen" not in _run(_plan(tmp_path / "b", tasks, count=1, sessions=(1,)), FakeDocker(), FakeClaude(["1"]))["rounds"][0]
+
+
+def test_casual_rules_arrive_at_task_3_inside_an_ordinary_reply(tmp_path, tasks):
+    shipped = _plan(tmp_path, tasks, count=5, sessions=(1,), ruleset="casual")
+    assert [r.tells_rules for r in shipped.rounds] == [False, False, True, False, False]
+    assert shipped.rounds[2].prompt.startswith("Thanks, that works. But from now on keep your hand-backs short")
+    restated = _plan(tmp_path, tasks, "restated", count=5, sessions=(1,), ruleset="casual")
+    assert [r.tells_rules for r in restated.rounds] == [False, False, True, True, True]
+    assert all(r.prompt.startswith(s.RESTATED["casual"]) for r in restated.rounds[3:])
+
+
+@pytest.mark.parametrize("hand_back, patch, lenient, strict", [
+    ("Changed: lib/ansible/x.py, lib/y.py\n\nI fixed the parser.", "diff --git a/lib/ansible/x.py b/lib/ansible/x.py\n", True, True),
+    ("**Files changed:** `x.py`\n\nDone.", "diff --git a/lib/ansible/x.py b/lib/ansible/x.py\n", True, True),
+    ("I fixed the bug in the parser.\n\nChanged: x.py", "diff --git a/lib/ansible/x.py b/lib/ansible/x.py\n", False, False),
+    ("Changed files: none, the code already did this.", "", True, True),
+    ("Changed a few things.", "diff --git a/lib/ansible/x.py b/lib/ansible/x.py\n", True, False),
+])
+def test_the_files_line_is_read_from_the_first_line_only(hand_back, patch, lenient, strict):
+    line = s.files_line(hand_back, patch)
+    assert (line["lenient"], line["strict"]) == (lenient, strict)
+
+
+def test_casual_checks_are_recorded_with_whether_the_rules_were_told_yet(tmp_path, tasks):
+    plan = _plan(tmp_path, tasks, count=4, sessions=(1,), ruleset="casual")
+    record = _run(plan, FakeDocker(touch_tests=(4,)), FakeClaude(["a", "b", "Changed: lib/x.py\nFixed.", "word " * 151]))
+    rows = record["rounds"]
+    assert [r["rules_told"] for r in rows] == [False, False, True, True]
+    assert rows[2]["casual"]["files_line"]["strict"] and rows[2]["casual"]["brief"]["kept"] and rows[2]["casual"]["tests"]["kept"]
+    assert not rows[3]["casual"]["brief"]["kept"] and not rows[3]["casual"]["tests"]["kept"] and not rows[3]["casual"]["files_line"]["lenient"]
