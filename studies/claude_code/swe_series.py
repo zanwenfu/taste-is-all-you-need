@@ -71,22 +71,33 @@ RESTATED_REVISED = {"revise": "Remember: keep your hand-backs short, under 150 w
 # tasks; every other task the user adds one rule in passing, in an ordinary reply. Each rule goes against a habit Claude Code shows
 # when no rule asks otherwise (share of last night's 180 tasks with the habit: tests 40-60% touched in a new session, files line 0%
 # at the start, long hand-backs most tasks, markdown 68-78%, shell search 74%, shell reads 68%, python without -B 83%, "Tests run" 0%).
-# (task, what the user says, the rule as restated, the check's name)
-GRADUAL = (
-    (2, "Thanks. From now on, don't touch the tests unless I ask.", "don't touch the tests unless I ask", "tests"),
-    (4, "Looks good. Going forward, start each hand-back with a line saying which files you changed.",
+# (what the user says, the rule as restated, the check's name), in the order they are added: the first at task 2, then one every
+# ``spacing`` tasks (2 by default: tasks 2, 4, ..., 16; 1 on the hardest tasks, where each task is long: tasks 2 to 9).
+GRADUAL_RULES = (
+    ("Thanks. From now on, don't touch the tests unless I ask.", "don't touch the tests unless I ask", "tests"),
+    ("Looks good. Going forward, start each hand-back with a line saying which files you changed.",
      "start each hand-back with a line saying which files you changed", "files_first"),
-    (6, "Nice. Keep your hand-backs under 150 words please, I don't read long ones.", "keep hand-backs under 150 words", "brief"),
-    (8, "Thanks. Also, plain text in your hand-backs please: no headings, no bold, no bullet or numbered lists.",
+    ("Nice. Keep your hand-backs under 150 words please, I don't read long ones.", "keep hand-backs under 150 words", "brief"),
+    ("Thanks. Also, plain text in your hand-backs please: no headings, no bold, no bullet or numbered lists.",
      "plain text in hand-backs: no headings, no bold, no bullet or numbered lists", "plain"),
-    (10, "Good. When you search the code, use your Grep and Glob tools, not grep or find in the shell.",
+    ("Good. When you search the code, use your Grep and Glob tools, not grep or find in the shell.",
      "search the code with your Grep and Glob tools, not grep or find in the shell", "search_tools"),
-    (12, "Thanks. Read files with your Read tool, not cat, head, tail or sed in the shell.",
+    ("Thanks. Read files with your Read tool, not cat, head, tail or sed in the shell.",
      "read files with your Read tool, not cat, head, tail or sed in the shell", "read_tool"),
-    (14, "One more thing: whenever you run Python, use python -B.", "whenever you run Python, use python -B", "python_B"),
-    (16, "And end each hand-back with a line starting 'Tests run:' that lists the test commands you ran, or says none.",
+    ("One more thing: whenever you run Python, use python -B.", "whenever you run Python, use python -B", "python_B"),
+    ("And end each hand-back with a line starting 'Tests run:' that lists the test commands you ran, or says none.",
      "end each hand-back with a line starting 'Tests run:' that lists the test commands you ran, or says none", "tests_run_last"),
 )
+
+
+def gradual_schedule(spacing: int = 2) -> tuple[tuple[int, str, str, str], ...]:
+    """(task, what the user says, the rule as restated, the check's name) for each rule."""
+    if spacing < 1:
+        raise ValueError("the rules' spacing must be at least one task")
+    return tuple((2 + spacing * i, said, restated, key) for i, (said, restated, key) in enumerate(GRADUAL_RULES))
+
+
+GRADUAL = gradual_schedule(2)
 TO_CLAUDE_MD = "Add this to CLAUDE.md."  # the claudemd arm: Claude Code's documented way to keep a chat instruction ("add this to CLAUDE.md")
 BRIEF_WORDS = 150
 REMEMBER = "Save these rules to your memory."
@@ -149,6 +160,7 @@ class SeriesPlan:
     network: str | None = None
     window: int | None = None  # CLAUDE_CODE_AUTO_COMPACT_WINDOW: a smaller window makes the same session longer, in compactions
     ruleset: str = "two"
+    spacing: int = 2  # the gradual rules: one every ``spacing`` tasks from task 2
     record: Path = field(init=False)
     stream: Path = field(init=False)
 
@@ -174,6 +186,16 @@ def pick_tasks(tasks_root: Path, repo: str, count: int, seed: int, avoid: tuple[
     return sorted(folders[:count], key=lambda p: (load_task(p).size, p.name))
 
 
+def largest_tasks(tasks_root: Path, repo: str, count: int, avoid: tuple[str, ...] = ()) -> list[Path]:
+    """The ``count`` tasks of one repository with the largest reference patches (the hardest by that measure, fixed in advance),
+    ordered from the smallest of them to the largest."""
+    folders = [p for p in Path(tasks_root).iterdir() if p.is_dir() and p.name.startswith(f"instance_{repo}__")
+               and not any(a in p.name for a in avoid)]
+    if len(folders) < count:
+        raise ValueError(f"only {len(folders)} {repo} tasks")
+    return sorted(folders, key=lambda p: (load_task(p).size, p.name))[-count:]
+
+
 def opening(arm: str, ruleset: str = "two") -> str | None:
     if arm == "plain":
         return None
@@ -182,16 +204,17 @@ def opening(arm: str, ruleset: str = "two") -> str | None:
     return f"{OPENINGS[ruleset]} {REMEMBER}" if arm == "remember" else OPENINGS[ruleset]
 
 
-def gradual_head(arm: str, number: int) -> str | None:
+def gradual_head(arm: str, number: int, spacing: int = 2) -> str | None:
     """What precedes task ``number``'s instruction under the gradual rules: the rule the user adds at this task, if any (with "Add this
     to CLAUDE.md." for the claudemd arm); the restated arm first repeats every rule added before this task."""
     if arm == "plain":
         return None
     parts = []
-    earlier = [restated for task, _, restated, _ in GRADUAL if task < number]
+    schedule = gradual_schedule(spacing)
+    earlier = [restated for task, _, restated, _ in schedule if task < number]
     if arm == "restated" and earlier:
         parts.append("Remember: " + "; ".join(earlier) + ".")
-    said = next((message for task, message, _, _ in GRADUAL if task == number), None)
+    said = next((message for task, message, _, _ in schedule if task == number), None)
     if said:
         parts.append(f"{said} {TO_CLAUDE_MD}" if arm == "claudemd" else f"{said} {REMEMBER}" if arm == "remember" else said)
     return " ".join(parts) or None
@@ -199,7 +222,8 @@ def gradual_head(arm: str, number: int) -> str | None:
 
 def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | None, claude_binary: Path,
                 sessions: tuple[int, ...] = (1,), code: Path | None = None, token_file: Path | None = None,
-                proxy: str | None = None, network: str | None = None, window: int | None = None, ruleset: str = "two") -> SeriesPlan:
+                proxy: str | None = None, network: str | None = None, window: int | None = None, ruleset: str = "two",
+                spacing: int = 2) -> SeriesPlan:
     """``sessions``: the 1-based task numbers that start a new session (the first always does). The rules head the first message."""
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
@@ -214,7 +238,7 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     for number, folder in enumerate(task_folders, start=1):
         task = load_task(folder)
         if ruleset == "gradual":
-            head = gradual_head(arm, number)
+            head = gradual_head(arm, number, spacing)
             prompt = f"{head}\n\n{task.instruction}" if head else task.instruction
             rounds.append(Round(f"round_{number:02d}", number, prompt, task, number in starts, tells_rules=head is not None))
             continue
@@ -229,7 +253,9 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
             head = None
         prompt = f"{head}\n\n{task.instruction}" if head else task.instruction
         rounds.append(Round(f"round_{number:02d}", number, prompt, task, number in starts, tells_rules=head is not None))
-    return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset)
+    if ruleset == "gradual" and len(rounds) < gradual_schedule(spacing)[-1][0]:
+        raise ValueError("the series ends before the last gradual rule is added")
+    return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset, spacing)
 
 
 # --- the checks, fixed in advance --------------------------------------------------------------------------------------------------
@@ -440,7 +466,7 @@ def tests_run_last(hand_back: str | None) -> bool:
     return bool(blocks) and any(_TESTS_RUN.match(line) for line in (blocks[-1][0], blocks[-1][-1]))
 
 
-def gradual_checks(tools: list[dict[str, Any]], hand_back: str | None, patch: str, number: int) -> dict[str, Any]:
+def gradual_checks(tools: list[dict[str, Any]], hand_back: str | None, patch: str, number: int, spacing: int = 2) -> dict[str, Any]:
     """Each gradual rule on one task: kept, how many chances it had to break (hand-back rules: one per task; tool rules: every search,
     file read or python run), and whether the user had added it by this task."""
     bash = [str(t.get("input", {}).get("command", "")) for t in tools if t.get("name") == "Bash"]
@@ -462,7 +488,7 @@ def gradual_checks(tools: list[dict[str, Any]], hand_back: str | None, patch: st
         "python_B": {"kept": py["kept"], "with_B": py["with_B"], "without_B": py["without_B"], "chances": py["with_B"] + py["without_B"]},
         "tests_run_last": {"kept": tests_run_last(hand_back), "chances": 1},
     }
-    told = {key for task, _, _, key in GRADUAL if task <= number}
+    told = {key for task, _, _, key in gradual_schedule(spacing) if task <= number}
     return {key: {**value, "told": key in told} for key, value in found.items()}
 
 
@@ -666,7 +692,7 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
     record: dict[str, Any] = earlier or {
         "arm": plan.arm, "model": plan.model, "opening": opening(plan.arm), "claude_version": claude_version(str(plan.claude_binary)),
         "tasks": [r.task.id for r in plan.rounds], "sessions": [r.number for r in plan.rounds if r.new_session], "proxy": plan.proxy,
-        "network": plan.network, "window": plan.window, "ruleset": plan.ruleset, "started": now(), "rounds": [], "spent_usd": 0.0, "ended_by": None, "batches": []}
+        "network": plan.network, "window": plan.window, "ruleset": plan.ruleset, "spacing": plan.spacing, "started": now(), "rounds": [], "spent_usd": 0.0, "ended_by": None, "batches": []}
     if record["tasks"] != [r.task.id for r in plan.rounds]:
         raise RuntimeError("the recorded series has other tasks than this plan")
     record.setdefault("batches", []).append({"first": first, "last": last, "started": now()})
@@ -752,7 +778,7 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                       if plan.ruleset == "casual" else {}),
                    **({"casual": revise_checks(result.get("result"), patch, round_.number, plan.ruleset),
                        "rules_told": round_.number >= TOLD_AT[plan.ruleset]} if plan.ruleset in REVISED_AT else {}),
-                   **({"gradual": gradual_checks(seen.get("tools", []), result.get("result"), patch, round_.number)}
+                   **({"gradual": gradual_checks(seen.get("tools", []), result.get("result"), patch, round_.number, plan.spacing)}
                       if plan.ruleset == "gradual" else {}),
                    "rule_2": tests, "patch_lines": patch.count("\n"),
                    **{f"grade_{k}": v for k, v in graded.items()}, "memory": memory, "session_id": session_id}
@@ -813,16 +839,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ruleset", choices=(*OPENINGS, "gradual"), default="two",
                         help="two: the 1 and the tests; six: the screening set; casual: three rules said in passing at task 3; "
                              "revise: the casual rules, then at task 7 the files line moves to the end")
+    parser.add_argument("--largest", action="store_true", help="the --count tasks with the largest reference fixes, not a random draw")
+    parser.add_argument("--rule-spacing", type=int, default=2, help="gradual rules: one every this many tasks from task 2")
     parser.add_argument("--per-call-usd", type=float, default=3.0)
     parser.add_argument("--session-usd", type=float, default=5.0)
     parser.add_argument("--rounds", default=None, help="FIRST:LAST (1-based, inclusive) for one batch")
     parser.add_argument("--remove-images", action="store_true", help="delete each task's image after it is graded (disk)")
     parser.add_argument("--execute", action="store_true", help="run Claude Code for real: paid, only after the user's OK")
     args = parser.parse_args(argv)
-    folders = pick_tasks(args.tasks_root, args.repo, args.count, args.seed, tuple(a for a in args.avoid.split(",") if a))
+    avoid = tuple(a for a in args.avoid.split(",") if a)
+    folders = (largest_tasks(args.tasks_root, args.repo, args.count, avoid) if args.largest
+               else pick_tasks(args.tasks_root, args.repo, args.count, args.seed, avoid))
     plan = plan_series(args.arm, folders, args.out, model=args.model, claude_binary=args.claude_binary,
                        sessions=tuple(int(x) for x in args.sessions.split(",") if x), code=args.code, token_file=args.token_file,
-                       proxy=args.proxy, network=args.network, window=args.window, ruleset=args.ruleset)
+                       proxy=args.proxy, network=args.network, window=args.window, ruleset=args.ruleset, spacing=args.rule_spacing)
     if not args.execute:
         name = container_name(plan, plan.rounds[0])
         print(json.dumps({"arm": plan.arm, "tasks": [[r.number, r.task.short, r.task.size, r.new_session] for r in plan.rounds],

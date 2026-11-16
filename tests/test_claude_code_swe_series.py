@@ -461,8 +461,33 @@ def test_each_gradual_rule_is_checked_with_its_chances_and_whether_it_was_told_y
 
 
 def test_gradual_checks_are_recorded_every_task(tmp_path, tasks):
-    plan = _plan(tmp_path, tasks, count=3, sessions=(1,), ruleset="gradual")
-    record = _run(plan, FakeDocker(touch_tests=()), FakeClaude(["Done.", "Files changed: none\n\nDone.", "Done."]))
+    plan = _plan(tmp_path, tasks, count=10, sessions=(1,), ruleset="gradual", spacing=1)
+    record = _run(plan, FakeDocker(touch_tests=()), FakeClaude(["Done.", "Files changed: none\n\nDone."] + ["Done."] * 8))
     rows = record["rounds"]
-    assert [sorted(k for k, v in r["gradual"].items() if v["told"]) for r in rows] == [[], ["tests"], ["tests"]]
-    assert record["ruleset"] == "gradual" and all("casual" not in r for r in rows)
+    told = [sorted(k for k, v in r["gradual"].items() if v["told"]) for r in rows]
+    assert told[:3] == [[], ["tests"], ["files_first", "tests"]] and len(told[8]) == len(told[9]) == 8
+    assert record["ruleset"] == "gradual" and record["spacing"] == 1 and all("casual" not in r for r in rows)
+    with pytest.raises(ValueError, match="before the last gradual rule"):
+        _plan(tmp_path, tasks, count=10, sessions=(1,), ruleset="gradual")  # spacing 2 needs 16 tasks
+
+
+def test_one_rule_a_task_on_the_hardest_tasks(tmp_path, tasks):
+    assert [t for t, _, _, _ in s.gradual_schedule(1)] == [2, 3, 4, 5, 6, 7, 8, 9]
+    assert [t for t, _, _, _ in s.gradual_schedule(2)] == [2, 4, 6, 8, 10, 12, 14, 16] and s.GRADUAL == s.gradual_schedule(2)
+    with pytest.raises(ValueError):
+        s.gradual_schedule(0)
+    plan = _plan(tmp_path, tasks, "restated", count=10, sessions=(1,), ruleset="gradual", spacing=1)
+    assert plan.rounds[9].prompt.startswith("Remember: " + "; ".join(r for _, r, _ in s.GRADUAL_RULES) + ".\n\n")
+    assert plan.rounds[4].prompt.startswith("Remember: " + "; ".join(r for _, r, _ in s.GRADUAL_RULES[:3]) + ". " + s.GRADUAL_RULES[3][0])
+    checks = s.gradual_checks([], "Done.", "", number=5, spacing=1)
+    assert [k for k, v in checks.items() if v["told"]] == ["tests", "files_first", "brief", "plain"]
+
+
+def test_the_largest_tasks_are_the_hardest_by_reference_fix_size_smallest_first(tasks):
+    largest = s.largest_tasks(tasks[0].parent, "ansible", 3)
+    sizes = [s.load_task(p).size for p in largest]
+    every = sorted(s.load_task(p).size for p in tasks if "ansible" in p.name)
+    assert sizes == every[-3:] and sizes == sorted(sizes)
+    assert all("00000001" not in p.name for p in s.largest_tasks(tasks[0].parent, "ansible", 3, avoid=("00000001",)))
+    with pytest.raises(ValueError):
+        s.largest_tasks(tasks[0].parent, "ansible", 11)
