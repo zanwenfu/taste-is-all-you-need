@@ -208,13 +208,33 @@ def grade(name: str, task: SweTask, *, runner: Runner = subprocess.run) -> dict[
 
 # --- the series ------------------------------------------------------------------------------------------------------------------
 
+def earlier_state(plan: SeriesPlan, first: int) -> tuple[dict[str, Any] | None, str | None, float]:
+    """For a batch that starts at round ``first`` (1-based): the series record so far, the session to resume and its running total.
+    A batch must follow on exactly from the rounds already recorded, so a series is never run twice or with a gap."""
+    if first == 1:
+        if plan.record.exists():
+            raise RuntimeError(f"{plan.record} exists: this series has begun; continue it from the round after its last one")
+        return None, None, 0.0
+    record = json.loads(plan.record.read_text())
+    done = record["rounds"]
+    if len(done) != first - 1 or record.get("ended_by"):
+        raise RuntimeError(f"cannot start at round {first}: {len(done)} rounds recorded, ended_by {record.get('ended_by')}")
+    totals = [r["reported_total_usd"] for r in done if r.get("reported_total_usd") is not None]
+    return record, done[-1]["session_id"], (totals[-1] if totals else 0.0)
+
+
 def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, session_usd: float, timeout_s: float = 3600.0,
                caller=None, runner: Runner = subprocess.run, base_env: dict[str, str] | None = None,
-               say: Callable[[str], None] = print, keep_containers: bool = False) -> dict[str, Any]:
-    """Paid: only with execute=True. Ends when the budget is spent, when a call gives no result, or when a container will not start."""
+               say: Callable[[str], None] = print, keep_containers: bool = False, first: int = 1, last: int | None = None,
+               remove_images: bool = False, prefetch: Callable[[str], Any] | None = None) -> dict[str, Any]:
+    """Paid: only with execute=True. Runs rounds ``first`` to ``last`` (1-based, inclusive) and saves the record after every round.
+    Ends early when the budget is spent, when a call gives no result, or when a container will not start."""
     import os
     if not execute:
         raise RuntimeError("run_series starts paid Claude Code calls; call it with execute=True, after the user's OK")
+    last = len(plan.rounds) if last is None else last
+    if not 1 <= first <= last <= len(plan.rounds):
+        raise ValueError(f"rounds {first} to {last} of {len(plan.rounds)}")
     env = dict(os.environ if base_env is None else base_env)
     for name in OTHER_CREDENTIALS:
         env.pop(name, None)
@@ -224,12 +244,20 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
     caller = caller or call_claude
     (plan.out / "claude_config").mkdir(parents=True, exist_ok=True)
     (plan.out / "patches").mkdir(exist_ok=True)
-    record: dict[str, Any] = {"arm": plan.arm, "model": plan.model, "requirement": requirement_line(plan.arm),
-                              "window": plan.window, "percent": plan.percent, "claude_version": claude_version(str(plan.claude_binary)),
-                              "tasks": [r.task.id for r in plan.rounds], "started": now(), "rounds": [], "spent_usd": 0.0, "ended_by": None}
-    session_id, reported_total = None, 0.0
+    earlier, session_id, reported_total = earlier_state(plan, first)
+    record: dict[str, Any] = earlier or {
+        "arm": plan.arm, "model": plan.model, "requirement": requirement_line(plan.arm), "window": plan.window, "percent": plan.percent,
+        "claude_version": claude_version(str(plan.claude_binary)), "tasks": [r.task.id for r in plan.rounds], "started": now(),
+        "rounds": [], "spent_usd": 0.0, "ended_by": None, "batches": []}
+    if record["tasks"] != [r.task.id for r in plan.rounds]:
+        raise RuntimeError("the recorded series has other tasks than this plan")
+    record.setdefault("batches", []).append({"first": first, "last": last, "started": now()})
+    owner = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else None
+    prefetch = prefetch or (lambda image: subprocess.Popen(["docker", "pull", "-q", image], stdout=subprocess.DEVNULL,
+                                                           stderr=subprocess.DEVNULL))
     with plan.stream.open("a") as stream:
-        for index, round_ in enumerate(plan.rounds):
+        for index in range(first - 1, last):
+            round_ = plan.rounds[index]
             left = session_usd - record["spent_usd"]
             if left < 0.05:
                 record["ended_by"] = "budget"
@@ -257,6 +285,8 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                 if isinstance(event, dict) and event.get("type") == "result":
                     seen["result"] = event
 
+            if index + 1 < len(plan.rounds) and index + 1 < last:  # the next task's image downloads while this one runs
+                prefetch(plan.rounds[index + 1].task.image)
             budget = min(per_call_usd, left)
             argv = claude_argv(plan, name, budget_usd=reported_total + budget, resume=session_id)
             t0 = time.monotonic()
@@ -281,15 +311,21 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
             stream.flush()
             say(f"{plan.arm} {round_.id} {round_.task.short}: exit {code}, {seconds}s, ${cost:.2f} (session ${record['spent_usd']:.2f}), "
                 f"1 strict {one['strict']}, reward {graded.get('reward')}")
+            if owner:  # Claude Code runs as root in the container; the session folder goes back to the runner's user
+                run(["docker", "exec", name, "chown", "-R", owner, CONFIG_IN_CONTAINER], runner=runner, timeout=120)
             if not keep_containers:
                 run(["docker", "rm", "-f", name], runner=runner, timeout=300)
+                if remove_images:
+                    run(["docker", "rmi", round_.task.image], runner=runner, timeout=300)
             if not result:
                 record["ended_by"] = "no_result"
+            plan.record.write_text(json.dumps(record, indent=1) + "\n")  # after every round, so a crash loses at most one
+            if not result:
                 break
     stderr = plan.out / "stderr.log"
     if stderr.exists():
         stderr.write_text(redact(stderr.read_text(), secrets))
-    record["finished"] = now()
+    record["batches"][-1]["finished"] = record["finished"] = now()
     plan.record.write_text(json.dumps(record, indent=1) + "\n")
     return record
 
@@ -309,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--percent", type=int)
     parser.add_argument("--per-call-usd", type=float, default=8.0)
     parser.add_argument("--session-usd", type=float, default=25.0)
+    parser.add_argument("--rounds", default=None, help="FIRST:LAST (1-based, inclusive) for one batch; a later batch resumes the session")
+    parser.add_argument("--remove-images", action="store_true", help="delete each task's image after it is graded (disk)")
     parser.add_argument("--execute", action="store_true", help="run Claude Code for real: paid, only after the user's OK")
     args = parser.parse_args(argv)
     folders = pick_tasks(args.tasks_root, args.repo, args.count, args.seed, tuple(a for a in args.avoid.split(",") if a))
@@ -321,7 +359,9 @@ def main(argv: list[str] | None = None) -> int:
                           "claude": claude_argv(plan, name, budget_usd=args.per_call_usd, resume=None)}, indent=1))
         return 0
     args.out.mkdir(parents=True, exist_ok=True)
-    record = run_series(plan, execute=True, per_call_usd=args.per_call_usd, session_usd=args.session_usd)
+    first, last = (int(x) for x in args.rounds.split(":")) if args.rounds else (1, len(plan.rounds))
+    record = run_series(plan, execute=True, per_call_usd=args.per_call_usd, session_usd=args.session_usd, first=first, last=last,
+                        remove_images=args.remove_images)
     print(json.dumps({key: record[key] for key in ("arm", "spent_usd", "ended_by")}))
     return 0
 

@@ -9,6 +9,7 @@ import pytest
 from studies.claude_code import swe_series as s
 
 TOKEN = "sk-ant-oat01-" + "t" * 40  # a stand-in, never a real token
+NO_PULL = lambda image: None  # noqa: E731  (tests never start a real docker pull)
 COMMIT = "0ea40e09d1b35bcb69ff4d9cecf3d0defa4b36e8"
 
 
@@ -124,7 +125,7 @@ def test_a_series_runs_grades_and_scores_each_round(tmp_path, tasks):
     plan = _plan(tmp_path, tasks)
     docker, claude = FakeDocker(), FakeClaude(["Fixed it.\n\n1", "Fixed it.\n1", "Fixed the parser, all tests pass."])
     record = s.run_series(plan, execute=True, per_call_usd=8, session_usd=25, caller=claude, runner=docker,
-                          base_env={"CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-ant-api03-" + "a" * 40}, say=lambda m: None)
+                          base_env={"CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-ant-api03-" + "a" * 40}, say=lambda m: None, prefetch=NO_PULL)
     assert [r["one"]["strict"] for r in record["rounds"]] == [True, True, False]
     assert [r["grade_reward"] for r in record["rounds"]] == [1, 0, 1]
     assert record["spent_usd"] == pytest.approx(1.5) and record["ended_by"] is None
@@ -140,7 +141,7 @@ def test_a_series_runs_grades_and_scores_each_round(tmp_path, tasks):
 def test_a_series_refuses_without_the_subscription_token(tmp_path, tasks):
     with pytest.raises(RuntimeError, match="subscription"):
         s.run_series(_plan(tmp_path, tasks), execute=True, per_call_usd=8, session_usd=25, caller=FakeClaude([]), runner=FakeDocker(),
-                     base_env={"ANTHROPIC_API_KEY": "sk-ant-api03-" + "a" * 40})
+                     base_env={"ANTHROPIC_API_KEY": "sk-ant-api03-" + "a" * 40}, prefetch=NO_PULL)
     with pytest.raises(RuntimeError, match="execute=True"):
         s.run_series(_plan(tmp_path, tasks), per_call_usd=8, session_usd=25)
 
@@ -148,5 +149,41 @@ def test_a_series_refuses_without_the_subscription_token(tmp_path, tasks):
 def test_a_series_stops_when_a_container_will_not_start(tmp_path, tasks):
     claude = FakeClaude(["1"])
     record = s.run_series(_plan(tmp_path, tasks), execute=True, per_call_usd=8, session_usd=25, caller=claude,
-                          runner=FakeDocker(fail_start=True), base_env={"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, say=lambda m: None)
+                          runner=FakeDocker(fail_start=True), base_env={"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, say=lambda m: None, prefetch=NO_PULL)
     assert record["ended_by"].startswith("container") and not claude.calls
+
+
+def _run(plan, docker, claude, **options):
+    return s.run_series(plan, execute=True, per_call_usd=8, session_usd=25, caller=claude, runner=docker,
+                        base_env={"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, say=lambda m: None, **({"prefetch": NO_PULL} | options))
+
+
+def test_a_series_runs_in_batches_that_resume_the_same_session(tmp_path, tasks):
+    plan = _plan(tmp_path, tasks)
+    docker, pulled = FakeDocker(rewards=(1, 1, 0)), []
+    first = _run(plan, docker, FakeClaude(["a\n1", "b\n1"]), first=1, last=2, prefetch=pulled.append)
+    assert len(first["rounds"]) == 2 and json.loads(plan.record.read_text())["rounds"][-1]["round"] == "round_02"
+    assert pulled == [plan.rounds[1].task.image]  # only the next image inside the batch
+    second_claude = FakeClaude(["c"], cost=0.5)
+    second = _run(plan, docker, second_claude, first=3, last=3)
+    assert [r["round"] for r in second["rounds"]] == ["round_01", "round_02", "round_03"] and len(second["batches"]) == 2
+    assert second_claude.calls[0]["argv"][second_claude.calls[0]["argv"].index("--resume") + 1] == "sess-1"
+    budget = second_claude.calls[0]["argv"][second_claude.calls[0]["argv"].index("--max-budget-usd") + 1]
+    assert budget == "9.00"  # the running total so far (1.00) plus this call's cap (8.00)
+
+
+def test_a_batch_must_follow_on_exactly(tmp_path, tasks):
+    plan = _plan(tmp_path, tasks)
+    _run(plan, FakeDocker(), FakeClaude(["1"]), first=1, last=1)
+    with pytest.raises(RuntimeError, match="has begun"):
+        _run(plan, FakeDocker(), FakeClaude(["1"]), first=1, last=1)
+    with pytest.raises(RuntimeError, match="cannot start at round 3"):
+        _run(plan, FakeDocker(), FakeClaude(["1"]), first=3, last=3)
+
+
+def test_each_round_returns_the_session_folder_and_can_remove_its_image(tmp_path, tasks):
+    plan, docker = _plan(tmp_path, tasks), FakeDocker()
+    _run(plan, docker, FakeClaude(["1", "1", "1"]), remove_images=True)
+    chowns = [argv for argv in docker.calls if argv[:2] == ["docker", "exec"] and "chown" in argv]
+    assert len(chowns) == 3 and all(argv[-1] == s.CONFIG_IN_CONTAINER for argv in chowns)
+    assert [argv[-1] for argv in docker.calls if argv[:2] == ["docker", "rmi"]] == [r.task.image for r in plan.rounds]
