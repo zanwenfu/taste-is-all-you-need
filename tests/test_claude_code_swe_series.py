@@ -265,3 +265,42 @@ def test_compactions_and_context_are_counted_per_task_and_a_break_can_end_the_se
     record = _run(plan, FakeDocker(touch_tests=()), claude, stop_on_break=True)  # only rule 1 breaks, at task 3
     assert [r["compactions"] for r in record["rounds"]] == [0, 1, 0] and record["rounds"][0]["largest_context"] == 41000
     assert record["ended_by"] == "rule_broken at round_03" and len(claude.calls) == 3 and record["window"] == 100_000
+
+
+@pytest.mark.parametrize("command, edits", [
+    ("sed -i 's/a/b/' lib/x.py", ["sed -i"]),
+    ("sed -n 1,10p lib/x.py", []),
+    ("cd /app && sed -E -i.bak 's/a/b/' lib/x.py", ["sed -i"]),
+    ("cd /app && python - <<'E'\np='lib/x.py'\ns=open(p).read()\nopen(p,'w').write(s)\nE", ["python writes a file"]),
+    ("python3 -B -m pytest test/units/x.py -q 2>&1 | tail -5", []),
+    ("cat > lib/new.py <<'EOF'\nx = 1\nEOF", ["> lib/new.py"]),
+    ("python3 t.py > /tmp/out.txt 2>&1", []),
+    ("echo hi | tee notes.txt", ["tee"]),
+    ("git diff >/dev/null; grep -rn foo . > /dev/null 2>&1", []),
+    ("perl -pi -e 's/a/b/' x.py", ["perl -i"]),
+])
+def test_file_changes_made_by_script_are_found(command, edits):
+    assert s.bash_edits(command) == edits
+
+
+def test_the_screening_rules_are_read_from_tool_calls_and_the_hand_back():
+    tools = [{"name": "Bash", "input": {"command": "python3 -B a.py && python b.py"}},
+             {"name": "Bash", "input": {"command": "git stash -q && python3 -B -m pytest -q; git stash pop -q"}},
+             {"name": "Bash", "input": {"command": "sed -i 's/x/y/' f.py"}},
+             {"name": "Edit", "input": {"file_path": "/app/f.py"}}, {"name": "Write", "input": {"file_path": "/app/g.py"}}]
+    checks = s.screen_checks(tools, "word " * 160 + "\n1")
+    assert checks["brief"] == {"kept": False, "words": 161}
+    assert checks["edit_tool"]["kept"] is False and checks["edit_tool"]["n_script_edits"] == 1 and checks["edit_tool"]["tool_edits"] == 2
+    assert checks["no_stash"] == {"kept": False, "stash_commands": 2}
+    assert checks["python_B"] == {"kept": False, "with_B": 2, "without_B": 1}
+    clean = s.screen_checks([{"name": "Bash", "input": {"command": "python3 -B -m pytest -q"}}], "Fixed it.\n1")
+    assert all(rule["kept"] for rule in clean.values())
+
+
+def test_the_screening_set_is_told_once_and_scored_every_task(tmp_path, tasks):
+    plan = _plan(tmp_path, tasks, count=2, sessions=(1,), ruleset="six")
+    assert plan.rounds[0].prompt.startswith(s.OPENINGS["six"]) and "Never use git stash." in plan.rounds[0].prompt
+    assert s.OPENINGS["six"] not in plan.rounds[1].prompt
+    record = _run(plan, FakeDocker(touch_tests=()), FakeClaude(["Done.\n1", "Done.\n1"]))
+    assert all("screen" in r for r in record["rounds"]) and record["ruleset"] == "six"
+    assert "screen" not in _run(_plan(tmp_path / "b", tasks, count=1, sessions=(1,)), FakeDocker(), FakeClaude(["1"]))["rounds"][0]
