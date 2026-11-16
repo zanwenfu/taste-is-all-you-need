@@ -55,12 +55,21 @@ SCREEN_RULES = RULES + ("Keep your hand-back under 150 words.",
                         "Never use git stash.", "Whenever you run Python, use python -B.")
 CASUAL = ("Thanks, that works. But from now on keep your hand-backs short, under 150 words, start each one with a line saying which "
           "files you changed, and don't touch the tests unless I ask.")
-OPENINGS = {"two": OPENING, "six": "A few rules for all my tasks. " + " ".join(SCREEN_RULES), "casual": CASUAL}
-TOLD_AT = {"two": 1, "six": 1, "casual": 3}  # the task whose message carries the rules: casual rules come later, in an ordinary reply
+OPENINGS = {"two": OPENING, "six": "A few rules for all my tasks. " + " ".join(SCREEN_RULES), "casual": CASUAL, "revise": CASUAL}
+TOLD_AT = {"two": 1, "six": 1, "casual": 3, "revise": 3}  # the task whose message carries the rules: casual rules come in an ordinary reply
 RESTATED = {"casual": "Remember: keep your hand-backs short, under 150 words, start each one with a line saying which files you changed, "
                       "and don't touch the tests unless I ask."}
+RESTATED["revise"] = RESTATED["casual"]
+# The change of mind (the user's yes, Nov 16 ~2:00 pm ET; design in notes/cc-memory-pilot-design.md): the casual rules at task 3, then
+# at task 7, in passing, the files line moves from the start of the hand-back to its end. The other two rules stay as they were.
+REVISION = ("Thanks. Small change: from now on put the line saying which files you changed at the end of your hand-back, "
+            "not the start.")
+REVISED_AT = {"revise": 7}
+RESTATED_REVISED = {"revise": "Remember: keep your hand-backs short, under 150 words, end each one with a line saying which files you "
+                              "changed, and don't touch the tests unless I ask."}
 BRIEF_WORDS = 150
 REMEMBER = "Save these rules to your memory."
+UPDATE_MEMORY = "Update your memory with this."  # the remember arm, at the change
 ARMS = ("shipped", "remember", "ours", "restated", "plain")
 CONFIG_IN_CONTAINER = "/cc/config"
 CLAUDE_IN_CONTAINER = "/usr/local/bin/claude"
@@ -166,11 +175,13 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     rounds = []
     for number, folder in enumerate(task_folders, start=1):
         task = load_task(folder)
-        told = TOLD_AT[ruleset]
-        if number == told or (arm == "restated" and number > told and ruleset not in RESTATED):
+        told, changed = TOLD_AT[ruleset], REVISED_AT.get(ruleset)
+        if changed and number == changed:
+            head = None if arm == "plain" else f"{REVISION} {UPDATE_MEMORY}" if arm == "remember" else REVISION
+        elif number == told or (arm == "restated" and number > told and ruleset not in RESTATED):
             head = opening(arm, ruleset)
         elif arm == "restated" and number > told:
-            head = RESTATED[ruleset]
+            head = RESTATED_REVISED[ruleset] if changed and number > changed else RESTATED[ruleset]
         else:
             head = None
         prompt = f"{head}\n\n{task.instruction}" if head else task.instruction
@@ -269,6 +280,38 @@ def casual_checks(hand_back: str | None, patch: str) -> dict[str, Any]:
     count = len(re.findall(r"[A-Za-z0-9][\w'.\-]*", hand_back or ""))
     return {"brief": {"kept": count <= BRIEF_WORDS, "words": count}, "files_line": files_line(hand_back, patch),
             "tests": tests_rule(patch)}
+
+
+# A paragraph that says which files changed opens with a heading such as "Files changed:", "Files I changed:", "Changed files:" or
+# "Changed:". Fixed before the change-of-mind run; on the 180 hand-backs of the casual head-to-head (Nov 16) the end form never
+# appeared by chance, and every hand-back that kept the start rule was read as "start".
+_FILES_HEADING = re.compile(r"^\W*(files?\b[^.:\n]{0,24}?\b(changed|touched|modified|edited|updated)"
+                            r"|(changed|modified|edited|touched|updated)(\s+files?)?\s*:)", re.I)
+
+
+def files_where(hand_back: str | None) -> dict[str, Any]:
+    """Where the hand-back says which files changed: "start" (its first line opens with a files heading), "end" (its last paragraph,
+    when it has more than one, opens or closes with one), "both" or "neither"."""
+    paragraphs = []
+    for block in re.split(r"\n\s*\n", (hand_back or "").strip()):
+        lines = [line for line in (_DECOR.sub("", raw) for raw in block.splitlines()) if line]
+        if lines:
+            paragraphs.append(lines)
+    if not paragraphs:
+        return {"where": "neither", "first_line": "", "last_paragraph": ""}
+    start = bool(_FILES_HEADING.match(paragraphs[0][0]))
+    end = len(paragraphs) > 1 and any(_FILES_HEADING.match(line) for line in (paragraphs[-1][0], paragraphs[-1][-1]))
+    where = "both" if start and end else "start" if start else "end" if end else "neither"
+    return {"where": where, "first_line": paragraphs[0][0][:200], "last_paragraph": paragraphs[-1][0][:200]}
+
+
+def revise_checks(hand_back: str | None, patch: str, number: int, ruleset: str = "revise") -> dict[str, Any]:
+    """The casual checks, plus where the files line sits against where it was asked for at this task: kept when exactly there,
+    stale when only where the earlier version of the rule put it ("both" is neither kept nor stale)."""
+    asked = "end" if number >= REVISED_AT[ruleset] else "start"
+    found = files_where(hand_back)
+    return {**casual_checks(hand_back, patch), "files_where": {**found, "asked": asked, "kept": found["where"] == asked,
+                                                               "stale": asked == "end" and found["where"] == "start"}}
 
 
 def screen_checks(tools: list[dict[str, Any]], hand_back: str | None) -> dict[str, Any]:
@@ -554,7 +597,10 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                    "largest_context": seen.get("context", 0), "rule_1": one,
                    **({"screen": screen_checks(seen.get("tools", []), result.get("result"))} if plan.ruleset == "six" else {}),
                    **({"casual": casual_checks(result.get("result"), patch), "rules_told": round_.number >= TOLD_AT["casual"]}
-                      if plan.ruleset == "casual" else {}), "rule_2": tests, "patch_lines": patch.count("\n"),
+                      if plan.ruleset == "casual" else {}),
+                   **({"casual": revise_checks(result.get("result"), patch, round_.number, plan.ruleset),
+                       "rules_told": round_.number >= TOLD_AT[plan.ruleset]} if plan.ruleset in REVISED_AT else {}),
+                   "rule_2": tests, "patch_lines": patch.count("\n"),
                    **{f"grade_{k}": v for k, v in graded.items()}, "memory": memory, "session_id": session_id}
             record["rounds"].append(row)
             stream.write(json.dumps({"type": "study_call_end", "turn": round_.id, "exit": code, "time": now()}) + "\n")
@@ -569,7 +615,9 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                        b=row["screen"]["brief"], e=row["screen"]["edit_tool"], n=row["screen"]["no_stash"], p=row["screen"]["python_B"]))
                 + ("" if "casual" not in row else " | rules told {t} | brief {b[kept]} ({b[words]} words), files line {f[lenient]}/{f[strict]} "
                    "({f[first_line]!r:.70}), tests {x[kept]}".format(t=row["rules_told"], b=row["casual"]["brief"], f=row["casual"]["files_line"],
-                                                                      x=row["casual"]["tests"])))
+                                                                      x=row["casual"]["tests"]))
+                + ("" if "files_where" not in row.get("casual", {}) else " | files at {w[where]} (asked {w[asked]}, kept {w[kept]}, "
+                   "stale {w[stale]})".format(w=row["casual"]["files_where"])))
             broke = not one["strict"] or not tests["kept"]
             if not result:
                 record["ended_by"] = "no_result"
@@ -604,7 +652,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--network", help="the docker network with no way out but the proxy")
     parser.add_argument("--window", type=int, help="CLAUDE_CODE_AUTO_COMPACT_WINDOW, 100000 to 1000000")
     parser.add_argument("--stop-on-break", action="store_true", help="end the series at the first task that breaks a rule")
-    parser.add_argument("--ruleset", choices=tuple(OPENINGS), default="two", help="two: the 1 and the tests; six: the screening set")
+    parser.add_argument("--ruleset", choices=tuple(OPENINGS), default="two",
+                        help="two: the 1 and the tests; six: the screening set; casual: three rules said in passing at task 3; "
+                             "revise: the casual rules, then at task 7 the files line moves to the end")
     parser.add_argument("--per-call-usd", type=float, default=3.0)
     parser.add_argument("--session-usd", type=float, default=5.0)
     parser.add_argument("--rounds", default=None, help="FIRST:LAST (1-based, inclusive) for one batch")

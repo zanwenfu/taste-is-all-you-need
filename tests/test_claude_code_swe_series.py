@@ -334,3 +334,54 @@ def test_casual_checks_are_recorded_with_whether_the_rules_were_told_yet(tmp_pat
     assert [r["rules_told"] for r in rows] == [False, False, True, True]
     assert rows[2]["casual"]["files_line"]["strict"] and rows[2]["casual"]["brief"]["kept"] and rows[2]["casual"]["tests"]["kept"]
     assert not rows[3]["casual"]["brief"]["kept"] and not rows[3]["casual"]["tests"]["kept"] and not rows[3]["casual"]["files_line"]["lenient"]
+
+
+def test_the_change_of_mind_moves_the_files_line_at_task_7_and_each_arm_hears_it_as_planned(tmp_path, tasks):
+    shipped = _plan(tmp_path, tasks, count=10, sessions=(1,), ruleset="revise")
+    assert [r.tells_rules for r in shipped.rounds] == [False, False, True, False, False, False, True, False, False, False]
+    assert shipped.rounds[2].prompt.startswith(s.CASUAL) and shipped.rounds[6].prompt.startswith(s.REVISION + "\n\n")
+    assert not any(s.REMEMBER in r.prompt or s.UPDATE_MEMORY in r.prompt for r in shipped.rounds)
+    remember = _plan(tmp_path, tasks, "remember", count=10, sessions=(1,), ruleset="revise")
+    assert remember.rounds[2].prompt.startswith(f"{s.CASUAL} {s.REMEMBER}\n\n")
+    assert remember.rounds[6].prompt.startswith(f"{s.REVISION} {s.UPDATE_MEMORY}\n\n")
+    restated = _plan(tmp_path, tasks, "restated", count=10, sessions=(1,), ruleset="revise")
+    assert all(r.prompt.startswith(s.RESTATED["revise"] + "\n\n") for r in restated.rounds[3:6])
+    assert restated.rounds[6].prompt.startswith(s.REVISION + "\n\n")
+    assert all(r.prompt.startswith(s.RESTATED_REVISED["revise"] + "\n\n") for r in restated.rounds[7:])
+    assert "end each one with a line saying which files you changed" in s.RESTATED_REVISED["revise"]
+    plain = _plan(tmp_path, tasks, "plain", count=10, sessions=(1,), ruleset="revise")
+    assert not any(r.tells_rules for r in plain.rounds)
+    ours = _plan(tmp_path, tasks, "ours", count=10, sessions=(1,), ruleset="revise")
+    assert [r.prompt for r in ours.rounds] == [r.prompt for r in shipped.rounds]  # ours hears exactly what shipped hears
+
+
+@pytest.mark.parametrize("hand_back, where", [
+    ("Files changed: `x.py`\n\nFixed the parser.", "start"),
+    ("**Files changed:** `x.py`\n\nDone.", "start"),
+    ("Files I changed: `a.py`\n\nDone.", "start"),
+    ("Changed files: none, the code already did this.", "start"),
+    ("Files changed: x.py, fixed the parser.", "start"),  # one paragraph: its only line is the start
+    ("Fixed the parser.\n\nFiles changed: `x.py`", "end"),
+    ("Fixed the parser.\n\nIt now handles tabs.\n\n**Files changed:**\n- `lib/x.py`\n- `lib/y.py`", "end"),
+    ("Fixed the parser. It handles tabs.\n\nTests pass.\nChanged: lib/x.py", "end"),
+    ("Files changed: x.py\n\nFixed it.\n\nFiles changed: x.py", "both"),
+    ("Fixed the parser in x.py.\n\nI changed two files.", "neither"),
+    ("The files are changed now.\n\nDone.", "neither"),
+    ("", "neither"),
+    (None, "neither"),
+])
+def test_where_the_files_line_sits_is_read_from_the_first_line_and_the_last_paragraph(hand_back, where):
+    assert s.files_where(hand_back)["where"] == where
+
+
+def test_the_change_of_mind_is_scored_against_the_version_asked_at_each_task(tmp_path, tasks):
+    plan = _plan(tmp_path, tasks, count=8, sessions=(1,), ruleset="revise")
+    start, end = "Files changed: lib/x.py\n\nFixed.", "Fixed.\n\nFiles changed: lib/x.py"
+    record = _run(plan, FakeDocker(touch_tests=()), FakeClaude(["a", "b", start, start, end, start, end, start]))
+    rows = record["rounds"]
+    where = [r["casual"]["files_where"] for r in rows]
+    assert [r["rules_told"] for r in rows] == [False, False] + [True] * 6 and record["ruleset"] == "revise"
+    assert [w["asked"] for w in where] == ["start"] * 6 + ["end"] * 2
+    assert [w["kept"] for w in where] == [False, False, True, True, False, True, True, False]
+    assert [w["stale"] for w in where] == [False] * 7 + [True]  # task 8 went back to the start: the old version of the rule
+    assert all("brief" in r["casual"] and "tests" in r["casual"] for r in rows)
