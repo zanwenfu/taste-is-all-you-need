@@ -105,6 +105,7 @@ class SeriesPlan:
     token_file: Path | None = None
     proxy: str | None = None
     network: str | None = None
+    window: int | None = None  # CLAUDE_CODE_AUTO_COMPACT_WINDOW: a smaller window makes the same session longer, in compactions
     record: Path = field(init=False)
     stream: Path = field(init=False)
 
@@ -138,10 +139,12 @@ def opening(arm: str) -> str | None:
 
 def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | None, claude_binary: Path,
                 sessions: tuple[int, ...] = (1,), code: Path | None = None, token_file: Path | None = None,
-                proxy: str | None = None, network: str | None = None) -> SeriesPlan:
+                proxy: str | None = None, network: str | None = None, window: int | None = None) -> SeriesPlan:
     """``sessions``: the 1-based task numbers that start a new session (the first always does). The rules head the first message."""
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
+    if window is not None and not 100_000 <= window <= 1_000_000:
+        raise ValueError("the compaction window must be 100,000 to 1,000,000 tokens (Claude Code's documented range)")
     if arm == "ours" and not (code and token_file):
         raise ValueError("the ours arm needs the code folder (its hooks) and the token file (its reader)")
     starts = set(sessions) | {1}
@@ -151,7 +154,7 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
         head = opening(arm) if (number == 1 or arm == "restated") else None
         prompt = f"{head}\n\n{task.instruction}" if head else task.instruction
         rounds.append(Round(f"round_{number:02d}", number, prompt, task, number in starts, tells_rules=head is not None))
-    return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network)
+    return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window)
 
 
 # --- the checks, fixed in advance --------------------------------------------------------------------------------------------------
@@ -235,6 +238,8 @@ def exec_env(plan: SeriesPlan) -> list[str]:
     env = {"CLAUDE_CONFIG_DIR": CONFIG_IN_CONTAINER, "DISABLE_AUTOUPDATER": "1", "HOME": "/root",
            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}  # auto memory ON in every arm, as the design says, whatever the default is
+    if plan.window:
+        env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(plan.window)
     if plan.proxy:
         env |= {"HTTPS_PROXY": plan.proxy, "HTTP_PROXY": plan.proxy, "NO_PROXY": "localhost,127.0.0.1"}
     if plan.arm == "ours":
@@ -348,9 +353,10 @@ def earlier_state(plan: SeriesPlan, first: int) -> tuple[dict[str, Any] | None, 
 def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, session_usd: float, timeout_s: float = TASK_SECONDS,
                caller=None, runner: Runner = subprocess.run, base_env: dict[str, str] | None = None,
                say: Callable[[str], None] = print, first: int = 1, last: int | None = None, remove_images: bool = False,
-               prefetch: Callable[[str], Any] | None = None) -> dict[str, Any]:
+               prefetch: Callable[[str], Any] | None = None, stop_on_break: bool = False) -> dict[str, Any]:
     """Paid: only with execute=True. Runs rounds ``first`` to ``last`` (1-based, inclusive); saves the record after every round. Ends
-    early when the budget is spent, when a call gives no result, or when a container will not start."""
+    early when the budget is spent, when a call gives no result, when a container will not start, or (stop_on_break) at the first
+    task that breaks a rule."""
     if not execute:
         raise RuntimeError("run_series starts paid Claude Code calls; call it with execute=True, after the user's OK")
     last = len(plan.rounds) if last is None else last
@@ -372,7 +378,7 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
     record: dict[str, Any] = earlier or {
         "arm": plan.arm, "model": plan.model, "opening": opening(plan.arm), "claude_version": claude_version(str(plan.claude_binary)),
         "tasks": [r.task.id for r in plan.rounds], "sessions": [r.number for r in plan.rounds if r.new_session], "proxy": plan.proxy,
-        "network": plan.network, "started": now(), "rounds": [], "spent_usd": 0.0, "ended_by": None, "batches": []}
+        "network": plan.network, "window": plan.window, "started": now(), "rounds": [], "spent_usd": 0.0, "ended_by": None, "batches": []}
     if record["tasks"] != [r.task.id for r in plan.rounds]:
         raise RuntimeError("the recorded series has other tasks than this plan")
     record.setdefault("batches", []).append({"first": first, "last": last, "started": now()})
@@ -411,6 +417,12 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                     seen["session_id"] = event["session_id"]
                 if isinstance(event, dict) and event.get("type") == "result":
                     seen["result"] = event
+                if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "compact_boundary":
+                    seen["compactions"] = seen.get("compactions", 0) + 1
+                if isinstance(event, dict) and event.get("type") == "assistant":
+                    usage = (event.get("message") or {}).get("usage") or {}
+                    size = sum(usage.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+                    seen["context"] = max(seen.get("context", 0), size)
 
             if index + 1 < last:  # the next task's image downloads while this one runs
                 prefetch(plan.rounds[index + 1].task.image)
@@ -443,18 +455,24 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
             memory = memory_snapshot(plan, round_, carried)
             row = {"round": round_.id, "task": round_.task.id, "new_session": round_.new_session, "exit": code, "seconds": seconds,
                    "cost_usd": round(cost, 6), "reported_total_usd": total if result else None, "is_error": result.get("is_error"),
-                   "num_turns": result.get("num_turns"), "rule_1": one, "rule_2": tests, "patch_lines": patch.count("\n"),
+                   "num_turns": result.get("num_turns"), "compactions": seen.get("compactions", 0),
+                   "largest_context": seen.get("context", 0), "rule_1": one, "rule_2": tests, "patch_lines": patch.count("\n"),
                    **{f"grade_{k}": v for k, v in graded.items()}, "memory": memory, "session_id": session_id}
             record["rounds"].append(row)
             stream.write(json.dumps({"type": "study_call_end", "turn": round_.id, "exit": code, "time": now()}) + "\n")
             stream.flush()
+            so_far = sum(r.get("compactions", 0) for r in record["rounds"])
             say(f"{plan.arm} {round_.id}{' (new session)' if round_.new_session else ''} {round_.task.short}: exit {code}, {seconds}s, "
+                f"compactions {row['compactions']} (all {so_far}), context up to {row['largest_context']}, "
                 f"${cost:.2f} (series ${record['spent_usd']:.2f}), rule 1 {one['strict']}, rule 2 {tests['kept']}, "
                 f"reward {graded.get('reward')}, memory auto {len(memory['auto_memory_files'])} project {memory['project_memory']}")
+            broke = not one["strict"] or not tests["kept"]
             if not result:
                 record["ended_by"] = "no_result"
+            elif stop_on_break and broke:
+                record["ended_by"] = f"rule_broken at {round_.id}"
             plan.record.write_text(json.dumps(record, indent=1) + "\n")  # after every round, so a crash loses at most one
-            if not result:
+            if record["ended_by"]:
                 break
     stderr = plan.out / "stderr.log"
     if stderr.exists():
@@ -480,6 +498,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token-file", type=Path, help="the subscription token's file, mounted read-only for the ours arm's reader")
     parser.add_argument("--proxy", help="the model-only proxy, e.g. http://172.30.0.1:8888")
     parser.add_argument("--network", help="the docker network with no way out but the proxy")
+    parser.add_argument("--window", type=int, help="CLAUDE_CODE_AUTO_COMPACT_WINDOW, 100000 to 1000000")
+    parser.add_argument("--stop-on-break", action="store_true", help="end the series at the first task that breaks a rule")
     parser.add_argument("--per-call-usd", type=float, default=3.0)
     parser.add_argument("--session-usd", type=float, default=5.0)
     parser.add_argument("--rounds", default=None, help="FIRST:LAST (1-based, inclusive) for one batch")
@@ -489,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
     folders = pick_tasks(args.tasks_root, args.repo, args.count, args.seed, tuple(a for a in args.avoid.split(",") if a))
     plan = plan_series(args.arm, folders, args.out, model=args.model, claude_binary=args.claude_binary,
                        sessions=tuple(int(x) for x in args.sessions.split(",") if x), code=args.code, token_file=args.token_file,
-                       proxy=args.proxy, network=args.network)
+                       proxy=args.proxy, network=args.network, window=args.window)
     if not args.execute:
         name = container_name(plan, plan.rounds[0])
         print(json.dumps({"arm": plan.arm, "tasks": [[r.number, r.task.short, r.task.size, r.new_session] for r in plan.rounds],
@@ -499,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     first, last = (int(x) for x in args.rounds.split(":")) if args.rounds else (1, len(plan.rounds))
     record = run_series(plan, execute=True, per_call_usd=args.per_call_usd, session_usd=args.session_usd, first=first, last=last,
-                        remove_images=args.remove_images)
+                        remove_images=args.remove_images, stop_on_break=args.stop_on_break)
     print(json.dumps({key: record[key] for key in ("arm", "spent_usd", "ended_by")}))
     return 0
 

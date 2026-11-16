@@ -156,8 +156,9 @@ class FakeDocker:
 class FakeClaude:
     """claude -p: a running total that restarts with each new session (no --resume), as Claude Code's does."""
 
-    def __init__(self, replies, cost=0.2, on_call=None):
+    def __init__(self, replies, cost=0.2, on_call=None, compact_on=()):
         self.replies, self.cost, self.on_call, self.calls, self.in_session = list(replies), cost, on_call, [], 0
+        self.compact_on = set(compact_on)
 
     def __call__(self, argv, *, env, cwd, stdin_line, timeout_s, on_line, stderr_path):
         self.calls.append({"argv": argv, "env": env, "message": json.loads(stdin_line)["message"]["content"], "timeout": timeout_s})
@@ -165,6 +166,10 @@ class FakeClaude:
         if self.on_call:
             self.on_call(len(self.calls), cwd)
         on_line(json.dumps({"type": "system", "subtype": "init", "session_id": f"sess-{len(self.calls) if '--resume' not in argv else 'x'}"}) + "\n")
+        if len(self.calls) in self.compact_on:
+            on_line(json.dumps({"type": "system", "subtype": "compact_boundary", "compact_metadata": {"pre_tokens": 80000}}) + "\n")
+        on_line(json.dumps({"type": "assistant", "message": {"content": [], "usage": {"input_tokens": 5, "cache_read_input_tokens": 40000,
+                                                                                         "cache_creation_input_tokens": 995}}}) + "\n")
         on_line(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": self.replies[len(self.calls) - 1],
                             "total_cost_usd": self.cost * self.in_session, "session_id": "sess-a" if len(self.calls) <= 5 else "sess-b",
                             "num_turns": 20}) + "\n")
@@ -244,3 +249,19 @@ def test_the_ours_arm_writes_its_hook_settings(tmp_path, tasks):
     plan = _plan(tmp_path, tasks, "ours", count=1, sessions=(1,))
     _run(plan, FakeDocker(), FakeClaude(["1"]))
     assert json.loads((plan.out / "hooks" / "settings.json").read_text()) == s.hook_settings()
+
+
+def test_the_window_makes_a_session_long_in_compactions_and_is_kept_in_range(tmp_path, tasks):
+    plan = _plan(tmp_path, tasks, window=100_000)
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000" in s.exec_env(plan)
+    assert not any(f.startswith("CLAUDE_CODE_AUTO_COMPACT_WINDOW") for f in s.exec_env(_plan(tmp_path, tasks)))
+    with pytest.raises(ValueError, match="100,000 to 1,000,000"):
+        _plan(tmp_path, tasks, window=50_000)
+
+
+def test_compactions_and_context_are_counted_per_task_and_a_break_can_end_the_series(tmp_path, tasks):
+    plan = _plan(tmp_path, tasks, sessions=(1,), window=100_000)
+    claude = FakeClaude(["Done.\n1", "Done.\n1", "Done.", "Done.\n1"], compact_on=(2,))
+    record = _run(plan, FakeDocker(touch_tests=()), claude, stop_on_break=True)  # only rule 1 breaks, at task 3
+    assert [r["compactions"] for r in record["rounds"]] == [0, 1, 0] and record["rounds"][0]["largest_context"] == 41000
+    assert record["ended_by"] == "rule_broken at round_03" and len(claude.calls) == 3 and record["window"] == 100_000
