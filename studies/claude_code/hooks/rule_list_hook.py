@@ -61,18 +61,24 @@ def add(path: Path, found: list[str]) -> list[str]:
 def commit(path: Path, new: list[str], run=None) -> bool:
     """Our git memory: the rules file lives in a git repository and each reading that adds rules is one commit, so the list has a
     history that can be read, diffed and rolled back like the agent's code. A failure here is returned, never raised."""
+    import os
     import subprocess
+    import tempfile
     run = run or subprocess.run
-    # safe.directory: the memory folder is mounted from the host, so its owner differs from the container's root, and git refuses a
-    # repository owned by someone else ("dubious ownership", seen in the plumbing check of Nov 15) unless told it is safe.
-    folder = Path(path).parent
+    folder = Path(path).parent.resolve()
+    # The memory folder is mounted from the host, so its owner differs from the container's root, and git refuses a repository owned
+    # by someone else ("dubious ownership"). Newer git takes safe.directory on the command line; the older git of some task images
+    # (2.25.1 with the backported check, Nov 16) reads it only from a config file, so git also gets a home of its own holding one.
+    home = Path(tempfile.mkdtemp(prefix="taste-memory-git-"))
+    (home / ".gitconfig").write_text(f"[safe]\n\tdirectory = {folder}\n\tdirectory = *\n")
+    env = {**os.environ, "HOME": str(home)}
     git = ["git", "-c", "safe.directory=*", "-c", "user.name=taste-memory", "-c", "user.email=memory@taste.invalid"]
     try:
         if not (folder / ".git").exists():
-            run([*git, "-C", str(folder), "init", "-q"], check=True, capture_output=True, timeout=30)
-        run([*git, "-C", str(folder), "add", Path(path).name], check=True, capture_output=True, timeout=30)
+            run([*git, "-C", str(folder), "init", "-q"], check=True, capture_output=True, timeout=30, env=env)
+        run([*git, "-C", str(folder), "add", Path(path).name], check=True, capture_output=True, timeout=30, env=env)
         message = f"rule: {new[0][:72]}" + (f" (+{len(new) - 1})" if len(new) > 1 else "")
-        run([*git, "-C", str(folder), "commit", "-q", "-m", message], check=True, capture_output=True, timeout=30)
+        run([*git, "-C", str(folder), "commit", "-q", "-m", message], check=True, capture_output=True, timeout=30, env=env)
         return True
     except Exception:
         return False
@@ -90,7 +96,7 @@ def on_prompt(event: Mapping[str, Any], *, rules_path: Path, reader: Callable[[s
     try:
         found = list(reader(prompt)) if prompt.strip() else []
         added = add(rules_path, found)
-        record |= {"found": found, "added": added}
+        record.update({"found": found, "added": added})  # not |=: some task images have Python 3.8
         if git and added:
             record["committed"] = commit(rules_path, added)
     except Exception as error:  # the list so far still goes out; the driver stops the session on a logged error

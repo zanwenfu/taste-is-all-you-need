@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from studies.claude_code.driver import OTHER_CREDENTIALS, SUBSCRIPTION_TOKEN
+from studies.claude_code.credentials import OTHER_CREDENTIALS, SUBSCRIPTION_TOKEN
 from studies.context_rot.criteria import parse_reply, reader_prompt
 
 TOKEN_FILE_ENV = "CC_STUDY_TOKEN_FILE"  # the subscription token's file, when the hook's environment does not carry the token

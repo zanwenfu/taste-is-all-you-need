@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from studies.claude_code.credentials import OTHER_CREDENTIALS, SUBSCRIPTION_TOKEN  # noqa: F401  (re-exported)
 from studies.claude_code.hooks.common import now
 from studies.claude_code.hooks.mem0_hook import CLIENT_ENV
 from studies.claude_code.hooks.rule_list_hook import READER_ENV
@@ -52,9 +53,6 @@ LS_ONE = "From now on, when you list a folder, use ls -1 and no other form of ls
 CLAUDE_MD = "# Project notes\n\nSmall Python and shell tools, one folder per task.\n\nWhen you list a folder, use ls -la.\n"
 TAG_FILE = ".session_tag"
 LS_RULE_BEFORE_TASK = 4
-SUBSCRIPTION_TOKEN = "CLAUDE_CODE_OAUTH_TOKEN"  # the user's Claude subscription; read from its file by the caller, never saved
-OTHER_CREDENTIALS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
-                     "CLAUDE_CODE_USE_MANTLE", "AWS_BEARER_TOKEN_BEDROCK")
 WINDOW = 100_000  # CLAUDE_CODE_AUTO_COMPACT_WINDOW; the docs allow 100,000 to 1,000,000
 COMPACT_PERCENT = 50  # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE; it can only lower the trigger
 PERMISSION_MODE = "acceptEdits"  # edits run unattended; the allowed tools cover Bash; denials are counted from each result line
