@@ -103,7 +103,7 @@ def test_command_lines_follow_the_locked_protocol_and_pass_the_token_by_name_onl
     argv = s.claude_argv(plan, name, budget_usd=3, resume="sess-1")
     flags = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
     assert "CLAUDE_CODE_OAUTH_TOKEN" in flags and not any(f.startswith("CLAUDE_CODE_OAUTH_TOKEN=") for f in flags)
-    assert "HTTPS_PROXY=http://172.30.0.1:8888" in flags and not any(f.startswith("CLAUDE_CODE_DISABLE_AUTO_MEMORY") for f in flags)
+    assert "HTTPS_PROXY=http://172.30.0.1:8888" in flags and "CLAUDE_CODE_DISABLE_AUTO_MEMORY=0" in flags  # auto memory on
     assert argv[argv.index("--disallowedTools") + 1: argv.index("--disallowedTools") + 3] == ["WebFetch", "WebSearch"]
     assert "--settings" not in argv and "--bare" not in argv and argv[argv.index("--resume") + 1] == "sess-1"
     for excluded in s.PROJECT_MEMORY:

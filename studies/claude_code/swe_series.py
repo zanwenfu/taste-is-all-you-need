@@ -233,7 +233,8 @@ def hook_settings() -> dict[str, Any]:
 def exec_env(plan: SeriesPlan) -> list[str]:
     """docker exec -e flags: the token by NAME only (docker takes its value from the runner's environment), the rest by value."""
     env = {"CLAUDE_CONFIG_DIR": CONFIG_IN_CONTAINER, "DISABLE_AUTOUPDATER": "1", "HOME": "/root",
-           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+           "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}  # auto memory ON in every arm, as the design says, whatever the default is
     if plan.proxy:
         env |= {"HTTPS_PROXY": plan.proxy, "HTTP_PROXY": plan.proxy, "NO_PROXY": "localhost,127.0.0.1"}
     if plan.arm == "ours":
