@@ -23,6 +23,7 @@ read-only. Neither is ever printed or saved.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import random
@@ -102,8 +103,14 @@ TO_CLAUDE_MD = "Add this to CLAUDE.md."  # the claudemd arm: Claude Code's docum
 BRIEF_WORDS = 150
 REMEMBER = "Save these rules to your memory."
 UPDATE_MEMORY = "Update your memory with this."  # the remember arm, at the change
-ARMS = ("shipped", "remember", "claudemd", "ours", "oursfirm", "restated", "plain")
+ARMS = ("shipped", "remember", "claudemd", "ours", "oursfirm", "restated", "plain", "flat", "folders", "gitmem")
 OURS = ("ours", "oursfirm")  # our layer; oursfirm delivers the same list under the firm header
+# One project memory, three designs (the user, Nov 16 ~8 pm ET; studies.claude_code.git_memory): flat (all in CLAUDE.md), folders
+# (Claude Code's path-scoped rules), gitmem (Taste's git store, delivered when needed and searchable). Ruleset "scaled": no rule is
+# said during the session; the memory holds the house rules from the start.
+MEMORY_ARMS = ("flat", "folders", "gitmem")
+MCP_IN_CONTAINER = "/cc/hooks/mcp.json"
+MCP_TOOLS = ("mcp__memory__memory_search", "mcp__memory__memory_fetch")
 CONFIG_IN_CONTAINER = "/cc/config"
 CLAUDE_IN_CONTAINER = "/usr/local/bin/claude"
 CODE_IN_CONTAINER = "/cc/code"
@@ -162,6 +169,7 @@ class SeriesPlan:
     window: int | None = None  # CLAUDE_CODE_AUTO_COMPACT_WINDOW: a smaller window makes the same session longer, in compactions
     ruleset: str = "two"
     spacing: int = 2  # the gradual rules: one every ``spacing`` tasks from task 2
+    memory: Path | None = None  # the memory arms: the folder git_memory build wrote (flat/, folders/, git/)
     record: Path = field(init=False)
     stream: Path = field(init=False)
 
@@ -224,12 +232,18 @@ def gradual_head(arm: str, number: int, spacing: int = 2) -> str | None:
 def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | None, claude_binary: Path,
                 sessions: tuple[int, ...] = (1,), code: Path | None = None, token_file: Path | None = None,
                 proxy: str | None = None, network: str | None = None, window: int | None = None, ruleset: str = "two",
-                spacing: int = 2) -> SeriesPlan:
+                spacing: int = 2, memory: Path | None = None) -> SeriesPlan:
     """``sessions``: the 1-based task numbers that start a new session (the first always does). The rules head the first message."""
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
-    if ruleset not in OPENINGS and ruleset != "gradual":
+    if ruleset not in OPENINGS and ruleset not in ("gradual", "scaled"):
         raise ValueError(f"unknown rule set {ruleset!r}")
+    if (arm in MEMORY_ARMS) != (ruleset == "scaled"):
+        raise ValueError("the memory arms run the scaled rule set, and only they do")
+    if arm in MEMORY_ARMS and not (memory and (Path(memory) / "git" / "index.json").exists()):
+        raise ValueError("the memory arms need the built memory folder (git_memory build)")
+    if arm == "gitmem" and not code:
+        raise ValueError("the gitmem arm needs the code folder (its hooks and tool server)")
     if window is not None and not 100_000 <= window <= 1_000_000:
         raise ValueError("the compaction window must be 100,000 to 1,000,000 tokens (Claude Code's documented range)")
     if arm in OURS and not (code and token_file):
@@ -238,6 +252,9 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     rounds = []
     for number, folder in enumerate(task_folders, start=1):
         task = load_task(folder)
+        if ruleset == "scaled":  # the memory holds the rules; nothing is said
+            rounds.append(Round(f"round_{number:02d}", number, task.instruction, task, number in starts))
+            continue
         if ruleset == "gradual":
             head = gradual_head(arm, number, spacing)
             prompt = f"{head}\n\n{task.instruction}" if head else task.instruction
@@ -256,7 +273,8 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
         rounds.append(Round(f"round_{number:02d}", number, prompt, task, number in starts, tells_rules=head is not None))
     if ruleset == "gradual" and len(rounds) < gradual_schedule(spacing)[-1][0]:
         raise ValueError("the series ends before the last gradual rule is added")
-    return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset, spacing)
+    return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset, spacing,
+                      Path(memory) if memory else None)
 
 
 # --- the checks, fixed in advance --------------------------------------------------------------------------------------------------
@@ -493,6 +511,22 @@ def gradual_checks(tools: list[dict[str, Any]], hand_back: str | None, patch: st
     return {key: {**value, "told": key in told} for key, value in found.items()}
 
 
+def folder_checks(tools: list[dict[str, Any]], patch: str, folder_items: list[dict[str, Any]]) -> dict[str, Any]:
+    """The memory's folder instructions on one task: for each code file the task changed, the most specific folder instruction
+    that covers it is due; it is kept when a shell command ran pytest on that folder's tests with -p no:cacheprovider (the flag only
+    the memory asks for)."""
+    bash = [str(t.get("input", {}).get("command", "")) for t in tools if t.get("name") == "Bash"]
+    due: dict[str, dict[str, Any]] = {}
+    for path in (p for p in patch_paths(patch) if not is_test_code(p)):
+        covering = [i for i in folder_items if path.startswith(i["scope"] + "/")]
+        if covering:
+            item = max(covering, key=lambda i: len(i["scope"]))
+            due[item["scope"]] = item
+    items = [{"scope": scope, "tests": item["tests"],
+              "kept": any("pytest" in c and item["tests"] in c and "no:cacheprovider" in c for c in bash)} for scope, item in due.items()]
+    return {"due": len(items), "kept": sum(i["kept"] for i in items), "items": items}
+
+
 def screen_checks(tools: list[dict[str, Any]], hand_back: str | None) -> dict[str, Any]:
     """Rules 3 to 6 of the screening set for one task, with how many chances each had to break."""
     from studies.claude_code.score import program, python_options, split_commands, words
@@ -536,6 +570,9 @@ def start_argv(plan: SeriesPlan, round_: Round, name: str) -> list[str]:
         argv += ["-v", f"{Path(plan.code).resolve()}:{CODE_IN_CONTAINER}:ro", "-v", f"{out / 'memory'}:{MEMORY_IN_CONTAINER}",
                  "-v", f"{out / 'reader'}:{READER_IN_CONTAINER}", "-v", f"{Path(plan.token_file).resolve()}:{TOKEN_IN_CONTAINER}:ro",
                  "-v", f"{out / 'hooks'}:{Path(HOOKS_IN_CONTAINER).parent}:ro"]
+    if plan.arm == "gitmem":  # the hooks and the tool server; the memory folder holds the service's socket
+        argv += ["-v", f"{Path(plan.code).resolve()}:{CODE_IN_CONTAINER}:ro", "-v", f"{out / 'memory'}:{MEMORY_IN_CONTAINER}",
+                 "-v", f"{out / 'hooks'}:{Path(HOOKS_IN_CONTAINER).parent}:ro"]
     return argv + ["-w", "/app", round_.task.image, "infinity"]
 
 
@@ -547,6 +584,24 @@ def hook_settings(firm: bool = False) -> dict[str, Any]:
     return {"hooks": {
         "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{hook} prompt {files} --git", "timeout": 120}]}],
         "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{hook} compact {files}", "timeout": 60}]}]}}
+
+
+def git_memory_settings() -> dict[str, Any]:
+    """The gitmem arm's hooks: the house rules with every message, a folder's instructions and a file's notes when Claude first
+    touches them, the house rules again after a compaction."""
+    hook = f"python3 -B {CODE_IN_CONTAINER}/studies/claude_code/hooks/git_memory_hook.py"
+    memory = f"--memory {MEMORY_IN_CONTAINER}"
+    return {"hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{hook} prompt {memory}", "timeout": 30}]}],
+        "PostToolUse": [{"matcher": "Read|Edit|Write|MultiEdit|Grep|Glob|Bash",
+                         "hooks": [{"type": "command", "command": f"{hook} post {memory}", "timeout": 30}]}],
+        "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{hook} compact {memory}", "timeout": 30}]}]}}
+
+
+def mcp_config() -> dict[str, Any]:
+    """memory_search and memory_fetch as an MCP server over the same store."""
+    return {"mcpServers": {"memory": {"command": "python3", "args": [
+        "-B", f"{CODE_IN_CONTAINER}/studies/claude_code/hooks/memory_mcp.py", "--memory", MEMORY_IN_CONTAINER]}}}
 
 
 def exec_env(plan: SeriesPlan) -> list[str]:
@@ -572,6 +627,10 @@ def claude_argv(plan: SeriesPlan, name: str, *, budget_usd: float, resume: str |
     inner += ["--disallowedTools", *DISALLOWED]
     if plan.arm in OURS:
         inner += ["--settings", HOOKS_IN_CONTAINER]
+    if plan.arm == "gitmem":
+        at = inner.index("--permission-mode")
+        inner = inner[:at] + list(MCP_TOOLS) + inner[at:]  # in the one --allowedTools list
+        inner += ["--settings", HOOKS_IN_CONTAINER, "--mcp-config", MCP_IN_CONTAINER, "--strict-mcp-config"]
     return ["docker", "exec", "-i", "-w", "/app", *exec_env(plan), name, *inner]
 
 
@@ -651,6 +710,50 @@ def memory_snapshot(plan: SeriesPlan, round_: Round, carried: list[str]) -> dict
 
 # --- the series ------------------------------------------------------------------------------------------------------------------
 
+def seed_project_memory(folder: Path, carry: Path) -> list[str]:
+    """The flat and folders arms: the memory's files (CLAUDE.md, .claude/rules/) as the project's carried files before task 1."""
+    import tarfile
+    names = sorted(str(p.relative_to(folder)) for p in Path(folder).rglob("*") if p.is_file())
+    with tarfile.open(carry, "w") as tar:
+        for name in names:
+            tar.add(Path(folder) / name, arcname=name)
+    return names
+
+
+def start_memory_service(plan: SeriesPlan, *, wait_s: float = 180) -> subprocess.Popen:
+    """The gitmem arm: Taste's store served on this machine through the socket in the mounted memory folder (the store needs Python
+    3.11 and GitPython; CC_STUDY_PYLIB names the folder holding GitPython). No credential reaches it."""
+    folder = plan.out / "memory"
+    sock = folder / "memory.sock"
+    env = {k: v for k, v in os.environ.items() if k not in (SUBSCRIPTION_TOKEN, *OTHER_CREDENTIALS)}
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(Path(plan.code).resolve()), os.environ.get("CC_STUDY_PYLIB", "")) if p)
+    log = (folder / "service.log").open("a")
+    process = subprocess.Popen([sys.executable, "-B", "-m", "studies.claude_code.git_memory", "serve", "--memory", str(folder),
+                                "--socket", str(sock)], env=env, stdout=log, stderr=log, cwd=str(Path(plan.code).resolve()))
+    deadline = time.time() + wait_s
+    while time.time() < deadline and process.poll() is None and not sock.exists():
+        time.sleep(0.5)
+    if process.poll() is not None or not sock.exists():
+        process.kill()
+        raise RuntimeError("the memory service did not start: " + (folder / "service.log").read_text()[-400:])
+    return process
+
+
+@contextlib.contextmanager
+def memory_service(plan: SeriesPlan, service: Callable[[SeriesPlan], Any] | None):
+    """The gitmem arm's service for the length of one batch; nothing for the other arms."""
+    server = (service or start_memory_service)(plan) if plan.arm == "gitmem" else None
+    try:
+        yield server
+    finally:
+        if server is not None:
+            server.terminate()
+            try:
+                server.wait(timeout=30)
+            except Exception:
+                server.kill()
+
+
 def earlier_state(plan: SeriesPlan, first: int) -> tuple[dict[str, Any] | None, str | None, float]:
     """For a batch that starts at round ``first`` (1-based): the record so far, the session to resume and its running total. A batch
     must follow on exactly from the rounds already recorded."""
@@ -669,7 +772,8 @@ def earlier_state(plan: SeriesPlan, first: int) -> tuple[dict[str, Any] | None, 
 def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, session_usd: float, timeout_s: float = TASK_SECONDS,
                caller=None, runner: Runner = subprocess.run, base_env: dict[str, str] | None = None,
                say: Callable[[str], None] = print, first: int = 1, last: int | None = None, remove_images: bool = False,
-               prefetch: Callable[[str], Any] | None = None, stop_on_break: bool = False) -> dict[str, Any]:
+               prefetch: Callable[[str], Any] | None = None, stop_on_break: bool = False,
+               service: Callable[[SeriesPlan], Any] | None = None) -> dict[str, Any]:
     """Paid: only with execute=True. Runs rounds ``first`` to ``last`` (1-based, inclusive); saves the record after every round. Ends
     early when the budget is spent, when a call gives no result, when a container will not start, or (stop_on_break) at the first
     task that breaks a rule."""
@@ -691,6 +795,18 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
         (plan.out / "hooks" / "settings.json").write_text(json.dumps(hook_settings(firm=plan.arm == "oursfirm"), indent=1) + "\n")
     carry = plan.out / "project-memory.tar"
     earlier, session_id, reported_total = earlier_state(plan, first)
+    folder_items: list[dict[str, Any]] = []
+    if plan.arm in MEMORY_ARMS:
+        import shutil
+        index = json.loads((plan.memory / "git" / "index.json").read_text())
+        folder_items = [{"scope": r["scope"], "tests": r["tests"]} for r in index if r["kind"] == "folder"]
+        if earlier is None and plan.arm in ("flat", "folders"):
+            seed_project_memory(plan.memory / plan.arm, carry)
+        if plan.arm == "gitmem":
+            if not (plan.out / "memory" / "index.json").exists():
+                shutil.copytree(plan.memory / "git", plan.out / "memory", dirs_exist_ok=True)
+            (plan.out / "hooks" / "settings.json").write_text(json.dumps(git_memory_settings(), indent=1) + "\n")
+            (plan.out / "hooks" / "mcp.json").write_text(json.dumps(mcp_config(), indent=1) + "\n")
     record: dict[str, Any] = earlier or {
         "arm": plan.arm, "model": plan.model, "opening": opening(plan.arm), "claude_version": claude_version(str(plan.claude_binary)),
         "tasks": [r.task.id for r in plan.rounds], "sessions": [r.number for r in plan.rounds if r.new_session], "proxy": plan.proxy,
@@ -701,7 +817,7 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
     owner = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else None
     prefetch = prefetch or (lambda image: subprocess.Popen(["docker", "pull", "-q", image], stdout=subprocess.DEVNULL,
                                                            stderr=subprocess.DEVNULL))
-    with plan.stream.open("a") as stream:
+    with plan.stream.open("a") as stream, memory_service(plan, service):
         for index in range(first - 1, last):
             round_ = plan.rounds[index]
             left = session_usd - record["spent_usd"]
@@ -741,6 +857,7 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                     usage = (event.get("message") or {}).get("usage") or {}
                     size = sum(usage.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
                     seen["context"] = max(seen.get("context", 0), size)
+                    seen.setdefault("contexts", []).append(size)
 
             if index + 1 < last:  # the next task's image downloads while this one runs
                 prefetch(plan.rounds[index + 1].task.image)
@@ -782,6 +899,10 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                        "rules_told": round_.number >= TOLD_AT[plan.ruleset]} if plan.ruleset in REVISED_AT else {}),
                    **({"gradual": gradual_checks(seen.get("tools", []), result.get("result"), patch, round_.number, plan.spacing)}
                       if plan.ruleset == "gradual" else {}),
+                   **({"gradual": gradual_checks(seen.get("tools", []), result.get("result"), patch, 10 ** 6, 1),
+                       "folder_items": folder_checks(seen.get("tools", []), patch, folder_items)} if plan.ruleset == "scaled" else {}),
+                   "context_calls": len(seen.get("contexts", [])),
+                   "context_mean": round(sum(seen.get("contexts", [])) / len(seen["contexts"])) if seen.get("contexts") else 0,
                    "rule_2": tests, "patch_lines": patch.count("\n"),
                    **{f"grade_{k}": v for k, v in graded.items()}, "memory": memory, "session_id": session_id}
             record["rounds"].append(row)
@@ -803,7 +924,9 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                 + ("" if "gradual" not in row else " | rules kept {k}/{n} told{broken}".format(
                     k=sum(v["kept"] for v in row["gradual"].values() if v["told"] and v["chances"]),
                     n=sum(1 for v in row["gradual"].values() if v["told"] and v["chances"]),
-                    broken="".join(f", broke {key}" for key, v in row["gradual"].items() if v["told"] and v["chances"] and not v["kept"]))))
+                    broken="".join(f", broke {key}" for key, v in row["gradual"].items() if v["told"] and v["chances"] and not v["kept"])))
+                + ("" if "folder_items" not in row else " | folder items kept {f[kept]}/{f[due]}, context mean {c}".format(
+                    f=row["folder_items"], c=row["context_mean"])))
             broke = not one["strict"] or not tests["kept"]
             if not result:
                 record["ended_by"] = "no_result"
@@ -838,7 +961,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--network", help="the docker network with no way out but the proxy")
     parser.add_argument("--window", type=int, help="CLAUDE_CODE_AUTO_COMPACT_WINDOW, 100000 to 1000000")
     parser.add_argument("--stop-on-break", action="store_true", help="end the series at the first task that breaks a rule")
-    parser.add_argument("--ruleset", choices=(*OPENINGS, "gradual"), default="two",
+    parser.add_argument("--memory", type=Path, help="the memory arms: the folder git_memory build wrote")
+    parser.add_argument("--ruleset", choices=(*OPENINGS, "gradual", "scaled"), default="two",
                         help="two: the 1 and the tests; six: the screening set; casual: three rules said in passing at task 3; "
                              "revise: the casual rules, then at task 7 the files line moves to the end")
     parser.add_argument("--largest", action="store_true", help="the --count tasks with the largest reference fixes, not a random draw")
@@ -854,7 +978,8 @@ def main(argv: list[str] | None = None) -> int:
                else pick_tasks(args.tasks_root, args.repo, args.count, args.seed, avoid))
     plan = plan_series(args.arm, folders, args.out, model=args.model, claude_binary=args.claude_binary,
                        sessions=tuple(int(x) for x in args.sessions.split(",") if x), code=args.code, token_file=args.token_file,
-                       proxy=args.proxy, network=args.network, window=args.window, ruleset=args.ruleset, spacing=args.rule_spacing)
+                       proxy=args.proxy, network=args.network, window=args.window, ruleset=args.ruleset, spacing=args.rule_spacing,
+                       memory=args.memory)
     if not args.execute:
         name = container_name(plan, plan.rounds[0])
         print(json.dumps({"arm": plan.arm, "tasks": [[r.number, r.task.short, r.task.size, r.new_session] for r in plan.rounds],

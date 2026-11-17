@@ -503,3 +503,114 @@ def test_the_largest_tasks_are_the_hardest_by_reference_fix_size_smallest_first(
     assert all("00000001" not in p.name for p in s.largest_tasks(tasks[0].parent, "ansible", 3, avoid=("00000001",)))
     with pytest.raises(ValueError):
         s.largest_tasks(tasks[0].parent, "ansible", 11)
+
+
+@pytest.fixture
+def memory_folder(tmp_path):
+    folder = tmp_path / "mem"
+    (folder / "git").mkdir(parents=True)
+    (folder / "git" / "index.json").write_text(json.dumps([
+        {"id": 0, "kind": "rule", "scope": "", "file": "", "tests": "", "text": "Keep hand-backs under 150 words.", "path": "a", "state": "x"},
+        {"id": 1, "kind": "folder", "scope": "lib", "tests": "test/units", "text": "When you change code under lib/, run ...", "path": "b",
+         "state": "y"}]))
+    (folder / "flat").mkdir()
+    (folder / "flat" / "CLAUDE.md").write_text("# Project memory\n")
+    (folder / "folders" / ".claude" / "rules").mkdir(parents=True)
+    (folder / "folders" / "CLAUDE.md").write_text("# Project memory\n")
+    (folder / "folders" / ".claude" / "rules" / "lib--tests.md").write_text('---\npaths:\n  - "lib/**"\n---\n')
+    return folder
+
+
+def _memory_plan(tmp_path, tasks, arm, memory, count=2):
+    return s.plan_series(arm, s.pick_tasks(tasks[0].parent, "ansible", count, seed=3), tmp_path / arm, model=None,
+                         claude_binary=tmp_path / "c", sessions=(1,), ruleset="scaled", memory=memory, code=tmp_path / "code")
+
+
+def test_the_memory_arms_run_the_scaled_rule_set_with_the_built_memory(tmp_path, tasks, memory_folder):
+    plan = _memory_plan(tmp_path, tasks, "flat", memory_folder)
+    assert [r.prompt for r in plan.rounds] == [s.load_task(f).instruction for f in s.pick_tasks(tasks[0].parent, "ansible", 2, seed=3)]
+    assert not any(r.tells_rules for r in plan.rounds)
+    with pytest.raises(ValueError, match="scaled rule set"):
+        s.plan_series("flat", tasks[:1], tmp_path / "x", model=None, claude_binary=tmp_path / "c", memory=memory_folder)
+    with pytest.raises(ValueError, match="scaled rule set"):
+        s.plan_series("shipped", tasks[:1], tmp_path / "x", model=None, claude_binary=tmp_path / "c", ruleset="scaled")
+    with pytest.raises(ValueError, match="built memory folder"):
+        s.plan_series("gitmem", tasks[:1], tmp_path / "x", model=None, claude_binary=tmp_path / "c", ruleset="scaled", code=tmp_path)
+
+
+def test_the_gitmem_arm_mounts_its_memory_and_lists_its_search_tools(tmp_path, tasks, memory_folder):
+    plan = _memory_plan(tmp_path, tasks, "gitmem", memory_folder)
+    start = " ".join(s.start_argv(plan, plan.rounds[0], "x"))
+    assert "/cc/code:ro" in start and ":/cc/memory " in start and "/cc/hooks:ro" in start and "/cc/secret" not in start
+    argv = s.claude_argv(plan, "x", budget_usd=3, resume=None)
+    allowed = argv[argv.index("--allowedTools") + 1: argv.index("--permission-mode")]
+    assert all(t in allowed for t in s.MCP_TOOLS) and "Grep" in allowed
+    assert argv[argv.index("--mcp-config") + 1] == s.MCP_IN_CONTAINER and "--strict-mcp-config" in argv
+    flat = s.claude_argv(_memory_plan(tmp_path / "f", tasks, "flat", memory_folder), "x", budget_usd=3, resume=None)
+    assert "--mcp-config" not in flat and "--settings" not in flat
+    settings = s.git_memory_settings()["hooks"]
+    assert set(settings) == {"UserPromptSubmit", "PostToolUse", "SessionStart"} and settings["SessionStart"][0]["matcher"] == "compact"
+    assert all(t in settings["PostToolUse"][0]["matcher"] for t in ("Read", "Edit", "Bash", "Grep"))
+
+
+def test_the_flat_and_folder_arms_start_with_the_memory_in_the_project_and_every_task_is_checked(tmp_path, tasks, memory_folder):
+    import tarfile
+    for arm, names in (("flat", ["CLAUDE.md"]), ("folders", [".claude/rules/lib--tests.md", "CLAUDE.md"])):
+        plan = _memory_plan(tmp_path, tasks, arm, memory_folder)
+        docker = FakeDocker(touch_tests=())
+        seeded = []
+        original = s.carry_in
+
+        def spy(name, carry, runner):
+            if not seeded:
+                with tarfile.open(carry) as tar:
+                    seeded.extend(sorted(tar.getnames()))
+            original(name, carry, runner=runner)
+        s.carry_in, before = spy, s.carry_in
+        try:
+            record = _run(plan, docker, FakeClaude(["Files changed: lib/x.py\n\nDone.\n\nTests run: none"] * 2))
+        finally:
+            s.carry_in = before
+        assert seeded == names and docker.carried_in >= 1
+        row = record["rounds"][0]
+        assert all(v["told"] for v in row["gradual"].values())
+        assert row["folder_items"] == {"due": 1, "kept": 0, "items": [{"scope": "lib", "tests": "test/units", "kept": False}]}
+        assert row["context_calls"] == 1 and row["context_mean"] == 41000 and record["ruleset"] == "scaled"
+
+
+def test_the_gitmem_arm_runs_its_memory_service_for_the_batch_and_writes_its_hooks(tmp_path, tasks, memory_folder):
+    plan = _memory_plan(tmp_path, tasks, "gitmem", memory_folder)
+    started = []
+
+    class Server:
+        stopped = False
+
+        def terminate(self):
+            Server.stopped = True
+
+        def wait(self, timeout):
+            return 0
+
+    def fake_service(p):
+        started.append(p.arm)
+        assert (p.out / "memory" / "index.json").exists()  # the store is copied before the service starts
+        return Server()
+
+    _run(plan, FakeDocker(touch_tests=()), FakeClaude(["Done."] * 2), service=fake_service)
+    assert started == ["gitmem"] and Server.stopped
+    assert json.loads((plan.out / "hooks" / "settings.json").read_text()) == s.git_memory_settings()
+    assert json.loads((plan.out / "hooks" / "mcp.json").read_text()) == s.mcp_config()
+
+
+@pytest.mark.parametrize("commands, kept", [
+    (["cd /app && python -B -m pytest openlibrary/catalog/marc/tests -q -p no:cacheprovider"], 1),
+    (["python -B -m pytest openlibrary/catalog/marc/tests -q"], 0),  # the right tests, without the memory's flag
+    (["python -B -m pytest openlibrary/tests/solr -q -p no:cacheprovider"], 0),  # another folder's tests
+])
+def test_a_folder_instruction_is_due_for_the_most_specific_folder_a_change_touches(commands, kept):
+    items = [{"scope": "openlibrary/catalog/marc", "tests": "openlibrary/catalog/marc/tests"},
+             {"scope": "openlibrary", "tests": "openlibrary/tests"}, {"scope": "openlibrary/solr", "tests": "openlibrary/tests/solr"}]
+    patch = ("diff --git a/openlibrary/catalog/marc/parse.py b/openlibrary/catalog/marc/parse.py\n"
+             "diff --git a/openlibrary/catalog/marc/tests/test_parse.py b/openlibrary/catalog/marc/tests/test_parse.py\n")
+    checks = s.folder_checks([{"name": "Bash", "input": {"command": c}} for c in commands], patch, items)
+    assert checks["due"] == 1 and checks["items"][0]["scope"] == "openlibrary/catalog/marc" and checks["kept"] == kept
