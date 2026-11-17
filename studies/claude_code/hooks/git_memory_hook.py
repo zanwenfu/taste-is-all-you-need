@@ -177,6 +177,9 @@ def task_title(user: str) -> str:
 
 def record_turn(event: dict, memory: Path, project: Path, reader: bool) -> dict:
     turn = last_turn(Path(str(event.get("transcript_path") or "")))
+    # Claude Code hands the Stop hook the final reply itself; the transcript may not hold it yet when the hook runs (the fair trial:
+    # every turn record had an empty reply, Nov 17)
+    turn["reply"] = str(event.get("last_assistant_message") or "") or turn["reply"]
     files = changed_files(project)
     tests = [c.replace("\n", " ")[:200] for c in turn["commands"] if "pytest" in c][:8]
     text = (f"Turn record. Task: {task_title(turn['user'])}\nClaude's reply: {turn['reply'][:1500]}\n"

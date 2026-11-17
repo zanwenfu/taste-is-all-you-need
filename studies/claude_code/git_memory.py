@@ -72,6 +72,10 @@ def _words(text: str) -> set[str]:
 
 
 def similar(a: str, b: str) -> float:
+    """Word overlap; 0 when the two name different numbers, so a changed limit ("under 100 words" after "under 150") is never
+    taken for a repeat."""
+    if sorted(re.findall(r"\d+(?:\.\d+)?", a)) != sorted(re.findall(r"\d+(?:\.\d+)?", b)):
+        return 0.0
     wa, wb = _words(a), _words(b)
     return len(wa & wb) / max(1, len(wa | wb))
 

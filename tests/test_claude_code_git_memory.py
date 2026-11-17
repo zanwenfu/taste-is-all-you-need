@@ -285,9 +285,11 @@ def test_the_stop_hook_records_the_turn_and_the_reader_backs_up_claudes_saves(tm
     fake = types.ModuleType("studies.claude_code.readers")
     fake.claude_reader = lambda message: ["From now on use python -B."]
     monkeypatch.setitem(__import__("sys").modules, "studies.claude_code.readers", fake)
-    out = hook.run("stop", {"transcript_path": str(path), "session_id": "s"}, tmp_path, live=True, reader=True, project=project)
+    out = hook.run("stop", {"transcript_path": str(path), "session_id": "s", "last_assistant_message": "Files changed: a.py. Done."},
+                   tmp_path, live=True, reader=True, project=project)
     assert out == ""  # a Stop hook that prints nothing never blocks Claude
     assert calls[0]["kind"] == "turn" and "Task: Fix the parser" in calls[0]["text"] and "a.py" in calls[0]["text"]
+    assert "Claude's reply: Files changed: a.py. Done." in calls[0]["text"]  # the reply Claude Code hands the hook, not the transcript's
     assert "CLAUDE.md" not in calls[0]["text"]  # the other designs' memory files are not the task's changes
     assert calls[1] == {"op": "save", "kind": "rule", "source": "reader", "text": "From now on use python -B."}
     assert hook.run("stop", {"transcript_path": str(path), "stop_hook_active": True}, tmp_path, reader=True, project=project) == ""
@@ -332,3 +334,8 @@ def test_a_failed_save_is_logged_as_an_error(tmp_path, monkeypatch):
     assert hook.run("stop", {"transcript_path": str(path)}, tmp_path, live=True) == ""
     logged = [json.loads(line) for line in (tmp_path / "deliveries.jsonl").read_text().splitlines()]
     assert logged[-1]["mode"] == "stop" and "turn not saved: GitCommandError" in logged[-1]["error"]
+
+
+def test_a_rule_with_a_changed_number_is_never_taken_for_a_repeat():
+    assert gm.similar("Keep hand-backs under 150 words.", "Actually, keep hand-backs under 100 words.") == 0.0
+    assert gm.similar("Keep hand-backs under 150 words.", "keep your hand-backs under 150 words please") >= gm.SIMILAR
