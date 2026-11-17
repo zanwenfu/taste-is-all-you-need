@@ -251,6 +251,18 @@ def test_the_ours_arm_writes_its_hook_settings(tmp_path, tasks):
     assert json.loads((plan.out / "hooks" / "settings.json").read_text()) == s.hook_settings()
 
 
+def test_the_oursfirm_arm_is_our_layer_with_the_firm_header_and_hears_what_shipped_hears(tmp_path, tasks):
+    plan = s.plan_series("oursfirm", s.pick_tasks(tasks[0].parent, "ansible", 10, seed=3), tmp_path / "oursfirm", model=None,
+                         claude_binary=tmp_path / "c", sessions=(1,), code=tmp_path / "code", token_file=tmp_path / "token")
+    _run(plan, FakeDocker(), FakeClaude(["1"] * 10), first=1, last=1)
+    settings = json.loads((plan.out / "hooks" / "settings.json").read_text())
+    assert settings == s.hook_settings(firm=True) and "--firm" in json.dumps(settings) and "--firm" not in json.dumps(s.hook_settings())
+    assert "/cc/memory" in " ".join(s.start_argv(plan, plan.rounds[0], "x"))  # mounts its memory, as ours does
+    assert [r.prompt for r in plan.rounds] == [r.prompt for r in _plan(tmp_path, tasks, count=10, sessions=(1,)).rounds]
+    with pytest.raises(ValueError, match="ours arm needs"):
+        s.plan_series("oursfirm", tasks[:1], tmp_path / "x", model=None, claude_binary=tmp_path / "c")
+
+
 def test_the_window_makes_a_session_long_in_compactions_and_is_kept_in_range(tmp_path, tasks):
     plan = _plan(tmp_path, tasks, window=100_000)
     assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000" in s.exec_env(plan)

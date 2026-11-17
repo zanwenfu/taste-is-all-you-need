@@ -102,7 +102,8 @@ TO_CLAUDE_MD = "Add this to CLAUDE.md."  # the claudemd arm: Claude Code's docum
 BRIEF_WORDS = 150
 REMEMBER = "Save these rules to your memory."
 UPDATE_MEMORY = "Update your memory with this."  # the remember arm, at the change
-ARMS = ("shipped", "remember", "claudemd", "ours", "restated", "plain")
+ARMS = ("shipped", "remember", "claudemd", "ours", "oursfirm", "restated", "plain")
+OURS = ("ours", "oursfirm")  # our layer; oursfirm delivers the same list under the firm header
 CONFIG_IN_CONTAINER = "/cc/config"
 CLAUDE_IN_CONTAINER = "/usr/local/bin/claude"
 CODE_IN_CONTAINER = "/cc/code"
@@ -231,7 +232,7 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
         raise ValueError(f"unknown rule set {ruleset!r}")
     if window is not None and not 100_000 <= window <= 1_000_000:
         raise ValueError("the compaction window must be 100,000 to 1,000,000 tokens (Claude Code's documented range)")
-    if arm == "ours" and not (code and token_file):
+    if arm in OURS and not (code and token_file):
         raise ValueError("the ours arm needs the code folder (its hooks) and the token file (its reader)")
     starts = set(sessions) | {1}
     rounds = []
@@ -531,17 +532,18 @@ def start_argv(plan: SeriesPlan, round_: Round, name: str) -> list[str]:
             "-v", f"{plan.claude_binary.resolve()}:{CLAUDE_IN_CONTAINER}:ro", "-v", f"{out / 'claude_config'}:{CONFIG_IN_CONTAINER}"]
     if plan.network:
         argv += ["--network", plan.network]
-    if plan.arm == "ours":
+    if plan.arm in OURS:
         argv += ["-v", f"{Path(plan.code).resolve()}:{CODE_IN_CONTAINER}:ro", "-v", f"{out / 'memory'}:{MEMORY_IN_CONTAINER}",
                  "-v", f"{out / 'reader'}:{READER_IN_CONTAINER}", "-v", f"{Path(plan.token_file).resolve()}:{TOKEN_IN_CONTAINER}:ro",
                  "-v", f"{out / 'hooks'}:{Path(HOOKS_IN_CONTAINER).parent}:ro"]
     return argv + ["-w", "/app", round_.task.image, "infinity"]
 
 
-def hook_settings() -> dict[str, Any]:
-    """The ours arm's hooks: the rule list on every user message (the reader writes, git keeps) and again after every compaction."""
+def hook_settings(firm: bool = False) -> dict[str, Any]:
+    """The ours arm's hooks: the rule list on every user message (the reader writes, git keeps) and again after every compaction;
+    with ``firm``, under the firm header."""
     hook = f"python3 -B {CODE_IN_CONTAINER}/studies/claude_code/hooks/rule_list_hook.py"
-    files = f"--rules {MEMORY_IN_CONTAINER}/rules.md --log {MEMORY_IN_CONTAINER}/rule_list.jsonl"
+    files = f"--rules {MEMORY_IN_CONTAINER}/rules.md --log {MEMORY_IN_CONTAINER}/rule_list.jsonl" + (" --firm" if firm else "")
     return {"hooks": {
         "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{hook} prompt {files} --git", "timeout": 120}]}],
         "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{hook} compact {files}", "timeout": 60}]}]}}
@@ -556,7 +558,7 @@ def exec_env(plan: SeriesPlan) -> list[str]:
         env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(plan.window)
     if plan.proxy:
         env |= {"HTTPS_PROXY": plan.proxy, "HTTP_PROXY": plan.proxy, "NO_PROXY": "localhost,127.0.0.1"}
-    if plan.arm == "ours":
+    if plan.arm in OURS:
         env |= {"PYTHONPATH": CODE_IN_CONTAINER, "CC_STUDY_RULE_READER": "studies.claude_code.readers:claude_reader",
                 "CC_STUDY_READER_HOME": READER_IN_CONTAINER, "CC_STUDY_TOKEN_FILE": TOKEN_IN_CONTAINER}
     flags = ["-e", SUBSCRIPTION_TOKEN]
@@ -568,7 +570,7 @@ def exec_env(plan: SeriesPlan) -> list[str]:
 def claude_argv(plan: SeriesPlan, name: str, *, budget_usd: float, resume: str | None) -> list[str]:
     inner = command(budget_usd=budget_usd, resume=resume, model=plan.model, claude=CLAUDE_IN_CONTAINER)
     inner += ["--disallowedTools", *DISALLOWED]
-    if plan.arm == "ours":
+    if plan.arm in OURS:
         inner += ["--settings", HOOKS_IN_CONTAINER]
     return ["docker", "exec", "-i", "-w", "/app", *exec_env(plan), name, *inner]
 
@@ -685,8 +687,8 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
     caller = caller or call_claude
     for sub in ("claude_config", "patches", "memory", "reader", "hooks"):
         (plan.out / sub).mkdir(parents=True, exist_ok=True)
-    if plan.arm == "ours":
-        (plan.out / "hooks" / "settings.json").write_text(json.dumps(hook_settings(), indent=1) + "\n")
+    if plan.arm in OURS:
+        (plan.out / "hooks" / "settings.json").write_text(json.dumps(hook_settings(firm=plan.arm == "oursfirm"), indent=1) + "\n")
     carry = plan.out / "project-memory.tar"
     earlier, session_id, reported_total = earlier_state(plan, first)
     record: dict[str, Any] = earlier or {
@@ -762,7 +764,7 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
             carried = carry_out(name, carry, runner=runner)
             if owner:  # Claude Code runs as root in the container; its folders go back to the runner's user
                 run(["docker", "exec", name, "chown", "-R", owner, CONFIG_IN_CONTAINER, *([MEMORY_IN_CONTAINER, READER_IN_CONTAINER]
-                     if plan.arm == "ours" else [])], runner=runner, timeout=120)
+                     if plan.arm in OURS else [])], runner=runner, timeout=120)
             run(["docker", "rm", "-f", name], runner=runner, timeout=300)
             graded = grade_fresh(plan, round_, patch_file, runner=runner) if result else {"reward": None, "error": "no result"}
             if remove_images:

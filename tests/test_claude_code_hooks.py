@@ -81,6 +81,20 @@ def test_main_reads_stdin_and_loads_the_reader_named_in_the_environment(tmp_path
     assert code == 0 and driver.LS_ONE in _context(out.getvalue(), "UserPromptSubmit")
 
 
+def test_the_firm_header_frames_the_same_list_on_every_message_and_after_compaction(tmp_path):
+    rules = tmp_path / "r.md"
+    rule_list_hook.add(rules, [driver.PYTHON_B])
+    for mode, event, name in (("prompt", {"prompt": driver.LS_ONE}, "UserPromptSubmit"), ("compact", {"source": "compact"}, "SessionStart")):
+        firm, plain = io.StringIO(), io.StringIO()
+        for argv, out in ((["--firm"], firm), ([], plain)):
+            rule_list_hook.main([mode, "--rules", str(rules), *argv], stdin=io.StringIO(json.dumps(event)), stdout=out,
+                                environ={rule_list_hook.READER_ENV: STUB})
+        firm_text, plain_text = _context(firm.getvalue(), name), _context(plain.getvalue(), name)
+        assert firm_text.startswith(rule_list_hook.FIRM_HEADER) and plain_text.startswith(rule_list_hook.HEADER)
+        assert firm_text[len(rule_list_hook.FIRM_HEADER):] == plain_text[len(rule_list_hook.HEADER):]  # the list itself is the same
+    assert "override your default habits" in rule_list_hook.FIRM_HEADER
+
+
 def test_main_without_a_reader_says_so_and_never_blocks_the_prompt(tmp_path):
     out, log = io.StringIO(), tmp_path / "log.jsonl"
     code = rule_list_hook.main(["prompt", "--rules", str(tmp_path / "r.md"), "--log", str(log)], stdin=io.StringIO("{}"), stdout=out,

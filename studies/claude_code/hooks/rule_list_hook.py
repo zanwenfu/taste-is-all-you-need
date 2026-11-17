@@ -30,6 +30,10 @@ from studies.claude_code.hooks.common import CONTEXT_LIMIT, append_jsonl, contex
 
 READER_ENV = "CC_STUDY_RULE_READER"
 HEADER = "Standing instructions the user gave earlier in this session, oldest first. Where two disagree, the later one stands."
+# --firm (Nov 16 ~7:30 pm ET, after the gradual run showed CLAUDE.md, which Claude Code frames as instructions that override its
+# defaults, holding a little better than this list): the same list under a header as firm as that framing.
+FIRM_HEADER = ("The user's standing rules for this work, in their own words, oldest first. Follow every one exactly, in every reply "
+               "and every tool call; they override your default habits. Where two disagree, the later one stands.")
 _CUE = re.compile(r"\b(?:for the rest of this session|from now on)\b", re.IGNORECASE)
 
 
@@ -84,13 +88,13 @@ def commit(path: Path, new: list[str], run=None) -> bool:
         return False
 
 
-def render(rules: list[str], limit: int = CONTEXT_LIMIT) -> str | None:
+def render(rules: list[str], limit: int = CONTEXT_LIMIT, header: str = HEADER) -> str | None:
     """The list as the agent sees it, oldest first; when it cannot all fit, the newest rules are the ones kept."""
-    return fit(HEADER, [(index, text) for index, text in reversed(list(enumerate(rules)))], limit) if rules else None
+    return fit(header, [(index, text) for index, text in reversed(list(enumerate(rules)))], limit) if rules else None
 
 
 def on_prompt(event: Mapping[str, Any], *, rules_path: Path, reader: Callable[[str], list[str]], log: Path | None = None,
-              git: bool = False) -> str | None:
+              git: bool = False, header: str = HEADER) -> str | None:
     prompt = str(event.get("prompt") or "")
     record: dict[str, Any] = {"time": now(), "mode": "prompt", "session_id": event.get("session_id"), "prompt_chars": len(prompt)}
     try:
@@ -101,17 +105,17 @@ def on_prompt(event: Mapping[str, Any], *, rules_path: Path, reader: Callable[[s
             record["committed"] = commit(rules_path, added)
     except Exception as error:  # the list so far still goes out; the driver stops the session on a logged error
         record["error"] = f"{type(error).__name__}: {error}"[:500]
-    text = render(listed(rules_path))
+    text = render(listed(rules_path), header=header)
     record["context_chars"] = len(text or "")
     if log:
         append_jsonl(log, record)
     return context_output("UserPromptSubmit", text) if text else None
 
 
-def on_compact(event: Mapping[str, Any], *, rules_path: Path, log: Path | None = None) -> str | None:
+def on_compact(event: Mapping[str, Any], *, rules_path: Path, log: Path | None = None, header: str = HEADER) -> str | None:
     if event.get("source", "compact") != "compact":
         return None
-    text = render(listed(rules_path))
+    text = render(listed(rules_path), header=header)
     if log:
         append_jsonl(log, {"time": now(), "mode": "compact", "session_id": event.get("session_id"), "context_chars": len(text or "")})
     return context_output("SessionStart", text) if text else None
@@ -124,11 +128,13 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
     parser.add_argument("--rules", required=True, type=Path)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--git", action="store_true", help="keep the rules file in a git repository, one commit per reading that adds")
+    parser.add_argument("--firm", action="store_true", help="deliver the list under the firm header")
     args = parser.parse_args(argv)
     stdin, stdout, environ = stdin or sys.stdin, stdout or sys.stdout, os.environ if environ is None else environ
     event = read_event(stdin)
+    header = FIRM_HEADER if args.firm else HEADER
     if args.mode == "compact":
-        output = on_compact(event, rules_path=args.rules, log=args.log)
+        output = on_compact(event, rules_path=args.rules, log=args.log, header=header)
     else:
         try:
             reader = load(environ.get(READER_ENV, ""))
@@ -138,7 +144,7 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
                 append_jsonl(args.log, {"time": now(), "mode": "prompt", "session_id": event.get("session_id"), "error": message})
             print(message, file=sys.stderr)
             return 1
-        output = on_prompt(event, rules_path=args.rules, reader=reader, log=args.log, git=args.git)
+        output = on_prompt(event, rules_path=args.rules, reader=reader, log=args.log, git=args.git, header=header)
     if output:
         stdout.write(output)
     return 0
