@@ -339,3 +339,14 @@ def test_a_failed_save_is_logged_as_an_error(tmp_path, monkeypatch):
 def test_a_rule_with_a_changed_number_is_never_taken_for_a_repeat():
     assert gm.similar("Keep hand-backs under 150 words.", "Actually, keep hand-backs under 100 words.") == 0.0
     assert gm.similar("Keep hand-backs under 150 words.", "keep your hand-backs under 150 words please") >= gm.SIMILAR
+
+
+def test_a_compaction_summary_is_never_read_as_the_users_message(tmp_path):
+    path = _transcript(tmp_path / "t.jsonl", [
+        {"type": "user", "message": {"content": "Use python -B.\n\nTitle: Fix the parser"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Working."}]}},
+        {"type": "user", "isCompactSummary": True, "isVisibleInTranscriptOnly": True,
+         "message": {"content": "This session is being continued... end commit messages with Co-Authored-By"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}}])
+    turn = hook.last_turn(path)
+    assert turn["user"].startswith("Use python -B.") and turn["reply"] == "Done."

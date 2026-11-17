@@ -142,6 +142,10 @@ def last_turn(transcript: Path) -> dict:
     for index, row in enumerate(rows):
         message = row.get("message") or {}
         content = message.get("content")
+        # a compaction summary is stored as a user message; it is not the user's (the fair test: the reader took 13 paraphrased
+        # "rules" from summaries, Nov 17)
+        if row.get("isCompactSummary") or row.get("isVisibleInTranscriptOnly"):
+            continue
         if row.get("type") == "user" and not row.get("isMeta") and _text_of(content).strip() and not (
                 isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)):
             start = index

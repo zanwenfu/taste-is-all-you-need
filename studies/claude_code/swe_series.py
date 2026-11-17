@@ -708,10 +708,16 @@ def git_memory_settings(refresh: bool = False) -> dict[str, Any]:
 
 
 def mcp_config(saving: bool = False) -> dict[str, Any]:
-    """memory_search and memory_fetch (and, with ``saving``, memory_save) as an MCP server over the same store."""
-    return {"mcpServers": {"memory": {"command": "python3", "args": [
+    """memory_search and memory_fetch (and, with ``saving``, memory_save) as an MCP server over the same store. With ``saving`` (the
+    gitlive arm) the tools are always loaded: Claude Code otherwise defers an add-on server's tools behind a tool-search step, and in
+    the fair test's new session Claude grepped the code for three saved facts instead of loading memory_search (Nov 17). CLAUDE.md
+    needs no lookup either: it is always in the prompt."""
+    server: dict[str, Any] = {"command": "python3", "args": [
         "-B", f"{CODE_IN_CONTAINER}/studies/claude_code/hooks/memory_mcp.py", "--memory", MEMORY_IN_CONTAINER]
-        + (["--saving"] if saving else [])}}}
+        + (["--saving"] if saving else [])}
+    if saving:
+        server["alwaysLoad"] = True
+    return {"mcpServers": {"memory": server}}
 
 
 def exec_env(plan: SeriesPlan) -> list[str]:

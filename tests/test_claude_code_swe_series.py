@@ -728,3 +728,8 @@ def test_only_the_git_memory_turns_claude_codes_auto_memory_off(tmp_path, tasks,
     flags = {arm: [e for e in s.exec_env(p) if "AUTO_MEMORY" in e] for arm, p in plans.items()}
     assert flags == {"auto": ["CLAUDE_CODE_DISABLE_AUTO_MEMORY=0"], "mdlog": ["CLAUDE_CODE_DISABLE_AUTO_MEMORY=0"],
                      "gitlive": ["CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"]}
+
+
+def test_only_the_saving_memory_server_is_always_loaded():
+    assert s.mcp_config(saving=True)["mcpServers"]["memory"]["alwaysLoad"] is True
+    assert "alwaysLoad" not in s.mcp_config()["mcpServers"]["memory"]
