@@ -103,14 +103,65 @@ TO_CLAUDE_MD = "Add this to CLAUDE.md."  # the claudemd arm: Claude Code's docum
 BRIEF_WORDS = 150
 REMEMBER = "Save these rules to your memory."
 UPDATE_MEMORY = "Update your memory with this."  # the remember arm, at the change
-ARMS = ("shipped", "remember", "claudemd", "ours", "oursfirm", "restated", "plain", "flat", "folders", "gitmem", "gitmem2")
+ARMS = ("shipped", "remember", "claudemd", "ours", "oursfirm", "restated", "plain", "flat", "folders", "gitmem", "gitmem2",
+        "auto", "mdlog", "gitlive")
 OURS = ("ours", "oursfirm")  # our layer; oursfirm delivers the same list under the firm header
 # One project memory, three designs (the user, Nov 16 ~8 pm ET; studies.claude_code.git_memory): flat (all in CLAUDE.md), folders
 # (Claude Code's path-scoped rules), gitmem (Taste's git store, delivered when needed and searchable). Ruleset "scaled": no rule is
 # said during the session; the memory holds the house rules from the start.
-MEMORY_ARMS = ("flat", "folders", "gitmem", "gitmem2")
-GIT_ARMS = ("gitmem", "gitmem2")  # gitmem2: a folder's instruction again with every task that touches it (revised Nov 16 ~8:40 pm ET)
+MEMORY_ARMS = ("flat", "folders", "gitmem", "gitmem2", "auto", "mdlog", "gitlive")
+GIT_ARMS = ("gitmem", "gitmem2", "gitlive")  # gitmem2: a folder's instruction again with every task that touches it (revised Nov 16 ~8:40 pm ET)
 QUESTION_HEAD = "Quick question, no code changes needed: "
+# THE FAIR TEST (the user, Nov 17 ~12:15 am ET; notes/cc-memory-pilot-design.md): memory starts empty but for the code notes (bulk);
+# the user says rules and facts in passing during the work; the same writer (Claude) keeps memory in every design; then a new session.
+#   auto     Claude Code as shipped (its auto memory); the code notes as path-scoped rules
+#   mdlog    the same, and at task 1 the user asks Claude to keep track in CLAUDE.md (the user's own practice)
+#   gitlive  our git memory: the same request naming the project memory; Claude saves with memory_save, the small reader saves standing
+#            rules Claude did not, every turn is recorded, rules and decisions come with every message, search for the rest
+FAIR_ARMS = ("auto", "mdlog", "gitlive")
+KEEP_TRACK = {"mdlog": "Please keep track of my rules, decisions and what you changed in CLAUDE.md as we go.",
+              "gitlive": "Please keep track of my rules, decisions and what you changed in the project memory as we go."}
+FAIR_FACTS = (  # (said in passing during a task, asked in the new session, the answer)
+    ("By the way, for later: the sitemaps script has to run with --chunk 45000, with the default it times out.",
+     "What --chunk value does the sitemaps script have to run with?", "45000"),
+    ("Also good to know: full-text search inside books is served by the saga cluster now, orion is retired.",
+     "Which cluster serves full-text search inside books now?", "saga"),
+    ("FYI, edition merges that the policy refuses go to the manual queue merge-review-7.",
+     "Which manual queue do edition merges refused by the policy go to?", "merge-review-7"),
+    ("Note for later: the monthly data dump job takes the lock file /var/run/ol-dump.lock.",
+     "What lock file does the monthly data dump job take?", "/var/run/ol-dump.lock"),
+    ("One thing to remember: the maintenance banner text for the admin pages lives in the config key admin_banner_v3.",
+     "Which config key holds the maintenance banner text for the admin pages?", "admin_banner_v3"),
+)
+RULES_QUESTION = "What standing rules have I given you for your work and your hand-backs? List them all, current versions only."
+HISTORY_QUESTION = 'Earlier we worked on the task "{title}". Which files did you change for it? Just the paths.'
+
+
+@dataclass(frozen=True)
+class FairSchedule:
+    tasks: int                    # tasks in the first session
+    rules_at: tuple[int, ...]     # the tasks where the user says rules 1, 2, ... (GRADUAL_RULES, in order)
+    facts_at: tuple[int, ...]     # the tasks where the user says facts 1, 2, ... (FAIR_FACTS, in order)
+    history: tuple[int, ...]      # the tasks asked about in the new session
+    extra: int                    # tasks in the new session, after the questions
+
+
+FAIR_SCHEDULES = {"fair": FairSchedule(20, (2, 3, 4, 5, 6, 7, 8, 9), (10, 11, 12, 13, 14), (3, 7, 12), 2),
+                  "fairtrial": FairSchedule(4, (2, 3), (4,), (2,), 1)}
+
+
+def fair_told(schedule: FairSchedule, number: int) -> set[str]:
+    """The rules the user had said by task ``number`` (a new-session task counts every rule said)."""
+    return {GRADUAL_RULES[i][2] for i, at in enumerate(schedule.rules_at) if at <= number}
+
+
+def task_title(instruction: str) -> str:
+    found = re.search(r"(?im)^\W*title:?\s*(.+)$", instruction)
+    if found:
+        return found.group(1).strip()[:120]
+    body = instruction.split("<pr_description>", 1)[-1]
+    return next((line.strip(" #*") for line in body.splitlines() if len(line.strip(" #*")) > 15 and not line.strip().startswith("<")),
+                instruction[:120])[:120]
 MCP_IN_CONTAINER = "/cc/hooks/mcp.json"
 MCP_TOOLS = ("mcp__memory__memory_search", "mcp__memory__memory_fetch")
 CONFIG_IN_CONTAINER = "/cc/config"
@@ -156,6 +207,7 @@ class Round:
     new_session: bool
     tells_rules: bool = False
     question: bool = False  # a question after the tasks: asked in the last task's container, nothing graded
+    asks: str = ""  # the fair test: what a question asks ("fact:<answer>", "rules", "history:<task>")
 
 
 @dataclass
@@ -208,6 +260,31 @@ def largest_tasks(tasks_root: Path, repo: str, count: int, avoid: tuple[str, ...
     return sorted(folders, key=lambda p: (load_task(p).size, p.name))[-count:]
 
 
+def _fair_plan(arm: str, tasks: list[SweTask], fair: FairSchedule, out: Path, model: str | None, claude_binary: Path,
+               code: Path | None, token_file: Path | None, proxy: str | None, network: str | None, window: int | None, ruleset: str,
+               memory: Path | None) -> SeriesPlan:
+    """Session 1: the tasks, with the keep-track request at task 1 (mdlog, gitlive), rules and facts said in passing. Session 2: the
+    questions (each fact said, the rules, the files changed in earlier tasks), then the extra tasks."""
+    rounds: list[Round] = []
+    for number, task in enumerate(tasks[:fair.tasks], start=1):
+        parts = [KEEP_TRACK[arm]] if number == 1 and arm in KEEP_TRACK else []
+        parts += [GRADUAL_RULES[i][0] for i, at in enumerate(fair.rules_at) if at == number]
+        parts += [FAIR_FACTS[i][0] for i, at in enumerate(fair.facts_at) if at == number]
+        prompt = (" ".join(parts) + "\n\n" + task.instruction) if parts else task.instruction
+        rounds.append(Round(f"round_{number:02d}", number, prompt, task, number == 1, tells_rules=bool(parts)))
+    asked = [(FAIR_FACTS[i][1], f"fact:{FAIR_FACTS[i][2]}") for i in range(len(fair.facts_at))]
+    asked += [(RULES_QUESTION, "rules")]
+    asked += [(HISTORY_QUESTION.format(title=task_title(tasks[k - 1].instruction)), f"history:{k}") for k in fair.history]
+    for i, (question, asks) in enumerate(asked):
+        number = len(rounds) + 1
+        rounds.append(Round(f"round_{number:02d}", number, QUESTION_HEAD + question, tasks[fair.tasks], i == 0, question=True, asks=asks))
+    for task in tasks[fair.tasks:]:
+        number = len(rounds) + 1
+        rounds.append(Round(f"round_{number:02d}", number, task.instruction, task, False))
+    return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset, 1,
+                      Path(memory) if memory else None)
+
+
 def opening(arm: str, ruleset: str = "two") -> str | None:
     if arm == "plain":
         return None
@@ -239,20 +316,30 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     """``sessions``: the 1-based task numbers that start a new session (the first always does). The rules head the first message."""
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
-    if ruleset not in OPENINGS and ruleset not in ("gradual", "scaled"):
+    if ruleset not in OPENINGS and ruleset not in ("gradual", "scaled", *FAIR_SCHEDULES):
         raise ValueError(f"unknown rule set {ruleset!r}")
-    if (arm in MEMORY_ARMS) != (ruleset == "scaled"):
+    fair = FAIR_SCHEDULES.get(ruleset)
+    if fair is not None and arm not in FAIR_ARMS:
+        raise ValueError("the fair rule sets run the fair arms (auto, mdlog, gitlive), and only they do")
+    if fair is None and (arm in MEMORY_ARMS) != (ruleset == "scaled"):
         raise ValueError("the memory arms run the scaled rule set, and only they do")
+    if fair is not None and len(task_folders) != fair.tasks + fair.extra:
+        raise ValueError(f"the {ruleset} test takes {fair.tasks + fair.extra} tasks")
     if arm in MEMORY_ARMS and not (memory and (Path(memory) / "git" / "index.json").exists()):
         raise ValueError("the memory arms need the built memory folder (git_memory build)")
     if arm in GIT_ARMS and not code:
         raise ValueError("the gitmem arm needs the code folder (its hooks and tool server)")
+    if arm == "gitlive" and not token_file:
+        raise ValueError("the gitlive arm needs the token file (its small reader)")
     if window is not None and not 100_000 <= window <= 1_000_000:
         raise ValueError("the compaction window must be 100,000 to 1,000,000 tokens (Claude Code's documented range)")
     if arm in OURS and not (code and token_file):
         raise ValueError("the ours arm needs the code folder (its hooks) and the token file (its reader)")
     starts = set(sessions) | {1}
     rounds = []
+    if fair is not None:
+        return _fair_plan(arm, [load_task(f) for f in task_folders], fair, out, model, claude_binary, code, token_file, proxy,
+                          network, window, ruleset, memory)
     for number, folder in enumerate(task_folders, start=1):
         task = load_task(folder)
         if ruleset == "scaled":  # the memory holds the rules; nothing is said
@@ -579,6 +666,8 @@ def start_argv(plan: SeriesPlan, round_: Round, name: str) -> list[str]:
     if plan.arm in GIT_ARMS:  # the hooks and the tool server; the memory folder holds the service's socket
         argv += ["-v", f"{Path(plan.code).resolve()}:{CODE_IN_CONTAINER}:ro", "-v", f"{out / 'memory'}:{MEMORY_IN_CONTAINER}",
                  "-v", f"{out / 'hooks'}:{Path(HOOKS_IN_CONTAINER).parent}:ro"]
+    if plan.arm == "gitlive":  # the small reader's own config folder and the subscription token, read-only
+        argv += ["-v", f"{out / 'reader'}:{READER_IN_CONTAINER}", "-v", f"{Path(plan.token_file).resolve()}:{TOKEN_IN_CONTAINER}:ro"]
     return argv + ["-w", "/app", round_.task.image, "infinity"]
 
 
@@ -590,6 +679,19 @@ def hook_settings(firm: bool = False) -> dict[str, Any]:
     return {"hooks": {
         "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{hook} prompt {files} --git", "timeout": 120}]}],
         "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{hook} compact {files}", "timeout": 60}]}]}}
+
+
+def git_memory_live_settings() -> dict[str, Any]:
+    """The gitlive arm (the fair test): what was saved, with every message; a file's notes on touch; after a compaction the same
+    again; at the end of every turn the turn recorded and the small reader's backstop."""
+    hook = f"python3 -B {CODE_IN_CONTAINER}/studies/claude_code/hooks/git_memory_hook.py"
+    memory = f"--memory {MEMORY_IN_CONTAINER}"
+    return {"hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "timeout": 30, "command": f"{hook} prompt {memory} --live"}]}],
+        "PostToolUse": [{"matcher": "Read|Edit|Write|MultiEdit|Grep|Glob|Bash",
+                         "hooks": [{"type": "command", "command": f"{hook} post {memory}", "timeout": 30}]}],
+        "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{hook} compact {memory} --live", "timeout": 30}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": f"{hook} stop {memory} --live --reader", "timeout": 180}]}]}}
 
 
 def git_memory_settings(refresh: bool = False) -> dict[str, Any]:
@@ -605,10 +707,11 @@ def git_memory_settings(refresh: bool = False) -> dict[str, Any]:
         "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{hook} compact {memory}", "timeout": 30}]}]}}
 
 
-def mcp_config() -> dict[str, Any]:
-    """memory_search and memory_fetch as an MCP server over the same store."""
+def mcp_config(saving: bool = False) -> dict[str, Any]:
+    """memory_search and memory_fetch (and, with ``saving``, memory_save) as an MCP server over the same store."""
     return {"mcpServers": {"memory": {"command": "python3", "args": [
-        "-B", f"{CODE_IN_CONTAINER}/studies/claude_code/hooks/memory_mcp.py", "--memory", MEMORY_IN_CONTAINER]}}}
+        "-B", f"{CODE_IN_CONTAINER}/studies/claude_code/hooks/memory_mcp.py", "--memory", MEMORY_IN_CONTAINER]
+        + (["--saving"] if saving else [])}}}
 
 
 def exec_env(plan: SeriesPlan) -> list[str]:
@@ -623,6 +726,9 @@ def exec_env(plan: SeriesPlan) -> list[str]:
     if plan.arm in OURS:
         env |= {"PYTHONPATH": CODE_IN_CONTAINER, "CC_STUDY_RULE_READER": "studies.claude_code.readers:claude_reader",
                 "CC_STUDY_READER_HOME": READER_IN_CONTAINER, "CC_STUDY_TOKEN_FILE": TOKEN_IN_CONTAINER}
+    if plan.arm == "gitlive":
+        env |= {"PYTHONPATH": CODE_IN_CONTAINER, "CC_STUDY_CODE": CODE_IN_CONTAINER, "CC_STUDY_READER_HOME": READER_IN_CONTAINER,
+                "CC_STUDY_TOKEN_FILE": TOKEN_IN_CONTAINER}
     flags = ["-e", SUBSCRIPTION_TOKEN]
     for key, value in env.items():
         flags += ["-e", f"{key}={value}"]
@@ -636,7 +742,7 @@ def claude_argv(plan: SeriesPlan, name: str, *, budget_usd: float, resume: str |
         inner += ["--settings", HOOKS_IN_CONTAINER]
     if plan.arm in GIT_ARMS:
         at = inner.index("--permission-mode")
-        inner = inner[:at] + list(MCP_TOOLS) + inner[at:]  # in the one --allowedTools list
+        inner = inner[:at] + list(MCP_TOOLS) + (["mcp__memory__memory_save"] if plan.arm == "gitlive" else []) + inner[at:]
         inner += ["--settings", HOOKS_IN_CONTAINER, "--mcp-config", MCP_IN_CONTAINER, "--strict-mcp-config"]
     return ["docker", "exec", "-i", "-w", "/app", *exec_env(plan), name, *inner]
 
@@ -809,11 +915,17 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
         folder_items = [{"scope": r["scope"], "tests": r["tests"]} for r in index if r["kind"] == "folder"]
         if earlier is None and plan.arm in ("flat", "folders"):
             seed_project_memory(plan.memory / plan.arm, carry)
+        if earlier is None and plan.arm in ("auto", "mdlog"):  # only the code notes, as path-scoped rules; no CLAUDE.md to start
+            import tempfile
+            seed = Path(tempfile.mkdtemp(prefix="seed-", dir=plan.out))
+            shutil.copytree(plan.memory / "folders" / ".claude", seed / ".claude")
+            seed_project_memory(seed, carry)
         if plan.arm in GIT_ARMS:
             if not (plan.out / "memory" / "index.json").exists():
                 shutil.copytree(plan.memory / "git", plan.out / "memory", dirs_exist_ok=True)
-            (plan.out / "hooks" / "settings.json").write_text(json.dumps(git_memory_settings(refresh=plan.arm == "gitmem2"), indent=1) + "\n")
-            (plan.out / "hooks" / "mcp.json").write_text(json.dumps(mcp_config(), indent=1) + "\n")
+            settings = git_memory_live_settings() if plan.arm == "gitlive" else git_memory_settings(refresh=plan.arm == "gitmem2")
+            (plan.out / "hooks" / "settings.json").write_text(json.dumps(settings, indent=1) + "\n")
+            (plan.out / "hooks" / "mcp.json").write_text(json.dumps(mcp_config(saving=plan.arm == "gitlive"), indent=1) + "\n")
     record: dict[str, Any] = earlier or {
         "arm": plan.arm, "model": plan.model, "opening": opening(plan.arm), "claude_version": claude_version(str(plan.claude_binary)),
         "tasks": [r.task.id for r in plan.rounds], "sessions": [r.number for r in plan.rounds if r.new_session], "proxy": plan.proxy,
@@ -888,7 +1000,8 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
             carried = carry_out(name, carry, runner=runner)
             if owner:  # Claude Code runs as root in the container; its folders go back to the runner's user
                 run(["docker", "exec", name, "chown", "-R", owner, CONFIG_IN_CONTAINER, *([MEMORY_IN_CONTAINER, READER_IN_CONTAINER]
-                     if plan.arm in OURS else [])], runner=runner, timeout=120)
+                     if plan.arm in (*OURS, "gitlive") else [MEMORY_IN_CONTAINER] if plan.arm in GIT_ARMS else [])],
+                    runner=runner, timeout=120)
             run(["docker", "rm", "-f", name], runner=runner, timeout=300)
             graded = ({"reward": None, "skipped": "question"} if round_.question else
                       grade_fresh(plan, round_, patch_file, runner=runner) if result else {"reward": None, "error": "no result"})
@@ -910,6 +1023,10 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                    **({"gradual": gradual_checks(seen.get("tools", []), result.get("result"), patch, 10 ** 6, 1),
                        "folder_items": folder_checks(seen.get("tools", []), patch, folder_items)}
                       if plan.ruleset == "scaled" and not round_.question else {}),
+                   **({"gradual": {k: {**v, "told": k in fair_told(FAIR_SCHEDULES[plan.ruleset], round_.number)}
+                                   for k, v in gradual_checks(seen.get("tools", []), result.get("result"), patch, 10 ** 6, 1).items()}}
+                      if plan.ruleset in FAIR_SCHEDULES and not round_.question else {}),
+                   **({"asks": round_.asks} if round_.asks else {}),
                    **({"question": round_.prompt[len(QUESTION_HEAD):], "answer": result.get("result"),
                        "memory_tool_calls": sum(1 for t in seen.get("tools", []) if str(t.get("name", "")).startswith("mcp__memory__"))}
                       if round_.question else {}),
@@ -977,10 +1094,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop-on-break", action="store_true", help="end the series at the first task that breaks a rule")
     parser.add_argument("--memory", type=Path, help="the memory arms: the folder git_memory build wrote")
     parser.add_argument("--questions", type=Path, help="a JSON list of {question, answer}, asked after the last task")
-    parser.add_argument("--ruleset", choices=(*OPENINGS, "gradual", "scaled"), default="two",
+    parser.add_argument("--ruleset", choices=(*OPENINGS, "gradual", "scaled", *FAIR_SCHEDULES), default="two",
                         help="two: the 1 and the tests; six: the screening set; casual: three rules said in passing at task 3; "
                              "revise: the casual rules, then at task 7 the files line moves to the end")
     parser.add_argument("--largest", action="store_true", help="the --count tasks with the largest reference fixes, not a random draw")
+    parser.add_argument("--avoid-largest", type=int, default=0, help="leave the N largest tasks out of a random draw (the fair test's trial)")
     parser.add_argument("--rule-spacing", type=int, default=2, help="gradual rules: one every this many tasks from task 2")
     parser.add_argument("--per-call-usd", type=float, default=3.0)
     parser.add_argument("--session-usd", type=float, default=5.0)
@@ -989,8 +1107,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execute", action="store_true", help="run Claude Code for real: paid, only after the user's OK")
     args = parser.parse_args(argv)
     avoid = tuple(a for a in args.avoid.split(",") if a)
-    folders = (largest_tasks(args.tasks_root, args.repo, args.count, avoid) if args.largest
-               else pick_tasks(args.tasks_root, args.repo, args.count, args.seed, avoid))
+    if args.avoid_largest:
+        avoid += tuple(f.name for f in largest_tasks(args.tasks_root, args.repo, args.avoid_largest, avoid))
+    fair = FAIR_SCHEDULES.get(args.ruleset)
+    if fair is not None and args.largest:  # the first session on the hardest tasks, the new session on the next ones
+        top = largest_tasks(args.tasks_root, args.repo, fair.tasks, avoid)
+        folders = top + [f for f in largest_tasks(args.tasks_root, args.repo, fair.tasks + fair.extra, avoid) if f not in top]
+    else:
+        folders = (largest_tasks(args.tasks_root, args.repo, args.count, avoid) if args.largest
+                   else pick_tasks(args.tasks_root, args.repo, args.count, args.seed, avoid))
     plan = plan_series(args.arm, folders, args.out, model=args.model, claude_binary=args.claude_binary,
                        sessions=tuple(int(x) for x in args.sessions.split(",") if x), code=args.code, token_file=args.token_file,
                        proxy=args.proxy, network=args.network, window=args.window, ruleset=args.ruleset, spacing=args.rule_spacing,

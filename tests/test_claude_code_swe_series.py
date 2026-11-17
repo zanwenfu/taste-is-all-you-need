@@ -632,3 +632,90 @@ def test_questions_come_after_the_tasks_in_the_same_session_and_are_not_graded(t
     assert "--refresh-folders" in json.dumps(json.loads((plan.out / "hooks" / "settings.json").read_text()))
     assert "--refresh-folders" not in json.dumps(s.git_memory_settings())
     assert "/cc/memory" in " ".join(s.start_argv(plan, plan.rounds[0], "x")) and "--mcp-config" in s.claude_argv(plan, "x", budget_usd=3, resume=None)
+
+
+def _fair_tasks(tmp_path, n):
+    return [_task(tmp_path / "fair", i, gold_lines=300 + i) for i in range(1, n + 1)]
+
+
+def test_the_fair_test_says_rules_and_facts_in_passing_then_asks_in_a_new_session(tmp_path, memory_folder):
+    folders = s.largest_tasks(_fair_tasks(tmp_path, 22)[0].parent, "ansible", 22)
+    plan = lambda arm: s.plan_series(arm, folders, tmp_path / arm, model=None, claude_binary=tmp_path / "c", ruleset="fair",  # noqa: E731
+                                     memory=memory_folder, code=tmp_path / "code", token_file=tmp_path / "t")
+    git, md, auto = plan("gitlive"), plan("mdlog"), plan("auto")
+    assert git.rounds[0].prompt.startswith(s.KEEP_TRACK["gitlive"] + "\n\n") and md.rounds[0].prompt.startswith(s.KEEP_TRACK["mdlog"])
+    assert not auto.rounds[0].tells_rules and "keep track" not in auto.rounds[0].prompt
+    for i, at in enumerate(s.FAIR_SCHEDULES["fair"].rules_at):
+        assert git.rounds[at - 1].prompt.startswith(s.GRADUAL_RULES[i][0])
+    for i, at in enumerate(s.FAIR_SCHEDULES["fair"].facts_at):
+        assert git.rounds[at - 1].prompt.startswith(s.FAIR_FACTS[i][0])
+    questions = [r for r in git.rounds if r.question]
+    assert [r.asks for r in questions] == [f"fact:{f[2]}" for f in s.FAIR_FACTS] + ["rules", "history:3", "history:7", "history:12"]
+    assert questions[0].new_session and not any(r.new_session for r in git.rounds[21:]) and len(git.rounds) == 31
+    assert s.task_title(git.rounds[2].task.instruction) in questions[-3].prompt
+    assert [r.question for r in git.rounds[-2:]] == [False, False] and git.rounds[-2].task == questions[0].task  # asked in task 21's container
+    assert [r.prompt for r in auto.rounds[20:]] == [r.prompt for r in git.rounds[20:]]  # the new session is the same for every arm
+    assert s.fair_told(s.FAIR_SCHEDULES["fair"], 5) == {"tests", "files_first", "brief", "plain"}
+    with pytest.raises(ValueError, match="fair arms"):
+        s.plan_series("shipped", folders, tmp_path / "x", model=None, claude_binary=tmp_path / "c", ruleset="fair")
+    with pytest.raises(ValueError, match="takes 22 tasks"):
+        s.plan_series("auto", folders[:20], tmp_path / "x", model=None, claude_binary=tmp_path / "c", ruleset="fair", memory=memory_folder)
+
+
+def test_the_gitlive_arm_saves_with_a_tool_records_turns_and_reads_with_the_small_reader(tmp_path, tasks, memory_folder):
+    plan = s.plan_series("gitlive", s.pick_tasks(tasks[0].parent, "ansible", 5, seed=3), tmp_path / "gl", model=None,
+                         claude_binary=tmp_path / "c", ruleset="fairtrial", memory=memory_folder, code=tmp_path / "code",
+                         token_file=tmp_path / "token")
+    start = " ".join(s.start_argv(plan, plan.rounds[0], "x"))
+    assert "/cc/secret/token:ro" in start and "/cc/reader" in start and "/cc/memory" in start
+    argv = s.claude_argv(plan, "x", budget_usd=3, resume=None)
+    assert "mcp__memory__memory_save" in argv[argv.index("--allowedTools") + 1: argv.index("--permission-mode")]
+    assert "CC_STUDY_TOKEN_FILE=/cc/secret/token" in s.exec_env(plan) and "CC_STUDY_CODE=/cc/code" in s.exec_env(plan)
+    hooks = s.git_memory_live_settings()["hooks"]
+    assert "--reader" in hooks["Stop"][0]["hooks"][0]["command"] and "--live" in hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert s.mcp_config(saving=True)["mcpServers"]["memory"]["args"][-1] == "--saving"
+    with pytest.raises(ValueError, match="token file"):
+        s.plan_series("gitlive", s.pick_tasks(tasks[0].parent, "ansible", 5, seed=3), tmp_path / "x", model=None,
+                      claude_binary=tmp_path / "c", ruleset="fairtrial", memory=memory_folder, code=tmp_path / "code")
+    record = _run(plan, FakeDocker(touch_tests=()), FakeClaude(["Done."] * 8),
+                  service=lambda p: type("S", (), {"terminate": lambda self: None, "wait": lambda self, timeout: 0})())
+    rows = record["rounds"]
+    assert json.loads((plan.out / "hooks" / "settings.json").read_text()) == s.git_memory_live_settings()
+    assert "--saving" in json.dumps(json.loads((plan.out / "hooks" / "mcp.json").read_text()))
+    assert [sorted(k for k, v in r["gradual"].items() if v["told"]) for r in rows[:4]] == [[], ["tests"], ["files_first", "tests"],
+                                                                                           ["files_first", "tests"]]
+    assert [r.get("asks") for r in rows[4:7]] == ["fact:45000", "rules", "history:2"] and "gradual" not in rows[4]
+    assert sorted(k for k, v in rows[7]["gradual"].items() if v["told"]) == ["files_first", "tests"]
+
+
+def test_the_claude_code_arms_start_with_only_the_code_notes_as_path_scoped_rules(tmp_path, tasks, memory_folder):
+    import tarfile
+    plan = s.plan_series("mdlog", s.pick_tasks(tasks[0].parent, "ansible", 5, seed=3), tmp_path / "md", model=None,
+                         claude_binary=tmp_path / "c", ruleset="fairtrial", memory=memory_folder)
+    seeded, original = [], s.carry_in
+
+    def spy(name, carry, runner):
+        if not seeded:
+            with tarfile.open(carry) as tar:
+                seeded.extend(sorted(n for n in tar.getnames() if not n.endswith((".claude", ".claude/rules"))))
+        original(name, carry, runner=runner)
+    s.carry_in = spy
+    try:
+        _run(plan, FakeDocker(touch_tests=()), FakeClaude(["Done."] * 8), first=1, last=1)
+    finally:
+        s.carry_in = original
+    assert seeded == [".claude/rules/lib--tests.md"] and "--settings" not in s.claude_argv(plan, "x", budget_usd=3, resume=None)
+
+
+def test_the_fair_runs_take_the_hardest_tasks_first_and_the_trial_never_touches_them(tmp_path, monkeypatch):
+    root = _fair_tasks(tmp_path, 30)[0].parent
+    seen = {}
+    monkeypatch.setattr(s, "plan_series", lambda arm, folders, out, **kw: seen.setdefault(kw["ruleset"], folders) and None)
+    base = ["--tasks-root", str(root), "--repo", "ansible", "--out", str(tmp_path / "o"), "--claude-binary", str(tmp_path / "c")]
+    with pytest.raises(AttributeError):  # the stub returns no plan; only the chosen folders matter here
+        s.main(base + ["--arm", "auto", "--ruleset", "fair", "--largest", "--count", "22"])
+    hardest = s.largest_tasks(root, "ansible", 20)
+    assert seen["fair"][:20] == hardest and len(seen["fair"]) == 22 and not set(seen["fair"][20:]) & set(hardest)
+    with pytest.raises(AttributeError):
+        s.main(base + ["--arm", "auto", "--ruleset", "fairtrial", "--count", "5", "--seed", "7", "--avoid-largest", "22"])
+    assert len(seen["fairtrial"]) == 5 and not set(seen["fairtrial"]) & set(s.largest_tasks(root, "ansible", 22))

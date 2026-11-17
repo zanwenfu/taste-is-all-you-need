@@ -219,3 +219,88 @@ def test_with_refresh_a_folder_instruction_comes_again_with_every_task_and_notes
     assert "run the marc tests" in second and "parse.py note" not in second  # the instruction again, the notes not
     hook_run("prompt", {"prompt": "task 3", "session_id": "s"}, False)  # without the option nothing is forgotten
     assert hook_run("post", touch, False) == ""
+
+
+def test_claude_saves_each_entry_as_its_own_commit_and_the_reader_does_not_repeat_it(tmp_path):
+    (tmp_path / "items.json").write_text(json.dumps([i for i in ITEMS if i["kind"] == "note"]))
+    gm.build(tmp_path / "items.json", tmp_path / "mem", house_rules=False)
+    memory = gm.Memory(tmp_path / "mem" / "git")
+    try:
+        assert memory.rules() == []
+        text, failed = memory.tool("memory_save", {"kind": "rule", "text": "Keep hand-backs under 150 words."})
+        assert not failed and json.loads(text)["saved"] == 2
+        memory.tool("memory_save", {"kind": "decision", "text": "Use the ISBNdb name everywhere.", "scope": "scripts/providers"})
+        memory.tool("memory_save", {"kind": "fact", "text": "The sitemaps script runs with --chunk 45000."})
+        assert memory.rules() == ["Keep hand-backs under 150 words.", "Use the ISBNdb name everywhere."]  # facts are searched, not sent
+        assert memory.handle({"op": "save", "kind": "rule", "source": "reader", "text": "keep your hand-backs under 150 words please"}
+                             )["skipped"] == "already kept"
+        assert "saved" in memory.handle({"op": "save", "kind": "rule", "source": "reader", "text": "Never use git stash."})
+        assert "saved" in memory.handle({"op": "save", "kind": "turn", "source": "hook", "text": "Turn record. Task: fix the parser"})
+        assert memory.tool("memory_save", {"kind": "turn", "text": "x"})[1] is True  # Claude saves rules, decisions and facts only
+        assert memory.tool("memory_save", {"kind": "fact", "text": ""})[1] is True
+        assert "45000" in memory.tool("memory_search", {"description": "sitemaps chunk"})[0]
+        assert {t["name"] for t in memory.definitions(saving=True)} == {"memory_search", "memory_fetch", "memory_save"}
+        assert "this session" not in json.dumps(memory.definitions())
+    finally:
+        memory.store.close()
+    again = gm.Memory(tmp_path / "mem" / "git")  # the saves are on disk and agree with the store
+    try:
+        assert [r["kind"] for r in again.index][-5:] == ["rule", "decision", "fact", "rule", "turn"]
+        assert again.rules()[-1] == "Never use git stash."
+    finally:
+        again.store.close()
+
+
+def _transcript(path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return path
+
+
+def test_the_last_turn_is_read_from_claude_codes_own_transcript(tmp_path):
+    path = _transcript(tmp_path / "t.jsonl", [
+        {"type": "user", "message": {"role": "user", "content": "first task"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "done one"}]}},
+        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "From now on use python -B.\n\nTitle: Fix the parser"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "python -B -m pytest x"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Files changed: a.py\n\nFixed it."}]}}])
+    turn = hook.last_turn(path)
+    assert turn["user"].startswith("From now on use python -B.") and turn["reply"].startswith("Files changed: a.py")
+    assert turn["commands"] == ["python -B -m pytest x"] and hook.task_title(turn["user"]) == "Fix the parser"
+
+
+def test_the_stop_hook_records_the_turn_and_the_reader_backs_up_claudes_saves(tmp_path, monkeypatch):
+    import subprocess as sp
+    project = tmp_path / "app"
+    project.mkdir()
+    sp.run(["git", "init", "-q", str(project)], check=True)
+    (project / "a.py").write_text("x = 1\n")
+    (project / "CLAUDE.md").write_text("# notes\n")
+    path = _transcript(tmp_path / "t.jsonl", [
+        {"type": "user", "message": {"content": "From now on use python -B.\n\nTitle: Fix the parser"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Fixed."}]}}])
+    calls = []
+    monkeypatch.setattr(hook, "ask", lambda memory, request, timeout=30: calls.append(request) or {"saved": len(calls)})
+    import types
+    fake = types.ModuleType("studies.claude_code.readers")
+    fake.claude_reader = lambda message: ["From now on use python -B."]
+    monkeypatch.setitem(__import__("sys").modules, "studies.claude_code.readers", fake)
+    out = hook.run("stop", {"transcript_path": str(path), "session_id": "s"}, tmp_path, live=True, reader=True, project=project)
+    assert out == ""  # a Stop hook that prints nothing never blocks Claude
+    assert calls[0]["kind"] == "turn" and "Task: Fix the parser" in calls[0]["text"] and "a.py" in calls[0]["text"]
+    assert "CLAUDE.md" not in calls[0]["text"]  # the other designs' memory files are not the task's changes
+    assert calls[1] == {"op": "save", "kind": "rule", "source": "reader", "text": "From now on use python -B."}
+    assert hook.run("stop", {"transcript_path": str(path), "stop_hook_active": True}, tmp_path, reader=True, project=project) == ""
+    assert len(calls) == 2
+
+
+def test_the_live_message_says_how_to_save_and_brings_what_was_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(hook, "ask", lambda memory, request, timeout=30: {"rules": []})
+    empty = hook.rules_text(tmp_path, live=True)
+    assert empty == hook.LIVE_TOOLS and "memory_save" in empty
+    monkeypatch.setattr(hook, "ask", lambda memory, request, timeout=30: {"rules": ["Use python -B."]})
+    assert hook.rules_text(tmp_path, live=True).startswith(hook.LIVE_HEADER + "\n- Use python -B.\n")
+    seen = []
+    monkeypatch.setattr(mcp, "ask", lambda memory, request, timeout=30: seen.append(request) or {"tools": []})
+    mcp.respond({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, tmp_path, saving=True)
+    assert seen[-1] == {"op": "definitions", "saving": True}

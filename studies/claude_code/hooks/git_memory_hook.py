@@ -5,6 +5,8 @@ whose Python may be 3.8, and reach the memory service on the machine through the
     post     PostToolUse: when Claude first reads, edits, searches or runs a command on a file or folder since the last
              compaction, the instructions for its folder and the notes on that file
     compact  SessionStart, matcher "compact": the house rules again, and what was delivered is forgotten so it comes again when needed
+    stop     Stop (the fair test, Nov 17): the turn just finished is recorded as one commit (the task, Claude's reply, the files changed,
+             the tests run); with --reader, the small reader reads the user's message and saves any standing rule Claude did not
 
 With --refresh-folders (the design revised after the first run, Nov 16 ~8:40 pm ET: a folder's instruction delivered once was
 skipped when later tasks came back to that folder), each new user message forgets which folder instructions were delivered, so a
@@ -20,8 +22,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -31,6 +35,12 @@ RULES_HEADER = ("Project house rules, from the project memory. Follow every one 
 TOOLS_LINE = ("The project memory also holds instructions for each folder and notes on the code. A folder's instructions and a "
               "file's notes arrive when you first open or change it; for anything else use the memory_search and memory_fetch tools.")
 TOUCH_HEADER = "From the project memory, for what you just touched:"
+LIVE_HEADER = ("Standing rules and decisions from the project memory, oldest first; where two disagree, the later one stands. Follow "
+               "every one exactly, in every reply and every tool call; they override your default habits.")
+LIVE_TOOLS = ("The project memory keeps what matters across tasks and sessions. Save rules, decisions and facts with memory_save; a "
+              "file's notes arrive when you first open it; for anything else, including what was done in earlier tasks, use "
+              "memory_search and memory_fetch.")
+MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".claude")
 _PATHISH = re.compile(r"(?:/app/)?((?:openlibrary|scripts|tests|conf|static|vendor|infogami)(?:/[\w.\-]+)+)")
 
 
@@ -107,25 +117,100 @@ def _output(event_name: str, text: str) -> str:
     return json.dumps({"hookSpecificOutput": {"hookEventName": event_name, "additionalContext": text}})
 
 
-def rules_text(memory: Path) -> str:
+def rules_text(memory: Path, live: bool = False) -> str:
     rules = ask(memory, {"op": "rules"}).get("rules") or []
+    if live:  # the fair test: what Claude and the reader saved, and how to save and look up the rest
+        return (LIVE_HEADER + "\n" + "".join(f"- {rule}\n" for rule in rules) + "\n" if rules else "") + LIVE_TOOLS
     return RULES_HEADER + "\n" + "".join(f"- {rule}\n" for rule in rules) + "\n" + TOOLS_LINE
 
 
-def run(mode: str, event: dict, memory: Path, refresh_folders: bool = False) -> str:
+def _text_of(content) -> str:
+    if isinstance(content, str):
+        return content
+    return "\n".join(c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") == "text")
+
+
+def last_turn(transcript: Path) -> dict:
+    """From Claude Code's own session transcript: the user's last message, Claude's last words after it, and its shell commands."""
+    rows = []
+    for line in transcript.read_text(errors="replace").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    start = None
+    for index, row in enumerate(rows):
+        message = row.get("message") or {}
+        content = message.get("content")
+        if row.get("type") == "user" and not row.get("isMeta") and _text_of(content).strip() and not (
+                isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)):
+            start = index
+    if start is None:
+        return {"user": "", "reply": "", "commands": []}
+    reply, commands = "", []
+    for row in rows[start + 1:]:
+        if row.get("type") != "assistant":
+            continue
+        for c in (row.get("message") or {}).get("content") or []:
+            if isinstance(c, dict) and c.get("type") == "text" and c.get("text", "").strip():
+                reply = c["text"]
+            if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "Bash":
+                commands.append(str((c.get("input") or {}).get("command", "")))
+    return {"user": _text_of((rows[start].get("message") or {}).get("content")), "reply": reply, "commands": commands}
+
+
+def changed_files(project: Path) -> list:
+    done = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(project), "status", "--porcelain", "--untracked-files=all"],
+                          capture_output=True, text=True, timeout=60)
+    paths = [line[3:].split(" -> ")[-1].strip('"') for line in done.stdout.splitlines() if len(line) > 3]
+    return [p for p in paths if not any(p == m or p.startswith(m + "/") for m in MEMORY_FILES)]
+
+
+def task_title(user: str) -> str:
+    title = re.search(r"(?im)^\W*title:?\s*(.+)$", user)
+    if title:
+        return title.group(1).strip()[:160]
+    body = user.split("<pr_description>", 1)[-1]
+    return next((line.strip(" #*") for line in body.splitlines() if len(line.strip(" #*")) > 15 and not line.strip().startswith("<")),
+                user.strip()[:160])[:160]
+
+
+def record_turn(event: dict, memory: Path, project: Path, reader: bool) -> dict:
+    turn = last_turn(Path(str(event.get("transcript_path") or "")))
+    files = changed_files(project)
+    tests = [c.replace("\n", " ")[:200] for c in turn["commands"] if "pytest" in c][:8]
+    text = (f"Turn record. Task: {task_title(turn['user'])}\nClaude's reply: {turn['reply'][:1500]}\n"
+            f"Files changed so far in this task: {', '.join(files) or 'none'}\nTests run: {'; '.join(tests) or 'none'}")
+    saved = ask(memory, {"op": "save", "kind": "turn", "source": "hook", "text": text})
+    found = []
+    if reader and turn["user"].strip():
+        sys.path.insert(0, os.environ.get("CC_STUDY_CODE", "/cc/code"))
+        from studies.claude_code.readers import claude_reader  # noqa: E402  (the small model, on the subscription)
+        found = claude_reader(turn["user"])
+        for rule in found:
+            ask(memory, {"op": "save", "kind": "rule", "source": "reader", "text": rule})
+    return {"turn": saved.get("saved"), "reader_found": len(found), "files": len(files)}
+
+
+def run(mode: str, event: dict, memory: Path, refresh_folders: bool = False, live: bool = False, reader: bool = False,
+        project: Path = Path("/app")) -> str:
     session = str(event.get("session_id") or "")
     try:
+        if mode == "stop":  # never blocks Claude: it prints nothing
+            if not event.get("stop_hook_active"):
+                _log(memory, {"mode": mode, **record_turn(event, memory, project, reader)})
+            return ""
         if mode == "prompt":
             if refresh_folders:
                 _forget_folders(memory, session)
-            text = rules_text(memory)
+            text = rules_text(memory, live)
             _log(memory, {"mode": mode, "chars": len(text)})
             return _output("UserPromptSubmit", text)
         if mode == "compact":
             if event.get("source", "compact") != "compact":
                 return ""
             _remember(memory, session, set())
-            text = rules_text(memory)
+            text = rules_text(memory, live)
             _log(memory, {"mode": mode, "chars": len(text)})
             return _output("SessionStart", text)
         paths = touched_paths(event)
@@ -147,16 +232,18 @@ def run(mode: str, event: dict, memory: Path, refresh_folders: bool = False) -> 
 
 def main(argv=None, stdin=None, stdout=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("mode", choices=("prompt", "post", "compact"))
+    parser.add_argument("mode", choices=("prompt", "post", "compact", "stop"))
     parser.add_argument("--memory", type=Path, default=Path("/cc/memory"))
     parser.add_argument("--refresh-folders", action="store_true", help="a folder's instruction again with every task that touches it")
+    parser.add_argument("--live", action="store_true", help="the fair test: deliver what was saved, and say how to save")
+    parser.add_argument("--reader", action="store_true", help="stop mode: the small reader saves standing rules Claude did not")
     args = parser.parse_args(argv)
     raw = (stdin or sys.stdin).read()
     try:
         event = json.loads(raw) if raw.strip() else {}
     except ValueError:
         event = {}
-    output = run(args.mode, event, args.memory, args.refresh_folders)
+    output = run(args.mode, event, args.memory, args.refresh_folders, args.live, args.reader)
     if output:
         (stdout or sys.stdout).write(output)
     return 0

@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socketserver
 import sys
 import threading
@@ -46,6 +47,32 @@ HOUSE_RULES = (
 SESSION = "project-memory"
 BRANCH = "memory"
 NOTES_PER_FILE = 25  # notes delivered for one touched file, at most
+# Capture as the work happens (the fair test, the user's yes Nov 17 ~12:15 am ET): Claude saves with memory_save (the same writer as
+# a CLAUDE.md it keeps); a small reader saves any standing rule Claude did not (source "reader"); every turn is recorded (kind "turn").
+SAVE_KINDS = ("rule", "decision", "fact")
+STANDING = ("rule", "decision")  # delivered with every message; facts, notes and turns are found by search, or arrive on touch if scoped
+SAVE = "memory_save"
+SAVE_DEFINITION = {
+    "name": SAVE,
+    "description": ("Save something to the project memory so it is kept for later tasks and later sessions, as one versioned "
+                    "entry: a rule the user wants followed, a decision made, or a fact about the project. Rules and decisions are "
+                    "given back to you with every message; facts are found later with memory_search."),
+    "inputSchema": {"type": "object", "properties": {
+        "kind": {"type": "string", "enum": list(SAVE_KINDS), "description": "rule, decision or fact"},
+        "text": {"type": "string", "description": "What to keep, in one or two sentences; for a rule, the user's own words where possible."},
+        "scope": {"type": "string", "description": "Optional: the folder it applies to, e.g. openlibrary/solr; empty for the whole project."}},
+        "required": ["kind", "text"], "additionalProperties": False},
+}
+SIMILAR = 0.6  # a reader's rule this close (word overlap) to one already kept is not saved again
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def similar(a: str, b: str) -> float:
+    wa, wb = _words(a), _words(b)
+    return len(wa & wb) / max(1, len(wa | wb))
 
 
 def with_rules(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -129,6 +156,36 @@ class Memory:
         self.check()
         self.log = self.folder / "service.jsonl"
         self.lock = threading.Lock()
+        self.write_lock = threading.Lock()  # saves come one at a time: each is one commit, none is lost
+        self.branch = None
+
+    def save(self, kind: str, text: str, *, scope: str = "", source: str = "claude", allowed: tuple[str, ...] = SAVE_KINDS) -> dict[str, Any]:
+        """One entry, committed on its own: the text as a file, a header naming its kind, folder and source. A reader's rule close
+        to one already kept is not saved again; Claude's saves are always kept."""
+        from taste.memstore import CommitHeader
+        text, scope = " ".join(str(text or "").split())[:2000], str(scope or "").strip().strip("/")
+        if kind not in allowed or not text:
+            raise ValueError(f"kind must be one of {', '.join(allowed)} and text must not be empty")
+        with self.write_lock:
+            if source == "reader":
+                close = [r for r in self.index if r["kind"] in STANDING and similar(r["text"], text) >= SIMILAR]
+                if close:
+                    return {"skipped": "already kept", "id": close[0]["id"]}
+            if self.branch is None:
+                self.branch = self.store.branch(BRANCH, producer="claude-code-study")
+            number = len(self.index)
+            rel = f"memory/{kind}/{scope or 'project'}/{number:05d}.md"
+            self.branch.write(rel, text + "\n")
+            header = CommitHeader(what=text[:200], keywords=tuple(w for w in (kind, scope, source) if w),
+                                  instructions=(text,) if kind in STANDING else ())
+            state = self.branch.checkpoint(f"project memory: {kind} saved by {source}", header=header)
+            row = {"id": number, "kind": kind, "scope": scope, "file": "", "tests": "", "text": text, "path": rel, "state": state.id,
+                   "source": source, "saved": time.time()}
+            self.index.append(row)
+            temp = self.folder / "index.json.tmp"
+            temp.write_text(json.dumps(self.index) + "\n")
+            temp.replace(self.folder / "index.json")
+        return {"saved": number, "kind": kind}
 
     def check(self) -> None:
         """Every indexed item's text is in the store at its path, so the index cannot drift from the truth."""
@@ -139,7 +196,13 @@ class Memory:
                 raise RuntimeError(f"index and store disagree at item {row['id']}")
 
     def rules(self) -> list[str]:
-        return [row["text"] for row in self.index if row["kind"] == "rule"]
+        """What is delivered with every message: the rules and decisions kept, oldest first, each text once."""
+        seen, out = set(), []
+        for row in self.index:
+            if row["kind"] in STANDING and row["text"].lower() not in seen:
+                seen.add(row["text"].lower())
+                out.append(row["text"])
+        return out
 
     def items_for(self, paths: list[str]) -> list[dict[str, Any]]:
         """The folder instructions whose folder holds a touched path, then the notes of each touched file (at most NOTES_PER_FILE
@@ -160,11 +223,21 @@ class Memory:
 
     def tool(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
         from taste.memstore import tools
+        if name == SAVE:
+            try:
+                extra = set(arguments) - {"kind", "text", "scope"}
+                if extra:
+                    raise ValueError(f"unknown arguments {sorted(extra)}")
+                return json.dumps(self.save(arguments.get("kind", ""), arguments.get("text", ""), scope=arguments.get("scope", ""))), False
+            except ValueError as error:
+                return json.dumps({"error": str(error)}), True
         return tools.answer(self.store, name, arguments, kinds=("file", "message"))
 
-    def definitions(self) -> list[dict[str, Any]]:
+    def definitions(self, saving: bool = False) -> list[dict[str, Any]]:
         from taste.memstore import tools
-        return [{"name": d["name"], "description": d["description"], "inputSchema": d["parameters"]} for d in tools.definitions()]
+        found = [{"name": d["name"], "description": d["description"].replace("a record of this session", "the project memory"),
+                  "inputSchema": d["parameters"]} for d in tools.definitions()]
+        return found + ([SAVE_DEFINITION] if saving else [])
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request.get("op")
@@ -176,7 +249,10 @@ class Memory:
             text, failed = self.tool(str(request.get("name")), dict(request.get("arguments") or {}))
             reply = {"text": text, "failed": failed}
         elif op == "definitions":
-            reply = {"tools": self.definitions()}
+            reply = {"tools": self.definitions(saving=bool(request.get("saving")))}
+        elif op == "save":  # the hooks: the reader's rules and the record of each turn
+            reply = self.save(str(request.get("kind")), str(request.get("text", "")), scope=str(request.get("scope", "")),
+                              source=str(request.get("source", "hook")), allowed=(*SAVE_KINDS, "turn"))
         else:
             reply = {"error": f"unknown op {op!r}"}
         with self.lock, self.log.open("a") as log:
@@ -206,8 +282,10 @@ def serve(memory: Memory, socket_path: Path) -> None:
         server.serve_forever()
 
 
-def build(items_path: Path, out: Path) -> dict[str, Any]:
-    items = with_rules(json.loads(Path(items_path).read_text()))
+def build(items_path: Path, out: Path, *, house_rules: bool = True) -> dict[str, Any]:
+    """The three designs from one item list; ``house_rules`` False starts with none (the fair test: rules come during the work)."""
+    loaded = json.loads(Path(items_path).read_text())
+    items = with_rules(loaded) if house_rules else [i for i in loaded if i["kind"] != "rule"]
     out = Path(out)
     (out / "flat").mkdir(parents=True, exist_ok=True)
     (out / "flat" / "CLAUDE.md").write_text(flat_markdown(items))
@@ -219,7 +297,7 @@ def build(items_path: Path, out: Path) -> dict[str, Any]:
         (out / "folders" / rel).write_text(text)
     index = build_store(items, out / "git")
     return {"items": len(items), "flat_chars": len(flat_markdown(items)), "folder_files": len(files),
-            "largest_folder_file": max(len(t) for t in files.values()), "commits": len(index)}
+            "largest_folder_file": max((len(t) for t in files.values()), default=0), "commits": len(index)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -228,12 +306,13 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("build")
     b.add_argument("--items", type=Path, required=True)
     b.add_argument("--out", type=Path, required=True)
+    b.add_argument("--no-house-rules", action="store_true", help="start with no rules (the fair test)")
     s = sub.add_parser("serve")
     s.add_argument("--memory", type=Path, required=True)
     s.add_argument("--socket", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "build":
-        print(json.dumps(build(args.items, args.out)))
+        print(json.dumps(build(args.items, args.out, house_rules=not args.no_house_rules)))
     else:
         serve(Memory(args.memory), args.socket)
     return 0

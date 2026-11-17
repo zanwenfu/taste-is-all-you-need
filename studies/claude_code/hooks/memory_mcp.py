@@ -18,7 +18,7 @@ from git_memory_hook import ask  # noqa: E402
 PROTOCOL = "2025-06-18"
 
 
-def respond(request: dict, memory: Path) -> dict | None:
+def respond(request: dict, memory: Path, saving: bool = False) -> dict | None:
     method, rid = request.get("method"), request.get("id")
     if rid is None:  # a notification (initialized, cancelled): no reply
         return None
@@ -27,7 +27,7 @@ def respond(request: dict, memory: Path) -> dict | None:
             wanted = (request.get("params") or {}).get("protocolVersion") or PROTOCOL
             result = {"protocolVersion": wanted, "capabilities": {"tools": {}}, "serverInfo": {"name": "memory", "version": "1"}}
         elif method == "tools/list":
-            result = {"tools": ask(memory, {"op": "definitions"}).get("tools", [])}
+            result = {"tools": ask(memory, {"op": "definitions", "saving": saving}).get("tools", [])}
         elif method == "tools/call":
             params = request.get("params") or {}
             reply = ask(memory, {"op": "tool", "name": params.get("name"), "arguments": params.get("arguments") or {}}, timeout=60)
@@ -47,6 +47,7 @@ def respond(request: dict, memory: Path) -> dict | None:
 def main(argv=None, stdin=None, stdout=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--memory", type=Path, default=Path("/cc/memory"))
+    parser.add_argument("--saving", action="store_true", help="also offer memory_save (the fair test)")
     args = parser.parse_args(argv)
     out = stdout or sys.stdout
     for line in stdin or sys.stdin:
@@ -56,7 +57,7 @@ def main(argv=None, stdin=None, stdout=None) -> int:
             request = json.loads(line)
         except ValueError:
             continue
-        reply = respond(request, args.memory)
+        reply = respond(request, args.memory, args.saving)
         if reply is not None:
             out.write(json.dumps(reply) + "\n")
             out.flush()
