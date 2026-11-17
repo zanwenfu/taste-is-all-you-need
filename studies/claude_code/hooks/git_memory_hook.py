@@ -6,6 +6,10 @@ whose Python may be 3.8, and reach the memory service on the machine through the
              compaction, the instructions for its folder and the notes on that file
     compact  SessionStart, matcher "compact": the house rules again, and what was delivered is forgotten so it comes again when needed
 
+With --refresh-folders (the design revised after the first run, Nov 16 ~8:40 pm ET: a folder's instruction delivered once was
+skipped when later tasks came back to that folder), each new user message forgets which folder instructions were delivered, so a
+folder's instruction comes again with every task that touches it; a file's notes still come once until a compaction.
+
 Every delivery is logged (mode, items, characters) to deliveries.jsonl beside the socket. The hook never blocks Claude: if the
 service does not answer it says so in the log and gives nothing.
 
@@ -61,20 +65,34 @@ def _state(memory: Path) -> Path:
     return memory / "delivered.json"
 
 
+def _load(memory: Path) -> dict:
+    try:
+        return json.loads(_state(memory).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
 def _delivered(memory: Path, session: str) -> set:
-    try:
-        return set(json.loads(_state(memory).read_text()).get(session, []))
-    except (OSError, ValueError):
-        return set()
+    entry = _load(memory).get(session, {})
+    return set(entry.get("ids", [])) if isinstance(entry, dict) else set(entry)
 
 
-def _remember(memory: Path, session: str, ids: set) -> None:
-    try:
-        data = json.loads(_state(memory).read_text())
-    except (OSError, ValueError):
-        data = {}
-    data[session] = sorted(ids)
+def _remember(memory: Path, session: str, ids: set, folders: set = frozenset()) -> None:
+    """What has been delivered in this context: every item's id, and which of them are folder instructions."""
+    data = _load(memory)
+    old = data.get(session, {})
+    kept = set(old.get("folders", [])) if isinstance(old, dict) else set()
+    data[session] = {"ids": sorted(ids), "folders": sorted((kept | set(folders)) & set(ids))}
     _state(memory).write_text(json.dumps(data))
+
+
+def _forget_folders(memory: Path, session: str) -> None:
+    data = _load(memory)
+    entry = data.get(session, {})
+    if isinstance(entry, dict) and entry.get("folders"):
+        folders = set(entry["folders"])
+        data[session] = {"ids": sorted(set(entry.get("ids", [])) - folders), "folders": []}
+        _state(memory).write_text(json.dumps(data))
 
 
 def _log(memory: Path, record: dict) -> None:
@@ -94,10 +112,12 @@ def rules_text(memory: Path) -> str:
     return RULES_HEADER + "\n" + "".join(f"- {rule}\n" for rule in rules) + "\n" + TOOLS_LINE
 
 
-def run(mode: str, event: dict, memory: Path) -> str:
+def run(mode: str, event: dict, memory: Path, refresh_folders: bool = False) -> str:
     session = str(event.get("session_id") or "")
     try:
         if mode == "prompt":
+            if refresh_folders:
+                _forget_folders(memory, session)
             text = rules_text(memory)
             _log(memory, {"mode": mode, "chars": len(text)})
             return _output("UserPromptSubmit", text)
@@ -115,7 +135,7 @@ def run(mode: str, event: dict, memory: Path) -> str:
         items = [i for i in ask(memory, {"op": "items_for", "paths": paths}).get("items", []) if i["id"] not in delivered]
         if not items:
             return ""
-        _remember(memory, session, delivered | {i["id"] for i in items})
+        _remember(memory, session, delivered | {i["id"] for i in items}, {i["id"] for i in items if i["kind"] == "folder"})
         text = TOUCH_HEADER + "\n" + "".join(f"- {i['text']}\n" for i in items)
         _log(memory, {"mode": mode, "tool": event.get("tool_name"), "paths": paths[:5], "items": len(items),
                       "folder_items": sum(i["kind"] == "folder" for i in items), "chars": len(text)})
@@ -129,13 +149,14 @@ def main(argv=None, stdin=None, stdout=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("mode", choices=("prompt", "post", "compact"))
     parser.add_argument("--memory", type=Path, default=Path("/cc/memory"))
+    parser.add_argument("--refresh-folders", action="store_true", help="a folder's instruction again with every task that touches it")
     args = parser.parse_args(argv)
     raw = (stdin or sys.stdin).read()
     try:
         event = json.loads(raw) if raw.strip() else {}
     except ValueError:
         event = {}
-    output = run(args.mode, event, args.memory)
+    output = run(args.mode, event, args.memory, args.refresh_folders)
     if output:
         (stdout or sys.stdout).write(output)
     return 0

@@ -614,3 +614,21 @@ def test_a_folder_instruction_is_due_for_the_most_specific_folder_a_change_touch
              "diff --git a/openlibrary/catalog/marc/tests/test_parse.py b/openlibrary/catalog/marc/tests/test_parse.py\n")
     checks = s.folder_checks([{"name": "Bash", "input": {"command": c}} for c in commands], patch, items)
     assert checks["due"] == 1 and checks["items"][0]["scope"] == "openlibrary/catalog/marc" and checks["kept"] == kept
+
+
+def test_questions_come_after_the_tasks_in_the_same_session_and_are_not_graded(tmp_path, tasks, memory_folder):
+    plan = s.plan_series("gitmem2", s.pick_tasks(tasks[0].parent, "ansible", 2, seed=3), tmp_path / "g2", model=None,
+                         claude_binary=tmp_path / "c", sessions=(1,), ruleset="scaled", memory=memory_folder, code=tmp_path / "code",
+                         questions=("Which cluster serves search?", "What chunk size?"))
+    assert [(r.number, r.question, r.new_session) for r in plan.rounds] == [(1, False, True), (2, False, False), (3, True, False),
+                                                                          (4, True, False)]
+    assert plan.rounds[2].prompt == s.QUESTION_HEAD + "Which cluster serves search?" and plan.rounds[3].task == plan.rounds[1].task
+    docker = FakeDocker(touch_tests=())
+    record = _run(plan, docker, FakeClaude(["Done.", "Done.", "It is saga.", "45000"]),
+                  service=lambda p: type("S", (), {"terminate": lambda self: None, "wait": lambda self, timeout: 0})())
+    rows = record["rounds"]
+    assert docker.graded == 2 and rows[2]["grade_skipped"] == "question" and rows[3]["answer"] == "45000"
+    assert rows[2]["question"] == "Which cluster serves search?" and rows[2]["memory_tool_calls"] == 0 and "folder_items" not in rows[2]
+    assert "--refresh-folders" in json.dumps(json.loads((plan.out / "hooks" / "settings.json").read_text()))
+    assert "--refresh-folders" not in json.dumps(s.git_memory_settings())
+    assert "/cc/memory" in " ".join(s.start_argv(plan, plan.rounds[0], "x")) and "--mcp-config" in s.claude_argv(plan, "x", budget_usd=3, resume=None)

@@ -178,3 +178,44 @@ def test_the_hook_and_the_tool_server_reach_the_real_store_through_a_socket(buil
         assert [r["op"] for r in log] == ["rules", "items_for", "tool"]
     finally:
         memory.store.close()
+
+
+FACT = {"kind": "fact", "scope": "scripts/sitemaps", "text": "Project note (sitemaps): the sitemaps script must run with --chunk 45000."}
+
+
+def test_project_facts_are_in_every_design_and_come_with_their_folder(tmp_path):
+    items = gm.with_rules(ITEMS + [FACT])
+    assert "## Project notes\n\n- " + FACT["text"] in gm.flat_markdown(items)
+    _, files = gm.folder_rules(items)
+    assert files[".claude/rules/scripts__sitemaps--facts.md"].startswith('---\npaths:\n  - "scripts/sitemaps/**"\n---\n')
+    (tmp_path / "items.json").write_text(json.dumps(ITEMS + [FACT]))
+    gm.build(tmp_path / "items.json", tmp_path / "mem")
+    memory = gm.Memory(tmp_path / "mem" / "git")
+    try:
+        assert [i["text"] for i in memory.items_for(["/app/scripts/sitemaps/sitemap.py"])] == [FACT["text"]]
+        text, _ = memory.tool("memory_search", {"description": "what chunk size for the sitemaps script"})
+        assert "45000" in text
+    finally:
+        memory.store.close()
+
+
+def test_with_refresh_a_folder_instruction_comes_again_with_every_task_and_notes_do_not(tmp_path, monkeypatch):
+    service = FakeService()
+    touch = {"tool_name": "Read", "tool_input": {"file_path": f"/app/{MARC}/parse.py"}, "session_id": "s"}
+
+    def hook_run(mode, event, refresh):
+        monkeypatch.setattr(hook, "ask", service)
+        out = io.StringIO()
+        hook.main([mode, "--memory", str(tmp_path)] + (["--refresh-folders"] if refresh else []), stdin=io.StringIO(json.dumps(event)),
+                  stdout=out)
+        return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"] if out.getvalue() else ""
+
+    hook_run("prompt", {"prompt": "task 1", "session_id": "s"}, True)
+    first = hook_run("post", touch, True)
+    assert "run the marc tests" in first and "parse.py note" in first
+    assert hook_run("post", touch, False) == ""  # within the same task, nothing again
+    hook_run("prompt", {"prompt": "task 2", "session_id": "s"}, True)
+    second = hook_run("post", touch, True)
+    assert "run the marc tests" in second and "parse.py note" not in second  # the instruction again, the notes not
+    hook_run("prompt", {"prompt": "task 3", "session_id": "s"}, False)  # without the option nothing is forgotten
+    assert hook_run("post", touch, False) == ""

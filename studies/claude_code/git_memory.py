@@ -1,9 +1,10 @@
 """One project memory, three designs, for real Claude Code (agent-os session, Nov 16 2026; the user's direction: structured git
 memory, delivered when needed and searchable, against a flat markdown file dumped into every prompt).
 
-A project memory is a list of items {"kind": "rule" | "folder" | "note", "scope": folder, "file": path (notes only), "text": ...}:
-the house rules that hold for every task, how to run each folder's tests, and notes on the code (what each public function and
-class is), written once and given identically to every design, so the writer cannot explain a difference.
+A project memory is a list of items {"kind": "rule" | "folder" | "note" | "fact", "scope": folder, "file": path (notes only),
+"text": ...}: the house rules that hold for every task, how to run each folder's tests, notes on the code (what each public function
+and class is), and project facts that live only in memory (a decision, a limit, a name), written once and given identically to every
+design, so the writer cannot explain a difference.
 
     flat      one CLAUDE.md holding everything; Claude Code reads it on every call (its own design)
     folders   Claude Code's path-scoped rules: CLAUDE.md holds the house rules; each folder's items go to .claude/rules/ with
@@ -60,6 +61,7 @@ def flat_markdown(items: list[dict[str, Any]]) -> str:
     """Everything in one file, as a project's CLAUDE.md grows."""
     return ("# Project memory\n\n" + _section("House rules (every task)", [i["text"] for i in items if i["kind"] == "rule"])
             + _section("Running tests by folder", [i["text"] for i in items if i["kind"] == "folder"])
+            + _section("Project notes", [i["text"] for i in items if i["kind"] == "fact"])
             + _section("Code notes", [i["text"] for i in items if i["kind"] == "note"]))
 
 
@@ -82,6 +84,12 @@ def folder_rules(items: list[dict[str, Any]]) -> tuple[str, dict[str, str]]:
             by_folder.setdefault(item["scope"], []).append(item["text"])
     for scope, rows in by_folder.items():
         files[f".claude/rules/{_slug(scope)}--notes.md"] = f'---\npaths:\n  - "{scope}/*"\n---\n\n' + _section("Code notes", rows)
+    facts: dict[str, list[str]] = {}
+    for item in items:
+        if item["kind"] == "fact":
+            facts.setdefault(item["scope"], []).append(item["text"])
+    for scope, rows in facts.items():
+        files[f".claude/rules/{_slug(scope)}--facts.md"] = f'---\npaths:\n  - "{scope}/**"\n---\n\n' + _section("Project notes", rows)
     return claude_md, files
 
 
@@ -138,8 +146,8 @@ class Memory:
         each)."""
         found: list[dict[str, Any]] = []
         clean = [p.split("/app/", 1)[-1].lstrip("./") for p in paths if p]
-        for row in self.index:
-            if row["kind"] == "folder" and any(p == row["scope"] or p.startswith(row["scope"] + "/") for p in clean):
+        for row in self.index:  # a folder's instruction and its project facts, like a path-scoped rule covering the folder
+            if row["kind"] in ("folder", "fact") and any(p == row["scope"] or p.startswith(row["scope"] + "/") for p in clean):
                 found.append(row)
         for path in clean:
             found += [row for row in self.index if row["kind"] == "note" and row["file"] == path][:NOTES_PER_FILE]
