@@ -719,3 +719,12 @@ def test_the_fair_runs_take_the_hardest_tasks_first_and_the_trial_never_touches_
     with pytest.raises(AttributeError):
         s.main(base + ["--arm", "auto", "--ruleset", "fairtrial", "--count", "5", "--seed", "7", "--avoid-largest", "22"])
     assert len(seen["fairtrial"]) == 5 and not set(seen["fairtrial"]) & set(s.largest_tasks(root, "ansible", 22))
+
+
+def test_only_the_git_memory_turns_claude_codes_auto_memory_off(tmp_path, tasks, memory_folder):
+    plans = {arm: s.plan_series(arm, s.pick_tasks(tasks[0].parent, "ansible", 5, seed=3), tmp_path / arm, model=None,
+                                claude_binary=tmp_path / "c", ruleset="fairtrial", memory=memory_folder, code=tmp_path / "code",
+                                token_file=tmp_path / "t") for arm in ("auto", "mdlog", "gitlive")}
+    flags = {arm: [e for e in s.exec_env(p) if "AUTO_MEMORY" in e] for arm, p in plans.items()}
+    assert flags == {"auto": ["CLAUDE_CODE_DISABLE_AUTO_MEMORY=0"], "mdlog": ["CLAUDE_CODE_DISABLE_AUTO_MEMORY=0"],
+                     "gitlive": ["CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"]}

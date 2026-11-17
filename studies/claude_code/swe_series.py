@@ -719,6 +719,8 @@ def exec_env(plan: SeriesPlan) -> list[str]:
     env = {"CLAUDE_CONFIG_DIR": CONFIG_IN_CONTAINER, "DISABLE_AUTOUPDATER": "1", "HOME": "/root",
            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}  # auto memory ON in every arm, as the design says, whatever the default is
+    if plan.arm == "gitlive":  # our layer replaces Claude Code's built-in memory: with both on, Claude saved to its auto memory
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # (which it also calls "memory") and never to ours (the fair trial, Nov 17)
     if plan.window:
         env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(plan.window)
     if plan.proxy:
@@ -922,7 +924,8 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
             seed_project_memory(seed, carry)
         if plan.arm in GIT_ARMS:
             if not (plan.out / "memory" / "index.json").exists():
-                shutil.copytree(plan.memory / "git", plan.out / "memory", dirs_exist_ok=True)
+                from studies.claude_code.git_memory import copy_memory
+                copy_memory(plan.memory / "git", plan.out / "memory")
             settings = git_memory_live_settings() if plan.arm == "gitlive" else git_memory_settings(refresh=plan.arm == "gitmem2")
             (plan.out / "hooks" / "settings.json").write_text(json.dumps(settings, indent=1) + "\n")
             (plan.out / "hooks" / "mcp.json").write_text(json.dumps(mcp_config(saving=plan.arm == "gitlive"), indent=1) + "\n")

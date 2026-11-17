@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socketserver
 import sys
 import threading
@@ -258,6 +259,16 @@ class Memory:
         with self.lock, self.log.open("a") as log:
             log.write(json.dumps({"time": time.time(), "op": op, "name": request.get("name"), "reply_chars": len(json.dumps(reply))}) + "\n")
         return reply
+
+
+def copy_memory(source: Path, target: Path) -> None:
+    """A run's own copy of a built git memory. A plain copy keeps git's record of the source's checkout folder, so git refuses to
+    open the memory branch in the copy and every save fails (the fair trial, Nov 17 ~12:25 am ET). The copy leaves out the source's
+    checkout folders and their registrations; the store makes its own checkout on the first save. The source is never changed."""
+    shutil.copytree(source, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".taste-worktrees"))
+    for registry in (target / "repo" / ".git" / "worktrees", target / "repo" / "worktrees"):
+        if registry.is_dir():
+            shutil.rmtree(registry)
 
 
 def serve(memory: Memory, socket_path: Path) -> None:

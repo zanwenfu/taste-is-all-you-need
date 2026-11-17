@@ -304,3 +304,31 @@ def test_the_live_message_says_how_to_save_and_brings_what_was_saved(tmp_path, m
     monkeypatch.setattr(mcp, "ask", lambda memory, request, timeout=30: seen.append(request) or {"tools": []})
     mcp.respond({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, tmp_path, saving=True)
     assert seen[-1] == {"op": "definitions", "saving": True}
+
+
+def test_a_runs_copy_of_the_memory_can_save_and_the_source_is_untouched(tmp_path):
+    (tmp_path / "items.json").write_text(json.dumps([i for i in ITEMS if i["kind"] == "note"]))
+    gm.build(tmp_path / "items.json", tmp_path / "built", house_rules=False)
+    source = gm.Memory(tmp_path / "built" / "git")  # the source's own checkout exists and stays registered, as on the machine
+    source.save("rule", "Seed rule.")
+    before = (tmp_path / "built" / "git" / "index.json").read_text()
+    source.store.close()
+    gm.copy_memory(tmp_path / "built" / "git", tmp_path / "run" / "memory")
+    copy = gm.Memory(tmp_path / "run" / "memory")
+    try:
+        assert "saved" in copy.handle({"op": "save", "kind": "turn", "source": "hook", "text": "Turn record. Task: x"})
+        assert json.loads(copy.tool("memory_save", {"kind": "fact", "text": "The lock is /var/run/x.lock."})[0])["saved"]
+        assert "/var/run/x.lock" in copy.tool("memory_search", {"description": "lock file"})[0]
+    finally:
+        copy.store.close()
+    assert (tmp_path / "built" / "git" / "index.json").read_text() == before
+
+
+def test_a_failed_save_is_logged_as_an_error(tmp_path, monkeypatch):
+    path = tmp_path / "t.jsonl"
+    path.write_text(json.dumps({"type": "user", "message": {"content": "Title: Fix it"}}) + "\n")
+    monkeypatch.setattr(hook, "ask", lambda memory, request, timeout=30: {"error": "GitCommandError: worktree in use"})
+    monkeypatch.setattr(hook, "changed_files", lambda project: [])
+    assert hook.run("stop", {"transcript_path": str(path)}, tmp_path, live=True) == ""
+    logged = [json.loads(line) for line in (tmp_path / "deliveries.jsonl").read_text().splitlines()]
+    assert logged[-1]["mode"] == "stop" and "turn not saved: GitCommandError" in logged[-1]["error"]

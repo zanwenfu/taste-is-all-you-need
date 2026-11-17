@@ -182,14 +182,19 @@ def record_turn(event: dict, memory: Path, project: Path, reader: bool) -> dict:
     text = (f"Turn record. Task: {task_title(turn['user'])}\nClaude's reply: {turn['reply'][:1500]}\n"
             f"Files changed so far in this task: {', '.join(files) or 'none'}\nTests run: {'; '.join(tests) or 'none'}")
     saved = ask(memory, {"op": "save", "kind": "turn", "source": "hook", "text": text})
-    found = []
+    if "error" in saved:  # a failed save is logged as an error, never passed over (the fair trial, Nov 17)
+        raise RuntimeError(f"turn not saved: {saved['error']}")
+    found, kept = [], 0
     if reader and turn["user"].strip():
         sys.path.insert(0, os.environ.get("CC_STUDY_CODE", "/cc/code"))
         from studies.claude_code.readers import claude_reader  # noqa: E402  (the small model, on the subscription)
         found = claude_reader(turn["user"])
         for rule in found:
-            ask(memory, {"op": "save", "kind": "rule", "source": "reader", "text": rule})
-    return {"turn": saved.get("saved"), "reader_found": len(found), "files": len(files)}
+            reply = ask(memory, {"op": "save", "kind": "rule", "source": "reader", "text": rule})
+            if "error" in reply:
+                raise RuntimeError(f"reader's rule not saved: {reply['error']}")
+            kept += "saved" in reply
+    return {"turn": saved.get("saved"), "reader_found": len(found), "reader_saved": kept, "files": len(files)}
 
 
 def run(mode: str, event: dict, memory: Path, refresh_folders: bool = False, live: bool = False, reader: bool = False,
