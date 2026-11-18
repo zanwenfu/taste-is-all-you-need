@@ -104,12 +104,12 @@ BRIEF_WORDS = 150
 REMEMBER = "Save these rules to your memory."
 UPDATE_MEMORY = "Update your memory with this."  # the remember arm, at the change
 ARMS = ("shipped", "remember", "claudemd", "ours", "oursfirm", "restated", "plain", "flat", "folders", "gitmem", "gitmem2",
-        "auto", "mdlog", "gitlive")
+        "auto", "mdlog", "gitlive", "mdreader")
 OURS = ("ours", "oursfirm")  # our layer; oursfirm delivers the same list under the firm header
 # One project memory, three designs (the user, Nov 16 ~8 pm ET; studies.claude_code.git_memory): flat (all in CLAUDE.md), folders
 # (Claude Code's path-scoped rules), gitmem (Taste's git store, delivered when needed and searchable). Ruleset "scaled": no rule is
 # said during the session; the memory holds the house rules from the start.
-MEMORY_ARMS = ("flat", "folders", "gitmem", "gitmem2", "auto", "mdlog", "gitlive")
+MEMORY_ARMS = ("flat", "folders", "gitmem", "gitmem2", "auto", "mdlog", "gitlive", "mdreader")
 GIT_ARMS = ("gitmem", "gitmem2", "gitlive")  # gitmem2: a folder's instruction again with every task that touches it (revised Nov 16 ~8:40 pm ET)
 QUESTION_HEAD = "Quick question, no code changes needed: "
 # THE FAIR TEST (the user, Nov 17 ~12:15 am ET; notes/cc-memory-pilot-design.md): memory starts empty but for the code notes (bulk);
@@ -155,13 +155,96 @@ def fair_told(schedule: FairSchedule, number: int) -> set[str]:
     return {GRADUAL_RULES[i][2] for i, at in enumerate(schedule.rules_at) if at <= number}
 
 
+# THE CAPTURE TEST (the user's yes, Nov 17 ~8 pm ET; every input fixed in notes/capture-test-plan.md): where a requirement said
+# during the work is lost (never written down, dropped by a compaction summary, not in front of the agent, or there and still broken).
+#   auto      shipped: Claude Code's own auto memory, nothing asked
+#   mdlog     asked: the same, and at task 1 the user asks Claude to keep track in CLAUDE.md
+#   mdreader  reader: shipped, plus after every turn the small reader copies each standing instruction in the user's message into
+#             CLAUDE.md word for word (the store held fixed, the writer changed)
+#   gitlive   ours: the same reader into the git memory, Claude's own saves, rules with every message, search
+# Every condition also logs which instruction files Claude Code loads, and why (its InstructionsLoaded hook: session start or
+# compaction), so delivery is read from the run, not assumed.
+CAPTURE_ARMS = ("auto", "mdlog", "mdreader", "gitlive")
+# The folder rule (said with the files-first rule at task 3): (what the user says, the folder it is about, the test folder it names)
+FOLDER_RULES = {
+    "openlibrary": ("And whenever you change anything under openlibrary/core/, also run the matching tests under openlibrary/tests/core "
+                    "before you hand back.", "openlibrary/core/", "openlibrary/tests/core"),
+    "qutebrowser": ("And whenever you change anything under qutebrowser/config/, also run the matching tests under tests/unit/config "
+                    "before you hand back.", "qutebrowser/config/", "tests/unit/config"),
+}
+CHANGED_BRIEF = "Small change: keep your hand-backs under 100 words from now on, not 150."  # at task 10: the brief rule's new version
+BRIEF_CHANGED_WORDS = 100
+REPLACES = {"brief_100": "brief"}  # once the new version is said, the old one no longer applies
+PROJECT_FACTS = {  # made up, so a right answer can only come from memory: (said in passing, asked in the new session, the answer)
+    "openlibrary": FAIR_FACTS,
+    "qutebrowser": (
+        ("By the way, for later: the docs build script has to run with --page-cap 3700, with the default it stalls.",
+         "What --page-cap value does the docs build script have to run with?", "3700"),
+        ("Also good to know: crash reports are triaged on the kestrel board now, osprey is retired.",
+         "Which board are crash reports triaged on now?", "kestrel"),
+        ("FYI, config migrations that the loader refuses go to the manual list cfg-review-4.",
+         "Which manual list do config migrations refused by the loader go to?", "cfg-review-4"),
+        ("Note for later: the nightly build job takes the lock file /var/lock/qb-nightly.lock.",
+         "What lock file does the nightly build job take?", "/var/lock/qb-nightly.lock"),
+        ("One thing to remember: the session-restore warning text lives in the setting key restore_notice_v2.",
+         "Which setting key holds the session-restore warning text?", "restore_notice_v2"),
+    ),
+}
+
+
+@dataclass(frozen=True)
+class CaptureSchedule:
+    tasks: int                                      # tasks in the first session
+    said: tuple[tuple[int, tuple[str, ...]], ...]   # (task, the items said in passing before it, in order, in one message)
+    facts: tuple[int, ...]                          # the facts (1-based) asked in the new session, in order
+    history: tuple[int, ...]                        # the tasks asked about in the new session
+    extra: int                                      # tasks in the new session, after the questions
+
+
+CAPTURE_SCHEDULES = {
+    "capture": CaptureSchedule(12, ((2, ("tests",)), (3, ("files_first", "folder_tests")), (4, ("brief",)), (5, ("plain", "fact1")),
+                                    (6, ("search_tools", "fact2")), (7, ("read_tool", "fact3")), (8, ("python_B", "fact4")),
+                                    (9, ("tests_run_last", "fact5")), (10, ("brief_100",))),
+                               (1, 2, 3, 4, 5), (3, 7, 11), 2),
+    "capturetrial": CaptureSchedule(3, ((2, ("files_first", "folder_tests", "brief", "fact1")), (3, ("brief_100",))), (1,), (), 1),
+}
+
+
+def project_of(task: SweTask) -> str:
+    """The repository a task belongs to, e.g. openlibrary or qutebrowser."""
+    return task.id.split("__")[1].split("-")[0] if "__" in task.id else task.id
+
+
+def capture_messages(project: str) -> dict[str, str]:
+    """What the user says for each item of the capture test, word for word, in this project."""
+    if project not in FOLDER_RULES:
+        raise ValueError(f"the capture test has no inputs for the project {project!r}")
+    messages = {key: said for said, _, key in GRADUAL_RULES}
+    messages["folder_tests"] = FOLDER_RULES[project][0]
+    messages["brief_100"] = CHANGED_BRIEF
+    messages.update({f"fact{i}": fact[0] for i, fact in enumerate(PROJECT_FACTS[project], start=1)})
+    return messages
+
+
+def capture_told(schedule: CaptureSchedule, number: int) -> set[str]:
+    """The rules in force at task ``number``: every rule said by then (facts are not rules), less any a later version replaced."""
+    said = {key for at, keys in schedule.said if at <= number for key in keys if not key.startswith("fact")}
+    return said - {old for new, old in REPLACES.items() if new in said}
+
+
 def task_title(instruction: str) -> str:
     found = re.search(r"(?im)^\W*title:?\s*(.+)$", instruction)
     if found:
-        return found.group(1).strip()[:120]
+        return _clean_title(found.group(1))[:120]
     body = instruction.split("<pr_description>", 1)[-1]
-    return next((line.strip(" #*") for line in body.splitlines() if len(line.strip(" #*")) > 15 and not line.strip().startswith("<")),
-                instruction[:120])[:120]
+    return _clean_title(next((line.strip(" #*") for line in body.splitlines()
+                              if len(line.strip(" #*")) > 15 and not line.strip().startswith("<")), instruction[:120]))[:120]
+
+
+def _clean_title(title: str) -> str:
+    """A title line without the markdown some tasks run into it ("... UI fonts ## Description: ...", "... 6.7+**")."""
+    parts = [p.strip() for p in re.split(r"\s#{2,}\s|\*\*", title) if len(p.strip()) > 15]
+    return parts[0] if parts else title.strip()
 MCP_IN_CONTAINER = "/cc/hooks/mcp.json"
 MCP_TOOLS = ("mcp__memory__memory_search", "mcp__memory__memory_fetch")
 CONFIG_IN_CONTAINER = "/cc/config"
@@ -171,6 +254,7 @@ MEMORY_IN_CONTAINER = "/cc/memory"  # the ours arm's git memory
 READER_IN_CONTAINER = "/cc/reader"
 TOKEN_IN_CONTAINER = "/cc/secret/token"
 HOOKS_IN_CONTAINER = "/cc/hooks/settings.json"
+LOADS_IN_CONTAINER = "/cc/loads"  # the capture test: Claude Code's log of the instruction files it loads, and why
 TASK_SECONDS = 3000  # the benchmark's 50 minutes per task
 GRADE_TIMEOUT_S = 3000  # the task's own verifier timeout (task.toml)
 PROJECT_MEMORY = ("CLAUDE.md", "CLAUDE.local.md", ".claude")  # what Claude may write in the project to remember things
@@ -208,6 +292,7 @@ class Round:
     tells_rules: bool = False
     question: bool = False  # a question after the tasks: asked in the last task's container, nothing graded
     asks: str = ""  # the fair test: what a question asks ("fact:<answer>", "rules", "history:<task>")
+    says: tuple[str, ...] = ()  # the capture test: the items the user says in passing before this task
 
 
 @dataclass
@@ -285,6 +370,36 @@ def _fair_plan(arm: str, tasks: list[SweTask], fair: FairSchedule, out: Path, mo
                       Path(memory) if memory else None)
 
 
+def _capture_plan(arm: str, tasks: list[SweTask], schedule: CaptureSchedule, out: Path, model: str | None, claude_binary: Path,
+                  code: Path | None, token_file: Path | None, proxy: str | None, network: str | None, window: int | None, ruleset: str,
+                  memory: Path | None) -> SeriesPlan:
+    """Session 1: the tasks, with the keep-track request at task 1 (mdlog, gitlive) and the items said in passing, several in one
+    message where the schedule says so. Session 2: the questions (each fact asked, the rules, the files changed in earlier tasks), then
+    the extra tasks with nothing said again."""
+    projects = {project_of(t) for t in tasks}
+    if len(projects) != 1:
+        raise ValueError(f"the capture test runs one project's tasks, not {sorted(projects)}")
+    project = projects.pop()
+    messages, facts, said = capture_messages(project), PROJECT_FACTS[project], dict(schedule.said)
+    rounds: list[Round] = []
+    for number, task in enumerate(tasks[:schedule.tasks], start=1):
+        keys = said.get(number, ())
+        parts = ([KEEP_TRACK[arm]] if number == 1 and arm in KEEP_TRACK else []) + [messages[k] for k in keys]
+        prompt = (" ".join(parts) + "\n\n" + task.instruction) if parts else task.instruction
+        rounds.append(Round(f"round_{number:02d}", number, prompt, task, number == 1, tells_rules=bool(parts), says=tuple(keys)))
+    asked = [(facts[i - 1][1], f"fact:{facts[i - 1][2]}") for i in schedule.facts] + [(RULES_QUESTION, "rules")]
+    asked += [(HISTORY_QUESTION.format(title=task_title(tasks[k - 1].instruction)), f"history:{k}") for k in schedule.history]
+    for i, (question, asks) in enumerate(asked):
+        number = len(rounds) + 1
+        rounds.append(Round(f"round_{number:02d}", number, QUESTION_HEAD + question, tasks[schedule.tasks], i == 0, question=True,
+                            asks=asks))
+    for task in tasks[schedule.tasks:]:
+        number = len(rounds) + 1
+        rounds.append(Round(f"round_{number:02d}", number, task.instruction, task, False))
+    return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset, 1,
+                      Path(memory) if memory else None)
+
+
 def opening(arm: str, ruleset: str = "two") -> str | None:
     if arm == "plain":
         return None
@@ -316,21 +431,28 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     """``sessions``: the 1-based task numbers that start a new session (the first always does). The rules head the first message."""
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}")
-    if ruleset not in OPENINGS and ruleset not in ("gradual", "scaled", *FAIR_SCHEDULES):
+    if ruleset not in OPENINGS and ruleset not in ("gradual", "scaled", *FAIR_SCHEDULES, *CAPTURE_SCHEDULES):
         raise ValueError(f"unknown rule set {ruleset!r}")
-    fair = FAIR_SCHEDULES.get(ruleset)
+    fair, capture = FAIR_SCHEDULES.get(ruleset), CAPTURE_SCHEDULES.get(ruleset)
     if fair is not None and arm not in FAIR_ARMS:
         raise ValueError("the fair rule sets run the fair arms (auto, mdlog, gitlive), and only they do")
-    if fair is None and (arm in MEMORY_ARMS) != (ruleset == "scaled"):
+    if capture is not None and arm not in CAPTURE_ARMS:
+        raise ValueError("the capture rule sets run the capture arms (auto, mdlog, mdreader, gitlive), and only they do")
+    if arm == "mdreader" and capture is None:
+        raise ValueError("the mdreader arm runs the capture rule sets only")
+    if fair is None and capture is None and (arm in MEMORY_ARMS) != (ruleset == "scaled"):
         raise ValueError("the memory arms run the scaled rule set, and only they do")
-    if fair is not None and len(task_folders) != fair.tasks + fair.extra:
-        raise ValueError(f"the {ruleset} test takes {fair.tasks + fair.extra} tasks")
+    for schedule in (fair, capture):
+        if schedule is not None and len(task_folders) != schedule.tasks + schedule.extra:
+            raise ValueError(f"the {ruleset} test takes {schedule.tasks + schedule.extra} tasks")
     if arm in MEMORY_ARMS and not (memory and (Path(memory) / "git" / "index.json").exists()):
         raise ValueError("the memory arms need the built memory folder (git_memory build)")
     if arm in GIT_ARMS and not code:
         raise ValueError("the gitmem arm needs the code folder (its hooks and tool server)")
-    if arm == "gitlive" and not token_file:
-        raise ValueError("the gitlive arm needs the token file (its small reader)")
+    if arm in ("gitlive", "mdreader") and not token_file:
+        raise ValueError(f"the {arm} arm needs the token file (its small reader)")
+    if arm == "mdreader" and not code:
+        raise ValueError("the mdreader arm needs the code folder (its hook)")
     if window is not None and not 100_000 <= window <= 1_000_000:
         raise ValueError("the compaction window must be 100,000 to 1,000,000 tokens (Claude Code's documented range)")
     if arm in OURS and not (code and token_file):
@@ -340,6 +462,9 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
     if fair is not None:
         return _fair_plan(arm, [load_task(f) for f in task_folders], fair, out, model, claude_binary, code, token_file, proxy,
                           network, window, ruleset, memory)
+    if capture is not None:
+        return _capture_plan(arm, [load_task(f) for f in task_folders], capture, out, model, claude_binary, code, token_file, proxy,
+                             network, window, ruleset, memory)
     for number, folder in enumerate(task_folders, start=1):
         task = load_task(folder)
         if ruleset == "scaled":  # the memory holds the rules; nothing is said
@@ -620,6 +745,80 @@ def folder_checks(tools: list[dict[str, Any]], patch: str, folder_items: list[di
     return {"due": len(items), "kept": sum(i["kept"] for i in items), "items": items}
 
 
+def pytest_runs(command: str, cwd: str = "") -> tuple[list[list[str]], str]:
+    """The test paths of each pytest run in one shell command (pytest, py.test, or python -m pytest, wrappers allowed), each made
+    relative to the project: a path is joined to the folder the shell is in (``cwd``, then any cd before it); /app/ and ./ are
+    dropped. A run that names no path is listed with the folder it ran in ([] when that is the project's root). Also returns the folder
+    the shell is in afterwards: Claude Code's shell keeps it from one Bash call to the next."""
+    from studies.claude_code.score import program, split_commands, words
+    runs = []
+    for segment in split_commands(command):
+        name, args = program(words(segment))
+        if name == "cd":
+            target = next((a for a in args if not a.startswith("-")), "/app")
+            cwd = target if target.startswith("/") else (cwd.rstrip("/") + "/" + target if cwd else target)
+            continue
+        if _PYTHON.fullmatch(name):
+            rest = None
+            for i, a in enumerate(args):
+                if not a.startswith("-") or a.startswith("--"):
+                    if a.startswith("--"):
+                        continue
+                    break  # a script runs, not a module
+                if "m" in a[1:]:  # -m pytest, -Bm pytest, -mpytest
+                    tail = a[a.index("m", 1) + 1:]
+                    if tail == "pytest":
+                        rest = args[i + 1:]
+                    elif not tail and args[i + 1:i + 2] == ["pytest"]:
+                        rest = args[i + 2:]
+                    break
+            if rest is None:
+                continue
+            args = rest
+        elif name not in ("pytest", "py.test"):
+            continue
+        paths = [a for a in args if not a.startswith("-")] or [""]
+        runs.append([_project_path(cwd, p) for p in paths])
+    return [[p for p in run if p] for run in runs], cwd
+
+
+def _project_path(cwd: str, path: str) -> str:
+    joined = path if path.startswith("/") or not cwd else (cwd.rstrip("/") + "/" + path if path else cwd)
+    joined = re.sub(r"^/app/?", "", joined)
+    while joined.startswith("./"):
+        joined = joined[2:]
+    return joined.rstrip("/")
+
+
+def folder_rule_check(tools: list[dict[str, Any]], patch: str, folder: str, tests: str) -> dict[str, Any]:
+    """The capture test's folder rule on one task: a chance only when the task's own patch changes something under ``folder``; kept
+    when some pytest run names a path under ``tests`` (a test file, a test id, or the folder itself)."""
+    changed = [p for p in patch_paths(patch) if p.startswith(folder)]
+    if not changed:
+        return {"kept": True, "chances": 0, "changed": []}
+    runs, cwd = [], ""  # each task starts in the project's root
+    for command in (str(t.get("input", {}).get("command", "")) for t in tools if t.get("name") == "Bash"):
+        found, cwd = pytest_runs(command, cwd)
+        runs += found
+    hits = [p for run in runs for p in run if p == tests or p.startswith((tests + "/", tests + "::"))]
+    return {"kept": bool(hits), "chances": 1, "changed": changed[:10], "test_paths": hits[:10],
+            "whole_suite_runs": sum(1 for run in runs if not run)}
+
+
+def capture_checks(tools: list[dict[str, Any]], hand_back: str | None, patch: str, number: int, schedule: CaptureSchedule,
+                   project: str) -> dict[str, Any]:
+    """Every capture-test rule on one task: the eight gradual rules, the folder rule, and the brief rule's new version (kept at 100
+    words or fewer, stale at 101 to 150, the old limit, broken above), each with its chances and whether it was in force."""
+    found = gradual_checks(tools, hand_back, patch, 10 ** 6, 1)
+    _, folder, tests = FOLDER_RULES[project]
+    found["folder_tests"] = folder_rule_check(tools, patch, folder, tests)
+    words = found["brief"]["words"]
+    found["brief_100"] = {"kept": words <= BRIEF_CHANGED_WORDS, "stale": BRIEF_CHANGED_WORDS < words <= BRIEF_WORDS, "words": words,
+                          "chances": 1}
+    told = capture_told(schedule, number)
+    return {key: {**value, "told": key in told} for key, value in found.items()}
+
+
 def screen_checks(tools: list[dict[str, Any]], hand_back: str | None) -> dict[str, Any]:
     """Rules 3 to 6 of the screening set for one task, with how many chances each had to break."""
     from studies.claude_code.score import program, python_options, split_commands, words
@@ -668,7 +867,41 @@ def start_argv(plan: SeriesPlan, round_: Round, name: str) -> list[str]:
                  "-v", f"{out / 'hooks'}:{Path(HOOKS_IN_CONTAINER).parent}:ro"]
     if plan.arm == "gitlive":  # the small reader's own config folder and the subscription token, read-only
         argv += ["-v", f"{out / 'reader'}:{READER_IN_CONTAINER}", "-v", f"{Path(plan.token_file).resolve()}:{TOKEN_IN_CONTAINER}:ro"]
+    if plan.arm == "mdreader":  # its hook (the code), the reader's own config folder, the token read-only, the hook settings
+        argv += ["-v", f"{Path(plan.code).resolve()}:{CODE_IN_CONTAINER}:ro", "-v", f"{out / 'reader'}:{READER_IN_CONTAINER}",
+                 "-v", f"{Path(plan.token_file).resolve()}:{TOKEN_IN_CONTAINER}:ro",
+                 "-v", f"{out / 'hooks'}:{Path(HOOKS_IN_CONTAINER).parent}:ro"]
+    if plan.ruleset in CAPTURE_SCHEDULES:  # every condition logs the instruction files Claude Code loads
+        argv += ["-v", f"{out / 'loads'}:{LOADS_IN_CONTAINER}"]
+        if plan.arm in ("auto", "mdlog"):
+            argv += ["-v", f"{out / 'hooks'}:{Path(HOOKS_IN_CONTAINER).parent}:ro"]
     return argv + ["-w", "/app", round_.task.image, "infinity"]
+
+
+def loads_hook() -> dict[str, Any]:
+    """The capture test, every condition: each instruction file Claude Code loads at a session's start or after a compaction, logged
+    with why (its InstructionsLoaded event; observation only, Claude Code ignores the hook's output). Path-scoped code notes loaded
+    on demand are not logged (thousands of them)."""
+    log = f"{LOADS_IN_CONTAINER}/instructions.jsonl"
+    command = ("python3 -B -c \"import sys,json,time; e=json.loads(sys.stdin.read() or '{}'); "
+               "open('" + log + "','a').write(json.dumps({'time': time.time(), **{k: e.get(k) for k in "
+               "('session_id','file_path','memory_type','load_reason')}})+'\\n')\"")
+    return {"InstructionsLoaded": [{"matcher": "session_start|compact", "hooks": [{"type": "command", "command": command,
+                                                                                    "timeout": 30}]}]}
+
+
+def md_reader_settings() -> dict[str, Any]:
+    """The mdreader arm (the capture test): at the end of every turn the small reader copies each standing instruction in the
+    user's message into CLAUDE.md, word for word; Claude Code's own memory stays as shipped."""
+    hook = f"python3 -B {CODE_IN_CONTAINER}/studies/claude_code/hooks/claude_md_reader_hook.py"
+    return {"hooks": {"Stop": [{"hooks": [{"type": "command", "timeout": 180,
+                                           "command": f"{hook} --project /app --log {READER_IN_CONTAINER}/claude-md-reader.jsonl"}]}]}}
+
+
+def capture_settings(arm: str) -> dict[str, Any]:
+    """The hook settings each capture-test condition runs with: its own hooks (mdreader, gitlive), and the load log in every one."""
+    own = md_reader_settings() if arm == "mdreader" else git_memory_live_settings() if arm == "gitlive" else {"hooks": {}}
+    return {"hooks": {**own["hooks"], **loads_hook()}}
 
 
 def hook_settings(firm: bool = False) -> dict[str, Any]:
@@ -734,7 +967,7 @@ def exec_env(plan: SeriesPlan) -> list[str]:
     if plan.arm in OURS:
         env |= {"PYTHONPATH": CODE_IN_CONTAINER, "CC_STUDY_RULE_READER": "studies.claude_code.readers:claude_reader",
                 "CC_STUDY_READER_HOME": READER_IN_CONTAINER, "CC_STUDY_TOKEN_FILE": TOKEN_IN_CONTAINER}
-    if plan.arm == "gitlive":
+    if plan.arm in ("gitlive", "mdreader"):
         env |= {"PYTHONPATH": CODE_IN_CONTAINER, "CC_STUDY_CODE": CODE_IN_CONTAINER, "CC_STUDY_READER_HOME": READER_IN_CONTAINER,
                 "CC_STUDY_TOKEN_FILE": TOKEN_IN_CONTAINER}
     flags = ["-e", SUBSCRIPTION_TOKEN]
@@ -746,7 +979,7 @@ def exec_env(plan: SeriesPlan) -> list[str]:
 def claude_argv(plan: SeriesPlan, name: str, *, budget_usd: float, resume: str | None) -> list[str]:
     inner = command(budget_usd=budget_usd, resume=resume, model=plan.model, claude=CLAUDE_IN_CONTAINER)
     inner += ["--disallowedTools", *DISALLOWED]
-    if plan.arm in OURS:
+    if plan.arm in OURS or plan.arm == "mdreader" or (plan.ruleset in CAPTURE_SCHEDULES and plan.arm in ("auto", "mdlog")):
         inner += ["--settings", HOOKS_IN_CONTAINER]
     if plan.arm in GIT_ARMS:
         at = inner.index("--permission-mode")
@@ -825,19 +1058,54 @@ def memory_snapshot(plan: SeriesPlan, round_: Round, carried: list[str]) -> dict
     for name, text in texts.items():
         (keep / name.replace("/", "__")).write_text(text)
     joined = "\n".join(texts.values())
-    return {"auto_memory_files": auto, "project_memory": carried, "rules_file": rules.exists(),
+    project = project_files(plan.out / "project-memory.tar", plan.out / PROJECT_SEED)
+    for name, text in project.items():  # what the project's memory files hold after this task (the capture test, Nov 17)
+        (keep / ("project__" + name.replace("/", "__"))).write_text(text)
+    index = plan.out / "memory" / "index.json"
+    if plan.arm == "gitlive" and index.exists():  # what the git memory holds after this task
+        (keep / "git__index.json").write_text(index.read_text(errors="replace"))
+    return {"auto_memory_files": auto, "project_memory": carried, "rules_file": rules.exists(), "project_files": sorted(project),
             "holds_rule_1": bool(re.search(r'output\W+1\W|"1"', joined)), "holds_rule_2": bool(re.search(r"modify the tests|tests unless", joined, re.I))}
+
+
+PROJECT_SEED = "project-memory-seed.json"  # the md5 of each file seeded into the project before task 1
+PROJECT_FILES_MAX = 200
+
+
+def project_files(carry: Path, seed: Path) -> dict[str, str]:
+    """The text of the project memory files carried after a task: CLAUDE.md and CLAUDE.local.md always, and any other file (under
+    .claude/) that is new or changed since the seed; {} when nothing was carried or the archive cannot be read."""
+    import hashlib
+    import tarfile
+    if not carry.exists() or not carry.stat().st_size:
+        return {}
+    seeded = json.loads(seed.read_text()) if seed.exists() else {}
+    found: dict[str, str] = {}
+    try:
+        with tarfile.open(carry) as tar:
+            for member in tar.getmembers():
+                if not member.isfile() or len(found) >= PROJECT_FILES_MAX:
+                    continue
+                data = tar.extractfile(member).read()
+                if member.name in ("CLAUDE.md", "CLAUDE.local.md") or seeded.get(member.name) != hashlib.md5(data).hexdigest():
+                    found[member.name] = data.decode(errors="replace")
+    except (tarfile.TarError, OSError):
+        return {}
+    return found
 
 
 # --- the series ------------------------------------------------------------------------------------------------------------------
 
 def seed_project_memory(folder: Path, carry: Path) -> list[str]:
     """The flat and folders arms: the memory's files (CLAUDE.md, .claude/rules/) as the project's carried files before task 1."""
+    import hashlib
     import tarfile
     names = sorted(str(p.relative_to(folder)) for p in Path(folder).rglob("*") if p.is_file())
     with tarfile.open(carry, "w") as tar:
         for name in names:
             tar.add(Path(folder) / name, arcname=name)
+    (carry.parent / PROJECT_SEED).write_text(json.dumps({name: hashlib.md5((Path(folder) / name).read_bytes()).hexdigest()
+                                                         for name in names}))
     return names
 
 
@@ -910,10 +1178,12 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
         raise RuntimeError(f"no {SUBSCRIPTION_TOKEN}: the study runs on the user's Claude subscription")
     secrets = secret_values(env)
     caller = caller or call_claude
-    for sub in ("claude_config", "patches", "memory", "reader", "hooks"):
+    for sub in ("claude_config", "patches", "memory", "reader", "hooks", "loads"):
         (plan.out / sub).mkdir(parents=True, exist_ok=True)
     if plan.arm in OURS:
         (plan.out / "hooks" / "settings.json").write_text(json.dumps(hook_settings(firm=plan.arm == "oursfirm"), indent=1) + "\n")
+    capture = CAPTURE_SCHEDULES.get(plan.ruleset)
+    project = project_of(plan.rounds[0].task) if capture else None
     carry = plan.out / "project-memory.tar"
     earlier, session_id, reported_total = earlier_state(plan, first)
     folder_items: list[dict[str, Any]] = []
@@ -923,7 +1193,7 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
         folder_items = [{"scope": r["scope"], "tests": r["tests"]} for r in index if r["kind"] == "folder"]
         if earlier is None and plan.arm in ("flat", "folders"):
             seed_project_memory(plan.memory / plan.arm, carry)
-        if earlier is None and plan.arm in ("auto", "mdlog"):  # only the code notes, as path-scoped rules; no CLAUDE.md to start
+        if earlier is None and plan.arm in ("auto", "mdlog", "mdreader"):  # only the code notes, as path-scoped rules; no CLAUDE.md
             import tempfile
             seed = Path(tempfile.mkdtemp(prefix="seed-", dir=plan.out))
             shutil.copytree(plan.memory / "folders" / ".claude", seed / ".claude")
@@ -935,10 +1205,15 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
             settings = git_memory_live_settings() if plan.arm == "gitlive" else git_memory_settings(refresh=plan.arm == "gitmem2")
             (plan.out / "hooks" / "settings.json").write_text(json.dumps(settings, indent=1) + "\n")
             (plan.out / "hooks" / "mcp.json").write_text(json.dumps(mcp_config(saving=plan.arm == "gitlive"), indent=1) + "\n")
+        if capture is not None:  # each condition's own hooks and the load log (after the gitlive settings, which it extends)
+            (plan.out / "hooks" / "settings.json").write_text(json.dumps(capture_settings(plan.arm), indent=1) + "\n")
     record: dict[str, Any] = earlier or {
         "arm": plan.arm, "model": plan.model, "opening": opening(plan.arm), "claude_version": claude_version(str(plan.claude_binary)),
         "tasks": [r.task.id for r in plan.rounds], "sessions": [r.number for r in plan.rounds if r.new_session], "proxy": plan.proxy,
-        "network": plan.network, "window": plan.window, "ruleset": plan.ruleset, "spacing": plan.spacing, "started": now(), "rounds": [], "spent_usd": 0.0, "ended_by": None, "batches": []}
+        "network": plan.network, "window": plan.window, "ruleset": plan.ruleset, "spacing": plan.spacing, "started": now(), "rounds": [], "spent_usd": 0.0, "ended_by": None, "batches": [],
+        **({"capture": {"project": project, "said": [[at, list(keys)] for at, keys in capture.said], "tasks": capture.tasks,
+                        "messages": capture_messages(project), "folder_rule": list(FOLDER_RULES[project]),
+                        "facts": [list(f) for f in PROJECT_FACTS[project]], "replaces": REPLACES}} if capture else {})}
     if record["tasks"] != [r.task.id for r in plan.rounds]:
         raise RuntimeError("the recorded series has other tasks than this plan")
     record.setdefault("batches", []).append({"first": first, "last": last, "started": now()})
@@ -1009,7 +1284,8 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
             carried = carry_out(name, carry, runner=runner)
             if owner:  # Claude Code runs as root in the container; its folders go back to the runner's user
                 run(["docker", "exec", name, "chown", "-R", owner, CONFIG_IN_CONTAINER, *([MEMORY_IN_CONTAINER, READER_IN_CONTAINER]
-                     if plan.arm in (*OURS, "gitlive") else [MEMORY_IN_CONTAINER] if plan.arm in GIT_ARMS else [])],
+                     if plan.arm in (*OURS, "gitlive") else [MEMORY_IN_CONTAINER] if plan.arm in GIT_ARMS else
+                     [READER_IN_CONTAINER] if plan.arm == "mdreader" else []), *([LOADS_IN_CONTAINER] if capture else [])],
                     runner=runner, timeout=120)
             run(["docker", "rm", "-f", name], runner=runner, timeout=300)
             graded = ({"reward": None, "skipped": "question"} if round_.question else
@@ -1035,6 +1311,9 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                    **({"gradual": {k: {**v, "told": k in fair_told(FAIR_SCHEDULES[plan.ruleset], round_.number)}
                                    for k, v in gradual_checks(seen.get("tools", []), result.get("result"), patch, 10 ** 6, 1).items()}}
                       if plan.ruleset in FAIR_SCHEDULES and not round_.question else {}),
+                   **({"gradual": capture_checks(seen.get("tools", []), result.get("result"), patch, round_.number, capture, project)}
+                      if capture and not round_.question else {}),
+                   **({"says": list(round_.says)} if capture else {}),
                    **({"asks": round_.asks} if round_.asks else {}),
                    **({"question": round_.prompt[len(QUESTION_HEAD):], "answer": result.get("result"),
                        "memory_tool_calls": sum(1 for t in seen.get("tools", []) if str(t.get("name", "")).startswith("mcp__memory__"))}
@@ -1103,7 +1382,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop-on-break", action="store_true", help="end the series at the first task that breaks a rule")
     parser.add_argument("--memory", type=Path, help="the memory arms: the folder git_memory build wrote")
     parser.add_argument("--questions", type=Path, help="a JSON list of {question, answer}, asked after the last task")
-    parser.add_argument("--ruleset", choices=(*OPENINGS, "gradual", "scaled", *FAIR_SCHEDULES), default="two",
+    parser.add_argument("--ruleset", choices=(*OPENINGS, "gradual", "scaled", *FAIR_SCHEDULES, *CAPTURE_SCHEDULES), default="two",
                         help="two: the 1 and the tests; six: the screening set; casual: three rules said in passing at task 3; "
                              "revise: the casual rules, then at task 7 the files line moves to the end")
     parser.add_argument("--largest", action="store_true", help="the --count tasks with the largest reference fixes, not a random draw")
@@ -1114,11 +1393,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rounds", default=None, help="FIRST:LAST (1-based, inclusive) for one batch")
     parser.add_argument("--remove-images", action="store_true", help="delete each task's image after it is graded (disk)")
     parser.add_argument("--execute", action="store_true", help="run Claude Code for real: paid, only after the user's OK")
+    parser.add_argument("--show-heads", action="store_true", help="without --execute: print what the user says before every task")
     args = parser.parse_args(argv)
     avoid = tuple(a for a in args.avoid.split(",") if a)
     if args.avoid_largest:
         avoid += tuple(f.name for f in largest_tasks(args.tasks_root, args.repo, args.avoid_largest, avoid))
-    fair = FAIR_SCHEDULES.get(args.ruleset)
+    fair = FAIR_SCHEDULES.get(args.ruleset) or CAPTURE_SCHEDULES.get(args.ruleset)
     if fair is not None and args.largest:  # the first session on the hardest tasks, the new session on the next ones
         top = largest_tasks(args.tasks_root, args.repo, fair.tasks, avoid)
         folders = top + [f for f in largest_tasks(args.tasks_root, args.repo, fair.tasks + fair.extra, avoid) if f not in top]
@@ -1135,6 +1415,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"arm": plan.arm, "tasks": [[r.number, r.task.short, r.task.size, r.new_session] for r in plan.rounds],
                           "first_prompt_head": plan.rounds[0].prompt[:240], "start": start_argv(plan, plan.rounds[0], name),
                           "claude": claude_argv(plan, name, budget_usd=args.per_call_usd, resume=None)}, indent=1))
+        if args.show_heads:  # every round's head: what the user says before the task text, word for word, and the task's title
+            for r in plan.rounds:
+                head = r.prompt[:len(r.prompt) - len(r.task.instruction)].strip() if r.prompt.endswith(r.task.instruction) else r.prompt
+                print(f"{r.id} {'NEW SESSION ' if r.new_session else ''}{'Q ' + r.asks if r.question else 'task ' + task_title(r.task.instruction)[:70]!r}"
+                      f" | says {list(r.says)} | head: {head!r}")
         return 0
     args.out.mkdir(parents=True, exist_ok=True)
     first, last = (int(x) for x in args.rounds.split(":")) if args.rounds else (1, len(plan.rounds))

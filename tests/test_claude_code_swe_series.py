@@ -733,3 +733,319 @@ def test_only_the_git_memory_turns_claude_codes_auto_memory_off(tmp_path, tasks,
 def test_only_the_saving_memory_server_is_always_loaded():
     assert s.mcp_config(saving=True)["mcpServers"]["memory"]["alwaysLoad"] is True
     assert "alwaysLoad" not in s.mcp_config()["mcpServers"]["memory"]
+
+
+# --- the capture test (notes/capture-test-plan.md) ------------------------------------------------------------------------------
+
+# What the user says before each Open Library task, copied from the plan's table: the plan, not the code, is the reference.
+OL_HEADS = {
+    2: "Thanks. From now on, don't touch the tests unless I ask.",
+    3: "Looks good. Going forward, start each hand-back with a line saying which files you changed. And whenever you change anything "
+       "under openlibrary/core/, also run the matching tests under openlibrary/tests/core before you hand back.",
+    4: "Nice. Keep your hand-backs under 150 words please, I don't read long ones.",
+    5: "Thanks. Also, plain text in your hand-backs please: no headings, no bold, no bullet or numbered lists. By the way, for later: "
+       "the sitemaps script has to run with --chunk 45000, with the default it times out.",
+    6: "Good. When you search the code, use your Grep and Glob tools, not grep or find in the shell. Also good to know: full-text search "
+       "inside books is served by the saga cluster now, orion is retired.",
+    7: "Thanks. Read files with your Read tool, not cat, head, tail or sed in the shell. FYI, edition merges that the policy refuses go "
+       "to the manual queue merge-review-7.",
+    8: "One more thing: whenever you run Python, use python -B. Note for later: the monthly data dump job takes the lock file "
+       "/var/run/ol-dump.lock.",
+    9: "And end each hand-back with a line starting 'Tests run:' that lists the test commands you ran, or says none. One thing to "
+       "remember: the maintenance banner text for the admin pages lives in the config key admin_banner_v3.",
+    10: "Small change: keep your hand-backs under 100 words from now on, not 150.",
+}
+OL_QUESTIONS = ["What --chunk value does the sitemaps script have to run with?", "Which cluster serves full-text search inside books now?",
+                "Which manual queue do edition merges refused by the policy go to?", "What lock file does the monthly data dump job take?",
+                "Which config key holds the maintenance banner text for the admin pages?",
+                "What standing rules have I given you for your work and your hand-backs? List them all, current versions only."]
+EIGHT = {"tests", "files_first", "brief", "plain", "search_tools", "read_tool", "python_B", "tests_run_last"}
+
+
+def _capture_root(tmp_path, repo, n=17):
+    root = tmp_path / f"cap-{repo}"
+    if not root.exists():
+        for i in range(1, n + 1):
+            _task(root, i, repo=repo, gold_lines=300 + i)
+    return root
+
+
+def _capture_folders(tmp_path, repo="openlibrary", ruleset="capture"):
+    schedule = s.CAPTURE_SCHEDULES[ruleset]
+    root = _capture_root(tmp_path, repo)
+    top = s.largest_tasks(root, repo, schedule.tasks)
+    return top + [f for f in s.largest_tasks(root, repo, schedule.tasks + schedule.extra) if f not in top]
+
+
+def _cplan(tmp_path, arm, memory, repo="openlibrary", ruleset="capture"):
+    return s.plan_series(arm, _capture_folders(tmp_path, repo, ruleset), tmp_path / f"{arm}-{repo}-{ruleset}", model=None,
+                         claude_binary=tmp_path / "c", ruleset=ruleset, memory=memory, code=tmp_path / "code", token_file=tmp_path / "t")
+
+
+def _head(round_):
+    return round_.prompt[:-len(round_.task.instruction)].strip() if round_.prompt.endswith("\n\n" + round_.task.instruction) else (
+        "" if round_.prompt == round_.task.instruction else None)
+
+
+def test_the_capture_test_says_each_item_word_for_word_on_the_planned_task(tmp_path, memory_folder):
+    plans = {arm: _cplan(tmp_path, arm, memory_folder) for arm in s.CAPTURE_ARMS}
+    folders = _capture_folders(tmp_path)
+    for arm, plan in plans.items():
+        keep = {"mdlog": s.KEEP_TRACK["mdlog"], "gitlive": s.KEEP_TRACK["gitlive"]}.get(arm, "")
+        assert _head(plan.rounds[0]) == keep and plan.rounds[0].tells_rules == bool(keep)
+        assert [_head(r) for r in plan.rounds[1:12]] == [OL_HEADS.get(n, "") for n in range(2, 13)]
+        assert [r.task.folder for r in plan.rounds[:12]] == folders[:12] and len(plan.rounds) == 23
+        questions = plan.rounds[12:21]
+        assert all(r.question for r in questions) and questions[0].new_session and not any(r.new_session for r in plan.rounds[13:])
+        assert [r.prompt for r in questions[:6]] == [s.QUESTION_HEAD + q for q in OL_QUESTIONS]
+        assert [r.asks for r in questions] == ["fact:45000", "fact:saga", "fact:merge-review-7", "fact:/var/run/ol-dump.lock",
+                                               "fact:admin_banner_v3", "rules", "history:3", "history:7", "history:11"]
+        assert questions[6].prompt == s.QUESTION_HEAD + s.HISTORY_QUESTION.format(title=s.task_title(plan.rounds[2].task.instruction))
+        assert [(r.task.folder, r.prompt, r.question) for r in plan.rounds[21:]] == [
+            (f, s.load_task(f).instruction, False) for f in folders[12:]]
+        assert plan.rounds[2].says == ("files_first", "folder_tests") and plan.rounds[9].says == ("brief_100",)
+    assert [r.prompt for r in plans["auto"].rounds[1:]] == [r.prompt for r in plans["mdreader"].rounds[1:]] == [
+        r.prompt for r in plans["mdlog"].rounds[1:]]  # only the keep-track request differs between conditions
+
+
+def test_the_rules_in_force_follow_the_schedule_and_the_new_brief_replaces_the_old():
+    capture = s.CAPTURE_SCHEDULES["capture"]
+    assert s.capture_told(capture, 1) == set() and s.capture_told(capture, 2) == {"tests"}
+    assert s.capture_told(capture, 3) == {"tests", "files_first", "folder_tests"}
+    assert s.capture_told(capture, 9) == EIGHT | {"folder_tests"}
+    assert s.capture_told(capture, 10) == (EIGHT - {"brief"}) | {"folder_tests", "brief_100"} == s.capture_told(capture, 23)
+
+
+def test_the_capture_test_on_qutebrowser_uses_its_own_folder_rule_and_facts(tmp_path, memory_folder):
+    plan = _cplan(tmp_path, "auto", memory_folder, repo="qutebrowser")
+    assert _head(plan.rounds[2]) == ("Looks good. Going forward, start each hand-back with a line saying which files you changed. And "
+                                     "whenever you change anything under qutebrowser/config/, also run the matching tests under "
+                                     "tests/unit/config before you hand back.")
+    assert _head(plan.rounds[4]).endswith("By the way, for later: the docs build script has to run with --page-cap 3700, with the "
+                                          "default it stalls.")
+    assert [r.asks for r in plan.rounds[12:17]] == ["fact:3700", "fact:kestrel", "fact:cfg-review-4", "fact:/var/lock/qb-nightly.lock",
+                                                    "fact:restore_notice_v2"]
+    assert plan.rounds[12].prompt == s.QUESTION_HEAD + "What --page-cap value does the docs build script have to run with?"
+    assert "openlibrary" not in " ".join(_head(r) or "" for r in plan.rounds)
+
+
+def test_the_capture_trial_is_three_tasks_two_questions_and_one_new_session_task(tmp_path, memory_folder):
+    plan = _cplan(tmp_path, "mdlog", memory_folder, ruleset="capturetrial")
+    assert _head(plan.rounds[0]) == s.KEEP_TRACK["mdlog"]
+    assert _head(plan.rounds[1]) == " ".join([OL_HEADS[3], OL_HEADS[4], "By the way, for later: the sitemaps script has to run with "
+                                              "--chunk 45000, with the default it times out."])
+    assert _head(plan.rounds[2]) == OL_HEADS[10]
+    assert [(r.question, r.asks, r.new_session) for r in plan.rounds[3:]] == [(True, "fact:45000", True), (True, "rules", False),
+                                                                             (False, "", False)]
+    assert s.capture_told(s.CAPTURE_SCHEDULES["capturetrial"], 2) == {"files_first", "folder_tests", "brief"}
+
+
+def test_the_capture_rule_sets_run_only_the_capture_arms_on_one_known_project(tmp_path, memory_folder):
+    folders = _capture_folders(tmp_path)
+    plan = lambda arm, f=folders, **kw: s.plan_series(arm, f, tmp_path / "x", model=None, claude_binary=tmp_path / "c",  # noqa: E731
+                                                     ruleset=kw.pop("ruleset", "capture"), memory=memory_folder, code=tmp_path / "code",
+                                                     token_file=kw.pop("token_file", tmp_path / "t"))
+    with pytest.raises(ValueError, match="capture arms"):
+        plan("shipped")
+    with pytest.raises(ValueError, match="takes 14 tasks"):
+        plan("auto", folders[:13])
+    with pytest.raises(ValueError, match="capture rule sets only"):
+        s.plan_series("mdreader", _fair_tasks(tmp_path, 5), tmp_path / "y", model=None, claude_binary=tmp_path / "c",
+                      ruleset="scaled", memory=memory_folder, code=tmp_path / "code", token_file=tmp_path / "t")
+    with pytest.raises(ValueError, match="fair arms"):
+        s.plan_series("mdreader", _fair_tasks(tmp_path / "f2", 5), tmp_path / "y", model=None, claude_binary=tmp_path / "c",
+                      ruleset="fairtrial", memory=memory_folder, code=tmp_path / "code", token_file=tmp_path / "t")
+    with pytest.raises(ValueError, match="token file"):
+        plan("mdreader", token_file=None)
+    with pytest.raises(ValueError, match="one project"):
+        plan("auto", folders[:13] + [_capture_folders(tmp_path, "qutebrowser")[0]])
+    ansible = [_task(tmp_path / "ans", i, gold_lines=300 + i) for i in range(1, 15)]
+    with pytest.raises(ValueError, match="no inputs for the project 'ansible'"):
+        plan("auto", ansible)
+
+
+OL_CORE_PATCH = "diff --git a/openlibrary/core/models.py b/openlibrary/core/models.py\n+x\n"
+
+
+@pytest.mark.parametrize("commands, kept, whole", [
+    (["cd /app && python -B -m pytest openlibrary/tests/core/test_models.py -q"], True, 0),
+    (["python -Bm pytest openlibrary/tests/core -q 2>&1 | tail -5"], True, 0),
+    (["cd openlibrary/tests/core && pytest test_models.py::TestWork -x"], True, 0),
+    (["timeout 600 pytest /app/openlibrary/tests/core/test_vendors.py"], True, 0),
+    (["python3 -m pytest ./openlibrary/tests/core/"], True, 0),
+    (["python -B -m pytest openlibrary/tests/solr -q"], False, 0),  # another folder's tests
+    (["python -B -m pytest openlibrary/tests/core_extra/test_x.py"], False, 0),  # a folder that only starts the same
+    (["python -B -m pytest -q"], False, 1),  # the whole suite, counted apart
+    (["grep -rn x openlibrary/tests/core"], False, 0),  # not a test run
+    (["python -B openlibrary/tests/core/test_models.py"], False, 0),  # a script, not pytest
+    (["python -B -c 'import pytest' openlibrary/tests/core"], False, 0),
+])
+def test_the_folder_rule_is_kept_by_a_pytest_run_under_its_test_folder(commands, kept, whole):
+    check = s.folder_rule_check([{"name": "Bash", "input": {"command": c}} for c in commands], OL_CORE_PATCH, "openlibrary/core/",
+                                "openlibrary/tests/core")
+    assert (check["kept"], check["chances"], check["whole_suite_runs"]) == (kept, 1, whole)
+
+
+@pytest.mark.parametrize("line, title", [
+    ("Default font size variable for UI fonts ## Description: Qutebrowser lets users set a default font family",
+     "Default font size variable for UI fonts"),
+    ("Workaround for QtWebEngine 5.15.3 Locale Parsing Issues in qutebrowser #### Description: qutebrowser experiences issues",
+     "Workaround for QtWebEngine 5.15.3 Locale Parsing Issues in qutebrowser"),
+    ("Add a qt_67 dark mode variant for QtWebEngine 6.7+**", "Add a qt_67 dark mode variant for QtWebEngine 6.7+"),
+    ("** Inability to identify configuration dependencies in stylesheet templates",
+     "Inability to identify configuration dependencies in stylesheet templates"),
+    ("Enhancement: Refactor Solr Utility Logic to Improve Maintainability", "Enhancement: Refactor Solr Utility Logic to Improve Maintainability"),
+])
+def test_a_task_title_leaves_out_the_markdown_some_tasks_run_into_it(line, title):
+    assert s.task_title(f"<pr_description>\n# Title: {line}\n\nbody\n</pr_description>") == title
+
+
+QB_CONFIG_PATCH = "diff --git a/qutebrowser/config/configtypes.py b/qutebrowser/config/configtypes.py\n+x\n"
+
+
+@pytest.mark.parametrize("project, commands, kept", [
+    # the forms seen in the Nov 17 runs: tests named from inside the package, after a cd in the same command or an earlier call
+    ("openlibrary", ["cd /app/openlibrary; pytest tests/core/test_models.py"], True),
+    ("openlibrary", ["cd /app/openlibrary && python -B -m pytest tests/core -q"], True),
+    ("openlibrary", ["cd /app/openlibrary/tests/core && pytest"], True),  # a bare run inside the test folder
+    ("openlibrary", ["cd /app/openlibrary", "python -B -m pytest tests/core/test_models.py -q"], True),  # the shell keeps its folder
+    ("openlibrary", ["cd openlibrary", "pytest tests/core/test_vendors.py::test_x"], True),
+    ("openlibrary", ["cd /app/openlibrary/catalog/marc; pytest tests/test_parse.py"], False),
+    ("openlibrary", ["cd /app/openlibrary", "cd /app", "pytest tests/core/test_models.py"], False),  # back at the root: another path
+    ("openlibrary", ["cd /app/openlibrary; pytest"], False),  # the package's whole suite does not name the folder
+    ("qutebrowser", ["cd /app && pytest tests/unit/config/test_configtypes.py"], True),
+    ("qutebrowser", ["cd tests/unit/config; python -B -m pytest -q"], True),
+    ("qutebrowser", ["cd /app/tests/unit", "pytest config/test_qtargs.py"], True),
+    ("qutebrowser", ["pytest tests/unit/utils/test_utils.py"], False),
+])
+def test_the_folder_rule_resolves_test_paths_against_the_folder_the_shell_is_in(project, commands, kept):
+    _, folder, tests = s.FOLDER_RULES[project]
+    patch = OL_CORE_PATCH if project == "openlibrary" else QB_CONFIG_PATCH
+    check = s.folder_rule_check([{"name": "Bash", "input": {"command": c}} for c in commands], patch, folder, tests)
+    assert (check["kept"], check["chances"]) == (kept, 1)
+
+
+def test_the_folder_rule_has_no_chance_on_a_task_that_leaves_its_folder_alone():
+    tools = [{"name": "Bash", "input": {"command": "python -B -m pytest openlibrary/tests/solr"}}]
+    check = s.folder_rule_check(tools, "diff --git a/openlibrary/solr/update.py b/openlibrary/solr/update.py\n", "openlibrary/core/",
+                                "openlibrary/tests/core")
+    assert check == {"kept": True, "chances": 0, "changed": []}
+    qb = s.folder_rule_check([{"name": "Bash", "input": {"command": "pytest tests/unit/config/test_configtypes.py -q"}}],
+                             "diff --git a/qutebrowser/config/configtypes.py b/qutebrowser/config/configtypes.py\n", "qutebrowser/config/",
+                             "tests/unit/config")
+    assert qb["kept"] and qb["chances"] == 1
+
+
+def _words(n):
+    return " ".join(["word"] * n)
+
+
+@pytest.mark.parametrize("words, kept, stale", [(90, True, False), (100, True, False), (101, False, True), (150, False, True),
+                                                (151, False, False)])
+def test_the_new_brief_rule_is_kept_stale_or_broken(words, kept, stale):
+    checks = s.capture_checks([], _words(words), "", 11, s.CAPTURE_SCHEDULES["capture"], "openlibrary")
+    assert (checks["brief_100"]["kept"], checks["brief_100"]["stale"], checks["brief_100"]["words"]) == (kept, stale, words)
+    assert checks["brief_100"]["told"] and not checks["brief"]["told"] and checks["folder_tests"]["told"]
+    before = s.capture_checks([], _words(words), "", 9, s.CAPTURE_SCHEDULES["capture"], "openlibrary")
+    assert before["brief"]["told"] and not before["brief_100"]["told"] and before["brief"]["kept"] == (words <= 150)
+    assert set(checks) == EIGHT | {"folder_tests", "brief_100"}
+
+
+def _volumes(argv):
+    return [argv[i + 1].split(":")[1] for i, a in enumerate(argv) if a == "-v"]
+
+
+def test_each_capture_condition_mounts_what_it_needs_once_and_logs_instruction_loads(tmp_path, memory_folder):
+    for arm in s.CAPTURE_ARMS:
+        plan = _cplan(tmp_path, arm, memory_folder)
+        start, argv = s.start_argv(plan, plan.rounds[0], "x"), s.claude_argv(plan, "x", budget_usd=3, resume=None)
+        mounts = _volumes(start)
+        assert len(mounts) == len(set(mounts)) and s.LOADS_IN_CONTAINER in mounts and "/cc/hooks" in mounts
+        assert argv.count("--settings") == 1 and argv[argv.index("--settings") + 1] == s.HOOKS_IN_CONTAINER
+        settings = s.capture_settings(arm)["hooks"]
+        assert settings["InstructionsLoaded"] == s.loads_hook()["InstructionsLoaded"]
+        assert ("Stop" in settings) == (arm in ("mdreader", "gitlive"))
+        assert (s.TOKEN_IN_CONTAINER in mounts) == (arm in ("mdreader", "gitlive"))
+        assert ("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1" in s.exec_env(plan)) == (arm == "gitlive")
+    reader = _cplan(tmp_path, "mdreader", memory_folder)
+    mounts = _volumes(s.start_argv(reader, reader.rounds[0], "x"))
+    assert s.CODE_IN_CONTAINER in mounts and s.READER_IN_CONTAINER in mounts and s.MEMORY_IN_CONTAINER not in mounts
+    assert "CC_STUDY_TOKEN_FILE=/cc/secret/token" in s.exec_env(reader) and "--mcp-config" not in s.claude_argv(reader, "x", budget_usd=3,
+                                                                                                                resume=None)
+    stop = s.capture_settings("mdreader")["hooks"]["Stop"][0]["hooks"][0]
+    assert "claude_md_reader_hook.py --project /app" in stop["command"] and stop["timeout"] == 180
+    assert s.capture_settings("gitlive")["hooks"]["Stop"] == s.git_memory_live_settings()["hooks"]["Stop"]
+    assert s.loads_hook()["InstructionsLoaded"][0]["matcher"] == "session_start|compact"
+
+
+def test_the_load_log_hook_writes_one_line_per_load(tmp_path):
+    command = s.loads_hook()["InstructionsLoaded"][0]["hooks"][0]["command"].replace(s.LOADS_IN_CONTAINER, str(tmp_path))
+    event = {"session_id": "s1", "file_path": "/app/CLAUDE.md", "memory_type": "Project", "load_reason": "compact", "cwd": "/app"}
+    for _ in range(2):
+        done = subprocess.run(["sh", "-c", command], input=json.dumps(event), capture_output=True, text=True, timeout=60)
+        assert done.returncode == 0 and not done.stdout
+    rows = [json.loads(line) for line in (tmp_path / "instructions.jsonl").read_text().splitlines()]
+    assert len(rows) == 2 and {k: rows[0][k] for k in ("file_path", "load_reason", "session_id")} == {
+        "file_path": "/app/CLAUDE.md", "load_reason": "compact", "session_id": "s1"}
+
+
+class TarDocker(FakeDocker):
+    """FakeDocker whose project memory is a real archive: the seeded code notes, and a CLAUDE.md that grows one line a task."""
+
+    def __init__(self, notes, **options):
+        super().__init__(touch_tests=(), **options)
+        self.notes, self.tasks = notes, 0
+
+    def __call__(self, argv, **options):
+        script = argv[-1] if argv[:2] == ["docker", "exec"] else ""
+        if script == s.MEMORY_OUT:
+            import io
+            import tarfile
+            self.calls.append(argv)
+            self.tasks += 1
+            data = io.BytesIO()
+            with tarfile.open(fileobj=data, mode="w") as tar:
+                files = {"CLAUDE.md": "".join(f"- rule {i}\n" for i in range(self.tasks)), **self.notes}
+                if self.tasks >= 2:
+                    files[".claude/rules/claude-wrote.md"] = "kept by Claude\n"
+                for name, text in files.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(text.encode())
+                    tar.addfile(info, io.BytesIO(text.encode()))
+            return subprocess.CompletedProcess(argv, 0, stdout=data.getvalue(), stderr="")
+        return super().__call__(argv, **options)
+
+
+def test_a_capture_run_records_each_task_s_checks_and_what_claude_md_holds_after_it(tmp_path, memory_folder):
+    plan = _cplan(tmp_path, "mdreader", memory_folder, ruleset="capturetrial")
+    docker = TarDocker({".claude/rules/lib--tests.md": '---\npaths:\n  - "lib/**"\n---\n'})
+    record = _run(plan, docker, FakeClaude(["Files changed: lib/x.py\n\nDone.\n\nTests run: none"] * 6))
+    rows = record["rounds"]
+    assert json.loads((plan.out / "hooks" / "settings.json").read_text()) == s.capture_settings("mdreader")
+    assert [r["says"] for r in rows] == [[], ["files_first", "folder_tests", "brief", "fact1"], ["brief_100"], [], [], []]
+    assert [sorted(k for k, v in r["gradual"].items() if v["told"]) for r in (rows[0], rows[1], rows[2], rows[5])] == [
+        [], ["brief", "files_first", "folder_tests"], ["brief_100", "files_first", "folder_tests"],
+        ["brief_100", "files_first", "folder_tests"]]
+    assert "gradual" not in rows[3] and rows[3]["asks"] == "fact:45000"
+    assert record["capture"]["project"] == "openlibrary" and record["capture"]["folder_rule"][1] == "openlibrary/core/"
+    assert record["capture"]["messages"]["brief_100"] == s.CHANGED_BRIEF and record["capture"]["said"][1] == [3, ["brief_100"]]
+    after = plan.out / "memory-after"
+    assert (after / "round_01" / "project__CLAUDE.md").read_text() == "- rule 0\n"
+    assert (after / "round_03" / "project__CLAUDE.md").read_text() == "- rule 0\n- rule 1\n- rule 2\n"
+    assert not (after / "round_03" / "project__.claude__rules__lib--tests.md").exists()  # the seeded notes, unchanged, are not copied
+    assert (after / "round_03" / "project__.claude__rules__claude-wrote.md").read_text() == "kept by Claude\n"
+    assert rows[2]["memory"]["project_files"] == [".claude/rules/claude-wrote.md", "CLAUDE.md"]
+    chowns = [a for a in docker.calls if "chown" in a]
+    assert chowns and all(s.READER_IN_CONTAINER in a and s.LOADS_IN_CONTAINER in a for a in chowns)
+
+
+def test_the_capture_runs_take_the_hardest_tasks_and_the_next_two_for_the_new_session(tmp_path, monkeypatch):
+    root = _capture_root(tmp_path, "openlibrary")
+    seen = {}
+    monkeypatch.setattr(s, "plan_series", lambda arm, folders, out, **kw: seen.setdefault(kw["ruleset"], folders) and None)
+    base = ["--tasks-root", str(root), "--repo", "openlibrary", "--out", str(tmp_path / "o"), "--claude-binary", str(tmp_path / "c")]
+    with pytest.raises(AttributeError):
+        s.main(base + ["--arm", "mdreader", "--ruleset", "capture", "--largest"])
+    hardest = s.largest_tasks(root, "openlibrary", 12)
+    assert seen["capture"][:12] == hardest and len(seen["capture"]) == 14
+    assert seen["capture"][12:] == [f for f in s.largest_tasks(root, "openlibrary", 14) if f not in hardest]
