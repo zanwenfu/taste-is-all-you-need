@@ -2,6 +2,7 @@
 lines, and whole series against a fake Claude Code and a fake docker (no container, no model)."""
 
 import json
+import re
 import subprocess
 
 import pytest
@@ -108,6 +109,17 @@ def test_command_lines_follow_the_locked_protocol_and_pass_the_token_by_name_onl
     assert "--settings" not in argv and "--bare" not in argv and argv[argv.index("--resume") + 1] == "sess-1"
     for excluded in s.PROJECT_MEMORY:
         assert f"':(exclude){excluded}'" in s.PATCH_SCRIPT
+
+
+def test_two_runs_of_one_arm_never_share_a_container_name(tmp_path, tasks):
+    """Nov 17 trial: Open Library's and qutebrowser's gitlive runs both named their first container cc-gitlive-round_01."""
+    folders = s.pick_tasks(tasks[0].parent, "ansible", 3, seed=3)
+    one = s.plan_series("shipped", folders, tmp_path / "run-a" / "gitlive", model=None, claude_binary=tmp_path / "claude")
+    two = s.plan_series("shipped", folders, tmp_path / "run-b" / "gitlive", model=None, claude_binary=tmp_path / "claude")
+    for kind in ("cc", "grade"):
+        a, b = s.container_name(one, one.rounds[0], kind), s.container_name(two, two.rounds[0], kind)
+        assert a != b and a == f"{kind}-run-a-gitlive-round_01" and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+", a)
+    assert s.container_name(one, one.rounds[0]) != s.container_name(one, one.rounds[1])
 
 
 def test_the_ours_arm_mounts_its_hooks_memory_and_reader(tmp_path, tasks):

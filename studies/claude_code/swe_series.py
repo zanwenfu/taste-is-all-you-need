@@ -849,7 +849,10 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 
 def container_name(plan: SeriesPlan, round_: Round, kind: str = "cc") -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]", "-", f"{kind}-{plan.out.name}-{round_.id}")
+    """Unique per run, not only per arm: the run's folder name comes first (Nov 17 trial: two runs of one arm on two projects shared
+    'cc-gitlive-round_01', and the later start removed the earlier run's container)."""
+    out = Path(plan.out).resolve()
+    return re.sub(r"[^a-zA-Z0-9_.-]", "-", f"{kind}-{out.parent.name}-{out.name}-{round_.id}")
 
 
 def start_argv(plan: SeriesPlan, round_: Round, name: str) -> list[str]:
