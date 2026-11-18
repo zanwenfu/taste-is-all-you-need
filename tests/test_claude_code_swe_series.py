@@ -1061,3 +1061,59 @@ def test_the_capture_runs_take_the_hardest_tasks_and_the_next_two_for_the_new_se
     hardest = s.largest_tasks(root, "openlibrary", 12)
     assert seen["capture"][:12] == hardest and len(seen["capture"]) == 14
     assert seen["capture"][12:] == [f for f in s.largest_tasks(root, "openlibrary", 14) if f not in hardest]
+
+
+# --- the drift test (Nov 18): the capture test's words, one session of 20 tasks, nothing after -------------------------------------
+
+def _dplan(tmp_path, arm, memory, ruleset="drift", repo="openlibrary"):
+    root = _capture_root(tmp_path / ruleset, repo, n=24)
+    folders = s.largest_tasks(root, repo, s.CAPTURE_SCHEDULES[ruleset].tasks)
+    return folders, s.plan_series(arm, folders, tmp_path / f"{arm}-{ruleset}", model=None, claude_binary=tmp_path / "c",
+                                  ruleset=ruleset, memory=memory, code=tmp_path / "code", token_file=tmp_path / "t")
+
+
+def test_the_drift_test_says_the_capture_words_on_the_capture_tasks_then_ten_tasks_of_silence(tmp_path, memory_folder):
+    assert s.CAPTURE_SCHEDULES["drift"].said == s.CAPTURE_SCHEDULES["capture"].said
+    for arm in s.CAPTURE_ARMS:
+        folders, plan = _dplan(tmp_path / arm, arm, memory_folder)
+        keep = {"mdlog": s.KEEP_TRACK["mdlog"], "gitlive": s.KEEP_TRACK["gitlive"]}.get(arm, "")
+        assert len(plan.rounds) == 20 and [r.task.folder for r in plan.rounds] == folders
+        assert _head(plan.rounds[0]) == keep
+        assert [_head(r) for r in plan.rounds[1:10]] == [OL_HEADS[n] for n in range(2, 11)]
+        assert all(_head(r) == "" and not r.says and not r.tells_rules for r in plan.rounds[10:])
+        assert [r.new_session for r in plan.rounds] == [True] + [False] * 19 and not any(r.question for r in plan.rounds)
+    assert s.capture_told(s.CAPTURE_SCHEDULES["drift"], 20) == s.capture_told(s.CAPTURE_SCHEDULES["capture"], 10)
+
+
+def test_the_drift_best_case_repeats_every_rule_in_force_before_each_task_and_only_in_the_shipped_condition(tmp_path, memory_folder):
+    _, plan = _dplan(tmp_path, "auto", memory_folder, ruleset="driftrestated")
+    heads = [_head(r) for r in plan.rounds]
+    assert heads[0] == "" and heads[1] == OL_HEADS[2]  # nothing to repeat before the first rule is said
+    assert heads[2] == "Remember: don't touch the tests unless I ask. " + OL_HEADS[3]
+    eleven = heads[10]
+    assert eleven.startswith("Remember: don't touch the tests unless I ask; start each hand-back with a line saying which files")
+    assert "under openlibrary/core/, also run the matching tests under openlibrary/tests/core before you hand back" in eleven
+    assert "keep hand-backs under 100 words." in eleven and "150" not in eleven  # the new limit replaces the old once said
+    assert heads[9].startswith("Remember: ") and "keep hand-backs under 150 words" in heads[9] and heads[9].endswith(OL_HEADS[10])
+    assert len(set(heads[10:])) == 1 and heads[19] == eleven  # the same full list before every later task
+    for n in range(2, 21):  # every rule said before task n, and none said after
+        in_force = s.capture_told(s.CAPTURE_SCHEDULES["driftrestated"], n - 1)
+        assert heads[n - 1].startswith("Remember: ") == bool(in_force)
+    _, shipped = _dplan(tmp_path / "x", "auto", memory_folder)
+    assert [r.says for r in plan.rounds] == [r.says for r in shipped.rounds]
+    for arm in ("mdlog", "mdreader", "gitlive"):
+        with pytest.raises(ValueError, match="restated rule sets run the auto"):
+            _dplan(tmp_path / arm, arm, memory_folder, ruleset="driftrestated")
+
+
+def test_the_drift_test_on_qutebrowser_restates_its_own_folder_rule(tmp_path, memory_folder):
+    _, plan = _dplan(tmp_path, "auto", memory_folder, ruleset="driftrestated", repo="qutebrowser")
+    head = _head(plan.rounds[12])
+    assert "under qutebrowser/config/, also run the matching tests under tests/unit/config" in head and "openlibrary" not in head
+
+
+def test_the_drift_trial_is_three_tasks_in_one_session(tmp_path, memory_folder):
+    _, plan = _dplan(tmp_path, "gitlive", memory_folder, ruleset="drifttrial")
+    assert [(r.number, r.new_session, r.question) for r in plan.rounds] == [(1, True, False), (2, False, False), (3, False, False)]
+    _, best = _dplan(tmp_path / "b", "auto", memory_folder, ruleset="drifttrialrestated")
+    assert _head(best.rounds[2]).startswith("Remember: start each hand-back") and _head(best.rounds[2]).endswith(OL_HEADS[10])

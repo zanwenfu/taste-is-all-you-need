@@ -199,15 +199,29 @@ class CaptureSchedule:
     facts: tuple[int, ...]                          # the facts (1-based) asked in the new session, in order
     history: tuple[int, ...]                        # the tasks asked about in the new session
     extra: int                                      # tasks in the new session, after the questions
+    fresh: bool = True                              # a new session with the questions follows the first session
+    restate: bool = False                           # the best case: every rule in force is repeated before each task's message
 
 
+CAPTURE_SAID = ((2, ("tests",)), (3, ("files_first", "folder_tests")), (4, ("brief",)), (5, ("plain", "fact1")),
+                (6, ("search_tools", "fact2")), (7, ("read_tool", "fact3")), (8, ("python_B", "fact4")),
+                (9, ("tests_run_last", "fact5")), (10, ("brief_100",)))
+# THE DRIFT TEST (the user's yes, Wed Nov 18 2026 ~6:25 pm ET): the capture test's words on the capture test's days, but one session
+# of 20 tasks and no new session, so ten tasks follow the last thing said. driftrestated is the best case: the same session, with every
+# rule in force repeated before each task, in the auto (shipped) condition.
 CAPTURE_SCHEDULES = {
     "capture": CaptureSchedule(12, ((2, ("tests",)), (3, ("files_first", "folder_tests")), (4, ("brief",)), (5, ("plain", "fact1")),
                                     (6, ("search_tools", "fact2")), (7, ("read_tool", "fact3")), (8, ("python_B", "fact4")),
                                     (9, ("tests_run_last", "fact5")), (10, ("brief_100",))),
                                (1, 2, 3, 4, 5), (3, 7, 11), 2),
     "capturetrial": CaptureSchedule(3, ((2, ("files_first", "folder_tests", "brief", "fact1")), (3, ("brief_100",))), (1,), (), 1),
+    "drift": CaptureSchedule(20, CAPTURE_SAID, (), (), 0, fresh=False),
+    "driftrestated": CaptureSchedule(20, CAPTURE_SAID, (), (), 0, fresh=False, restate=True),
+    "drifttrial": CaptureSchedule(3, ((2, ("files_first", "folder_tests", "brief")), (3, ("brief_100",))), (), (), 0, fresh=False),
+    "drifttrialrestated": CaptureSchedule(3, ((2, ("files_first", "folder_tests", "brief")), (3, ("brief_100",))), (), (), 0,
+                                          fresh=False, restate=True),
 }
+RESTATE_HEAD = "Remember: "
 
 
 def project_of(task: SweTask) -> str:
@@ -224,6 +238,18 @@ def capture_messages(project: str) -> dict[str, str]:
     messages["brief_100"] = CHANGED_BRIEF
     messages.update({f"fact{i}": fact[0] for i, fact in enumerate(PROJECT_FACTS[project], start=1)})
     return messages
+
+
+def capture_restated(project: str, schedule: CaptureSchedule, number: int) -> str | None:
+    """The best case's head before task ``number``: every rule in force after task ``number - 1``, as restated, in the order said
+    (the 100-word limit in place of the 150-word one once it is said); None before any rule."""
+    folder = FOLDER_RULES[project]
+    restated = {key: text for _, text, key in GRADUAL_RULES}
+    restated["folder_tests"] = f"whenever you change anything under {folder[1]}, also run the matching tests under {folder[2]} before you hand back"
+    restated["brief_100"] = f"keep hand-backs under {BRIEF_CHANGED_WORDS} words"
+    in_force = capture_told(schedule, number - 1)
+    keys = [key for at, said in schedule.said if at < number for key in said if key in in_force]
+    return RESTATE_HEAD + "; ".join(restated[k] for k in keys) + "." if keys else None
 
 
 def capture_told(schedule: CaptureSchedule, number: int) -> set[str]:
@@ -384,9 +410,14 @@ def _capture_plan(arm: str, tasks: list[SweTask], schedule: CaptureSchedule, out
     rounds: list[Round] = []
     for number, task in enumerate(tasks[:schedule.tasks], start=1):
         keys = said.get(number, ())
-        parts = ([KEEP_TRACK[arm]] if number == 1 and arm in KEEP_TRACK else []) + [messages[k] for k in keys]
+        restated = capture_restated(project, schedule, number) if schedule.restate else None
+        parts = (([KEEP_TRACK[arm]] if number == 1 and arm in KEEP_TRACK else []) + ([restated] if restated else [])
+                 + [messages[k] for k in keys])
         prompt = (" ".join(parts) + "\n\n" + task.instruction) if parts else task.instruction
         rounds.append(Round(f"round_{number:02d}", number, prompt, task, number == 1, tells_rules=bool(parts), says=tuple(keys)))
+    if not schedule.fresh:  # the drift test: one session, nothing after its last task
+        return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset, 1,
+                          Path(memory) if memory else None)
     asked = [(facts[i - 1][1], f"fact:{facts[i - 1][2]}") for i in schedule.facts] + [(RULES_QUESTION, "rules")]
     asked += [(HISTORY_QUESTION.format(title=task_title(tasks[k - 1].instruction)), f"history:{k}") for k in schedule.history]
     for i, (question, asks) in enumerate(asked):
@@ -440,6 +471,8 @@ def plan_series(arm: str, task_folders: list[Path], out: Path, *, model: str | N
         raise ValueError("the capture rule sets run the capture arms (auto, mdlog, mdreader, gitlive), and only they do")
     if arm == "mdreader" and capture is None:
         raise ValueError("the mdreader arm runs the capture rule sets only")
+    if capture is not None and capture.restate and arm != "auto":
+        raise ValueError("the restated rule sets run the auto (shipped) condition only: the best case adds nothing but the rules")
     if fair is None and capture is None and (arm in MEMORY_ARMS) != (ruleset == "scaled"):
         raise ValueError("the memory arms run the scaled rule set, and only they do")
     for schedule in (fair, capture):
@@ -1216,7 +1249,8 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
         "network": plan.network, "window": plan.window, "ruleset": plan.ruleset, "spacing": plan.spacing, "started": now(), "rounds": [], "spent_usd": 0.0, "ended_by": None, "batches": [],
         **({"capture": {"project": project, "said": [[at, list(keys)] for at, keys in capture.said], "tasks": capture.tasks,
                         "messages": capture_messages(project), "folder_rule": list(FOLDER_RULES[project]),
-                        "facts": [list(f) for f in PROJECT_FACTS[project]], "replaces": REPLACES}} if capture else {})}
+                        "facts": [list(f) for f in PROJECT_FACTS[project]], "replaces": REPLACES, "fresh": capture.fresh,
+                        "restate": capture.restate}} if capture else {})}
     if record["tasks"] != [r.task.id for r in plan.rounds]:
         raise RuntimeError("the recorded series has other tasks than this plan")
     record.setdefault("batches", []).append({"first": first, "last": last, "started": now()})
