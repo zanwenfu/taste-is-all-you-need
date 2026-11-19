@@ -50,7 +50,7 @@ DETOUR_MESSAGES = (
     "restart plan.",
 )
 DETOUR_RETURN = "Thanks, that's everything on the ops side. Back to the {project} work."
-PROJECT_NAMES = {"openlibrary": "Open Library", "qutebrowser": "qutebrowser"}
+PROJECT_NAMES = {"openlibrary": "Open Library", "qutebrowser": "qutebrowser", "ansible": "Ansible"}
 
 # What a careful answer finds (for reading the detour, never shown to Claude).
 ANSWERS = {

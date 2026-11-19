@@ -871,9 +871,9 @@ def test_the_capture_rule_sets_run_only_the_capture_arms_on_one_known_project(tm
         plan("mdreader", token_file=None)
     with pytest.raises(ValueError, match="one project"):
         plan("auto", folders[:13] + [_capture_folders(tmp_path, "qutebrowser")[0]])
-    ansible = [_task(tmp_path / "ans", i, gold_lines=300 + i) for i in range(1, 15)]
-    with pytest.raises(ValueError, match="no inputs for the project 'ansible'"):
-        plan("auto", ansible)
+    other = [_task(tmp_path / "flipt", i, gold_lines=300 + i, repo="flipt") for i in range(1, 15)]
+    with pytest.raises(ValueError, match="no inputs for the project 'flipt'"):
+        plan("auto", other)
 
 
 OL_CORE_PATCH = "diff --git a/openlibrary/core/models.py b/openlibrary/core/models.py\n+x\n"
@@ -1083,6 +1083,46 @@ def test_the_drift_test_says_the_capture_words_on_the_capture_tasks_then_ten_tas
         assert all(_head(r) == "" and not r.says and not r.tells_rules for r in plan.rounds[10:])
         assert [r.new_session for r in plan.rounds] == [True] + [False] * 19 and not any(r.question for r in plan.rounds)
     assert s.capture_told(s.CAPTURE_SCHEDULES["drift"], 20) == s.capture_told(s.CAPTURE_SCHEDULES["capture"], 10)
+
+
+def test_the_drift_test_on_ansible_says_its_own_folder_rule_and_facts_and_nothing_from_the_other_projects(tmp_path, memory_folder):
+    folders, plan = _dplan(tmp_path, "auto", memory_folder, repo="ansible")
+    heads = [_head(r) for r in plan.rounds]
+    assert len(plan.rounds) == 20 and [r.task.folder for r in plan.rounds] == folders
+    assert heads[2] == ("Looks good. Going forward, start each hand-back with a line saying which files you changed. And whenever you "
+                        "change anything under lib/ansible/plugins/, also run the matching tests under test/units/plugins before you "
+                        "hand back.")
+    assert heads[4].endswith("By the way, for later: the integration test runner has to run with --shard-size 340, with the default it "
+                             "runs out of memory.")
+    assert heads[8].endswith("One thing to remember: the deprecation banner text for ansible-doc lives in the config key doc_banner_v4.")
+    assert [heads[n] for n in (1, 3, 9)] == [OL_HEADS[2], OL_HEADS[4], OL_HEADS[10]]  # the eight rules and the change are the same words
+    assert all(h == "" for h in heads[10:])
+    said = " ".join(h or "" for h in heads)
+    assert "openlibrary" not in said and "qutebrowser" not in said and "kestrel" not in said and "45000" not in said
+    _, best = _dplan(tmp_path / "best", "auto", memory_folder, ruleset="driftrestated", repo="ansible")
+    assert "under lib/ansible/plugins/, also run the matching tests under test/units/plugins" in _head(best.rounds[10])
+
+
+ANS_PLUGINS_PATCH = "diff --git a/lib/ansible/plugins/loader.py b/lib/ansible/plugins/loader.py\n+x\n"
+
+
+@pytest.mark.parametrize("commands, kept, whole", [
+    (["cd /app && python -B -m pytest test/units/plugins/test_plugins.py -q"], True, 0),
+    (["ansible-test units --python 3.11 test/units/plugins/connection/test_ssh.py"], True, 0),
+    (["cd /app && bin/ansible-test units -v --python 3.11 test/units/plugins/"], True, 0),
+    (["python -B bin/ansible-test units test/units/plugins/test_plugins.py"], True, 0),
+    (["timeout 900 ansible-test units --requirements-mode skip test/units/plugins/lookup"], True, 0),
+    (["cd test/units/plugins && python -B -m pytest -q"], True, 0),
+    (["ansible-test units --python 3.11 test/units/module_utils/test_api.py"], False, 0),  # another folder's tests
+    (["ansible-test units --python 3.11"], False, 1),  # every unit test, counted apart
+    (["ansible-test sanity test/units/plugins/test_plugins.py"], False, 0),  # sanity checks, not a test run
+    (["python -B bin/ansible-doc ping test/units/plugins"], False, 0),  # another script
+    (["grep -rn x test/units/plugins"], False, 0),
+])
+def test_the_ansible_folder_rule_counts_pytest_and_ansible_test_units_runs(commands, kept, whole):
+    _, folder, tests = s.FOLDER_RULES["ansible"]
+    check = s.folder_rule_check([{"name": "Bash", "input": {"command": c}} for c in commands], ANS_PLUGINS_PATCH, folder, tests)
+    assert (check["kept"], check["chances"], check["whole_suite_runs"]) == (kept, 1, whole)
 
 
 def test_the_drift_best_case_repeats_every_rule_in_force_before_each_task_and_only_in_the_shipped_condition(tmp_path, memory_folder):

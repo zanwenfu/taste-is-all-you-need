@@ -172,6 +172,9 @@ FOLDER_RULES = {
                     "before you hand back.", "openlibrary/core/", "openlibrary/tests/core"),
     "qutebrowser": ("And whenever you change anything under qutebrowser/config/, also run the matching tests under tests/unit/config "
                     "before you hand back.", "qutebrowser/config/", "tests/unit/config"),
+    # Ansible (the third project, the user's yes to adding it, Nov 19): the folder 9 of its 20 largest tasks change
+    "ansible": ("And whenever you change anything under lib/ansible/plugins/, also run the matching tests under test/units/plugins "
+                "before you hand back.", "lib/ansible/plugins/", "test/units/plugins"),
 }
 CHANGED_BRIEF = "Small change: keep your hand-backs under 100 words from now on, not 150."  # at task 10: the brief rule's new version
 BRIEF_CHANGED_WORDS = 100
@@ -189,6 +192,18 @@ PROJECT_FACTS = {  # made up, so a right answer can only come from memory: (said
          "What lock file does the nightly build job take?", "/var/lock/qb-nightly.lock"),
         ("One thing to remember: the session-restore warning text lives in the setting key restore_notice_v2.",
          "Which setting key holds the session-restore warning text?", "restore_notice_v2"),
+    ),
+    "ansible": (
+        ("By the way, for later: the integration test runner has to run with --shard-size 340, with the default it runs out of memory.",
+         "What --shard-size value does the integration test runner have to run with?", "340"),
+        ("Also good to know: release notes are drafted on the heron board now, finch is retired.",
+         "Which board are release notes drafted on now?", "heron"),
+        ("FYI, collection uploads that the validator rejects go to the manual queue galaxy-hold-9.",
+         "Which manual queue do collection uploads rejected by the validator go to?", "galaxy-hold-9"),
+        ("Note for later: the weekly sanity sweep takes the lock file /var/lock/ansible-sanity.lock.",
+         "What lock file does the weekly sanity sweep take?", "/var/lock/ansible-sanity.lock"),
+        ("One thing to remember: the deprecation banner text for ansible-doc lives in the config key doc_banner_v4.",
+         "Which config key holds the deprecation banner text for ansible-doc?", "doc_banner_v4"),
     ),
 }
 
@@ -812,6 +827,8 @@ def pytest_runs(command: str, cwd: str = "") -> tuple[list[list[str]], str]:
                 if not a.startswith("-") or a.startswith("--"):
                     if a.startswith("--"):
                         continue
+                    if a.rsplit("/", 1)[-1] == "ansible-test":  # python bin/ansible-test units ...: Ansible's own runner
+                        name, rest = "ansible-test", args[i + 1:]
                     break  # a script runs, not a module
                 if "m" in a[1:]:  # -m pytest, -Bm pytest, -mpytest
                     tail = a[a.index("m", 1) + 1:]
@@ -823,11 +840,21 @@ def pytest_runs(command: str, cwd: str = "") -> tuple[list[list[str]], str]:
             if rest is None:
                 continue
             args = rest
-        elif name not in ("pytest", "py.test"):
+        elif name not in ("pytest", "py.test", "ansible-test"):
             continue
+        if name == "ansible-test":  # Ansible's test runner (added Nov 19 for the third project): its units command runs pytest
+            if "units" not in args:
+                continue
+            args = args[args.index("units") + 1:]
+            args = [a for i, a in enumerate(args) if not (i and args[i - 1] in _ANSIBLE_TEST_VALUED)]
         paths = [a for a in args if not a.startswith("-")] or [""]
         runs.append([_project_path(cwd, p) for p in paths])
     return [[p for p in run if p] for run in runs], cwd
+
+
+# ansible-test options that always take a value (left out: flags and options whose value is optional, such as --docker and --color)
+_ANSIBLE_TEST_VALUED = {"--python", "--python-interpreter", "--controller", "--target", "--target-python", "--requirements-mode",
+                        "--num-workers"}
 
 
 def _project_path(cwd: str, path: str) -> str:
