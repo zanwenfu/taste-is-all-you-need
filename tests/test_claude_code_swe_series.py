@@ -1090,7 +1090,7 @@ def test_the_drift_test_on_ansible_says_its_own_folder_rule_and_facts_and_nothin
     heads = [_head(r) for r in plan.rounds]
     assert len(plan.rounds) == 20 and [r.task.folder for r in plan.rounds] == folders
     assert heads[2] == ("Looks good. Going forward, start each hand-back with a line saying which files you changed. And whenever you "
-                        "change anything under lib/ansible/plugins/, also run the matching tests under test/units/plugins before you "
+                        "change anything under lib/ansible/cli/, also run the matching tests under test/units/cli before you "
                         "hand back.")
     assert heads[4].endswith("By the way, for later: the integration test runner has to run with --shard-size 340, with the default it "
                              "runs out of memory.")
@@ -1100,28 +1100,28 @@ def test_the_drift_test_on_ansible_says_its_own_folder_rule_and_facts_and_nothin
     said = " ".join(h or "" for h in heads)
     assert "openlibrary" not in said and "qutebrowser" not in said and "kestrel" not in said and "45000" not in said
     _, best = _dplan(tmp_path / "best", "auto", memory_folder, ruleset="driftrestated", repo="ansible")
-    assert "under lib/ansible/plugins/, also run the matching tests under test/units/plugins" in _head(best.rounds[10])
+    assert "under lib/ansible/cli/, also run the matching tests under test/units/cli" in _head(best.rounds[10])
 
 
-ANS_PLUGINS_PATCH = "diff --git a/lib/ansible/plugins/loader.py b/lib/ansible/plugins/loader.py\n+x\n"
+ANS_CLI_PATCH = "diff --git a/lib/ansible/cli/galaxy.py b/lib/ansible/cli/galaxy.py\n+x\n"
 
 
 @pytest.mark.parametrize("commands, kept, whole", [
-    (["cd /app && python -B -m pytest test/units/plugins/test_plugins.py -q"], True, 0),
-    (["ansible-test units --python 3.11 test/units/plugins/connection/test_ssh.py"], True, 0),
-    (["cd /app && bin/ansible-test units -v --python 3.11 test/units/plugins/"], True, 0),
-    (["python -B bin/ansible-test units test/units/plugins/test_plugins.py"], True, 0),
-    (["timeout 900 ansible-test units --requirements-mode skip test/units/plugins/lookup"], True, 0),
-    (["cd test/units/plugins && python -B -m pytest -q"], True, 0),
+    (["cd /app && python -B -m pytest test/units/cli/test_adhoc.py -q"], True, 0),
+    (["ansible-test units --python 3.11 test/units/cli/test_galaxy.py"], True, 0),
+    (["cd /app && bin/ansible-test units -v --python 3.11 test/units/cli/"], True, 0),
+    (["python -B bin/ansible-test units test/units/cli/test_adhoc.py"], True, 0),
+    (["timeout 900 ansible-test units --requirements-mode skip test/units/cli/galaxy"], True, 0),
+    (["cd test/units/cli && python -B -m pytest -q"], True, 0),
     (["ansible-test units --python 3.11 test/units/module_utils/test_api.py"], False, 0),  # another folder's tests
     (["ansible-test units --python 3.11"], False, 1),  # every unit test, counted apart
-    (["ansible-test sanity test/units/plugins/test_plugins.py"], False, 0),  # sanity checks, not a test run
-    (["python -B bin/ansible-doc ping test/units/plugins"], False, 0),  # another script
-    (["grep -rn x test/units/plugins"], False, 0),
+    (["ansible-test sanity test/units/cli/test_adhoc.py"], False, 0),  # sanity checks, not a test run
+    (["python -B bin/ansible-doc ping test/units/cli"], False, 0),  # another script
+    (["grep -rn x test/units/cli"], False, 0),
 ])
 def test_the_ansible_folder_rule_counts_pytest_and_ansible_test_units_runs(commands, kept, whole):
     _, folder, tests = s.FOLDER_RULES["ansible"]
-    check = s.folder_rule_check([{"name": "Bash", "input": {"command": c}} for c in commands], ANS_PLUGINS_PATCH, folder, tests)
+    check = s.folder_rule_check([{"name": "Bash", "input": {"command": c}} for c in commands], ANS_CLI_PATCH, folder, tests)
     assert (check["kept"], check["chances"], check["whole_suite_runs"]) == (kept, 1, whole)
 
 

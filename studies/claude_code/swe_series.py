@@ -172,9 +172,10 @@ FOLDER_RULES = {
                     "before you hand back.", "openlibrary/core/", "openlibrary/tests/core"),
     "qutebrowser": ("And whenever you change anything under qutebrowser/config/, also run the matching tests under tests/unit/config "
                     "before you hand back.", "qutebrowser/config/", "tests/unit/config"),
-    # Ansible (the third project, the user's yes to adding it, Nov 19): the folder 9 of its 20 largest tasks change
-    "ansible": ("And whenever you change anything under lib/ansible/plugins/, also run the matching tests under test/units/plugins "
-                "before you hand back.", "lib/ansible/plugins/", "test/units/plugins"),
+    # Ansible (the third project, added Nov 19): the folder whose tests Claude ran unasked least often on earlier Ansible tasks (6 of
+    # 14 changes; plugins 16 of 21, modules 13 of 19), close to Open Library's 9 of 21; 6 of its 20 largest tasks change it
+    "ansible": ("And whenever you change anything under lib/ansible/cli/, also run the matching tests under test/units/cli "
+                "before you hand back.", "lib/ansible/cli/", "test/units/cli"),
 }
 CHANGED_BRIEF = "Small change: keep your hand-backs under 100 words from now on, not 150."  # at task 10: the brief rule's new version
 BRIEF_CHANGED_WORDS = 100
