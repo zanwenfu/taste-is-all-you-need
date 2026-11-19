@@ -1117,3 +1117,90 @@ def test_the_drift_trial_is_three_tasks_in_one_session(tmp_path, memory_folder):
     assert [(r.number, r.new_session, r.question) for r in plan.rounds] == [(1, True, False), (2, False, False), (3, False, False)]
     _, best = _dplan(tmp_path / "b", "auto", memory_folder, ruleset="drifttrialrestated")
     assert _head(best.rounds[2]).startswith("Remember: start each hand-back") and _head(best.rounds[2]).endswith(OL_HEADS[10])
+
+
+# --- the detour test (Nov 19): the drift test with six heavy, unrelated ops chores between task 10 and task 11 -------------------
+
+def test_the_detour_test_runs_six_ops_chores_in_the_next_task_s_container_between_task_10_and_task_11(tmp_path, memory_folder):
+    from studies.claude_code import detour_sandbox as d
+    for repo, name in (("openlibrary", "Open Library"), ("qutebrowser", "qutebrowser")):
+        folders, plan = _dplan(tmp_path / repo, "auto", memory_folder, ruleset="driftdetour", repo=repo)
+        _, drift = _dplan(tmp_path / repo / "plain", "auto", memory_folder, ruleset="drift", repo=repo)
+        ids = [r.id for r in plan.rounds]
+        assert ids == [f"round_{n:02d}" for n in range(1, 11)] + [f"detour_{50 + k}" for k in range(1, 7)] + [
+            f"round_{n:02d}" for n in range(11, 21)]
+        detours = [r for r in plan.rounds if r.detour]
+        assert [r.detour for r in detours] == [1, 2, 3, 4, 5, 6] and all(r.task.folder == folders[10] for r in detours)
+        assert [r.prompt for r in detours] == [m.format(project=name) for m in d.DETOUR_MESSAGES]
+        assert all(not r.says and not r.tells_rules and not r.question and not r.new_session for r in detours)
+        tasks = [r for r in plan.rounds if not r.detour]
+        assert [r.number for r in tasks] == list(range(1, 21)) and [r.task.folder for r in tasks] == folders
+        back = d.DETOUR_RETURN.format(project=name)
+        assert tasks[10].prompt == back + "\n\n" + tasks[10].task.instruction and not tasks[10].tells_rules
+        assert [r.prompt for r in tasks[:10] + tasks[11:]] == [r.prompt for r in drift.rounds[:10] + drift.rounds[11:]]
+        assert [r.says for r in tasks] == [r.says for r in drift.rounds]
+    assert "Open Library" in detours[0].prompt or "qutebrowser" in detours[0].prompt
+
+
+def test_the_detour_trial_is_two_chores_between_task_2_and_task_3_and_the_return_line_comes_first(tmp_path, memory_folder):
+    from studies.claude_code import detour_sandbox as d
+    _, plan = _dplan(tmp_path, "gitlive", memory_folder, ruleset="drifttrialdetour")
+    assert [r.id for r in plan.rounds] == ["round_01", "round_02", "detour_51", "detour_52", "round_03"]
+    assert _head(plan.rounds[4]) == d.DETOUR_RETURN.format(project="Open Library") + " " + OL_HEADS[10]
+    assert _head(plan.rounds[0]) == s.KEEP_TRACK["gitlive"]
+
+
+class OpsDocker(FakeDocker):
+    """FakeDocker that hands back an ops archive and records which file was put into /ops before each detour chore."""
+
+    def __init__(self, **options):
+        super().__init__(touch_tests=(), **options)
+        self.ops_in, self.ops_out = [], 0
+
+    def __call__(self, argv, **options):
+        script = argv[-1] if argv[:2] == ["docker", "exec"] else ""
+        if script == s.OPS_OUT:
+            self.calls.append(argv)
+            self.ops_out += 1
+            return subprocess.CompletedProcess(argv, 0, stdout=f"OPS{self.ops_out}".encode(), stderr="")
+        if argv[:3] == ["docker", "exec", "-i"] and argv[-2:] == ["-C", "/"]:
+            self.calls.append(argv)
+            import pathlib
+            self.ops_in.append(pathlib.Path(options["stdin"].name).name + ":" + options["stdin"].read().decode())
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        return super().__call__(argv, **options)
+
+
+def test_a_detour_run_carries_ops_between_chores_grades_nothing_there_and_keeps_the_task_checks(tmp_path, memory_folder):
+    _, plan = _dplan(tmp_path, "auto", memory_folder, ruleset="drifttrialdetour")
+    plan.out.mkdir(parents=True, exist_ok=True)
+    (plan.out / "ops-sandbox.tar").write_bytes(b"BUILT")
+    docker = OpsDocker()
+    record = _run(plan, docker, FakeClaude(["Files changed: lib/x.py\n\nDone.\n\nTests run: none"] * 5))
+    rows = record["rounds"]
+    assert [r["round"] for r in rows] == ["round_01", "round_02", "detour_51", "detour_52", "round_03"]
+    assert docker.ops_in == ["ops-sandbox.tar:BUILT", "ops-state.tar:OPS1"] and docker.ops_out == 2
+    assert (plan.out / "ops" / "detour_51.tar").read_bytes() == b"OPS1" and (plan.out / "ops-state.tar").read_bytes() == b"OPS2"
+    for r in rows[2:4]:
+        assert "gradual" not in r and r["grade_skipped"] == "detour" and "asks" not in r and "question" not in r
+        assert r["detour"] in (1, 2) and r["prompt"].startswith(("Totally different thing", "Thanks. Next"))
+        assert sorted(k for k, v in r["detour_checks"].items() if v["told"]) == ["brief", "files_first", "folder_tests"]
+    assert sorted(k for k, v in rows[4]["gradual"].items() if v["told"]) == ["brief_100", "files_first", "folder_tests"]
+    assert docker.graded == 3 and record["capture"]["detour_after"] == 2 and len(record["capture"]["detour"]) == 2
+    turns = [json.loads(l) for l in plan.stream.read_text().splitlines() if '"study_turn"' in l]
+    assert [t["kind"] for t in turns] == ["task", "task", "detour", "detour", "task"]
+
+
+def test_the_ops_folder_has_every_chore_s_material_and_a_notes_clone_that_points_at_its_remote(tmp_path):
+    import tarfile
+    from studies.claude_code import detour_sandbox as d
+    out = d.build(tmp_path / "ops.tar")
+    with tarfile.open(out) as tar:
+        names = set(tar.getnames())
+        config = tar.extractfile("ops/notes/.git/config").read().decode()
+    for need in ("ops/downloads/attention_is_all_you_need.pdf", "ops/servers/staging-db/pg_locks.csv", "ops/servers/sessions/agent-session-4.log",
+                 "ops/billing/budgets.json", "ops/billing/cloud-c.csv", "ops/logs/deploys.txt", "ops/logs/staging-app.log",
+                 "ops/remote/notes.git/HEAD", "ops/RUNNING.md", "ops/status.json"):
+        assert need in names, need
+    assert "url = /ops/remote/notes.git" in config
+    assert len([n for n in names if n.startswith("ops/downloads/") and not n.endswith("/")]) >= 150

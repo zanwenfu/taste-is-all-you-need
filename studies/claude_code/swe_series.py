@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from studies.claude_code.detour_sandbox import DETOUR_MESSAGES, DETOUR_RETURN, PROJECT_NAMES
 from studies.claude_code.driver import (
     OTHER_CREDENTIALS,
     SUBSCRIPTION_TOKEN,
@@ -201,6 +202,8 @@ class CaptureSchedule:
     extra: int                                      # tasks in the new session, after the questions
     fresh: bool = True                              # a new session with the questions follows the first session
     restate: bool = False                           # the best case: every rule in force is repeated before each task's message
+    detour_after: int = 0                           # the detour test: after this task, unrelated ops chores in the same session
+    detour_steps: int = 0                           # how many of the detour's messages (studies/claude_code/detour_sandbox.py)
 
 
 CAPTURE_SAID = ((2, ("tests",)), (3, ("files_first", "folder_tests")), (4, ("brief",)), (5, ("plain", "fact1")),
@@ -220,6 +223,11 @@ CAPTURE_SCHEDULES = {
     "drifttrial": CaptureSchedule(3, ((2, ("files_first", "folder_tests", "brief")), (3, ("brief_100",))), (), (), 0, fresh=False),
     "drifttrialrestated": CaptureSchedule(3, ((2, ("files_first", "folder_tests", "brief")), (3, ("brief_100",))), (), (), 0,
                                           fresh=False, restate=True),
+    # THE DETOUR TEST (the user's idea and yes, Thu Nov 19 2026 ~2:15 am ET): the drift test, but after task 10 the user takes the
+    # session through six heavy, unrelated ops chores in /ops (detour_sandbox.py), then says "Back to the ... work" before task 11.
+    "driftdetour": CaptureSchedule(20, CAPTURE_SAID, (), (), 0, fresh=False, detour_after=10, detour_steps=6),
+    "drifttrialdetour": CaptureSchedule(3, ((2, ("files_first", "folder_tests", "brief")), (3, ("brief_100",))), (), (), 0,
+                                        fresh=False, detour_after=2, detour_steps=2),
 }
 RESTATE_HEAD = "Remember: "
 
@@ -319,6 +327,7 @@ class Round:
     question: bool = False  # a question after the tasks: asked in the last task's container, nothing graded
     asks: str = ""  # the fair test: what a question asks ("fact:<answer>", "rules", "history:<task>")
     says: tuple[str, ...] = ()  # the capture test: the items the user says in passing before this task
+    detour: int = 0  # the detour test: which ops chore (1-based); run in the next task's container, /ops carried, nothing graded
 
 
 @dataclass
@@ -408,13 +417,19 @@ def _capture_plan(arm: str, tasks: list[SweTask], schedule: CaptureSchedule, out
     project = projects.pop()
     messages, facts, said = capture_messages(project), PROJECT_FACTS[project], dict(schedule.said)
     rounds: list[Round] = []
+    name = PROJECT_NAMES.get(project, project)
     for number, task in enumerate(tasks[:schedule.tasks], start=1):
         keys = said.get(number, ())
         restated = capture_restated(project, schedule, number) if schedule.restate else None
         parts = (([KEEP_TRACK[arm]] if number == 1 and arm in KEEP_TRACK else []) + ([restated] if restated else [])
                  + [messages[k] for k in keys])
-        prompt = (" ".join(parts) + "\n\n" + task.instruction) if parts else task.instruction
+        back = [DETOUR_RETURN.format(project=name)] if schedule.detour_after and number == schedule.detour_after + 1 else []
+        prompt = (" ".join(back + parts) + "\n\n" + task.instruction) if back + parts else task.instruction
         rounds.append(Round(f"round_{number:02d}", number, prompt, task, number == 1, tells_rules=bool(parts), says=tuple(keys)))
+        if schedule.detour_after and number == schedule.detour_after:  # in the next task's container, before that task
+            for k in range(1, schedule.detour_steps + 1):
+                rounds.append(Round(f"detour_{50 + k}", 50 + k, DETOUR_MESSAGES[k - 1].format(project=name), tasks[number], False,
+                                    detour=k))
     if not schedule.fresh:  # the drift test: one session, nothing after its last task
         return SeriesPlan(arm, rounds, Path(out), model, Path(claude_binary), code, token_file, proxy, network, window, ruleset, 1,
                           Path(memory) if memory else None)
@@ -1028,6 +1043,7 @@ _EXCLUDE = " ".join(f"':(exclude){p}'" for p in PROJECT_MEMORY)
 PATCH_SCRIPT = (f"cd /app && cp .git/index /tmp/cc-index && GIT_INDEX_FILE=/tmp/cc-index git add -A -- . {_EXCLUDE} >/dev/null 2>&1 && "
                 "GIT_INDEX_FILE=/tmp/cc-index git diff --cached --binary HEAD; rm -f /tmp/cc-index")
 MEMORY_OUT = "cd /app && ls -d " + " ".join(PROJECT_MEMORY) + " 2>/dev/null | tar cf - -T - 2>/dev/null"
+OPS_OUT = "tar cf - -C / ops 2>/dev/null"  # the detour's ops folder, carried from one chore to the next
 
 
 def patch_argv(name: str) -> list[str]:
@@ -1221,6 +1237,10 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
     capture = CAPTURE_SCHEDULES.get(plan.ruleset)
     project = project_of(plan.rounds[0].task) if capture else None
     carry = plan.out / "project-memory.tar"
+    ops_start, ops_state = plan.out / "ops-sandbox.tar", plan.out / "ops-state.tar"
+    if capture is not None and capture.detour_after and not ops_start.exists():
+        from studies.claude_code.detour_sandbox import build as build_ops
+        build_ops(ops_start)
     earlier, session_id, reported_total = earlier_state(plan, first)
     folder_items: list[dict[str, Any]] = []
     if plan.arm in MEMORY_ARMS:
@@ -1250,7 +1270,8 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
         **({"capture": {"project": project, "said": [[at, list(keys)] for at, keys in capture.said], "tasks": capture.tasks,
                         "messages": capture_messages(project), "folder_rule": list(FOLDER_RULES[project]),
                         "facts": [list(f) for f in PROJECT_FACTS[project]], "replaces": REPLACES, "fresh": capture.fresh,
-                        "restate": capture.restate}} if capture else {})}
+                        "restate": capture.restate, "detour_after": capture.detour_after, "detour_steps": capture.detour_steps,
+                        "detour": [r.prompt for r in plan.rounds if r.detour]}} if capture else {})}
     if record["tasks"] != [r.task.id for r in plan.rounds]:
         raise RuntimeError("the recorded series has other tasks than this plan")
     record.setdefault("batches", []).append({"first": first, "last": last, "started": now()})
@@ -1271,8 +1292,13 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                 record["ended_by"] = f"container: {started.stderr[-300:]}"
                 break
             carry_in(name, carry, runner=runner)
+            if round_.detour:  # the ops folder as the last chore left it (the built one before the first chore)
+                with (ops_state if ops_state.exists() else ops_start).open("rb") as data:
+                    runner(["docker", "exec", "-i", name, "tar", "xf", "-", "-C", "/"], stdin=data, capture_output=True, timeout=300,
+                           check=False)
             resume = None if round_.new_session else session_id
-            stream.write(json.dumps({"type": "study_turn", "turn": round_.id, "kind": "task", "task": round_.task.id, "index": index,
+            stream.write(json.dumps({"type": "study_turn", "turn": round_.id, "kind": "detour" if round_.detour else "task",
+                                     "task": round_.task.id, "index": index,
                                      "new_session": round_.new_session, "tells": ["rules"] if round_.tells_rules else [],
                                      "time": now(), "prompt": round_.prompt}) + "\n")
             stream.flush()
@@ -1319,13 +1345,20 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
             patch_file = plan.out / "patches" / f"{round_.id}.diff"
             patch_file.write_text(patch)
             carried = carry_out(name, carry, runner=runner)
+            if round_.detour:  # keep /ops for the next chore, and a copy of it after each chore
+                done = runner(["docker", "exec", name, "bash", "-c", OPS_OUT], capture_output=True, timeout=300, check=False)
+                data = done.stdout if isinstance(done.stdout, bytes) else (done.stdout or "").encode()
+                if data:
+                    ops_state.write_bytes(data)
+                    (plan.out / "ops").mkdir(exist_ok=True)
+                    (plan.out / "ops" / f"{round_.id}.tar").write_bytes(data)
             if owner:  # Claude Code runs as root in the container; its folders go back to the runner's user
                 run(["docker", "exec", name, "chown", "-R", owner, CONFIG_IN_CONTAINER, *([MEMORY_IN_CONTAINER, READER_IN_CONTAINER]
                      if plan.arm in (*OURS, "gitlive") else [MEMORY_IN_CONTAINER] if plan.arm in GIT_ARMS else
                      [READER_IN_CONTAINER] if plan.arm == "mdreader" else []), *([LOADS_IN_CONTAINER] if capture else [])],
                     runner=runner, timeout=120)
             run(["docker", "rm", "-f", name], runner=runner, timeout=300)
-            graded = ({"reward": None, "skipped": "question"} if round_.question else
+            graded = ({"reward": None, "skipped": "question"} if round_.question else {"reward": None, "skipped": "detour"} if round_.detour else
                       grade_fresh(plan, round_, patch_file, runner=runner) if result else {"reward": None, "error": "no result"})
             if remove_images:
                 run(["docker", "rmi", round_.task.image], runner=runner, timeout=300)
@@ -1349,7 +1382,11 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                                    for k, v in gradual_checks(seen.get("tools", []), result.get("result"), patch, 10 ** 6, 1).items()}}
                       if plan.ruleset in FAIR_SCHEDULES and not round_.question else {}),
                    **({"gradual": capture_checks(seen.get("tools", []), result.get("result"), patch, round_.number, capture, project)}
-                      if capture and not round_.question else {}),
+                      if capture and not round_.question and not round_.detour else {}),
+                   **({"detour": round_.detour, "prompt": round_.prompt, "answer": result.get("result"),
+                       "detour_checks": capture_checks(seen.get("tools", []), result.get("result"), patch, capture.detour_after,
+                                                       capture, project),
+                       "tool_calls": len(seen.get("tools", []))} if capture and round_.detour else {}),
                    **({"says": list(round_.says)} if capture else {}),
                    **({"asks": round_.asks} if round_.asks else {}),
                    **({"question": round_.prompt[len(QUESTION_HEAD):], "answer": result.get("result"),
@@ -1381,8 +1418,10 @@ def run_series(plan: SeriesPlan, *, execute: bool = False, per_call_usd: float, 
                     broken="".join(f", broke {key}" for key, v in row["gradual"].items() if v["told"] and v["chances"] and not v["kept"])))
                 + ("" if "folder_items" not in row else " | folder items kept {f[kept]}/{f[due]}, context mean {c}".format(
                     f=row["folder_items"], c=row["context_mean"]))
-                + ("" if "answer" not in row else " | answer ({m} memory tool calls): {a!r:.150}".format(
-                    m=row["memory_tool_calls"], a=(row["answer"] or "").replace("\n", " "))))
+                + ("" if "answer" not in row or "detour" in row else " | answer ({m} memory tool calls): {a!r:.150}".format(
+                    m=row["memory_tool_calls"], a=(row["answer"] or "").replace("\n", " ")))
+                + ("" if "detour" not in row else " | detour chore {d}: {n} tool calls, reply {a!r:.120}".format(
+                    d=row["detour"], n=row["tool_calls"], a=(row["answer"] or "").replace("\n", " "))))
             broke = not one["strict"] or not tests["kept"]
             if not result:
                 record["ended_by"] = "no_result"
@@ -1455,7 +1494,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.show_heads:  # every round's head: what the user says before the task text, word for word, and the task's title
             for r in plan.rounds:
                 head = r.prompt[:len(r.prompt) - len(r.task.instruction)].strip() if r.prompt.endswith(r.task.instruction) else r.prompt
-                print(f"{r.id} {'NEW SESSION ' if r.new_session else ''}{'Q ' + r.asks if r.question else 'task ' + task_title(r.task.instruction)[:70]!r}"
+                print(f"{r.id} {'NEW SESSION ' if r.new_session else ''}{'Q ' + r.asks if r.question else f'DETOUR {r.detour}' if r.detour else 'task ' + task_title(r.task.instruction)[:70]!r}"
                       f" | says {list(r.says)} | head: {head!r}")
         return 0
     args.out.mkdir(parents=True, exist_ok=True)
